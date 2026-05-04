@@ -1,0 +1,24 @@
+# build artifacts
+sw-test-runner
+sw-test-runner.exe
+*.test
+*.test.exe
+*.out
+
+# run output
+results/
+artifacts/
+*.log
+
+# editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# experimental backup files left during extraction
+*.orig

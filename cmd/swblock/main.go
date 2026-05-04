@@ -1,0 +1,29 @@
+// Command swblock is the V3 seaweed-block product test runner.
+// It registers core actions plus the V3 product pack only.
+//
+// Operator entry:
+//
+//	swblock list
+//	swblock validate scenarios/v3-foo.yaml
+//	swblock run scenarios/v3-foo.yaml
+//
+// V3 product wrappers running outside this repo can use the exact same
+// pattern, replacing the v3block import with their own pack.
+package main
+
+import (
+	"os"
+
+	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/actions"
+	"github.com/pingqiu/sw-test-runner/cli"
+	"github.com/pingqiu/sw-test-runner/packs/v3block"
+)
+
+func main() {
+	register := func(r *tr.Registry) {
+		actions.RegisterCore(r)
+		v3block.RegisterPack(r)
+	}
+	os.Exit(cli.Run(register, os.Args[1:]))
+}
