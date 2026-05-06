@@ -109,8 +109,10 @@ func TestAllActions_Registration(t *testing.T) {
 	if n := len(byTier[tr.TierCore]); n != 21 {
 		t.Errorf("core: %d, want 21", n)
 	}
-	if n := len(byTier[tr.TierBlock]); n != 64 {
-		t.Errorf("block: %d, want 64", n)
+	// block = 63 product-agnostic block-tier actions + assert_no_active_iscsi_sessions
+	// (v1 first batch).
+	if n := len(byTier[tr.TierBlock]); n != 65 {
+		t.Errorf("block: %d, want 65", n)
 	}
 	if n := len(byTier[tr.TierDevOps]); n != 19 {
 		t.Errorf("devops: %d, want 19", n)
@@ -127,8 +129,8 @@ func TestAllActions_Registration(t *testing.T) {
 	for _, actions := range byTier {
 		total += len(actions)
 	}
-	if total != 123 {
-		t.Errorf("total actions: %d, want 123", total)
+	if total != 124 {
+		t.Errorf("total actions: %d, want 124", total)
 	}
 }
 

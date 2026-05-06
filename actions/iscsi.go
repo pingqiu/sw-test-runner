@@ -3,7 +3,9 @@ package actions
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strconv"
+	"strings"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/infra"
@@ -16,6 +18,104 @@ func RegisterISCSIActions(r *tr.Registry) {
 	r.RegisterFunc("iscsi_logout", tr.TierBlock, iscsiLogout)
 	r.RegisterFunc("iscsi_discover", tr.TierBlock, iscsiDiscover)
 	r.RegisterFunc("iscsi_cleanup", tr.TierBlock, iscsiCleanup)
+	r.RegisterFunc("assert_no_active_iscsi_sessions", tr.TierBlock, assertNoActiveISCSISessions)
+}
+
+// assertNoActiveISCSISessions runs `iscsiadm -m session` on the target
+// node (or controller if node is empty) and fails the action unless
+// the output reports no active sessions.
+//
+// Optional params:
+//
+//	iqn_substr — only fail if a session for an IQN containing this
+//	             substring is present. Default: any session fails.
+//	             Use this to ignore unrelated iSCSI sessions on shared
+//	             lab hosts (e.g. existing dm-mpath stacks).
+//	binary    — defaults to "iscsiadm" (use "sudo iscsiadm" if needed)
+//
+// Output: { sessions, count } — raw `iscsiadm` output and matched count.
+//
+// iscsiadm exits with a non-zero code (e.g. 21) when there are no
+// sessions and prints "iscsiadm: No active sessions." This action
+// treats both forms ("0 sessions" + non-zero exit, or successful
+// session list with zero matching IQNs) as PASS, and failure of the
+// command itself (e.g. missing binary) as a hard error.
+func assertNoActiveISCSISessions(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	iqnSubstr := act.Params["iqn_substr"]
+	bin := act.Params["binary"]
+	if bin == "" {
+		bin = "sudo iscsiadm"
+	}
+	cmd := bin + " -m session"
+
+	stdout, stderr, code, err := iscsiadmRun(ctx, actx, act.Node, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("assert_no_active_iscsi_sessions: exec: %w", err)
+	}
+	combined := stdout + "\n" + stderr
+
+	// "iscsiadm: No active sessions." (any exit code) is unambiguous PASS.
+	if strings.Contains(combined, "No active sessions") {
+		return map[string]string{"sessions": strings.TrimSpace(combined), "count": "0"}, nil
+	}
+	// Successful command with empty output (some distros) also PASS.
+	if code == 0 && strings.TrimSpace(stdout) == "" {
+		return map[string]string{"sessions": "", "count": "0"}, nil
+	}
+
+	// Parse sessions: each line is "tcp: [N] host:port,tpgt iqn ..."
+	matched := 0
+	var hits []string
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if iqnSubstr != "" && !strings.Contains(line, iqnSubstr) {
+			continue
+		}
+		matched++
+		hits = append(hits, line)
+	}
+
+	if matched == 0 {
+		return map[string]string{"sessions": strings.TrimSpace(stdout), "count": "0"}, nil
+	}
+	return nil, fmt.Errorf("assert_no_active_iscsi_sessions: %d active session(s) match%s:\n%s",
+		matched, iqnSubstrSuffix(iqnSubstr), strings.Join(hits, "\n"))
+}
+
+func iqnSubstrSuffix(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " (iqn_substr=" + s + ")"
+}
+
+// iscsiadmRun is a thin shim over local exec / remote ssh used by
+// iscsi-related assert/probe actions. iscsiadm's "no sessions" exit
+// code is non-zero, so callers must inspect output, not just code.
+func iscsiadmRun(ctx context.Context, actx *tr.ActionContext, nodeName, cmd string) (string, string, int, error) {
+	if nodeName == "" {
+		c := exec.CommandContext(ctx, "sh", "-c", cmd)
+		out, err := c.Output()
+		stdout := string(out)
+		stderr := ""
+		code := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = string(ee.Stderr)
+				code = ee.ExitCode()
+				err = nil
+			}
+		}
+		return stdout, stderr, code, err
+	}
+	n, err := GetNode(actx, nodeName)
+	if err != nil {
+		return "", "", 0, err
+	}
+	return n.Run(ctx, cmd)
 }
 
 // iscsiLogin discovers + logs into the target, returns the device path.
