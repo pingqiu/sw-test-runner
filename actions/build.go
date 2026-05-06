@@ -113,6 +113,7 @@ func goBuild(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[st
 	}
 
 	return map[string]string{
+		"value":  absOut, // primary output for save_as: binary path
 		"path":   absOut,
 		"sha256": sum,
 	}, nil
@@ -271,6 +272,7 @@ func dockerBuild(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	}
 
 	return map[string]string{
+		"value":  tag, // primary output for save_as: image tag
 		"image":  tag,
 		"digest": digest,
 	}, nil
@@ -389,8 +391,12 @@ func ctrLoad(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[st
 		}
 	}
 
-	actx.Log("  ctr_load: runtime=%s images=%s", runtime, strings.Join(images, ","))
-	return map[string]string{"imported": strings.Join(images, ",")}, nil
+	imported := strings.Join(images, ",")
+	actx.Log("  ctr_load: runtime=%s images=%s", runtime, imported)
+	return map[string]string{
+		"value":    imported, // primary output for save_as
+		"imported": imported,
+	}, nil
 }
 
 func ctrLoadK3s(ctx context.Context, actx *tr.ActionContext, node string, images []string) error {
@@ -491,7 +497,7 @@ func imageDigest(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 
 	digest, err := imageDigestLookup(ctx, actx, act.Node, image, bin)
 	if err != nil {
-		return map[string]string{"digest": "", "exists": "false"}, nil
+		return map[string]string{"value": "", "digest": "", "exists": "false"}, nil
 	}
 	if actx.Bundle != nil {
 		actx.Bundle.RecordImage(tr.ProvImage{
@@ -500,7 +506,11 @@ func imageDigest(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 			BuiltBy: act.SaveAs,
 		})
 	}
-	return map[string]string{"digest": digest, "exists": "true"}, nil
+	return map[string]string{
+		"value":  digest, // primary output for save_as
+		"digest": digest,
+		"exists": "true",
+	}, nil
 }
 
 func imageDigestLookup(ctx context.Context, actx *tr.ActionContext, node, image, bin string) (string, error) {

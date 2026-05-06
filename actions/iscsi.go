@@ -19,6 +19,79 @@ func RegisterISCSIActions(r *tr.Registry) {
 	r.RegisterFunc("iscsi_discover", tr.TierBlock, iscsiDiscover)
 	r.RegisterFunc("iscsi_cleanup", tr.TierBlock, iscsiCleanup)
 	r.RegisterFunc("assert_no_active_iscsi_sessions", tr.TierBlock, assertNoActiveISCSISessions)
+	r.RegisterFunc("assert_no_processes", tr.TierBlock, assertNoProcesses)
+	r.SetRequiredParams("assert_no_processes", []string{"pattern"})
+}
+
+// assertNoProcesses runs `pgrep -af <pattern>` on the target node (or
+// controller if node is empty) and fails if any matching process is
+// found. Used in cleanup phases to surface stale daemons that earlier
+// trap-based teardowns may have missed.
+//
+// Required params:
+//
+//	pattern   — passed to `pgrep -af`. Plain string; pgrep matches the
+//	            full command line. E.g. "blockmaster" matches any
+//	            process whose argv contains "blockmaster".
+//
+// Optional params:
+//
+//	binary    — defaults to "pgrep" (override e.g. "/usr/bin/pgrep")
+//
+// Output: { count, matches } — matches is the joined `pgrep` lines
+// (empty on PASS).
+//
+// pgrep exits non-zero (1) when no process matches; this is the PASS
+// path. Real exec errors (binary missing) surface as hard failures.
+func assertNoProcesses(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	pattern := act.Params["pattern"]
+	if pattern == "" {
+		return nil, fmt.Errorf("assert_no_processes: pattern param required")
+	}
+	bin := act.Params["binary"]
+	if bin == "" {
+		bin = "pgrep"
+	}
+	cmd := fmt.Sprintf("%s -af %s", bin, shellQuoteIscsi(pattern))
+
+	stdout, stderr, code, err := iscsiadmRun(ctx, actx, act.Node, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("assert_no_processes: exec: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+
+	// pgrep exit codes per pgrep(1):
+	//   0 = match found
+	//   1 = no match
+	//   2 = invalid args
+	//   3 = fatal error (e.g. permission)
+	// We accept 0 (with output parsed below) and 1 (clean PASS). Any
+	// other code is a hard failure — typically "binary not found"
+	// surfaces as 127 from the shell wrapper.
+	if code != 0 && code != 1 {
+		return nil, fmt.Errorf("assert_no_processes: %s exit=%d stderr=%s",
+			bin, code, strings.TrimSpace(stderr))
+	}
+
+	out := strings.TrimSpace(stdout)
+	if out == "" {
+		return map[string]string{"value": "0", "count": "0", "matches": ""}, nil
+	}
+	lines := strings.Split(out, "\n")
+	return nil, fmt.Errorf("assert_no_processes: %d process(es) match %q:\n%s",
+		len(lines), pattern, strings.Join(lines, "\n"))
+}
+
+// shellQuoteIscsi single-quote escapes a value for safe shell embed.
+// Same logic as actions/build.go's shellQuote but redeclared here to
+// avoid cross-file dependency for one-line use.
+func shellQuoteIscsi(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n'\"\\$`!(){}[]<>?*&|;#~^") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // assertNoActiveISCSISessions runs `iscsiadm -m session` on the target

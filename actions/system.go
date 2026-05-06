@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,18 @@ func execAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		return nil, fmt.Errorf("exec: cmd param required")
 	}
 
+	// Optional env injection: any param key starting with "env." is
+	// treated as an environment variable for the subprocess.
+	//
+	//   - action: exec
+	//     cmd: "bash run.sh"
+	//     env.SW_BLOCK_ARTIFACT_DIR: "{{ bundle_dir }}/phases/foo"
+	//     env.SW_BLOCK_ITER: "5"
+	//
+	// Variables are POSIX-quoted and prepended to the command, so this
+	// works for both local exec and SSH-dispatched (node:) calls.
+	cmd = prefixEnvVars(cmd, act.Params)
+
 	node, err := GetNode(actx, act.Node)
 	if err != nil {
 		return nil, err
@@ -51,6 +64,50 @@ func execAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	}
 
 	return map[string]string{"value": strings.TrimSpace(stdout)}, nil
+}
+
+// prefixEnvVars walks params for keys starting with "env." and emits
+// a POSIX `KEY=value KEY2=value2 cmd` prefix. Keys are sorted for
+// deterministic ordering; values are single-quote escaped so embedded
+// spaces, $, ` and ' are safe over both local sh -c and SSH. Returns
+// cmd unchanged when no env.* params are present.
+func prefixEnvVars(cmd string, params map[string]string) string {
+	if len(params) == 0 {
+		return cmd
+	}
+	keys := make([]string, 0)
+	for k := range params {
+		if strings.HasPrefix(k, "env.") && len(k) > 4 {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return cmd
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		name := k[4:]
+		b.WriteString(name)
+		b.WriteString("=")
+		b.WriteString(execShellQuote(params[k]))
+		b.WriteString(" ")
+	}
+	b.WriteString(cmd)
+	return b.String()
+}
+
+// execShellQuote single-quote escapes a value for POSIX shell. Empty
+// becomes ''; otherwise wraps in single quotes and escapes any
+// embedded single-quote by closing-escaping-reopening.
+func execShellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n'\"\\$`!(){}[]<>?*&|;#~^") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func sleepAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {

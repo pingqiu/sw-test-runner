@@ -168,11 +168,16 @@ func runCmd(args []string) {
 			logger.Printf("warning: failed to create run bundle: %v (continuing without)", err)
 		} else {
 			logger.Printf("run bundle: %s", bundle.Dir)
-			// Inject run_id into scenario env so phases can use {{ run_id }} for data namespacing.
+			// Inject run_id / bundle_dir / artifacts_dir into scenario env so
+			// phases can route their per-step artifacts under the bundle. The
+			// scenario references these as {{ run_id }} / {{ bundle_dir }} /
+			// {{ artifacts_dir }} (flat var namespace).
 			if scenario.Env == nil {
 				scenario.Env = make(map[string]string)
 			}
 			scenario.Env["run_id"] = bundle.Manifest.RunID
+			scenario.Env["bundle_dir"] = bundle.Dir
+			scenario.Env["artifacts_dir"] = bundle.ArtifactsDir()
 		}
 	}
 
@@ -488,6 +493,8 @@ func suiteCmd(args []string) {
 		}
 		if bundle != nil {
 			scenario.Env["run_id"] = bundle.Manifest.RunID
+			scenario.Env["bundle_dir"] = bundle.Dir
+			scenario.Env["artifacts_dir"] = bundle.ArtifactsDir()
 		}
 
 		// Run scenario on the first node via SSH. This is necessary because

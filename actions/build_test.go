@@ -63,6 +63,12 @@ func TestGoBuild_LocalBuildsAndRecordsProvenance(t *testing.T) {
 	if out["path"] != wantPath {
 		t.Errorf("path = %q, want %q", out["path"], wantPath)
 	}
+	// save_as in the engine reads output["value"]; for go_build that
+	// must equal the binary path so downstream phases can reference it
+	// via {{ master_path }}.
+	if out["value"] != wantPath {
+		t.Errorf("value = %q, want %q (save_as relies on this)", out["value"], wantPath)
+	}
 	if len(out["sha256"]) != 64 {
 		t.Errorf("sha256 = %q (len=%d), want 64-char hex", out["sha256"], len(out["sha256"]))
 	}
@@ -194,6 +200,9 @@ func TestDockerBuild_RealDaemon(t *testing.T) {
 	defer exec.Command("docker", "rmi", "-f", tag).Run()
 	if out["image"] != tag {
 		t.Errorf("image=%q want %q", out["image"], tag)
+	}
+	if out["value"] != tag {
+		t.Errorf("value=%q want %q (save_as relies on this)", out["value"], tag)
 	}
 	if !strings.HasPrefix(out["digest"], "sha256:") {
 		t.Errorf("digest=%q want sha256: prefix", out["digest"])

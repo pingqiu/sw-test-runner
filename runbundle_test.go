@@ -191,6 +191,29 @@ func TestRunBundle_Finalize_WritesProvenanceJSON(t *testing.T) {
 	}
 }
 
+func TestRunBundle_DirAndArtifactsDirAccessible(t *testing.T) {
+	// CLI injects bundle.Dir and bundle.ArtifactsDir() into scenario.Env
+	// as bundle_dir / artifacts_dir. Verify those paths exist and the
+	// artifacts dir is a subdir of the bundle dir.
+	tmpDir := t.TempDir()
+	scenarioFile := filepath.Join(tmpDir, "test.yaml")
+	os.WriteFile(scenarioFile, []byte("name: dir-test\nphases:\n- name: p\n  actions:\n  - action: print\n    msg: hi\n"), 0644)
+
+	bundle, err := CreateRunBundle(filepath.Join(tmpDir, "results"), scenarioFile, nil)
+	if err != nil {
+		t.Fatalf("CreateRunBundle: %v", err)
+	}
+	if _, err := os.Stat(bundle.Dir); err != nil {
+		t.Errorf("bundle.Dir not a real directory: %v", err)
+	}
+	if _, err := os.Stat(bundle.ArtifactsDir()); err != nil {
+		t.Errorf("bundle.ArtifactsDir() not a real directory: %v", err)
+	}
+	if !strings.HasPrefix(bundle.ArtifactsDir(), bundle.Dir) {
+		t.Errorf("ArtifactsDir %q not a subdir of Dir %q", bundle.ArtifactsDir(), bundle.Dir)
+	}
+}
+
 func TestRunBundle_Finalize_RedactsResultJSONVars(t *testing.T) {
 	tmpDir := t.TempDir()
 	scenarioFile := filepath.Join(tmpDir, "test.yaml")
