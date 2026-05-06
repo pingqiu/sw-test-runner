@@ -431,9 +431,11 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
-// marshalActionYAML serializes a resolved action to YAML for report display.
+// marshalActionYAML serializes a resolved action to YAML for report
+// display. Secret-named params are redacted before marshaling so the
+// run bundle's result.json never carries live credentials.
 func marshalActionYAML(act Action) string {
-	data, err := yaml.Marshal(act)
+	data, err := yaml.Marshal(RedactAction(act))
 	if err != nil {
 		return ""
 	}

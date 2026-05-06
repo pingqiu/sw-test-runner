@@ -85,14 +85,21 @@ const (
 )
 
 type actionEntry struct {
-	handler ActionHandler
-	tier    string
+	handler  ActionHandler
+	tier     string
+	mutating bool
 }
 
 // Registry maps action names to handlers with tier-based gating.
 type Registry struct {
 	handlers     map[string]actionEntry
 	EnabledTiers map[string]bool // nil or empty = all tiers allowed
+
+	// AllowMutating gates actions registered via RegisterMutating /
+	// RegisterMutatingFunc. When false (default), Get refuses to
+	// return a mutating handler. The CLI sets this to true when the
+	// operator passes --allow-mutating; CI defaults to refusing.
+	AllowMutating bool
 }
 
 // NewRegistry creates an empty registry.
@@ -110,6 +117,29 @@ func (r *Registry) RegisterFunc(name, tier string, f ActionHandlerFunc) {
 	r.handlers[name] = actionEntry{handler: f, tier: tier}
 }
 
+// RegisterMutating adds a handler that produces effects beyond the
+// run sandbox: pushing images to a registry, deleting shared
+// resources, modifying production infrastructure, etc. The runner
+// refuses to execute these unless invoked with --allow-mutating.
+func (r *Registry) RegisterMutating(name, tier string, h ActionHandler) {
+	r.handlers[name] = actionEntry{handler: h, tier: tier, mutating: true}
+}
+
+// RegisterMutatingFunc is the function variant of RegisterMutating.
+func (r *Registry) RegisterMutatingFunc(name, tier string, f ActionHandlerFunc) {
+	r.handlers[name] = actionEntry{handler: f, tier: tier, mutating: true}
+}
+
+// IsMutating reports whether the named action is registered as
+// mutating. Used by validate to surface mutating actions in a
+// scenario before run time.
+func (r *Registry) IsMutating(name string) bool {
+	if entry, ok := r.handlers[name]; ok {
+		return entry.mutating
+	}
+	return false
+}
+
 // EnableTiers sets which tiers are allowed. Pass nil or empty to allow all.
 func (r *Registry) EnableTiers(tiers []string) {
 	if len(tiers) == 0 {
@@ -123,7 +153,8 @@ func (r *Registry) EnableTiers(tiers []string) {
 }
 
 // Get returns the handler for an action name, or an error.
-// Returns an error if the action's tier is not enabled.
+// Returns an error if the action's tier is not enabled, or if the
+// action is mutating and AllowMutating is false.
 func (r *Registry) Get(name string) (ActionHandler, error) {
 	entry, ok := r.handlers[name]
 	if !ok {
@@ -131,6 +162,9 @@ func (r *Registry) Get(name string) (ActionHandler, error) {
 	}
 	if len(r.EnabledTiers) > 0 && !r.EnabledTiers[entry.tier] {
 		return nil, fmt.Errorf("action %q requires tier %q (enabled: %v)", name, entry.tier, r.tierList())
+	}
+	if entry.mutating && !r.AllowMutating {
+		return nil, fmt.Errorf("action %q is mutating; rerun with --allow-mutating to execute", name)
 	}
 	return entry.handler, nil
 }

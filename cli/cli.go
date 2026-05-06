@@ -144,6 +144,7 @@ func runCmd(args []string) {
 	tiers := fs.String("tiers", "", "Comma-separated list of enabled tiers (core,block,devops,chaos)")
 	resultsDir := fs.String("results-dir", "results", "Root directory for per-run result bundles")
 	noBundle := fs.Bool("no-bundle", false, "Disable automatic run bundle creation")
+	allowMutating := fs.Bool("allow-mutating", false, "Permit actions registered as mutating (docker_push, infra-affecting chaos, etc.)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -185,6 +186,7 @@ func runCmd(args []string) {
 	if *tiers != "" {
 		registry.EnableTiers(parseTiers(*tiers))
 	}
+	registry.AllowMutating = *allowMutating
 
 	logFunc := func(format string, args ...interface{}) {
 		logger.Printf(format, args...)

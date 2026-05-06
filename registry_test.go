@@ -6,6 +6,43 @@ import (
 	"testing"
 )
 
+func TestRegistry_MutatingGate(t *testing.T) {
+	r := NewRegistry()
+	noop := ActionHandlerFunc(func(ctx context.Context, actx *ActionContext, act Action) (map[string]string, error) {
+		return nil, nil
+	})
+
+	r.RegisterFunc("safe_action", TierCore, noop)
+	r.RegisterMutatingFunc("docker_push", TierCore, noop)
+
+	// Default: AllowMutating is false. Mutating action is gated;
+	// non-mutating action passes through.
+	if _, err := r.Get("safe_action"); err != nil {
+		t.Errorf("safe_action gated unexpectedly: %v", err)
+	}
+	if _, err := r.Get("docker_push"); err == nil {
+		t.Error("docker_push should be gated when AllowMutating=false")
+	}
+
+	if !r.IsMutating("docker_push") {
+		t.Error("IsMutating(docker_push) = false, want true")
+	}
+	if r.IsMutating("safe_action") {
+		t.Error("IsMutating(safe_action) = true, want false")
+	}
+
+	// Opt in.
+	r.AllowMutating = true
+	if _, err := r.Get("docker_push"); err != nil {
+		t.Errorf("docker_push gated after AllowMutating=true: %v", err)
+	}
+
+	// IsMutating on unknown action should be false (not panic).
+	if r.IsMutating("nonexistent") {
+		t.Error("IsMutating of unknown action should be false")
+	}
+}
+
 func TestRegistry_TierGating(t *testing.T) {
 	r := NewRegistry()
 	noop := ActionHandlerFunc(func(ctx context.Context, actx *ActionContext, act Action) (map[string]string, error) {

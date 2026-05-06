@@ -191,8 +191,13 @@ func (b *RunBundle) Finalize(result *ScenarioResult) error {
 		return err
 	}
 
-	// Write result.json.
-	if err := WriteJSON(result, filepath.Join(b.Dir, "result.json")); err != nil {
+	// Write result.json. Vars carry user-supplied save_as outputs
+	// which may include credentials when the scenario captured them
+	// from CHAP/SSH/token-fetch actions; redact by key name before
+	// the file hits disk.
+	redacted := *result
+	redacted.Vars = RedactMap(result.Vars)
+	if err := WriteJSON(&redacted, filepath.Join(b.Dir, "result.json")); err != nil {
 		return fmt.Errorf("write result.json: %w", err)
 	}
 

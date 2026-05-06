@@ -191,6 +191,55 @@ func TestRunBundle_Finalize_WritesProvenanceJSON(t *testing.T) {
 	}
 }
 
+func TestRunBundle_Finalize_RedactsResultJSONVars(t *testing.T) {
+	tmpDir := t.TempDir()
+	scenarioFile := filepath.Join(tmpDir, "test.yaml")
+	os.WriteFile(scenarioFile, []byte("name: redact-test\nphases:\n- name: p\n  actions:\n  - action: print\n    msg: hi\n"), 0644)
+
+	bundle, err := CreateRunBundle(filepath.Join(tmpDir, "results"), scenarioFile, []string{"run"})
+	if err != nil {
+		t.Fatalf("CreateRunBundle: %v", err)
+	}
+
+	result := &ScenarioResult{
+		Name:   "redact-test",
+		Status: StatusPass,
+		Vars: map[string]string{
+			"chap_secret": "VERY-SECRET",
+			"target_iqn":  "iqn.example",
+			"api_token":   "Bearer xyz",
+			"host":        "m02",
+		},
+	}
+	if err := bundle.Finalize(result); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(bundle.Dir, "result.json"))
+	if err != nil {
+		t.Fatalf("read result.json: %v", err)
+	}
+	body := string(data)
+	for _, leaked := range []string{"VERY-SECRET", "Bearer xyz"} {
+		if strings.Contains(body, leaked) {
+			t.Errorf("result.json leaks secret %q:\n%s", leaked, body)
+		}
+	}
+	for _, kept := range []string{"target_iqn", "iqn.example", "host", "m02"} {
+		if !strings.Contains(body, kept) {
+			t.Errorf("result.json missing non-secret %q", kept)
+		}
+	}
+	if !strings.Contains(body, RedactedValue) {
+		t.Errorf("result.json missing redaction marker; body:\n%s", body)
+	}
+
+	// Caller's struct must remain untouched (we copied before redacting).
+	if result.Vars["chap_secret"] != "VERY-SECRET" {
+		t.Errorf("Finalize mutated caller's Vars: %q", result.Vars["chap_secret"])
+	}
+}
+
 func TestRunBundle_RecordOnNilBundleIsSafe(t *testing.T) {
 	// Actions hold a *RunBundle that may be nil (e.g. --no-bundle, unit
 	// tests). Record* must be no-ops on a nil receiver.
