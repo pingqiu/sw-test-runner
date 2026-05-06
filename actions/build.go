@@ -26,9 +26,16 @@ import (
 // remote node via the standard infra.Node abstraction.
 func RegisterBuildActions(r *tr.Registry) {
 	r.RegisterFunc("go_build", tr.TierCore, goBuild)
+	r.SetRequiredParams("go_build", []string{"package"})
+
 	r.RegisterFunc("docker_build", tr.TierCore, dockerBuild)
+	r.SetRequiredParams("docker_build", []string{"dockerfile", "tag"})
+
 	r.RegisterFunc("ctr_load", tr.TierCore, ctrLoad)
+	r.SetRequiredParams("ctr_load", []string{"images"})
+
 	r.RegisterFunc("image_digest", tr.TierCore, imageDigest)
+	r.SetRequiredParams("image_digest", []string{"image"})
 }
 
 // goBuild runs `go build -o <out> <package>` in <cwd>.

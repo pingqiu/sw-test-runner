@@ -858,8 +858,37 @@ func validateCmd(args []string) {
 		os.Exit(1)
 	}
 
+	// Registry-dependent strict checks: every action must be
+	// registered, every required param must be present.
+	registry := tr.NewRegistry()
+	pkgRegister(registry)
+	if problems := tr.ValidateAgainstRegistry(scenario, registry); len(problems) > 0 {
+		fmt.Fprintf(os.Stderr, "INVALID: %s\n", scenario.Name)
+		for _, p := range problems {
+			fmt.Fprintf(os.Stderr, "  - %v\n", p)
+		}
+		os.Exit(1)
+	}
+
+	// Surface any mutating actions so the operator knows --allow-mutating
+	// will be required at run time.
+	var mutating []string
+	for _, ph := range scenario.Phases {
+		for _, act := range ph.Actions {
+			if registry.IsMutating(act.Action) {
+				mutating = append(mutating, fmt.Sprintf("%s (phase %q)", act.Action, ph.Name))
+			}
+		}
+	}
+
 	fmt.Printf("VALID: %s (%d phases, %d targets)\n",
 		scenario.Name, len(scenario.Phases), len(scenario.Targets))
+	if len(mutating) > 0 {
+		fmt.Println("  mutating actions present (require --allow-mutating at run):")
+		for _, m := range mutating {
+			fmt.Printf("    - %s\n", m)
+		}
+	}
 }
 
 func listCmd() {

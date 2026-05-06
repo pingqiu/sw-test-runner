@@ -88,6 +88,7 @@ type actionEntry struct {
 	handler  ActionHandler
 	tier     string
 	mutating bool
+	required []string // required Action.Params keys; checked by ValidateAgainstRegistry
 }
 
 // Registry maps action names to handlers with tier-based gating.
@@ -138,6 +139,39 @@ func (r *Registry) IsMutating(name string) bool {
 		return entry.mutating
 	}
 	return false
+}
+
+// SetRequiredParams records the set of params an action requires.
+// Validation reports a missing required param as an error, fail-fast,
+// before the run starts. Call after Register / RegisterFunc /
+// RegisterMutating; safe to call multiple times (last wins).
+func (r *Registry) SetRequiredParams(name string, required []string) {
+	if entry, ok := r.handlers[name]; ok {
+		entry.required = append([]string(nil), required...)
+		r.handlers[name] = entry
+	}
+}
+
+// RequiredParams returns the registered required-param list for an
+// action, or nil. Used by ValidateAgainstRegistry. Returns a defensive
+// copy so callers can't mutate the registry's internal slice.
+func (r *Registry) RequiredParams(name string) []string {
+	if entry, ok := r.handlers[name]; ok {
+		if entry.required == nil {
+			return nil
+		}
+		out := make([]string, len(entry.required))
+		copy(out, entry.required)
+		return out
+	}
+	return nil
+}
+
+// Has reports whether name is registered (regardless of tier gating
+// or mutating state).
+func (r *Registry) Has(name string) bool {
+	_, ok := r.handlers[name]
+	return ok
 }
 
 // EnableTiers sets which tiers are allowed. Pass nil or empty to allow all.

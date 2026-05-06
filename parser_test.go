@@ -1,6 +1,8 @@
 package testrunner
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -381,5 +383,84 @@ func TestExtractVarsFromString(t *testing.T) {
 				t.Errorf("extractVarsFromString(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
 			}
 		}
+	}
+}
+
+func TestValidateAgainstRegistry(t *testing.T) {
+	r := NewRegistry()
+	noop := ActionHandlerFunc(func(ctx context.Context, actx *ActionContext, act Action) (map[string]string, error) {
+		return nil, nil
+	})
+	r.RegisterFunc("known", TierCore, noop)
+	r.RegisterFunc("with_required", TierCore, noop)
+	r.SetRequiredParams("with_required", []string{"alpha", "beta"})
+
+	scenario := &Scenario{
+		Name: "x",
+		Phases: []Phase{
+			{Name: "ok", Actions: []Action{
+				{Action: "known"},
+				{Action: "with_required", Params: map[string]string{"alpha": "1", "beta": "2"}},
+			}},
+			{Name: "bad", Actions: []Action{
+				{Action: "totally_unknown"},
+				{Action: "with_required", Params: map[string]string{"alpha": "1"}}, // beta missing
+				{Action: "with_required"},                                          // both missing
+			}},
+		},
+	}
+
+	problems := ValidateAgainstRegistry(scenario, r)
+	if len(problems) == 0 {
+		t.Fatal("expected problems")
+	}
+	var msgs []string
+	for _, p := range problems {
+		msgs = append(msgs, p.Error())
+	}
+	mustContain := []string{
+		`unknown action "totally_unknown"`,
+		`required param "beta"`,
+		`required param "alpha"`,
+	}
+	for _, want := range mustContain {
+		found := false
+		for _, m := range msgs {
+			if strings.Contains(m, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing %q in problems: %v", want, msgs)
+		}
+	}
+}
+
+func TestValidateAgainstRegistry_NilSafe(t *testing.T) {
+	if got := ValidateAgainstRegistry(nil, NewRegistry()); got != nil {
+		t.Errorf("nil scenario should return nil, got %v", got)
+	}
+	if got := ValidateAgainstRegistry(&Scenario{}, nil); got != nil {
+		t.Errorf("nil registry should return nil, got %v", got)
+	}
+}
+
+func TestRegistry_RequiredParamsRoundTrip(t *testing.T) {
+	r := NewRegistry()
+	r.RegisterFunc("a", TierCore, ActionHandlerFunc(func(ctx context.Context, actx *ActionContext, act Action) (map[string]string, error) { return nil, nil }))
+	if got := r.RequiredParams("a"); got != nil {
+		t.Errorf("default required = %v, want nil", got)
+	}
+	r.SetRequiredParams("a", []string{"x", "y"})
+	got := r.RequiredParams("a")
+	if len(got) != 2 || got[0] != "x" || got[1] != "y" {
+		t.Errorf("RequiredParams = %v, want [x y]", got)
+	}
+	// Defensive copy: caller mutating returned slice does not affect the registry.
+	got[0] = "MUTATED"
+	again := r.RequiredParams("a")
+	if again[0] != "x" {
+		t.Errorf("registry leaked slice: %v", again)
 	}
 }

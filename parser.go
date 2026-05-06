@@ -254,6 +254,40 @@ func validate(s *Scenario) error {
 	return nil
 }
 
+// ValidateAgainstRegistry performs the registry-dependent validation
+// pass: every action in the scenario must be registered, every
+// registered action's required params must be present, and any action
+// flagged as mutating is reported (callers decide whether to fail).
+//
+// Returns a list of *all* problems found, not just the first, so the
+// CLI can show them in one go. nil registry is a no-op (returns nil).
+//
+// Runs after Parse / ParseWithBase / ParseFile (which run validate()
+// for structural checks). The CLI calls this in the validate
+// subcommand and may surface mutating actions before run time too.
+func ValidateAgainstRegistry(s *Scenario, r *Registry) []error {
+	if s == nil || r == nil {
+		return nil
+	}
+	var problems []error
+	for _, phase := range s.Phases {
+		for i, act := range phase.Actions {
+			if !r.Has(act.Action) {
+				problems = append(problems, fmt.Errorf("phase %q, action %d: unknown action %q",
+					phase.Name, i, act.Action))
+				continue
+			}
+			for _, req := range r.RequiredParams(act.Action) {
+				if _, ok := act.Params[req]; !ok {
+					problems = append(problems, fmt.Errorf("phase %q, action %d (%s): required param %q is missing",
+						phase.Name, i, act.Action, req))
+				}
+			}
+		}
+	}
+	return problems
+}
+
 // extractVarRefs finds all {{ var }} references in action fields.
 func extractVarRefs(act Action) []string {
 	var refs []string
