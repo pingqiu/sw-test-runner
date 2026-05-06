@@ -15,6 +15,12 @@ type ActionContext struct {
 	Log         func(format string, args ...interface{})
 	Coordinator *Coordinator // non-nil when running in coordinator mode
 	TempRoot    string       // per-run temp directory on remote nodes (T6)
+
+	// Bundle is the active run bundle, when one was created. Optional;
+	// actions must tolerate a nil Bundle (e.g. unit tests, --no-bundle).
+	// Build/render actions use Bundle.RecordImage / Bundle.RecordBinary
+	// to populate provenance.json.
+	Bundle *RunBundle
 }
 
 // NodeRunner abstracts remote command execution (implemented by infra.Node).

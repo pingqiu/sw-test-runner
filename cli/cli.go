@@ -200,6 +200,10 @@ func runCmd(args []string) {
 	}
 	defer cleanupNodes(actx)
 
+	// Hand the run bundle to action handlers via ActionContext so build
+	// actions can populate provenance.json. nil-safe for --no-bundle.
+	actx.Bundle = bundle
+
 	// Cluster lifecycle: try attach, fall back to managed if needed.
 	clusterMgr := tr.NewClusterManager(scenario.Cluster, logFunc)
 	if err := clusterMgr.Setup(ctx, actx); err != nil {

@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +36,68 @@ type RunBundle struct {
 	Dir          string // absolute path to the run directory
 	Manifest     RunManifest
 	scenarioData []byte // frozen copy of the input YAML
+
+	provMu     sync.Mutex
+	provenance Provenance
+}
+
+// Provenance records the build identities pinned by a run.
+// Written to provenance.json at Finalize. Designed to be the
+// reproducibility anchor: two runs with identical Provenance ran
+// against identical inputs.
+//
+// Field discipline (also enforced in spec v1-roadmap):
+//   - never embed secrets, env dumps, or scenario param values;
+//   - missing data is a zero value, not an estimate;
+//   - all hashes are sha256 hex.
+type Provenance struct {
+	RunID            string             `json:"run_id"`
+	FrameworkVersion string             `json:"framework_version,omitempty"`
+	Scenario         ProvScenario       `json:"scenario"`
+	Git              ProvGit            `json:"git"`
+	Host             ProvHost           `json:"host"`
+	Images           []ProvImage        `json:"images"`
+	Binaries         []ProvBinary       `json:"binaries"`
+}
+
+// ProvScenario records the scenario identity (name + frozen-bytes hash).
+type ProvScenario struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// ProvGit records the source-control state of the runner's working tree.
+// Dirty is true if the tree had uncommitted changes at run start.
+type ProvGit struct {
+	SHA   string `json:"sha,omitempty"`
+	Dirty bool   `json:"dirty"`
+}
+
+// ProvHost records where the run executed.
+type ProvHost struct {
+	Name   string `json:"name,omitempty"`
+	OS     string `json:"os,omitempty"`
+	Arch   string `json:"arch,omitempty"`
+	Kernel string `json:"kernel,omitempty"`
+}
+
+// ProvImage records a container image built or pinned during the run.
+// Tag identifies what the run consumed; Digest is the content-addressed
+// pin. BuiltBy records the action id that produced the image when known.
+type ProvImage struct {
+	Tag     string `json:"tag,omitempty"`
+	Digest  string `json:"digest,omitempty"`
+	BuiltBy string `json:"built_by,omitempty"`
+}
+
+// ProvBinary records a binary built during the run. Path is the
+// runner-local file system path; SHA256 is the post-build content hash.
+type ProvBinary struct {
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Package string `json:"package,omitempty"`
+	Node    string `json:"node,omitempty"`
+	BuiltBy string `json:"built_by,omitempty"`
 }
 
 // CreateRunBundle creates a timestamped run directory under resultsRoot.
@@ -88,6 +152,20 @@ func CreateRunBundle(resultsRoot, scenarioFile string, cmdLine []string) (*RunBu
 		Dir:          runDir,
 		Manifest:     manifest,
 		scenarioData: scenarioData,
+		provenance: Provenance{
+			RunID:            runID,
+			FrameworkVersion: Version(),
+			Scenario:         ProvScenario{Name: scenario.Name, SHA256: scenarioHash},
+			Git:              ProvGit{SHA: gitSHA(), Dirty: gitDirty()},
+			Host: ProvHost{
+				Name:   hostname(),
+				OS:     osRelease(),
+				Arch:   runtime.GOARCH,
+				Kernel: kernelRelease(),
+			},
+			Images:   []ProvImage{},
+			Binaries: []ProvBinary{},
+		},
 	}
 
 	// Write frozen scenario copy.
@@ -128,7 +206,58 @@ func (b *RunBundle) Finalize(result *ScenarioResult) error {
 		return fmt.Errorf("write result.html: %w", err)
 	}
 
+	// Write provenance.json (v1 additive artifact).
+	if err := b.writeProvenance(); err != nil {
+		return fmt.Errorf("write provenance.json: %w", err)
+	}
+
 	return nil
+}
+
+// RecordImage records an image (tag + digest) that this run produced
+// or pinned. Safe to call from parallel phases. The order images are
+// listed in provenance.json reflects the order RecordImage was called.
+func (b *RunBundle) RecordImage(img ProvImage) {
+	if b == nil {
+		return
+	}
+	b.provMu.Lock()
+	defer b.provMu.Unlock()
+	b.provenance.Images = append(b.provenance.Images, img)
+}
+
+// RecordBinary records a binary that this run built. Safe to call
+// from parallel phases.
+func (b *RunBundle) RecordBinary(bin ProvBinary) {
+	if b == nil {
+		return
+	}
+	b.provMu.Lock()
+	defer b.provMu.Unlock()
+	b.provenance.Binaries = append(b.provenance.Binaries, bin)
+}
+
+// Provenance returns a defensive copy of the current provenance state.
+// Used by tests; production callers should let Finalize write the file.
+func (b *RunBundle) Provenance() Provenance {
+	b.provMu.Lock()
+	defer b.provMu.Unlock()
+	imgs := append([]ProvImage(nil), b.provenance.Images...)
+	bins := append([]ProvBinary(nil), b.provenance.Binaries...)
+	p := b.provenance
+	p.Images = imgs
+	p.Binaries = bins
+	return p
+}
+
+func (b *RunBundle) writeProvenance() error {
+	b.provMu.Lock()
+	defer b.provMu.Unlock()
+	data, err := json.MarshalIndent(b.provenance, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal provenance: %w", err)
+	}
+	return os.WriteFile(filepath.Join(b.Dir, "provenance.json"), data, 0644)
 }
 
 // ArtifactsDir returns the path to the artifacts subdirectory.
@@ -172,6 +301,50 @@ func gitSHA() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// gitDirty returns true if the working tree has uncommitted changes.
+// Returns false on any error (no git, not a repo, etc.) — clean state
+// is the conservative default for the dirty flag.
+func gitDirty() bool {
+	out, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// kernelRelease returns `uname -r` on unix-like systems, empty on Windows.
+// Conservative: any error returns empty string rather than fabricating.
+func kernelRelease() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	out, err := exec.Command("uname", "-r").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// osRelease returns a short OS identifier. On Linux reads
+// /etc/os-release PRETTY_NAME; on others returns runtime.GOOS.
+func osRelease() string {
+	if runtime.GOOS != "linux" {
+		return runtime.GOOS
+	}
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return runtime.GOOS
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PRETTY_NAME=") {
+			v := strings.TrimPrefix(line, "PRETTY_NAME=")
+			v = strings.Trim(v, `"`)
+			return v
+		}
+	}
+	return runtime.GOOS
 }
 
 // Version returns the runner version. Set at build time via ldflags.

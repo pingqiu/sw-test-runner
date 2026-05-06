@@ -104,8 +104,10 @@ func TestAllActions_Registration(t *testing.T) {
 	byTier := registry.ListByTier()
 
 	// Verify tier counts.
-	if n := len(byTier[tr.TierCore]); n != 17 {
-		t.Errorf("core: %d, want 17", n)
+	// core = 17 product-agnostic actions + go_build, docker_build, ctr_load,
+	// image_digest (v1 first batch build primitives).
+	if n := len(byTier[tr.TierCore]); n != 21 {
+		t.Errorf("core: %d, want 21", n)
 	}
 	if n := len(byTier[tr.TierBlock]); n != 64 {
 		t.Errorf("block: %d, want 64", n)
@@ -125,8 +127,8 @@ func TestAllActions_Registration(t *testing.T) {
 	for _, actions := range byTier {
 		total += len(actions)
 	}
-	if total != 119 {
-		t.Errorf("total actions: %d, want 119", total)
+	if total != 123 {
+		t.Errorf("total actions: %d, want 123", total)
 	}
 }
 

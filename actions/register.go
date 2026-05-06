@@ -3,7 +3,8 @@ package actions
 import tr "github.com/pingqiu/sw-test-runner"
 
 // RegisterCore registers product-agnostic core actions:
-// exec, sleep, assert_*, print, grep_log, fsck, fault injection, benchmarking, cleanup, results, recovery.
+// exec, sleep, assert_*, print, grep_log, fsck, fault injection,
+// benchmarking, cleanup, results, recovery, build (go_build).
 func RegisterCore(r *tr.Registry) {
 	RegisterSystemActions(r)
 	RegisterFaultActions(r)
@@ -11,4 +12,5 @@ func RegisterCore(r *tr.Registry) {
 	RegisterCleanupActions(r)
 	RegisterResultActions(r)
 	RegisterRecoveryActions(r)
+	RegisterBuildActions(r)
 }

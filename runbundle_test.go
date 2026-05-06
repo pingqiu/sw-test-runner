@@ -138,6 +138,99 @@ func TestRunBundle_UniqueRunIDs(t *testing.T) {
 	}
 }
 
+func TestRunBundle_Finalize_WritesProvenanceJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	scenarioFile := filepath.Join(tmpDir, "test.yaml")
+	os.WriteFile(scenarioFile, []byte("name: prov-test\ntimeout: 1m\nphases:\n- name: p\n  actions:\n  - action: print\n    msg: hi\n"), 0644)
+
+	bundle, err := CreateRunBundle(filepath.Join(tmpDir, "results"), scenarioFile, []string{"run"})
+	if err != nil {
+		t.Fatalf("CreateRunBundle: %v", err)
+	}
+
+	bundle.RecordBinary(ProvBinary{Path: "/tmp/blockmaster", SHA256: "abcd1234", Package: "./cmd/blockmaster"})
+	bundle.RecordBinary(ProvBinary{Path: "/tmp/blockvolume", SHA256: "ef567890", Package: "./cmd/blockvolume", Node: "m02"})
+	bundle.RecordImage(ProvImage{Tag: "sw-block:local", Digest: "sha256:8865ebbb", BuiltBy: "build_block"})
+
+	if err := bundle.Finalize(&ScenarioResult{Name: "prov-test", Status: StatusPass}); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	provData, err := os.ReadFile(filepath.Join(bundle.Dir, "provenance.json"))
+	if err != nil {
+		t.Fatalf("read provenance.json: %v", err)
+	}
+	var prov Provenance
+	if err := json.Unmarshal(provData, &prov); err != nil {
+		t.Fatalf("parse provenance.json: %v", err)
+	}
+
+	if prov.RunID != bundle.Manifest.RunID {
+		t.Errorf("RunID = %q, want %q", prov.RunID, bundle.Manifest.RunID)
+	}
+	if prov.Scenario.Name != "prov-test" {
+		t.Errorf("Scenario.Name = %q, want prov-test", prov.Scenario.Name)
+	}
+	if prov.Scenario.SHA256 == "" {
+		t.Error("Scenario.SHA256 empty")
+	}
+	if len(prov.Binaries) != 2 {
+		t.Fatalf("Binaries count = %d, want 2", len(prov.Binaries))
+	}
+	if prov.Binaries[0].Path != "/tmp/blockmaster" || prov.Binaries[0].SHA256 != "abcd1234" {
+		t.Errorf("Binaries[0] = %+v", prov.Binaries[0])
+	}
+	if prov.Binaries[1].Node != "m02" {
+		t.Errorf("Binaries[1].Node = %q, want m02", prov.Binaries[1].Node)
+	}
+	if len(prov.Images) != 1 || prov.Images[0].Tag != "sw-block:local" {
+		t.Errorf("Images = %+v", prov.Images)
+	}
+	if prov.Host.Arch == "" {
+		t.Error("Host.Arch empty (runtime.GOARCH should always be set)")
+	}
+}
+
+func TestRunBundle_RecordOnNilBundleIsSafe(t *testing.T) {
+	// Actions hold a *RunBundle that may be nil (e.g. --no-bundle, unit
+	// tests). Record* must be no-ops on a nil receiver.
+	var b *RunBundle
+	b.RecordBinary(ProvBinary{Path: "/x", SHA256: "y"})
+	b.RecordImage(ProvImage{Tag: "x:y"})
+}
+
+func TestRunBundle_ProvenanceConcurrentRecord(t *testing.T) {
+	tmpDir := t.TempDir()
+	scenarioFile := filepath.Join(tmpDir, "test.yaml")
+	os.WriteFile(scenarioFile, []byte("name: race-test\nphases:\n- name: p\n  actions:\n  - action: print\n    msg: hi\n"), 0644)
+
+	bundle, err := CreateRunBundle(filepath.Join(tmpDir, "results"), scenarioFile, nil)
+	if err != nil {
+		t.Fatalf("CreateRunBundle: %v", err)
+	}
+
+	const N = 50
+	done := make(chan struct{})
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			bundle.RecordBinary(ProvBinary{Path: "/p", SHA256: "s"})
+			bundle.RecordImage(ProvImage{Tag: "t"})
+			done <- struct{}{}
+			_ = i
+		}(i)
+	}
+	for i := 0; i < N; i++ {
+		<-done
+	}
+	prov := bundle.Provenance()
+	if len(prov.Binaries) != N {
+		t.Errorf("Binaries len = %d, want %d", len(prov.Binaries), N)
+	}
+	if len(prov.Images) != N {
+		t.Errorf("Images len = %d, want %d", len(prov.Images), N)
+	}
+}
+
 func TestRunBundle_CommandLineRecorded(t *testing.T) {
 	tmpDir := t.TempDir()
 	scenarioFile := filepath.Join(tmpDir, "test.yaml")
