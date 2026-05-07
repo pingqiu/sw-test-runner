@@ -145,6 +145,8 @@ func runCmd(args []string) {
 	resultsDir := fs.String("results-dir", "results", "Root directory for per-run result bundles")
 	noBundle := fs.Bool("no-bundle", false, "Disable automatic run bundle creation")
 	allowMutating := fs.Bool("allow-mutating", false, "Permit actions registered as mutating (docker_push, infra-affecting chaos, etc.)")
+	envOverrides := newKVFlag()
+	fs.Var(envOverrides, "env", "Set scenario.env entry (repeatable). Format: KEY=VALUE. Overrides any same-named entry from the YAML.")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -158,6 +160,18 @@ func runCmd(args []string) {
 	scenario, err := tr.ParseFile(scenarioFile)
 	if err != nil {
 		logger.Fatalf("parse scenario: %v", err)
+	}
+
+	// Apply --env overrides over scenario.Env. CLI wins so an operator
+	// can substitute product_root, secrets, profile flags etc. without
+	// editing the YAML.
+	if len(envOverrides.values) > 0 {
+		if scenario.Env == nil {
+			scenario.Env = make(map[string]string)
+		}
+		for k, v := range envOverrides.values {
+			scenario.Env[k] = v
+		}
 	}
 
 	// Create run bundle (automatic unless --no-bundle).
@@ -1004,4 +1018,41 @@ func parseTiers(s string) []string {
 		}
 	}
 	return tiers
+}
+
+// kvFlag is a flag.Value collecting repeated KEY=VALUE pairs into a
+// map. Used by --env to let an operator override scenario.env entries
+// from the CLI without editing the YAML.
+type kvFlag struct {
+	values map[string]string
+}
+
+func newKVFlag() *kvFlag { return &kvFlag{values: make(map[string]string)} }
+
+func (k *kvFlag) String() string {
+	if k == nil || len(k.values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(k.values))
+	for kk, vv := range k.values {
+		parts = append(parts, kk+"="+vv)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (k *kvFlag) Set(s string) error {
+	if k.values == nil {
+		k.values = make(map[string]string)
+	}
+	idx := strings.Index(s, "=")
+	if idx <= 0 {
+		return fmt.Errorf("--env requires KEY=VALUE form, got %q", s)
+	}
+	key := strings.TrimSpace(s[:idx])
+	val := s[idx+1:]
+	if key == "" {
+		return fmt.Errorf("--env empty KEY")
+	}
+	k.values[key] = val
+	return nil
 }
