@@ -25,7 +25,10 @@ func RegisterCleanupActions(r *tr.Registry) {
 //   - iscsi_logout_prefix: IQN prefix to logout (e.g., "iqn.2024-01.com.seaweedfs")
 //   - check_ports: comma-separated ports that must be free after cleanup
 //
-// Always succeeds (ignore_error semantics built in) — logs warnings but doesn't fail the scenario.
+// Cleanup is best-effort for process kills, unmounts, NVMe disconnect, and
+// port checks. iSCSI prefix cleanup is stricter: if matching sessions are
+// found, logout/delete failures or still-active matching sessions fail this
+// action so stale lab state surfaces in pre_clean instead of mid-workload.
 func preRunCleanup(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, err := GetNode(actx, act.Node)
 	if err != nil {
@@ -33,6 +36,7 @@ func preRunCleanup(ctx context.Context, actx *tr.ActionContext, act tr.Action) (
 	}
 
 	var cleaned []string
+	out := map[string]string{}
 
 	// Kill stale processes.
 	patterns := act.Params["kill_patterns"]
@@ -68,10 +72,19 @@ func preRunCleanup(ctx context.Context, actx *tr.ActionContext, act tr.Action) (
 
 	// Logout iSCSI sessions.
 	if prefix := act.Params["iscsi_logout_prefix"]; prefix != "" {
-		node.RunRoot(ctx, fmt.Sprintf(
-			"iscsiadm -m session 2>/dev/null | grep '%s' | awk '{print $4}' | while read iqn; do "+
-				"iscsiadm -m node -T $iqn --logout 2>/dev/null; "+
-				"iscsiadm -m node -T $iqn -o delete 2>/dev/null; done || true", prefix))
+		stdout, stderr, code, runErr := node.RunRoot(ctx, iscsiPrefixCleanupCommand(prefix))
+		out["iscsi_cleanup_stdout"] = strings.TrimSpace(stdout)
+		out["iscsi_cleanup_stderr"] = strings.TrimSpace(stderr)
+		if strings.TrimSpace(stdout) != "" {
+			actx.Log("  iSCSI cleanup:\n%s", strings.TrimSpace(stdout))
+		}
+		if runErr != nil {
+			return out, fmt.Errorf("pre_run_cleanup: iSCSI cleanup exec: %w", runErr)
+		}
+		if code != 0 {
+			return out, fmt.Errorf("pre_run_cleanup: iSCSI cleanup for prefix %q failed exit=%d stderr=%s stdout=%s",
+				prefix, code, strings.TrimSpace(stderr), strings.TrimSpace(stdout))
+		}
 		cleaned = append(cleaned, "iscsi:"+prefix)
 	}
 
@@ -87,7 +100,65 @@ func preRunCleanup(ctx context.Context, actx *tr.ActionContext, act tr.Action) (
 	}
 
 	actx.Log("  cleanup: %s", strings.Join(cleaned, ", "))
-	return map[string]string{"value": strings.Join(cleaned, ",")}, nil
+	out["value"] = strings.Join(cleaned, ",")
+	return out, nil
+}
+
+func iscsiPrefixCleanupCommand(prefix string) string {
+	prefixQ := shellQuoteCleanup(prefix)
+	script := `set -eu
+prefix=__PREFIX__
+session_lines() {
+  iscsiadm -m session 2>/dev/null || true
+}
+node_lines() {
+  iscsiadm -m node 2>/dev/null || true
+}
+extract_iqns() {
+  awk -v p="$prefix" 'index($0, p) > 0 { for (i = 1; i <= NF; i++) if ($i ~ /^iqn\./) print $i }'
+}
+sessions="$(session_lines | extract_iqns | sort -u)"
+nodes="$(node_lines | extract_iqns | sort -u)"
+if [ -n "$sessions" ]; then
+  echo "matched iSCSI sessions:"
+  printf '%s\n' "$sessions"
+else
+  echo "matched iSCSI sessions: 0"
+fi
+if [ -n "$nodes" ]; then
+  echo "matched iSCSI nodes:"
+  printf '%s\n' "$nodes"
+else
+  echo "matched iSCSI nodes: 0"
+fi
+printf '%s\n' "$sessions" | awk 'NF' | sort -u | while IFS= read -r iqn; do
+  echo "logout $iqn"
+  iscsiadm -m node -T "$iqn" --logout
+done
+printf '%s\n%s\n' "$sessions" "$nodes" | awk 'NF' | sort -u | while IFS= read -r iqn; do
+  echo "delete $iqn"
+  iscsiadm -m node -T "$iqn" -o delete
+done
+for i in $(seq 1 20); do
+  remaining="$(session_lines | extract_iqns | sort -u)"
+  [ -z "$remaining" ] && break
+  sleep 0.25
+done
+remaining="$(session_lines | extract_iqns | sort -u)"
+if [ -n "$remaining" ]; then
+  echo "remaining matching iSCSI sessions after cleanup:"
+  printf '%s\n' "$remaining"
+  exit 1
+fi
+echo "remaining matching iSCSI sessions: 0"`
+	return strings.Replace(script, "__PREFIX__", prefixQ, 1)
+}
+
+func shellQuoteCleanup(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // nvmeConnect connects to an NVMe-oF target and returns the discovered device path.
