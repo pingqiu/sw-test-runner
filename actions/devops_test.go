@@ -105,9 +105,9 @@ func TestAllActions_Registration(t *testing.T) {
 
 	// Verify tier counts.
 	// core = 17 product-agnostic actions + go_build, docker_build, ctr_load,
-	// image_digest (v1 first batch build primitives).
-	if n := len(byTier[tr.TierCore]); n != 21 {
-		t.Errorf("core: %d, want 21", n)
+	// image_digest (v1 first batch build primitives) + collect_path.
+	if n := len(byTier[tr.TierCore]); n != 22 {
+		t.Errorf("core: %d, want 22", n)
 	}
 	// block = 63 product-agnostic block-tier actions + assert_no_active_iscsi_sessions
 	// + assert_no_processes (v1 first batch) + nvme_id_ctrl + nvme_id_ns (M1 PR-2)
@@ -130,8 +130,8 @@ func TestAllActions_Registration(t *testing.T) {
 	for _, actions := range byTier {
 		total += len(actions)
 	}
-	if total != 129 {
-		t.Errorf("total actions: %d, want 129", total)
+	if total != 130 {
+		t.Errorf("total actions: %d, want 130", total)
 	}
 }
 

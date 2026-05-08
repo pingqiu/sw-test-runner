@@ -143,7 +143,7 @@ Every action is registered against a tier:
 
 | Tier | Purpose |
 |---|---|
-| `TierCore` | product-agnostic primitives (`exec`, `assert_*`, `grep_log`, `sleep`, `print`, `pre_run_cleanup`, `collect_results`, `fio_parse`) |
+| `TierCore` | product-agnostic primitives (`exec`, `assert_*`, `grep_log`, `sleep`, `print`, `pre_run_cleanup`, `collect_path`, `collect_results`, `fio_parse`) |
 | `TierBlock` | block-storage actions (`iscsi_*`, `mkfs`, `mount`, `dd_*`, `fio*`, `start_target`, `nvme_*`, `snapshot_*`, `pgbench_*`, V2 lifecycle) |
 | `TierK8s` | `kubectl_*` family |
 | `TierDevOps` | V1/V2 weed-cluster wiring (`start_weed_master`, `cluster_status`, etc.) |
@@ -157,7 +157,7 @@ Every action is registered against a tier:
 
 **TierCore** — `assert_contains` `assert_equal` `assert_greater`
 `assert_status` `bench_compare` `bench_stats` `benchmark_postcheck`
-`benchmark_preflight` `benchmark_report` `collect_results` `exec`
+`benchmark_preflight` `benchmark_report` `collect_path` `collect_results` `exec`
 `fio_parse` `grep_log` `pre_run_cleanup` `print` `sleep`
 `validate_replication`
 

@@ -23,6 +23,9 @@ import (
 func main() {
 	register := func(r *tr.Registry) {
 		actions.RegisterCore(r)
+		actions.RegisterISCSIActions(r)
+		actions.RegisterNVMeActions(r)
+		actions.RegisterK8sActions(r)
 		v3block.RegisterPack(r)
 	}
 	os.Exit(cli.Run(register, os.Args[1:]))

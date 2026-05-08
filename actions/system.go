@@ -20,6 +20,8 @@ func RegisterSystemActions(r *tr.Registry) {
 	r.RegisterFunc("assert_status", tr.TierCore, assertStatus)
 	r.RegisterFunc("assert_contains", tr.TierCore, assertContains)
 	r.RegisterFunc("print", tr.TierCore, printAction)
+	r.RegisterFunc("collect_path", tr.TierCore, collectPath)
+	r.SetRequiredParams("collect_path", []string{"path"})
 	r.RegisterFunc("fsck_ext4", tr.TierBlock, fsckExt4)
 	r.RegisterFunc("fsck_xfs", tr.TierBlock, fsckXfs)
 	r.RegisterFunc("grep_log", tr.TierCore, grepLog)
@@ -98,7 +100,7 @@ func prefixEnvVars(cmd string, params map[string]string) string {
 }
 
 // execShellQuote single-quote escapes a value for POSIX shell. Empty
-// becomes ''; otherwise wraps in single quotes and escapes any
+// becomes an empty quoted string; otherwise wraps in single quotes and escapes any
 // embedded single-quote by closing-escaping-reopening.
 func execShellQuote(s string) string {
 	if s == "" {
