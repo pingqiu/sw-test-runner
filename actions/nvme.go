@@ -17,6 +17,8 @@ func RegisterNVMeActions(r *tr.Registry) {
 	r.RegisterFunc("nvme_disconnect", tr.TierBlock, nvmeDisconnect)
 	r.RegisterFunc("nvme_get_device", tr.TierBlock, nvmeGetDevice)
 	r.RegisterFunc("nvme_cleanup", tr.TierBlock, nvmeCleanup)
+	r.RegisterFunc("nvme_id_ctrl", tr.TierBlock, nvmeIdCtrl)
+	r.RegisterFunc("nvme_id_ns", tr.TierBlock, nvmeIdNs)
 }
 
 // nvmeConnect connects to an NVMe/TCP target.
@@ -340,4 +342,213 @@ func (r rawSubsystem) toSubsystem() Subsystem {
 		})
 	}
 	return out
+}
+
+// ============================================================
+// nvme_id_ctrl / nvme_id_ns
+// ============================================================
+
+// IdCtrl is the parsed Identify Controller view exposing the fields
+// our assertions care about. Spec field names are preserved.
+type IdCtrl struct {
+	VID       uint16 `json:"vid"`
+	SSVID     uint16 `json:"ssvid"`
+	SN        string `json:"sn"`
+	MN        string `json:"mn"`
+	FR        string `json:"fr"`
+	CMIC      uint8  `json:"cmic"`
+	MDTS      uint8  `json:"mdts"`
+	CNTLID    uint16 `json:"cntlid"`
+	Ver       uint32 `json:"ver"`
+	OACS      uint16 `json:"oacs"`
+	ANATT     uint8  `json:"anatt"`
+	ANACAP    uint8  `json:"anacap"`
+	ANAGRPMAX uint32 `json:"anagrpmax"`
+	NANAGRPID uint32 `json:"nanagrpid"`
+	NN        uint32 `json:"nn"`
+	SubNQN    string `json:"subnqn"`
+}
+
+// IdNs is the parsed Identify Namespace view.
+type IdNs struct {
+	NSZE     uint64 `json:"nsze"`
+	NCAP     uint64 `json:"ncap"`
+	NUSE     uint64 `json:"nuse"`
+	NSFEAT   uint8  `json:"nsfeat"`
+	NLBAF    uint8  `json:"nlbaf"`
+	FLBAS    uint8  `json:"flbas"`
+	NMIC     uint8  `json:"nmic"`
+	ANAGRPID uint32 `json:"anagrpid"`
+	NGUID    string `json:"nguid"`
+	EUI64    string `json:"eui64"`
+}
+
+// parseIdCtrl parses the JSON output of `nvme id-ctrl -o json`.
+// Trims trailing whitespace on string fields (sn/mn/fr are space-
+// padded to fixed widths in the wire format).
+func parseIdCtrl(stdout string) (*IdCtrl, error) {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return nil, fmt.Errorf("parseIdCtrl: empty input")
+	}
+	var c IdCtrl
+	if err := json.Unmarshal([]byte(stdout), &c); err != nil {
+		return nil, fmt.Errorf("parseIdCtrl: %w", err)
+	}
+	c.SN = strings.TrimSpace(c.SN)
+	c.MN = strings.TrimSpace(c.MN)
+	c.FR = strings.TrimSpace(c.FR)
+	c.SubNQN = strings.TrimSpace(c.SubNQN)
+	return &c, nil
+}
+
+// parseIdNs parses the JSON output of `nvme id-ns -o json`.
+func parseIdNs(stdout string) (*IdNs, error) {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return nil, fmt.Errorf("parseIdNs: empty input")
+	}
+	var n IdNs
+	if err := json.Unmarshal([]byte(stdout), &n); err != nil {
+		return nil, fmt.Errorf("parseIdNs: %w", err)
+	}
+	return &n, nil
+}
+
+// nvmeIdCtrl runs `nvme id-ctrl -o json <dev>` on the node and returns
+// the parsed IdCtrl. The device path is taken from params.dev or
+// resolved via the target's NQN.
+//
+// Params:
+//
+//	target: optional, used for sysfs device resolution if dev not set
+//	dev:    optional, controller device path (e.g. /dev/nvme1)
+//	node:   optional, defaults to local
+//
+// Returns: value = JSON-marshalled IdCtrl
+func nvmeIdCtrl(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	dev, err := resolveNVMeCtrlDevice(ctx, actx, act)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ctrl: %w", err)
+	}
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ctrl: %w", err)
+	}
+	cmd := fmt.Sprintf("nvme id-ctrl -o json %s 2>/dev/null", dev)
+	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("nvme_id_ctrl: code=%d stderr=%s err=%v", code, stderr, err)
+	}
+	parsed, err := parseIdCtrl(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ctrl: parse: %w", err)
+	}
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ctrl: marshal: %w", err)
+	}
+	actx.Log("  id-ctrl %s: cmic=%d cntlid=%d nn=%d subnqn=%s",
+		dev, parsed.CMIC, parsed.CNTLID, parsed.NN, parsed.SubNQN)
+	return map[string]string{"value": string(out)}, nil
+}
+
+// nvmeIdNs runs `nvme id-ns -o json <ns_dev>` on the node and returns
+// the parsed IdNs.
+//
+// Params:
+//
+//	target: optional, used for sysfs device resolution if dev not set
+//	dev:    optional, namespace device path (e.g. /dev/nvme1n1)
+//	node:   optional, defaults to local
+//
+// Returns: value = JSON-marshalled IdNs
+func nvmeIdNs(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	dev, err := resolveNVMeNSDevice(ctx, actx, act)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ns: %w", err)
+	}
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ns: %w", err)
+	}
+	cmd := fmt.Sprintf("nvme id-ns -o json %s 2>/dev/null", dev)
+	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("nvme_id_ns: code=%d stderr=%s err=%v", code, stderr, err)
+	}
+	parsed, err := parseIdNs(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ns: parse: %w", err)
+	}
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_id_ns: marshal: %w", err)
+	}
+	actx.Log("  id-ns %s: nsze=%d nmic=%d anagrpid=%d nguid=%s",
+		dev, parsed.NSZE, parsed.NMIC, parsed.ANAGRPID, parsed.NGUID)
+	return map[string]string{"value": string(out)}, nil
+}
+
+// resolveNVMeCtrlDevice picks a controller device path: explicit
+// params.dev wins; otherwise the first live path under the target's
+// NQN. Empty string is an error (caller cannot proceed).
+func resolveNVMeCtrlDevice(ctx context.Context, actx *tr.ActionContext, act tr.Action) (string, error) {
+	if dev, ok := act.Params["dev"]; ok && dev != "" {
+		return dev, nil
+	}
+	if act.Target == "" {
+		return "", fmt.Errorf("either params.dev or target is required")
+	}
+	spec, ok := actx.Scenario.Targets[act.Target]
+	if !ok {
+		return "", fmt.Errorf("target %q not in scenario", act.Target)
+	}
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return "", err
+	}
+	stdout, _, _, _ := node.RunRoot(ctx, "nvme list-subsys -o json 2>/dev/null")
+	view, err := parseListSubsys(stdout)
+	if err != nil {
+		return "", fmt.Errorf("list-subsys parse: %w", err)
+	}
+	sub := view.findByNQN(spec.NQN())
+	if sub == nil {
+		return "", fmt.Errorf("NQN %q not present", spec.NQN())
+	}
+	for _, p := range sub.Paths {
+		if p.Name != "" && strings.EqualFold(p.State, "live") {
+			return "/dev/" + p.Name, nil
+		}
+	}
+	return "", fmt.Errorf("no live controller path for %s", spec.NQN())
+}
+
+// resolveNVMeNSDevice picks a namespace device path: explicit
+// params.dev wins; otherwise the merged ns device under the
+// subsystem matching the target's NQN.
+func resolveNVMeNSDevice(ctx context.Context, actx *tr.ActionContext, act tr.Action) (string, error) {
+	if dev, ok := act.Params["dev"]; ok && dev != "" {
+		return dev, nil
+	}
+	if act.Target == "" {
+		return "", fmt.Errorf("either params.dev or target is required")
+	}
+	spec, ok := actx.Scenario.Targets[act.Target]
+	if !ok {
+		return "", fmt.Errorf("target %q not in scenario", act.Target)
+	}
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return "", err
+	}
+	dev, err := findNVMeDevice(ctx, node, spec.NQN())
+	if err != nil {
+		return "", err
+	}
+	if dev == "" {
+		return "", fmt.Errorf("no namespace device for %s", spec.NQN())
+	}
+	return dev, nil
 }

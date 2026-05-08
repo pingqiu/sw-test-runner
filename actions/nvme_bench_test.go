@@ -23,6 +23,8 @@ func TestNVMeActions_Registration(t *testing.T) {
 		"nvme_disconnect",
 		"nvme_get_device",
 		"nvme_cleanup",
+		"nvme_id_ctrl",
+		"nvme_id_ns",
 	}
 
 	for _, name := range expected {
@@ -32,8 +34,8 @@ func TestNVMeActions_Registration(t *testing.T) {
 	}
 
 	byTier := registry.ListByTier()
-	if n := len(byTier[tr.TierBlock]); n != 4 {
-		t.Errorf("block tier has %d nvme actions, want 4", n)
+	if n := len(byTier[tr.TierBlock]); n != len(expected) {
+		t.Errorf("block tier has %d nvme actions, want %d", n, len(expected))
 	}
 }
 
