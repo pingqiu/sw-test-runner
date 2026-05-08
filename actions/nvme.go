@@ -2,6 +2,7 @@ package actions
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,6 +12,10 @@ import (
 	"github.com/pingqiu/sw-test-runner/infra"
 )
 
+func base64Decode(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(s)
+}
+
 // RegisterNVMeActions registers NVMe/TCP client actions.
 func RegisterNVMeActions(r *tr.Registry) {
 	r.RegisterFunc("nvme_connect", tr.TierBlock, nvmeConnect)
@@ -19,6 +24,7 @@ func RegisterNVMeActions(r *tr.Registry) {
 	r.RegisterFunc("nvme_cleanup", tr.TierBlock, nvmeCleanup)
 	r.RegisterFunc("nvme_id_ctrl", tr.TierBlock, nvmeIdCtrl)
 	r.RegisterFunc("nvme_id_ns", tr.TierBlock, nvmeIdNs)
+	r.RegisterFunc("nvme_read_ana_log", tr.TierBlock, nvmeReadANALog)
 }
 
 // nvmeConnect connects to an NVMe/TCP target.
@@ -551,4 +557,183 @@ func resolveNVMeNSDevice(ctx context.Context, actx *tr.ActionContext, act tr.Act
 		return "", fmt.Errorf("no namespace device for %s", spec.NQN())
 	}
 	return dev, nil
+}
+
+// ============================================================
+// nvme_read_ana_log
+// ============================================================
+
+// ANA state codes (NVMe Base Spec §5.16.1.13 ANA Log Page).
+const (
+	ANAStateOptimized      = 0x01
+	ANAStateNonOptimized   = 0x02
+	ANAStateInaccessible   = 0x03
+	ANAStatePersistentLoss = 0x04
+	ANAStateChange         = 0x0F
+)
+
+// ANALog is the parsed ANA log page. M1 covers the single-group
+// shape (group_count=1, one NSID per group) which matches V3's
+// current model. Multi-group support stays out until a product
+// scenario needs it; the parser handles count>1 but the test
+// fixture set is single-group.
+type ANALog struct {
+	ChangeCount uint64     `json:"change_count"`
+	GroupCount  uint16     `json:"group_count"`
+	Groups      []ANAGroup `json:"groups"`
+}
+
+// ANAGroup is one ANA group descriptor.
+type ANAGroup struct {
+	GroupID          uint32   `json:"group_id"`
+	NSIDCount        uint32   `json:"nsid_count"`
+	GroupChangeCount uint64   `json:"group_change_count"`
+	State            uint8    `json:"state"`
+	StateName        string   `json:"state_name"`
+	NSIDs            []uint32 `json:"nsids"`
+}
+
+// anaStateName maps the raw state byte to a human-readable name.
+// Unknown states get "unknown_<hex>" so the bug surfaces cleanly
+// in goldens rather than silently being categorized as anything.
+func anaStateName(state uint8) string {
+	switch state {
+	case ANAStateOptimized:
+		return "optimized"
+	case ANAStateNonOptimized:
+		return "non_optimized"
+	case ANAStateInaccessible:
+		return "inaccessible"
+	case ANAStatePersistentLoss:
+		return "persistent_loss"
+	case ANAStateChange:
+		return "change"
+	default:
+		return fmt.Sprintf("unknown_0x%02x", state)
+	}
+}
+
+// parseANALog parses the ANA log page binary returned by
+// `nvme get-log <dev> -i 0x0c -b`.
+//
+// Binary layout (little-endian; NVMe Base Spec §5.16.1.13):
+//
+//	[ 0:  8) change_count       (u64)
+//	[ 8: 10) group_count        (u16)
+//	[10: 16) reserved
+//	[16: 16+group): per-group descriptor:
+//	  [+0:  +4) group_id           (u32)
+//	  [+4:  +8) nsid_count         (u32)
+//	  [+8: +16) group_change_count (u64)
+//	  [+16]    state              (u8)
+//	  [+17:+20] reserved
+//	  [+20:+20+4*nsid_count] nsids (u32 each)
+//
+// Minimum 16 bytes required (header). Per-group is at least 24
+// bytes header + 4*nsid_count bytes of NSIDs.
+func parseANALog(data []byte) (*ANALog, error) {
+	if len(data) < 16 {
+		return nil, fmt.Errorf("parseANALog: %d bytes < 16-byte header minimum", len(data))
+	}
+	out := &ANALog{
+		ChangeCount: leU64(data[0:8]),
+		GroupCount:  leU16(data[8:10]),
+	}
+	off := 16
+	for i := 0; i < int(out.GroupCount); i++ {
+		if off+24 > len(data) {
+			return nil, fmt.Errorf("parseANALog: group %d header truncated at offset %d", i, off)
+		}
+		g := ANAGroup{
+			GroupID:          leU32(data[off : off+4]),
+			NSIDCount:        leU32(data[off+4 : off+8]),
+			GroupChangeCount: leU64(data[off+8 : off+16]),
+			State:            data[off+16],
+		}
+		g.StateName = anaStateName(g.State)
+		off += 20
+		need := int(g.NSIDCount) * 4
+		if off+need > len(data) {
+			return nil, fmt.Errorf("parseANALog: group %d NSID list truncated at offset %d (need %d bytes for %d NSIDs)",
+				i, off, need, g.NSIDCount)
+		}
+		for j := uint32(0); j < g.NSIDCount; j++ {
+			g.NSIDs = append(g.NSIDs, leU32(data[off:off+4]))
+			off += 4
+		}
+		out.Groups = append(out.Groups, g)
+	}
+	return out, nil
+}
+
+func leU16(b []byte) uint16 { return uint16(b[0]) | uint16(b[1])<<8 }
+func leU32(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+func leU64(b []byte) uint64 {
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
+
+// nvmeReadANALog runs `nvme get-log <ns_dev> -i 0x0c -l <len> -b` on
+// the node and returns the parsed ANALog.
+//
+// Params:
+//
+//	target: optional, used for sysfs device resolution
+//	dev:    optional, namespace device path
+//	length: optional, log page byte length (default 40 — single
+//	        group + single NSID, matches V3 today)
+//	node:   optional
+//
+// Returns: value = JSON-marshalled ANALog
+func nvmeReadANALog(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	dev, err := resolveNVMeNSDevice(ctx, actx, act)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_read_ana_log: %w", err)
+	}
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_read_ana_log: %w", err)
+	}
+	length := "40"
+	if v, ok := act.Params["length"]; ok && v != "" {
+		length = v
+	}
+	tmpFile := fmt.Sprintf("/tmp/sw-test-runner-ana-%d.bin", time.Now().UnixNano())
+	cmd := fmt.Sprintf("nvme get-log %s -i 0x0c -l %s -b > %s 2>/dev/null && cat %s | base64 && rm -f %s",
+		dev, length, tmpFile, tmpFile, tmpFile)
+	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("nvme_read_ana_log: code=%d stderr=%s err=%v", code, stderr, err)
+	}
+	binData, err := decodeBase64Trimmed(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_read_ana_log: base64 decode: %w", err)
+	}
+	parsed, err := parseANALog(binData)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_read_ana_log: parse: %w", err)
+	}
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_read_ana_log: marshal: %w", err)
+	}
+	if len(parsed.Groups) > 0 {
+		actx.Log("  ana-log %s: groups=%d state=%s nsid_count=%d",
+			dev, parsed.GroupCount, parsed.Groups[0].StateName, parsed.Groups[0].NSIDCount)
+	} else {
+		actx.Log("  ana-log %s: groups=0 (empty)", dev)
+	}
+	return map[string]string{"value": string(out)}, nil
+}
+
+// decodeBase64Trimmed decodes base64 with whitespace tolerated.
+// nvme get-log emits raw bytes; we base64 them on the wire to
+// survive ssh/exec text channels cleanly.
+func decodeBase64Trimmed(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return base64Decode(s)
 }
