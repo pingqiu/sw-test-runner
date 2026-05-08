@@ -158,6 +158,7 @@ type ArtifactSpec struct {
 type ScenarioResult struct {
 	Name      string            `json:"name"`
 	Status    ResultStatus      `json:"status"`
+	Cancelled bool              `json:"cancelled,omitempty"`
 	Duration  time.Duration     `json:"duration_ms"`
 	Phases    []PhaseResult     `json:"phases"`
 	Error     string            `json:"error,omitempty"`

@@ -310,17 +310,7 @@ func runCmd(args []string) {
 	// recorded per-phase state; here we set the terminal run-level
 	// state from the result.
 	if statusWriter != nil {
-		var terminal, summary string
-		switch result.Status {
-		case tr.StatusPass:
-			terminal = tr.RunStatePass
-		case tr.StatusFail:
-			terminal = tr.RunStateFail
-			summary = result.Error
-		default:
-			terminal = tr.RunStateError
-			summary = result.Error
-		}
+		terminal, summary := terminalRunState(result)
 		if err := statusWriter.Finalize(terminal, summary); err != nil {
 			logger.Printf("warning: finalize status: %v", err)
 		}
@@ -364,6 +354,20 @@ func runCmd(args []string) {
 
 	if result.Status == tr.StatusFail {
 		os.Exit(1)
+	}
+}
+
+func terminalRunState(result *tr.ScenarioResult) (state, summary string) {
+	switch result.Status {
+	case tr.StatusPass:
+		return tr.RunStatePass, ""
+	case tr.StatusFail:
+		if result.Cancelled {
+			return tr.RunStateCancelled, result.Error
+		}
+		return tr.RunStateFail, result.Error
+	default:
+		return tr.RunStateError, result.Error
 	}
 }
 

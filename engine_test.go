@@ -200,6 +200,82 @@ func TestEngine_AlwaysPhaseRunsAfterFailure(t *testing.T) {
 	}
 }
 
+func TestEngine_CancelBeforePhaseKeepsTypedStateAndRunsAlwaysPhase(t *testing.T) {
+	registry := NewRegistry()
+
+	mainStep := &mockHandler{}
+	skippedStep := &mockHandler{}
+	cleanStep := &mockHandler{}
+
+	registry.Register("main_step", TierCore, mainStep)
+	registry.Register("skipped_step", TierCore, skippedStep)
+	registry.Register("clean_step", TierCore, cleanStep)
+
+	scenario := &Scenario{
+		Name:    "cancel-test",
+		Timeout: Duration{5 * time.Second},
+		Phases: []Phase{
+			{
+				Name: "main",
+				Actions: []Action{
+					{Action: "main_step"},
+				},
+			},
+			{
+				Name: "skipped",
+				Actions: []Action{
+					{Action: "skipped_step"},
+				},
+			},
+			{
+				Name:   "cleanup",
+				Always: true,
+				Actions: []Action{
+					{Action: "clean_step"},
+				},
+			},
+		},
+	}
+
+	cancelChecks := 0
+	engine := NewEngine(registry, nil)
+	engine.CancelCheck = func() bool {
+		cancelChecks++
+		return cancelChecks > 1
+	}
+	actx := &ActionContext{
+		Scenario: scenario,
+		Vars:     make(map[string]string),
+		Log:      func(string, ...interface{}) {},
+	}
+	result := engine.Run(context.Background(), scenario, actx)
+
+	if result.Status != StatusFail {
+		t.Errorf("status = %s, want FAIL", result.Status)
+	}
+	if !result.Cancelled {
+		t.Error("cancelled flag should be true")
+	}
+	if !strings.Contains(result.Error, "cancelled before phase skipped") {
+		t.Errorf("error = %q, want cancel phase", result.Error)
+	}
+	if len(mainStep.calls) != 1 {
+		t.Error("main step should have run before cancellation")
+	}
+	if len(skippedStep.calls) != 0 {
+		t.Error("skipped step should not run after cancellation")
+	}
+	if len(cleanStep.calls) != 1 {
+		t.Error("always cleanup should run after cancellation")
+	}
+	if len(result.Phases) != 2 {
+		t.Fatalf("phases = %d, want main + cleanup", len(result.Phases))
+	}
+	if result.Phases[0].Name != "main" || result.Phases[1].Name != "cleanup" {
+		t.Errorf("phases = %v, want main then cleanup", []string{result.Phases[0].Name, result.Phases[1].Name})
+	}
+}
+
 func TestEngine_VarSubstitution(t *testing.T) {
 	registry := NewRegistry()
 

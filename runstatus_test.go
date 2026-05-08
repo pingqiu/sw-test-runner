@@ -143,6 +143,28 @@ func TestStatusWriter_CancelDetection(t *testing.T) {
 	}
 }
 
+func TestStatusWriter_CancelledFinalizeKeepsSummary(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "run-cancelled")
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewStatusWriter(runDir, root, RunStatus{RunID: "run-cancelled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Finalize(RunStateCancelled, "cancelled before phase k8s_fio"); err != nil {
+		t.Fatal(err)
+	}
+	got := mustReadStatus(t, runDir)
+	if got.State != RunStateCancelled {
+		t.Errorf("state = %s, want cancelled", got.State)
+	}
+	if got.ErrorSummary != "cancelled before phase k8s_fio" {
+		t.Errorf("error_summary = %q", got.ErrorSummary)
+	}
+}
+
 // TestReadLatest_Missing returns "" with no error when the pointer
 // has not yet been written. CLI `status --latest` relies on this
 // to print a friendly message instead of erroring.

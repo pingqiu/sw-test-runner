@@ -182,7 +182,7 @@ func (w *StatusWriter) Finalize(state, summary string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.status.State = state
-	if summary != "" && (state == RunStateFail || state == RunStateError) {
+	if summary != "" && (state == RunStateFail || state == RunStateCancelled || state == RunStateError) {
 		w.status.ErrorSummary = summary
 	}
 	w.status.EndedAt = time.Now().UTC().Format(time.RFC3339)

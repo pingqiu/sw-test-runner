@@ -118,6 +118,7 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 			if e.CancelCheck != nil && e.CancelCheck() {
 				failed = true
 				result.Status = StatusFail
+				result.Cancelled = true
 				result.Error = "cancelled before phase " + phase.Name
 				break
 			}
@@ -499,4 +500,3 @@ func trimOutliers(values []float64, pct int) []float64 {
 	}
 	return sorted[trim : len(sorted)-trim]
 }
-
