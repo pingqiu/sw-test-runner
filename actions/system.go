@@ -95,7 +95,10 @@ func prefixEnvVars(cmd string, params map[string]string) string {
 		b.WriteString(execShellQuote(params[k]))
 		b.WriteString(" ")
 	}
-	b.WriteString(cmd)
+	// Apply the environment to the entire command, not just the first
+	// simple command before a shell operator such as && or |.
+	b.WriteString("sh -c ")
+	b.WriteString(execShellQuote(cmd))
 	return b.String()
 }
 
@@ -294,7 +297,7 @@ func grepLog(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[st
 		return nil, err
 	}
 
-	cmd := fmt.Sprintf("grep -c '%s' %s || true", pattern, path)
+	cmd := fmt.Sprintf("grep -c -- %s %s || true", execShellQuote(pattern), execShellQuote(path))
 	stdout, _, _, err := node.Run(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("grep_log: %w", err)

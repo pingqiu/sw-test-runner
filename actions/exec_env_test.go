@@ -1,6 +1,15 @@
 package actions
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/infra"
+)
 
 func TestPrefixEnvVars_NoEnvKeysReturnsCmdUnchanged(t *testing.T) {
 	got := prefixEnvVars("bash run.sh", map[string]string{
@@ -20,7 +29,7 @@ func TestPrefixEnvVars_BuildsSortedPrefix(t *testing.T) {
 		"env.SW_ITER":   "5",
 		"unrelated_key": "ignored",
 	})
-	want := "BAR=two FOO=one SW_ITER=5 bash run.sh"
+	want := "BAR=two FOO=one SW_ITER=5 sh -c 'bash run.sh'"
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
@@ -33,7 +42,7 @@ func TestPrefixEnvVars_QuotesValuesWithSpacesAndSpecials(t *testing.T) {
 		"env.C": "plain",      // no special → no quote
 		"env.D": `with'quote`, // single quote → escape
 	})
-	want := `A='a b' B='x$y' C=plain D='with'\''quote' run`
+	want := `A='a b' B='x$y' C=plain D='with'\''quote' sh -c run`
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
@@ -43,8 +52,8 @@ func TestPrefixEnvVars_EmptyValueIsEmptyQuotes(t *testing.T) {
 	got := prefixEnvVars("run", map[string]string{
 		"env.EMPTY": "",
 	})
-	if got != "EMPTY='' run" {
-		t.Errorf("got %q, want \"EMPTY='' run\"", got)
+	if got != "EMPTY='' sh -c run" {
+		t.Errorf("got %q, want \"EMPTY='' sh -c run\"", got)
 	}
 }
 
@@ -52,10 +61,54 @@ func TestPrefixEnvVars_RejectsBareEnvDot(t *testing.T) {
 	// "env." with no name after the dot is malformed; should be ignored,
 	// not produce a "= value" empty-name prefix.
 	got := prefixEnvVars("run", map[string]string{
-		"env.":    "lost",
-		"env.OK":  "kept",
+		"env.":   "lost",
+		"env.OK": "kept",
 	})
-	if got != "OK=kept run" {
-		t.Errorf("got %q, want OK=kept run", got)
+	if got != "OK=kept sh -c run" {
+		t.Errorf("got %q, want OK=kept sh -c run", got)
+	}
+}
+
+func TestPrefixEnvVars_AppliesToCompoundCommand(t *testing.T) {
+	got := prefixEnvVars("cd /tmp && bash run.sh", map[string]string{
+		"env.FOO": "bar",
+	})
+	want := "FOO=bar sh -c 'cd /tmp && bash run.sh'"
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestGrepLogPatternStartingWithDash(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "run.log")
+	if err := os.WriteFile(logPath, []byte("--nvme-listen=127.0.0.1:4420\n"), 0644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	node := &infra.Node{IsNative: true}
+	actionPath := logPath
+	if runtime.GOOS == "windows" {
+		node = &infra.Node{IsLocal: true}
+		actionPath = infra.ToWSLPath(logPath)
+	}
+	actx := &tr.ActionContext{
+		Nodes: map[string]tr.NodeRunner{
+			"local": node,
+		},
+		Log: func(string, ...interface{}) {},
+	}
+	out, err := grepLog(context.Background(), actx, tr.Action{
+		Action: "grep_log",
+		Node:   "local",
+		Params: map[string]string{
+			"path":    actionPath,
+			"pattern": "--nvme-listen=",
+		},
+	})
+	if err != nil {
+		t.Fatalf("grepLog: %v", err)
+	}
+	if out["value"] != "1" {
+		t.Fatalf("count=%q, want 1", out["value"])
 	}
 }
