@@ -959,9 +959,9 @@ func setupActionContext(s *tr.Scenario, logFunc func(string, ...interface{})) (*
 	// Create and connect nodes.
 	for name, spec := range s.Topology.Nodes {
 		node := &infra.Node{
-			Host:    spec.Host,
-			User:    spec.User,
-			KeyFile: spec.KeyFile,
+			Host:    resolveTopologyValue(spec.Host, s.Env),
+			User:    resolveTopologyValue(spec.User, s.Env),
+			KeyFile: resolveTopologyValue(spec.KeyFile, s.Env),
 			IsLocal: spec.IsLocal,
 		}
 		if err := node.Connect(); err != nil {
@@ -1000,6 +1000,14 @@ func setupActionContext(s *tr.Scenario, logFunc func(string, ...interface{})) (*
 	}
 
 	return actx, nil
+}
+
+func resolveTopologyValue(s string, vars map[string]string) string {
+	for k, v := range vars {
+		s = strings.ReplaceAll(s, "{{ "+k+" }}", v)
+		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
+	}
+	return s
 }
 
 func cleanupNodes(actx *tr.ActionContext) {
