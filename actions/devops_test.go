@@ -111,9 +111,9 @@ func TestAllActions_Registration(t *testing.T) {
 	}
 	// block = 63 product-agnostic block-tier actions + assert_no_active_iscsi_sessions
 	// + assert_no_processes (v1 first batch) + nvme_id_ctrl + nvme_id_ns (M1 PR-2)
-	// + nvme_read_ana_log (M1 PR-3).
-	if n := len(byTier[tr.TierBlock]); n != 69 {
-		t.Errorf("block: %d, want 69", n)
+	// + nvme_read_ana_log (M1 PR-3) + nvme_assert_subsystem (M1 PR-4).
+	if n := len(byTier[tr.TierBlock]); n != 70 {
+		t.Errorf("block: %d, want 70", n)
 	}
 	if n := len(byTier[tr.TierDevOps]); n != 19 {
 		t.Errorf("devops: %d, want 19", n)
@@ -130,8 +130,8 @@ func TestAllActions_Registration(t *testing.T) {
 	for _, actions := range byTier {
 		total += len(actions)
 	}
-	if total != 128 {
-		t.Errorf("total actions: %d, want 128", total)
+	if total != 129 {
+		t.Errorf("total actions: %d, want 129", total)
 	}
 }
 

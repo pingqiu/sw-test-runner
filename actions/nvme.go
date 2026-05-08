@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ func RegisterNVMeActions(r *tr.Registry) {
 	r.RegisterFunc("nvme_id_ctrl", tr.TierBlock, nvmeIdCtrl)
 	r.RegisterFunc("nvme_id_ns", tr.TierBlock, nvmeIdNs)
 	r.RegisterFunc("nvme_read_ana_log", tr.TierBlock, nvmeReadANALog)
+	r.RegisterFunc("nvme_assert_subsystem", tr.TierBlock, nvmeAssertSubsystem)
 }
 
 // nvmeConnect connects to an NVMe/TCP target.
@@ -736,4 +738,304 @@ func decodeBase64Trimmed(s string) ([]byte, error) {
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
 	return base64Decode(s)
+}
+
+// ============================================================
+// nvme_assert_subsystem
+// ============================================================
+//
+// Composite declarative assertion. Replaces ~30 lines of bash
+// gate logic per scenario (path-count grep, sysfs walk, identity
+// regex, ANA state byte check) with one YAML block.
+//
+// Each P4 product fix from 2026-05-07 corresponds to ONE field
+// here; a regression of any flips the matching expectation:
+//   c0e4a6a (CMIC bit 1)             → cmic
+//   035702f (NMIC.SHARED bit 0)      → nmic
+//   60d3533 (per-replica cntlid)     → cntlid_distinct
+//   ANA / multipath wire             → paths / namespace_devices /
+//                                       ana_state / anagrpid
+
+// assertSubsystemSpec collects every per-field expectation. nil
+// pointers / empty strings mean "no assertion on this field."
+type assertSubsystemSpec struct {
+	Paths            *int
+	NamespaceDevices *int
+	ANAState         string
+	CMIC             *uint8
+	NMIC             *uint8
+	ANAGRPID         *uint32
+	CntlidDistinct   bool // every controller has a distinct cntlid
+}
+
+// assertSubsystemEvidence is the observed state, gathered by the
+// action body. Pure evaluator below operates on this.
+type assertSubsystemEvidence struct {
+	Subsystem   *Subsystem
+	NSDevices   []string
+	Controllers []*IdCtrl // one per path; aligned by index with Subsystem.Paths
+	Namespace   *IdNs     // collected from first ns device, optional
+	ANALog      *ANALog   // optional
+}
+
+// evaluateAssertSubsystem returns one human-readable failure per
+// mismatched field. Empty result means everything matched.
+//
+// This is the pure evaluator: no I/O, no node, no shell. Unit-
+// testable against synthesized evidence.
+func evaluateAssertSubsystem(spec assertSubsystemSpec, ev assertSubsystemEvidence) []string {
+	var failures []string
+
+	if ev.Subsystem == nil {
+		return []string{"subsystem: NQN not present in nvme list-subsys"}
+	}
+
+	if spec.Paths != nil {
+		got := len(ev.Subsystem.Paths)
+		if got != *spec.Paths {
+			failures = append(failures,
+				fmt.Sprintf("paths: expected=%d got=%d", *spec.Paths, got))
+		}
+	}
+
+	if spec.NamespaceDevices != nil {
+		got := len(ev.NSDevices)
+		if got != *spec.NamespaceDevices {
+			failures = append(failures,
+				fmt.Sprintf("namespace_devices: expected=%d got=%d (devices=%v)",
+					*spec.NamespaceDevices, got, ev.NSDevices))
+		}
+	}
+
+	if spec.CMIC != nil {
+		for i, c := range ev.Controllers {
+			if c == nil {
+				continue
+			}
+			if c.CMIC != *spec.CMIC {
+				failures = append(failures,
+					fmt.Sprintf("cmic[path=%d]: expected=0x%02x got=0x%02x",
+						i, *spec.CMIC, c.CMIC))
+			}
+		}
+	}
+
+	if spec.CntlidDistinct {
+		seen := map[uint16]int{}
+		for i, c := range ev.Controllers {
+			if c == nil {
+				continue
+			}
+			if prev, ok := seen[c.CNTLID]; ok {
+				failures = append(failures,
+					fmt.Sprintf("cntlid_distinct: path[%d] cntlid=%d duplicates path[%d]",
+						i, c.CNTLID, prev))
+			}
+			seen[c.CNTLID] = i
+		}
+	}
+
+	if spec.NMIC != nil && ev.Namespace != nil {
+		if ev.Namespace.NMIC != *spec.NMIC {
+			failures = append(failures,
+				fmt.Sprintf("nmic: expected=0x%02x got=0x%02x",
+					*spec.NMIC, ev.Namespace.NMIC))
+		}
+	}
+
+	if spec.ANAGRPID != nil && ev.Namespace != nil {
+		if ev.Namespace.ANAGRPID != *spec.ANAGRPID {
+			failures = append(failures,
+				fmt.Sprintf("anagrpid: expected=%d got=%d",
+					*spec.ANAGRPID, ev.Namespace.ANAGRPID))
+		}
+	}
+
+	if spec.ANAState != "" && ev.ANALog != nil {
+		if len(ev.ANALog.Groups) == 0 {
+			failures = append(failures,
+				fmt.Sprintf("ana_state: expected=%s got=<no groups in ANA log>", spec.ANAState))
+		} else if ev.ANALog.Groups[0].StateName != spec.ANAState {
+			failures = append(failures,
+				fmt.Sprintf("ana_state: expected=%s got=%s (raw=0x%02x)",
+					spec.ANAState, ev.ANALog.Groups[0].StateName, ev.ANALog.Groups[0].State))
+		}
+	}
+
+	return failures
+}
+
+// parseAssertSubsystemSpec extracts the spec from action params.
+// Each field is optional — only fields that appear in YAML are
+// asserted.
+func parseAssertSubsystemSpec(params map[string]string) (assertSubsystemSpec, error) {
+	spec := assertSubsystemSpec{}
+	if v, ok := params["paths"]; ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return spec, fmt.Errorf("paths: %w", err)
+		}
+		spec.Paths = &n
+	}
+	if v, ok := params["namespace_devices"]; ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return spec, fmt.Errorf("namespace_devices: %w", err)
+		}
+		spec.NamespaceDevices = &n
+	}
+	if v, ok := params["ana_state"]; ok && v != "" {
+		spec.ANAState = v
+	}
+	if v, ok := params["cmic"]; ok && v != "" {
+		n, err := parseHexOrDecU8(v)
+		if err != nil {
+			return spec, fmt.Errorf("cmic: %w", err)
+		}
+		spec.CMIC = &n
+	}
+	if v, ok := params["nmic"]; ok && v != "" {
+		n, err := parseHexOrDecU8(v)
+		if err != nil {
+			return spec, fmt.Errorf("nmic: %w", err)
+		}
+		spec.NMIC = &n
+	}
+	if v, ok := params["anagrpid"]; ok && v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return spec, fmt.Errorf("anagrpid: %w", err)
+		}
+		u := uint32(n)
+		spec.ANAGRPID = &u
+	}
+	if v, ok := params["cntlid_distinct"]; ok && v != "" {
+		spec.CntlidDistinct = (v == "true" || v == "1" || v == "yes")
+	}
+	return spec, nil
+}
+
+// parseHexOrDecU8 accepts "0x0a", "0x0A", "10", or "10".
+func parseHexOrDecU8(s string) (uint8, error) {
+	s = strings.TrimSpace(s)
+	base := 10
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s = s[2:]
+		base = 16
+	}
+	n, err := strconv.ParseUint(s, base, 8)
+	if err != nil {
+		return 0, err
+	}
+	return uint8(n), nil
+}
+
+// nvmeAssertSubsystem gathers evidence and runs the pure evaluator.
+//
+// Params (all optional; fields present in YAML are asserted):
+//
+//	target:            required (provides NQN)
+//	paths:             expected controller-path count under the NQN
+//	namespace_devices: expected merged-ns-device count (1 for native multipath)
+//	ana_state:         "optimized" | "non_optimized" | "inaccessible" | …
+//	cmic:              "0x0a" or "10" (hex or decimal); checked per-path
+//	nmic:              "0x01" or "1"; checked on the namespace
+//	anagrpid:          decimal; checked on the namespace
+//	cntlid_distinct:   "true" → assert every path has a unique cntlid
+//	node:              optional, defaults to local
+//
+// Returns: nil on green; error with one bullet per failed field
+// when any assertion fails.
+func nvmeAssertSubsystem(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	spec, err := parseAssertSubsystemSpec(act.Params)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_assert_subsystem: spec: %w", err)
+	}
+
+	if act.Target == "" {
+		return nil, fmt.Errorf("nvme_assert_subsystem: target is required")
+	}
+	targetSpec, ok := actx.Scenario.Targets[act.Target]
+	if !ok {
+		return nil, fmt.Errorf("nvme_assert_subsystem: target %q not in scenario", act.Target)
+	}
+	nqn := targetSpec.NQN()
+
+	node, err := GetNode(actx, act.Node)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_assert_subsystem: %w", err)
+	}
+
+	ev := assertSubsystemEvidence{}
+
+	// 1. list-subsys → subsystem + paths.
+	stdout, _, _, _ := node.RunRoot(ctx, "nvme list-subsys -o json 2>/dev/null")
+	view, err := parseListSubsys(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("nvme_assert_subsystem: list-subsys parse: %w", err)
+	}
+	ev.Subsystem = view.findByNQN(nqn)
+
+	// 2. ns devices via sysfs.
+	if ev.Subsystem != nil {
+		devs, _ := nsDevicesViaSysfs(ctx, node, nqn)
+		ev.NSDevices = devs
+	}
+
+	// 3. id-ctrl per path (only if a CMIC or cntlid_distinct check is requested).
+	if (spec.CMIC != nil || spec.CntlidDistinct) && ev.Subsystem != nil {
+		for _, p := range ev.Subsystem.Paths {
+			if p.Name == "" {
+				ev.Controllers = append(ev.Controllers, nil)
+				continue
+			}
+			ctrlOut, _, _, _ := node.RunRoot(ctx,
+				fmt.Sprintf("nvme id-ctrl -o json /dev/%s 2>/dev/null", p.Name))
+			c, perr := parseIdCtrl(ctrlOut)
+			if perr != nil {
+				ev.Controllers = append(ev.Controllers, nil)
+				continue
+			}
+			ev.Controllers = append(ev.Controllers, c)
+		}
+	}
+
+	// 4. id-ns + ana log on first ns device (only if needed).
+	if (spec.NMIC != nil || spec.ANAGRPID != nil || spec.ANAState != "") && len(ev.NSDevices) > 0 {
+		nsDev := ev.NSDevices[0]
+		if spec.NMIC != nil || spec.ANAGRPID != nil {
+			nsOut, _, _, _ := node.RunRoot(ctx,
+				fmt.Sprintf("nvme id-ns -o json %s 2>/dev/null", nsDev))
+			n, perr := parseIdNs(nsOut)
+			if perr == nil {
+				ev.Namespace = n
+			}
+		}
+		if spec.ANAState != "" {
+			cmd := fmt.Sprintf(
+				"f=$(mktemp) && nvme get-log %s -i 0x0c -l 40 -b > $f 2>/dev/null && cat $f | base64 && rm -f $f",
+				nsDev)
+			out, _, _, _ := node.RunRoot(ctx, cmd)
+			binData, derr := decodeBase64Trimmed(out)
+			if derr == nil {
+				log, perr := parseANALog(binData)
+				if perr == nil {
+					ev.ANALog = log
+				}
+			}
+		}
+	}
+
+	failures := evaluateAssertSubsystem(spec, ev)
+	if len(failures) > 0 {
+		actx.Log("  nvme_assert_subsystem FAIL: %d field(s) mismatched", len(failures))
+		for _, f := range failures {
+			actx.Log("    - %s", f)
+		}
+		return nil, fmt.Errorf("nvme_assert_subsystem: %d failure(s):\n  - %s",
+			len(failures), strings.Join(failures, "\n  - "))
+	}
+
+	actx.Log("  nvme_assert_subsystem OK (target=%s nqn=%s)", act.Target, nqn)
+	return nil, nil
 }

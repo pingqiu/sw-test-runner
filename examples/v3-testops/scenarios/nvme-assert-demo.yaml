@@ -1,0 +1,30 @@
+apiVersion: testrunner.io/v1
+kind: Scenario
+metadata:
+  name: nvme-assert-demo
+  product: seaweed-block
+  tier: TierBlock
+  tags: [nvme, multipath, m1-pr4-demo]
+
+env:
+  artifact_dir: "{{required \"artifact_dir\"}}"
+
+targets:
+  v3-vol:
+    nqn: "{{required \"nqn\"}}"
+    nvme_port: 4421
+
+phases:
+  - id: assert_multipath
+    actions:
+      - id: subsystem_check
+        action: nvme_assert_subsystem
+        target: v3-vol
+        params:
+          paths: 2
+          namespace_devices: 1
+          ana_state: optimized
+          cmic: "0x0a"
+          nmic: "0x01"
+          anagrpid: 1
+          cntlid_distinct: "true"

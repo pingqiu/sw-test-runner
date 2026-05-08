@@ -26,6 +26,7 @@ func TestNVMeActions_Registration(t *testing.T) {
 		"nvme_id_ctrl",
 		"nvme_id_ns",
 		"nvme_read_ana_log",
+		"nvme_assert_subsystem",
 	}
 
 	for _, name := range expected {
