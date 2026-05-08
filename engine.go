@@ -20,6 +20,21 @@ var varPattern = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
 type Engine struct {
 	registry *Registry
 	log      func(format string, args ...interface{})
+
+	// PhaseHook fires at phase boundaries when set. Shape:
+	// PhaseHook("before", name, "", "") at phase start;
+	// PhaseHook("after", name, state, errMsg) at phase end.
+	// Used by the run-control schema (status.json) to keep the
+	// mutable state up-to-date during the run. Errors from the
+	// hook are non-fatal — engine logs and proceeds — so a
+	// flaky shared-drive write never kills the run itself.
+	PhaseHook func(when, phase, state, errMsg string)
+
+	// CancelCheck, when set, is polled before each phase. If it
+	// returns true, the engine stops dispatching new phases and
+	// returns a Cancelled-shaped result. Always-phases still run
+	// for cleanup. Used by the control/cancel signal pattern.
+	CancelCheck func() bool
 }
 
 // NewEngine creates an engine with the given registry and logger.
@@ -28,6 +43,20 @@ func NewEngine(registry *Registry, log func(format string, args ...interface{}))
 		log = func(string, ...interface{}) {}
 	}
 	return &Engine{registry: registry, log: log}
+}
+
+// callPhaseHook invokes PhaseHook if set, swallowing errors so the
+// run never dies because a status write hiccupped.
+func (e *Engine) callPhaseHook(when, phase, state, errMsg string) {
+	if e.PhaseHook == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			e.log("phase-hook panic: %v", r)
+		}
+	}()
+	e.PhaseHook(when, phase, state, errMsg)
 }
 
 // Run executes the scenario end-to-end and returns the result.
@@ -86,12 +115,20 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 		}
 
 		for iter := 1; iter <= count; iter++ {
+			if e.CancelCheck != nil && e.CancelCheck() {
+				failed = true
+				result.Status = StatusFail
+				result.Error = "cancelled before phase " + phase.Name
+				break
+			}
 			iterPhase := phase
 			if phase.Repeat > 1 {
 				iterPhase.Name = fmt.Sprintf("%s[%d/%d]", phase.Name, iter, count)
 			}
+			e.callPhaseHook("before", iterPhase.Name, "", "")
 			pr := e.runPhase(ctx, actx, iterPhase)
 			result.Phases = append(result.Phases, pr)
+			e.callPhaseHook("after", iterPhase.Name, string(pr.Status), pr.Error)
 
 			// Collect numeric save_as values for aggregation.
 			if iterValues != nil {
@@ -170,8 +207,10 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 	cleanupCtx, cleanupCancel := context.WithTimeout(cleanupCtx, 60*time.Second)
 	defer cleanupCancel()
 	for _, phase := range alwaysPhases {
+		e.callPhaseHook("before", phase.Name, "", "")
 		pr := e.runPhase(cleanupCtx, actx, phase)
 		result.Phases = append(result.Phases, pr)
+		e.callPhaseHook("after", phase.Name, string(pr.Status), pr.Error)
 	}
 
 	result.Duration = time.Since(start)

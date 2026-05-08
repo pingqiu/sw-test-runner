@@ -27,6 +27,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -76,6 +77,12 @@ func Run(register func(*tr.Registry), args []string) int {
 		validateCmd(args[1:])
 	case "list":
 		listCmd()
+	case "status":
+		return statusCmd(args[1:])
+	case "list-runs":
+		return listRunsCmd(args[1:])
+	case "cancel":
+		return cancelCmd(args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -97,6 +104,9 @@ Usage:
   sw-test-runner console [flags]                       Start web console server
   sw-test-runner validate <scenario.yaml>              Validate YAML without running
   sw-test-runner list [flags]                          List registered actions
+  sw-test-runner list-runs [-results-dir <dir>]        List run bundles under results-dir
+  sw-test-runner status [-results-dir <dir>] [run_id]  Show status.json (or --latest)
+  sw-test-runner cancel [-results-dir <dir>] [run_id]  Request cancel for a running run
   sw-test-runner help                                  Show this help
 
 Common flags:
@@ -176,6 +186,7 @@ func runCmd(args []string) {
 
 	// Create run bundle (automatic unless --no-bundle).
 	var bundle *tr.RunBundle
+	var statusWriter *tr.StatusWriter
 	if !*noBundle {
 		bundle, err = tr.CreateRunBundle(*resultsDir, scenarioFile, os.Args)
 		if err != nil {
@@ -192,6 +203,22 @@ func runCmd(args []string) {
 			scenario.Env["run_id"] = bundle.Manifest.RunID
 			scenario.Env["bundle_dir"] = bundle.Dir
 			scenario.Env["artifacts_dir"] = bundle.ArtifactsDir()
+
+			// Initialize the run-control status writer. status.json
+			// + the parent latest pointer are how `swblock status`
+			// reports run progress without parsing logs.
+			initial := tr.RunStatus{
+				RunID:       bundle.Manifest.RunID,
+				Scenario:    scenario.Name,
+				State:       tr.RunStateQueued,
+				PhasesTotal: countSchedulablePhases(scenario.Phases),
+			}
+			sw, swErr := tr.NewStatusWriter(bundle.Dir, *resultsDir, initial)
+			if swErr != nil {
+				logger.Printf("warning: status writer init failed: %v (run-control disabled)", swErr)
+			} else {
+				statusWriter = sw
+			}
 		}
 	}
 
@@ -213,6 +240,28 @@ func runCmd(args []string) {
 
 	// Create engine.
 	engine := tr.NewEngine(registry, logFunc)
+
+	// Wire run-control: phase progress and cancel signal both flow
+	// through the StatusWriter when one was created.
+	if statusWriter != nil {
+		engine.PhaseHook = func(when, name, state, errMsg string) {
+			switch when {
+			case "before":
+				_ = statusWriter.PhaseStarted(name)
+			case "after":
+				switch state {
+				case string(tr.StatusPass):
+					_ = statusWriter.PhaseFinished(name, tr.PhaseStatePass, "")
+				case string(tr.StatusFail):
+					_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, errMsg)
+				default:
+					_ = statusWriter.PhaseFinished(name, state, errMsg)
+				}
+			}
+		}
+		engine.CancelCheck = statusWriter.CancelRequested
+		_ = statusWriter.SetState(tr.RunStateRunning)
+	}
 
 	// Set up infrastructure.
 	actx, err := setupActionContext(scenario, logFunc)
@@ -254,6 +303,26 @@ func runCmd(args []string) {
 			logger.Printf("warning: finalize run bundle: %v", err)
 		} else {
 			logger.Printf("run bundle finalized: %s", bundle.Dir)
+		}
+	}
+
+	// Finalize run-control status. The engine PhaseHook already
+	// recorded per-phase state; here we set the terminal run-level
+	// state from the result.
+	if statusWriter != nil {
+		var terminal, summary string
+		switch result.Status {
+		case tr.StatusPass:
+			terminal = tr.RunStatePass
+		case tr.StatusFail:
+			terminal = tr.RunStateFail
+			summary = result.Error
+		default:
+			terminal = tr.RunStateError
+			summary = result.Error
+		}
+		if err := statusWriter.Finalize(terminal, summary); err != nil {
+			logger.Printf("warning: finalize status: %v", err)
 		}
 	}
 
@@ -1063,4 +1132,176 @@ func (k *kvFlag) Set(s string) error {
 	}
 	k.values[key] = val
 	return nil
+}
+
+// countSchedulablePhases returns how many phases the engine is
+// expected to dispatch given Repeat counts. Used as the initial
+// PhasesTotal in status.json so a watcher can compute progress %
+// without re-parsing the scenario.
+func countSchedulablePhases(phases []tr.Phase) int {
+	n := 0
+	for _, p := range phases {
+		count := p.Repeat
+		if count <= 0 {
+			count = 1
+		}
+		n += count
+	}
+	return n
+}
+
+// statusCmd prints status.json for a run. Three call shapes:
+//
+//	swblock status                           # latest under default results dir
+//	swblock status -results-dir <root>        # latest under <root>
+//	swblock status [-results-dir <root>] <id> # explicit run id
+//
+// Exit code 0 on found+terminal-pass, 1 on found+terminal-fail or
+// running, 2 on missing/error.
+func statusCmd(args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	resultsDir := fs.String("results-dir", "results", "Root directory of run bundles")
+	jsonOut := fs.Bool("json", false, "Print full status.json verbatim")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	var runID string
+	if len(rest) > 0 {
+		runID = rest[0]
+	} else {
+		latest, err := tr.ReadLatest(*resultsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "status: read latest: %v\n", err)
+			return 2
+		}
+		if latest == "" {
+			fmt.Fprintf(os.Stderr, "status: no runs found under %s\n", *resultsDir)
+			return 2
+		}
+		runID = latest
+	}
+	runDir := filepath.Join(*resultsDir, runID)
+	s, err := tr.ReadStatus(runDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "status: %v\n", err)
+		return 2
+	}
+	if *jsonOut {
+		data, _ := json.MarshalIndent(s, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("run_id:        %s\n", s.RunID)
+		fmt.Printf("scenario:      %s\n", s.Scenario)
+		fmt.Printf("state:         %s\n", s.State)
+		fmt.Printf("phases:        %d/%d\n", s.PhasesDone, s.PhasesTotal)
+		if s.CurrentPhase != "" {
+			fmt.Printf("current_phase: %s\n", s.CurrentPhase)
+		}
+		if s.StartedAt != "" {
+			fmt.Printf("started_at:    %s\n", s.StartedAt)
+		}
+		if s.EndedAt != "" {
+			fmt.Printf("ended_at:      %s\n", s.EndedAt)
+		}
+		if s.ErrorSummary != "" {
+			fmt.Printf("error:         %s\n", s.ErrorSummary)
+		}
+		fmt.Printf("artifact_dir:  %s\n", s.ArtifactDir)
+		if len(s.Phases) > 0 {
+			fmt.Println("phase_results:")
+			for _, p := range s.Phases {
+				marker := "[" + p.State + "]"
+				fmt.Printf("  %-10s %s", marker, p.Name)
+				if p.Error != "" {
+					fmt.Printf("    error=%s", p.Error)
+				}
+				fmt.Println()
+			}
+		}
+	}
+	switch s.State {
+	case tr.RunStatePass:
+		return 0
+	case tr.RunStateFail, tr.RunStateError, tr.RunStateCancelled:
+		return 1
+	default:
+		// queued/running -> exit 1 too: caller knows it's not done yet
+		return 1
+	}
+}
+
+// listRunsCmd prints a one-line summary per run found under
+// results-dir. Useful when latest pointer is stale or you want to
+// pick by date/status.
+func listRunsCmd(args []string) int {
+	fs := flag.NewFlagSet("list-runs", flag.ContinueOnError)
+	resultsDir := fs.String("results-dir", "results", "Root directory of run bundles")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	entries, err := os.ReadDir(*resultsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list-runs: %v\n", err)
+		return 2
+	}
+	latest, _ := tr.ReadLatest(*resultsDir)
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(*resultsDir, e.Name())
+		s, err := tr.ReadStatus(runDir)
+		if err != nil {
+			continue
+		}
+		marker := " "
+		if e.Name() == latest {
+			marker = "*"
+		}
+		fmt.Printf("%s %-30s %-10s %3d/%d  %s\n",
+			marker, s.RunID, s.State, s.PhasesDone, s.PhasesTotal, s.Scenario)
+		count++
+	}
+	if count == 0 {
+		fmt.Fprintf(os.Stderr, "list-runs: no runs under %s\n", *resultsDir)
+		return 1
+	}
+	return 0
+}
+
+// cancelCmd writes control/cancel under the run dir. The engine
+// polls CancelCheck between phases and stops when the file appears.
+// Always-phases still run for cleanup.
+func cancelCmd(args []string) int {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	resultsDir := fs.String("results-dir", "results", "Root directory of run bundles")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	var runID string
+	if len(rest) > 0 {
+		runID = rest[0]
+	} else {
+		latest, _ := tr.ReadLatest(*resultsDir)
+		if latest == "" {
+			fmt.Fprintf(os.Stderr, "cancel: no run id given and no latest pointer\n")
+			return 2
+		}
+		runID = latest
+	}
+	runDir := filepath.Join(*resultsDir, runID)
+	ctlDir := filepath.Join(runDir, "control")
+	if err := os.MkdirAll(ctlDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "cancel: %v\n", err)
+		return 2
+	}
+	if err := os.WriteFile(filepath.Join(ctlDir, "cancel"), []byte(""), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "cancel: %v\n", err)
+		return 2
+	}
+	fmt.Printf("cancel requested for %s\n", runID)
+	return 0
 }
