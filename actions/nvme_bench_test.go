@@ -2,7 +2,6 @@ package actions
 
 import (
 	"context"
-	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -76,31 +75,32 @@ func TestBenchActions_Registration(t *testing.T) {
 // findNVMeDevice JSON Parsing (nvme list-subsys output)
 // ============================================================
 
-// parseAndFind is a test helper that parses nvme list-subsys JSON and
-// finds the device for a given NQN, replicating findNVMeDevice logic
-// without SSH.
+// parseAndFind is a test helper that exercises the parseListSubsys
+// parser plus the fallback derivation path (no sysfs access). The
+// real findNVMeDevice prefers sysfs, but these tests cover the
+// fallback shape used when sysfs is unavailable (e.g. native
+// multipath disabled, single-path topologies, older kernels).
 func parseAndFind(t *testing.T, jsonStr, nqn string) string {
 	t.Helper()
-	var parsed nvmeSubsysOutput
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	view, err := parseListSubsys(jsonStr)
+	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	for _, ss := range parsed.Subsystems {
-		if ss.NQN != nqn {
+	sub := view.findByNQN(nqn)
+	if sub == nil {
+		return ""
+	}
+	for _, p := range sub.Paths {
+		if p.Name == "" {
 			continue
 		}
-		for _, p := range ss.Paths {
-			if p.Name == "" {
-				continue
-			}
-			if strings.EqualFold(p.Transport, "tcp") && strings.EqualFold(p.State, "live") {
-				return "/dev/" + p.Name + "n1"
-			}
+		if strings.EqualFold(p.Transport, "tcp") && strings.EqualFold(p.State, "live") {
+			return "/dev/" + p.Name + "n1"
 		}
-		for _, p := range ss.Paths {
-			if p.Name != "" {
-				return "/dev/" + p.Name + "n1"
-			}
+	}
+	for _, p := range sub.Paths {
+		if p.Name != "" {
+			return "/dev/" + p.Name + "n1"
 		}
 	}
 	return ""

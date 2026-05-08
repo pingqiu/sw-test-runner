@@ -158,7 +158,14 @@ func nvmeCleanup(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	return nil, nil
 }
 
-// findNVMeDevice parses `nvme list-subsys -o json` to find the device for a NQN.
+// findNVMeDevice resolves the merged namespace device path for the
+// given NQN. Under native NVMe multipath both controllers share one
+// namespace device that hangs off /sys/class/nvme-subsystem/<sub>/,
+// not off either controller. Walk sysfs first; if that returns
+// nothing (e.g. multipath disabled, single controller), fall back
+// to deriving /dev/<path-name>n1 from the controller name.
+//
+// Returns "" when the NQN is not yet present (caller polls).
 func findNVMeDevice(ctx context.Context, node *infra.Node, nqn string) (string, error) {
 	cmd := "nvme list-subsys -o json 2>/dev/null"
 	stdout, _, code, err := node.RunRoot(ctx, cmd)
@@ -166,53 +173,171 @@ func findNVMeDevice(ctx context.Context, node *infra.Node, nqn string) (string, 
 		return "", fmt.Errorf("nvme list-subsys failed: code=%d err=%v", code, err)
 	}
 
-	// nvme list-subsys returns a JSON array of host entries, each with a Subsystems array.
-	var hosts []nvmeSubsysOutput
-	if err := json.Unmarshal([]byte(stdout), &hosts); err != nil {
-		// Fallback: try parsing as a single object (older nvme-cli versions).
-		var single nvmeSubsysOutput
-		if err2 := json.Unmarshal([]byte(stdout), &single); err2 != nil {
-			return "", fmt.Errorf("nvme list-subsys parse: %w", err)
-		}
-		hosts = []nvmeSubsysOutput{single}
+	view, parseErr := parseListSubsys(stdout)
+	if parseErr != nil {
+		return "", fmt.Errorf("nvme list-subsys parse: %w", parseErr)
 	}
 
-	for _, h := range hosts {
-	for _, ss := range h.Subsystems {
-		if ss.NQN != nqn {
+	sub := view.findByNQN(nqn)
+	if sub == nil {
+		return "", nil // NQN not yet present
+	}
+
+	// Preferred: sysfs walk gives the merged ns device name.
+	devs, sysErr := nsDevicesViaSysfs(ctx, node, nqn)
+	if sysErr == nil && len(devs) > 0 {
+		return devs[0], nil
+	}
+
+	// Fallback: derive /dev/<controller>n1. Single-path topologies
+	// produce the right answer; under multipath this is the bug we
+	// fixed by preferring sysfs.
+	for _, p := range sub.Paths {
+		if p.Name == "" {
 			continue
 		}
-		for _, p := range ss.Paths {
-			if p.Name == "" {
-				continue
-			}
-			if strings.EqualFold(p.Transport, "tcp") && strings.EqualFold(p.State, "live") {
-				return "/dev/" + p.Name + "n1", nil
-			}
-		}
-		// Fallback: any path with a name.
-		for _, p := range ss.Paths {
-			if p.Name != "" {
-				return "/dev/" + p.Name + "n1", nil
-			}
+		if strings.EqualFold(p.Transport, "tcp") && strings.EqualFold(p.State, "live") {
+			return "/dev/" + p.Name + "n1", nil
 		}
 	}
+	for _, p := range sub.Paths {
+		if p.Name != "" {
+			return "/dev/" + p.Name + "n1", nil
+		}
 	}
-	return "", nil // not found yet
+	return "", nil
 }
 
-// JSON structures for nvme list-subsys output.
-type nvmeSubsysOutput struct {
-	Subsystems []nvmeSubsysEntry `json:"Subsystems"`
+// nsDevicesViaSysfs returns the namespace devices owned by the
+// subsystem matching nqn, by walking /sys/class/nvme-subsystem.
+// Empty result with nil error means "no subsystem matched" — the
+// caller should not treat that as failure, just as "not yet."
+func nsDevicesViaSysfs(ctx context.Context, node *infra.Node, nqn string) ([]string, error) {
+	cmd := fmt.Sprintf(`
+for d in /sys/class/nvme-subsystem/*/; do
+  if [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "%s" ]; then
+    for entry in "$d"*; do
+      base=$(basename "$entry")
+      case "$base" in
+        nvme[0-9]*n[0-9]*) echo "/dev/$base" ;;
+      esac
+    done
+  fi
+done`, nqn)
+	stdout, _, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("sysfs walk: code=%d err=%v", code, err)
+	}
+	var devs []string
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		devs = append(devs, line)
+	}
+	return devs, nil
 }
 
-type nvmeSubsysEntry struct {
-	NQN   string          `json:"NQN"`
-	Paths []nvmePathEntry `json:"Paths"`
+// ListSubsysView is the structured result of parsing
+// `nvme list-subsys -o json`. Pure-data, deterministic; safe for
+// fixture-test round-trip.
+type ListSubsysView struct {
+	Subsystems []Subsystem `json:"subsystems"`
 }
 
-type nvmePathEntry struct {
+// Subsystem is one NVMe subsystem (post-merge), addressed by NQN
+// and reachable through one or more controller Paths.
+type Subsystem struct {
+	Name     string `json:"name"`
+	NQN      string `json:"nqn"`
+	IOPolicy string `json:"io_policy,omitempty"`
+	Paths    []Path `json:"paths"`
+}
+
+// Path is one controller route into a subsystem.
+type Path struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	Address   string `json:"address,omitempty"`
+	State     string `json:"state,omitempty"`
+}
+
+// findByNQN returns the first subsystem matching nqn, or nil.
+func (v *ListSubsysView) findByNQN(nqn string) *Subsystem {
+	for i := range v.Subsystems {
+		if v.Subsystems[i].NQN == nqn {
+			return &v.Subsystems[i]
+		}
+	}
+	return nil
+}
+
+// parseListSubsys parses the JSON output of `nvme list-subsys -o
+// json`. Handles both the host-wrapper shape (top-level array of
+// hosts, each with a Subsystems array) and the older flat shape
+// (single object with Subsystems). Pure function; fixture-tested.
+func parseListSubsys(stdout string) (*ListSubsysView, error) {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return &ListSubsysView{}, nil
+	}
+
+	view := &ListSubsysView{}
+
+	// Try host-wrapper shape first.
+	var hosts []rawHost
+	if err := json.Unmarshal([]byte(stdout), &hosts); err == nil {
+		for _, h := range hosts {
+			for _, raw := range h.Subsystems {
+				view.Subsystems = append(view.Subsystems, raw.toSubsystem())
+			}
+		}
+		return view, nil
+	}
+
+	// Flat shape (older nvme-cli).
+	var single rawHost
+	if err := json.Unmarshal([]byte(stdout), &single); err != nil {
+		return nil, err
+	}
+	for _, raw := range single.Subsystems {
+		view.Subsystems = append(view.Subsystems, raw.toSubsystem())
+	}
+	return view, nil
+}
+
+type rawHost struct {
+	Subsystems []rawSubsystem `json:"Subsystems"`
+}
+
+type rawSubsystem struct {
+	Name     string    `json:"Name"`
+	NQN      string    `json:"NQN"`
+	IOPolicy string    `json:"IOPolicy"`
+	Paths    []rawPath `json:"Paths"`
+}
+
+type rawPath struct {
 	Name      string `json:"Name"`
 	Transport string `json:"Transport"`
+	Address   string `json:"Address"`
 	State     string `json:"State"`
+}
+
+func (r rawSubsystem) toSubsystem() Subsystem {
+	out := Subsystem{
+		Name:     r.Name,
+		NQN:      r.NQN,
+		IOPolicy: r.IOPolicy,
+	}
+	for _, p := range r.Paths {
+		out.Paths = append(out.Paths, Path{
+			Name:      p.Name,
+			Transport: p.Transport,
+			Address:   p.Address,
+			State:     p.State,
+		})
+	}
+	return out
 }
