@@ -83,8 +83,7 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		remoteArchive := fmt.Sprintf("/tmp/sw-test-runner-collect-%d.tgz", time.Now().UnixNano())
 		parent := pathpkg.Dir(strings.TrimRight(src, "/"))
 		base := pathpkg.Base(strings.TrimRight(src, "/"))
-		tarCmd := fmt.Sprintf("tar -czf %s -C %s %s",
-			execShellQuote(remoteArchive), execShellQuote(parent), execShellQuote(base))
+		tarCmd := collectPathTarCommand(remoteArchive, parent, base)
 		if _, stderr, code, err := node.Run(ctx, tarCmd); err != nil || code != 0 {
 			return nil, fmt.Errorf("collect_path: archive dir: code=%d stderr=%s err=%v", code, stderr, err)
 		}
@@ -97,4 +96,18 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	default:
 		return nil, fmt.Errorf("collect_path: unsupported path kind %q for %s", kind, src)
 	}
+}
+
+func collectPathTarCommand(archive, parent, base string) string {
+	return fmt.Sprintf(`err="$(mktemp)"
+tar -czf %s -C %s %s 2>"$err"
+rc=$?
+cat "$err" >&2
+if [ "$rc" -eq 1 ] && grep -qi 'file changed as we read it' "$err" && [ -s %s ]; then
+  rm -f "$err"
+  exit 0
+fi
+rm -f "$err"
+exit "$rc"`,
+		execShellQuote(archive), execShellQuote(parent), execShellQuote(base), execShellQuote(archive))
 }

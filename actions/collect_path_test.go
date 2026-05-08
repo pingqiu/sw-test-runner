@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -52,6 +53,19 @@ func TestCollectPathFile(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("collected data: got %q", string(data))
+	}
+}
+
+func TestCollectPathDirectoryArchiveCommandToleratesFileChangedWarning(t *testing.T) {
+	cmd := collectPathTarCommand("/tmp/archive.tgz", "/tmp", "phase")
+	for _, want := range []string{
+		"file changed as we read it",
+		`[ -s /tmp/archive.tgz ]`,
+		`exit 0`,
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("tar command missing %q:\n%s", want, cmd)
+		}
 	}
 }
 
