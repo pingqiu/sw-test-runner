@@ -75,6 +75,8 @@ func Run(register func(*tr.Registry), args []string) int {
 		consoleCmd(args[1:])
 	case "validate":
 		validateCmd(args[1:])
+	case "validate-bundle":
+		return validateBundleCmd(args[1:])
 	case "list":
 		listCmd()
 	case "status":
@@ -103,6 +105,7 @@ Usage:
   sw-test-runner agent [flags]                         Run as agent on test node
   sw-test-runner console [flags]                       Start web console server
   sw-test-runner validate <scenario.yaml>              Validate YAML without running
+  sw-test-runner validate-bundle [flags] <run-dir>     Validate completed result/status bundle
   sw-test-runner list [flags]                          List registered actions
   sw-test-runner list-runs [-results-dir <dir>]        List run bundles under results-dir
   sw-test-runner status [-results-dir <dir>] [run_id]  Show status.json (or --latest)
@@ -985,6 +988,61 @@ func validateCmd(args []string) {
 	}
 }
 
+func validateBundleCmd(args []string) int {
+	fs := flag.NewFlagSet("validate-bundle", flag.ExitOnError)
+	requirePass := fs.Bool("require-pass", false, "Require top-level and child statuses to be pass")
+	requireTiming := fs.Bool("require-timing", false, "Require started_at, ended_at, and wall_clock_s in result/status")
+	requireChildBundles := fs.Bool("require-child-bundles", false, "Require each listed child run_dir to contain status.json and result.json")
+	expectScenario := fs.String("expect-scenario", "", "Expected scenario name")
+	expectCommit := fs.String("expect-commit", "", "Expected product/source/git commit prefix")
+	children := fs.String("children", "", "Comma-separated expected child phase names, in order")
+	jsonOut := fs.Bool("json", false, "Print validation report as JSON")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "error: run bundle directory required")
+		return 2
+	}
+	opts := tr.BundleValidationOptions{
+		RequirePass:         *requirePass,
+		RequireTiming:       *requireTiming,
+		RequireChildBundles: *requireChildBundles,
+		ExpectScenario:      *expectScenario,
+		ExpectCommitPrefix:  *expectCommit,
+		ExpectedChildren:    splitCSV(*children),
+	}
+	report, err := tr.ValidateBundle(fs.Arg(0), opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "INVALID: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+	} else if report.OK {
+		fmt.Printf("VALID: bundle %s", report.Dir)
+		if report.RunID != "" {
+			fmt.Printf(" run_id=%s", report.RunID)
+		}
+		if report.Status != "" {
+			fmt.Printf(" status=%s", report.Status)
+		}
+		if report.ProductCommit != "" {
+			fmt.Printf(" commit=%s", report.ProductCommit)
+		}
+		fmt.Println()
+	} else {
+		fmt.Fprintf(os.Stderr, "INVALID: bundle %s\n", report.Dir)
+		for _, e := range report.Errors {
+			fmt.Fprintf(os.Stderr, "  - %s\n", e)
+		}
+	}
+	if !report.OK {
+		return 1
+	}
+	return 0
+}
+
 func listCmd() {
 	// Parse --tiers flag from remaining args.
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
@@ -1099,6 +1157,17 @@ func parseTiers(s string) []string {
 		}
 	}
 	return tiers
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // kvFlag is a flag.Value collecting repeated KEY=VALUE pairs into a

@@ -36,6 +36,7 @@ go install github.com/pingqiu/sw-test-runner/cmd/sw-test-runner@latest
 sw-test-runner list                        # show registered actions by tier
 sw-test-runner validate scenario.yaml      # parse + lint
 sw-test-runner run scenario.yaml           # execute
+sw-test-runner validate-bundle results/RUN # offline result/status check
 ```
 
 ## Repository layout
@@ -107,6 +108,19 @@ results/
     ├── result.html       human-readable
     ├── scenario.yaml     echo of input
     └── artifacts/        per-daemon logs, fio JSON, etc.
+```
+
+Validate a completed bundle without touching the lab:
+
+```bash
+sw-test-runner validate-bundle \
+  --require-pass \
+  --require-timing \
+  --require-child-bundles \
+  --expect-scenario protocol-release-gate-suite \
+  --expect-commit a0175f8 \
+  --children iscsi-p6-alua-failover,nvme-p4-multipath-failover,nvme-p5-csi-protocol,iscsi-p8-compat-soak \
+  results/protocol-release-gate-run
 ```
 
 ## Adding a product pack
