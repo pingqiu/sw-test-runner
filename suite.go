@@ -47,6 +47,7 @@ import (
 //	  save_to: results/phase20-t6
 type SuiteConfig struct {
 	Name      string            `yaml:"name"`
+	Mode      string            `yaml:"mode,omitempty"`
 	Topology  Topology          `yaml:"topology"`
 	Deploy    SuiteDeploy       `yaml:"deploy"`
 	Scenarios []SuiteScenario   `yaml:"scenarios"`
@@ -56,11 +57,11 @@ type SuiteConfig struct {
 
 // SuiteDeploy configures the one-time deploy stage.
 type SuiteDeploy struct {
-	Build     *SuiteBuild    `yaml:"build,omitempty"`
-	KillPorts []int          `yaml:"kill_ports"`
-	CleanDirs []string       `yaml:"clean_dirs"`
-	Binaries  []SuiteBinary  `yaml:"binaries"`
-	Nodes     []string       `yaml:"nodes"` // which nodes to deploy to (default: all)
+	Build     *SuiteBuild   `yaml:"build,omitempty"`
+	KillPorts []int         `yaml:"kill_ports"`
+	CleanDirs []string      `yaml:"clean_dirs"`
+	Binaries  []SuiteBinary `yaml:"binaries"`
+	Nodes     []string      `yaml:"nodes"` // which nodes to deploy to (default: all)
 }
 
 // SuiteBuild configures cross-compilation.

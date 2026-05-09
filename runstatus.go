@@ -20,6 +20,13 @@ type RunStatus struct {
 	RunID         string `json:"run_id"`
 	Scenario      string `json:"scenario"`
 
+	// Optional suite/provenance fields. Product-specific suites may set
+	// these at the top level so operators can read one status file and know
+	// which source/build they are looking at.
+	ProductCommit     string `json:"product_commit,omitempty"`
+	RunnerCommit      string `json:"runner_commit,omitempty"`
+	RemoteProductRoot string `json:"remote_product_root,omitempty"`
+
 	// Lifecycle. State transitions: queued -> running -> (pass|fail|cancelled|error).
 	State string `json:"state"`
 
@@ -39,9 +46,10 @@ type RunStatus struct {
 
 	// Timing. Start/End in RFC3339 UTC. UpdatedAt is the last
 	// successful write to status.json.
-	StartedAt string `json:"started_at,omitempty"`
-	EndedAt   string `json:"ended_at,omitempty"`
-	UpdatedAt string `json:"updated_at"`
+	StartedAt  string  `json:"started_at,omitempty"`
+	EndedAt    string  `json:"ended_at,omitempty"`
+	WallClockS float64 `json:"wall_clock_s,omitempty"`
+	UpdatedAt  string  `json:"updated_at"`
 
 	// Failure summary (one line). Full detail lives in result.json.
 	ErrorSummary string `json:"error_summary,omitempty"`
@@ -53,11 +61,16 @@ type RunStatus struct {
 
 // PhaseStatus is the per-phase line in status.json.
 type PhaseStatus struct {
-	Name      string `json:"name"`
-	State     string `json:"state"` // running | pass | fail | skipped
-	StartedAt string `json:"started_at,omitempty"`
-	EndedAt   string `json:"ended_at,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Name        string `json:"name"`
+	State       string `json:"state"` // running | pass | fail | skipped
+	RunID       string `json:"run_id,omitempty"`
+	ArtifactDir string `json:"artifact_dir,omitempty"`
+	RunDir      string `json:"run_dir,omitempty"`
+	PhasesDone  int    `json:"phases_done,omitempty"`
+	PhasesTotal int    `json:"phases_total,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	EndedAt     string `json:"ended_at,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // Run lifecycle states. Match the discipline in current-plan
@@ -128,12 +141,13 @@ func (w *StatusWriter) SetState(state string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.status.State = state
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if state == RunStateRunning && w.status.StartedAt == "" {
 		w.status.StartedAt = now
 	}
 	if isTerminal(state) {
 		w.status.EndedAt = now
+		w.setWallClockLocked()
 	}
 	return w.write()
 }
@@ -147,7 +161,7 @@ func (w *StatusWriter) PhaseStarted(name string) error {
 	w.status.Phases = append(w.status.Phases, PhaseStatus{
 		Name:      name,
 		State:     PhaseStateRunning,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	return w.write()
 }
@@ -157,7 +171,7 @@ func (w *StatusWriter) PhaseStarted(name string) error {
 func (w *StatusWriter) PhaseFinished(name, state, errMsg string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for i := range w.status.Phases {
 		ph := &w.status.Phases[i]
 		if ph.Name == name && ph.State == PhaseStateRunning {
@@ -177,18 +191,60 @@ func (w *StatusWriter) PhaseFinished(name, state, errMsg string) error {
 	return w.write()
 }
 
+// PhaseMetadata annotates a phase row with child-run pointers. It is
+// intentionally optional: normal scenario runs do not need these fields, while
+// suite-level status uses them so validate-bundle can prove child evidence is
+// present without opening a separate index file.
+func (w *StatusWriter) PhaseMetadata(name, runID, artifactDir, runDir string, phasesDone, phasesTotal int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for i := range w.status.Phases {
+		ph := &w.status.Phases[i]
+		if ph.Name == name {
+			ph.RunID = runID
+			ph.ArtifactDir = artifactDir
+			ph.RunDir = runDir
+			ph.PhasesDone = phasesDone
+			ph.PhasesTotal = phasesTotal
+			break
+		}
+	}
+	return w.write()
+}
+
 // Finalize records the terminal state, summary, and ends timing.
 func (w *StatusWriter) Finalize(state, summary string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.status.State = state
+	if w.status.StartedAt == "" {
+		w.status.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	if summary != "" && (state == RunStateFail || state == RunStateCancelled || state == RunStateError) {
 		w.status.ErrorSummary = summary
 	}
-	w.status.EndedAt = time.Now().UTC().Format(time.RFC3339)
+	w.status.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	w.setWallClockLocked()
 	w.status.CurrentPhase = ""
 	w.status.CurrentAction = ""
 	return w.write()
+}
+
+func (w *StatusWriter) setWallClockLocked() {
+	if w.status.StartedAt == "" || w.status.EndedAt == "" {
+		return
+	}
+	start, err := time.Parse(time.RFC3339Nano, w.status.StartedAt)
+	if err != nil {
+		return
+	}
+	end, err := time.Parse(time.RFC3339Nano, w.status.EndedAt)
+	if err != nil {
+		return
+	}
+	if end.After(start) {
+		w.status.WallClockS = end.Sub(start).Seconds()
+	}
 }
 
 // CancelRequested returns true if a control/cancel file exists in
@@ -212,7 +268,7 @@ func (w *StatusWriter) Snapshot() RunStatus {
 // Atomic via write-temp + rename so concurrent readers never see
 // a partial file.
 func (w *StatusWriter) write() error {
-	w.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	w.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if w.status.SchemaVersion == 0 {
 		w.status.SchemaVersion = 1
 	}

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -402,6 +403,8 @@ func suiteCmd(args []string) {
 	resultsDir := fs.String("results-dir", "", "Override suite evidence.save_to")
 	skipDeploy := fs.Bool("skip-deploy", false, "Skip the deploy stage (assume binaries pre-deployed)")
 	tiers := fs.String("tiers", "", "Comma-separated list of enabled tiers")
+	envOverrides := newKVFlag()
+	fs.Var(envOverrides, "env", "Set suite.env entry (repeatable). Format: KEY=VALUE. Overrides any same-named entry from the YAML.")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -416,6 +419,12 @@ func suiteCmd(args []string) {
 	if err != nil {
 		logger.Fatalf("parse suite: %v", err)
 	}
+	if suite.Env == nil {
+		suite.Env = make(map[string]string)
+	}
+	for k, v := range envOverrides.values {
+		suite.Env[k] = v
+	}
 
 	saveDir := suite.Evidence.SaveTo
 	if *resultsDir != "" {
@@ -423,6 +432,11 @@ func suiteCmd(args []string) {
 	}
 	if saveDir == "" {
 		saveDir = "results/" + suite.Name
+	}
+
+	if isNativeSuite(suite) {
+		code := runNativeSuite(suiteFile, suite, saveDir, *tiers, logger)
+		os.Exit(code)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -758,6 +772,348 @@ func suiteCmd(args []string) {
 	if suiteResult.Status == "FAIL" {
 		os.Exit(1)
 	}
+}
+
+func isNativeSuite(suite *tr.SuiteConfig) bool {
+	mode := strings.ToLower(strings.TrimSpace(suite.Mode))
+	if mode == "chain" || mode == "native" || mode == "local" {
+		return true
+	}
+	return suite.Deploy.Build == nil &&
+		len(suite.Deploy.Binaries) == 0 &&
+		len(suite.Deploy.KillPorts) == 0 &&
+		len(suite.Deploy.CleanDirs) == 0 &&
+		len(suite.Topology.Nodes) == 0 &&
+		len(suite.Topology.Agents) == 0
+}
+
+type nativeSuiteChild struct {
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	RunID       string `json:"run_id,omitempty"`
+	ArtifactDir string `json:"artifact_dir"`
+	RunDir      string `json:"run_dir,omitempty"`
+	PhasesDone  int    `json:"phases_done,omitempty"`
+	PhasesTotal int    `json:"phases_total,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+type nativeSuiteResult struct {
+	SchemaVersion     string             `json:"schema_version"`
+	RunID             string             `json:"run_id"`
+	Scenario          string             `json:"scenario"`
+	SourceCommit      string             `json:"source_commit,omitempty"`
+	ProductCommit     string             `json:"product_commit,omitempty"`
+	RunnerCommit      string             `json:"runner_commit,omitempty"`
+	RemoteProductRoot string             `json:"remote_product_root,omitempty"`
+	Status            string             `json:"status"`
+	Summary           string             `json:"summary"`
+	StartedAt         string             `json:"started_at"`
+	EndedAt           string             `json:"ended_at,omitempty"`
+	WallClockS        float64            `json:"wall_clock_s,omitempty"`
+	PhaseResults      []nativeSuiteChild `json:"phase_results"`
+	ArtifactDir       string             `json:"artifact_dir"`
+	Artifacts         map[string]string  `json:"artifacts,omitempty"`
+	NonClaims         []string           `json:"non_claims,omitempty"`
+}
+
+func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers string, logger *log.Logger) int {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	start := time.Now().UTC()
+	runID := fmt.Sprintf("%s-%04x", start.Format("20060102-150405"), start.UnixNano()&0xffff)
+	runDir := filepath.Join(resultsRoot, runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		logger.Printf("create suite run dir: %v", err)
+		return 1
+	}
+	if err := copyFile(suiteFile, filepath.Join(runDir, "scenario.yaml")); err != nil {
+		logger.Printf("warning: copy suite yaml: %v", err)
+	}
+	suiteLogPath := filepath.Join(runDir, "suite.log")
+	suiteLog, _ := os.Create(suiteLogPath)
+	if suiteLog != nil {
+		defer suiteLog.Close()
+	}
+	logSuite := func(format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		line := fmt.Sprintf("[%s] [suite] %s", time.Now().UTC().Format("15:04:05"), msg)
+		logger.Print(line)
+		if suiteLog != nil {
+			fmt.Fprintln(suiteLog, line)
+		}
+	}
+
+	productCommit := gitRevParse(filepath.Dir(suiteFile))
+	runnerCommit := gitRevParse(".")
+	statusWriter, err := tr.NewStatusWriter(runDir, resultsRoot, tr.RunStatus{
+		RunID:             runID,
+		Scenario:          suite.Name,
+		ProductCommit:     productCommit,
+		RunnerCommit:      runnerCommit,
+		RemoteProductRoot: suite.Env["product_root"],
+		State:             tr.RunStateQueued,
+		PhasesTotal:       len(suite.Scenarios),
+	})
+	if err != nil {
+		logger.Printf("status writer init: %v", err)
+		return 1
+	}
+	_ = statusWriter.SetState(tr.RunStateRunning)
+
+	children := initialNativeSuiteChildren(suite, runDir)
+	writeSuiteResult := func(status, summary string, terminal bool) {
+		endedAt := ""
+		if terminal {
+			endedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		result := nativeSuiteResult{
+			SchemaVersion:     "1.0",
+			RunID:             runID,
+			Scenario:          suite.Name,
+			SourceCommit:      productCommit,
+			ProductCommit:     productCommit,
+			RunnerCommit:      runnerCommit,
+			RemoteProductRoot: suite.Env["product_root"],
+			Status:            status,
+			Summary:           summary,
+			StartedAt:         start.Format(time.RFC3339Nano),
+			EndedAt:           endedAt,
+			WallClockS:        time.Since(start).Seconds(),
+			PhaseResults:      children,
+			ArtifactDir:       runDir,
+			Artifacts:         map[string]string{"suite_log": suiteLogPath},
+			NonClaims: []string{
+				"Runner-native orchestration of child scenarios; each child owns product-level assertions.",
+				"Does not add claims beyond the child scenario contracts.",
+			},
+		}
+		if data, err := json.MarshalIndent(result, "", "  "); err == nil {
+			_ = os.WriteFile(filepath.Join(runDir, "result.json"), data, 0644)
+		}
+	}
+	writeSuiteResult("running", "suite running", false)
+
+	registry := tr.NewRegistry()
+	pkgRegister(registry)
+	if tiers != "" {
+		registry.EnableTiers(parseTiers(tiers))
+	}
+
+	suiteStatus := tr.RunStatePass
+	summary := "suite passed"
+	suiteBase := filepath.Dir(suiteFile)
+
+	logSuite("run_id=%s", runID)
+	logSuite("suite=%s children=%d", suite.Name, len(suite.Scenarios))
+	for i, sc := range suite.Scenarios {
+		name := sc.ID
+		if name == "" {
+			name = fmt.Sprintf("scenario-%d", i+1)
+		}
+		scenarioFile := resolveSuitePath(suiteBase, sc.Path)
+		children[i].Name = name
+		children[i].ArtifactDir = filepath.Join(runDir, name)
+		if err := os.MkdirAll(children[i].ArtifactDir, 0755); err != nil {
+			children[i].Status = tr.RunStateError
+			children[i].Error = err.Error()
+			suiteStatus = tr.RunStateError
+			summary = fmt.Sprintf("suite failed at %s", name)
+			_ = statusWriter.PhaseStarted(name)
+			_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, err.Error())
+			break
+		}
+
+		if statusWriter.CancelRequested() {
+			suiteStatus = tr.RunStateCancelled
+			summary = fmt.Sprintf("cancelled before child %s", name)
+			break
+		}
+		logSuite("run child=%s scenario=%s", name, scenarioFile)
+		_ = statusWriter.PhaseStarted(name)
+		result, childRunID, childRunDir, err := runNativeSuiteChild(ctx, registry, suite, name, scenarioFile, children[i].ArtifactDir, logger)
+		childStatus := tr.RunStateError
+		childErr := ""
+		childDone := 0
+		childTotal := 0
+		if result != nil {
+			childStatus = string(result.Status)
+			childErr = result.Error
+		}
+		if childRunDir != "" {
+			if s, readErr := tr.ReadStatus(childRunDir); readErr == nil {
+				childStatus = s.State
+				childDone = s.PhasesDone
+				childTotal = s.PhasesTotal
+				if childErr == "" {
+					childErr = s.ErrorSummary
+				}
+			}
+		}
+		if err != nil && childErr == "" {
+			childErr = err.Error()
+		}
+		children[i].Status = childStatus
+		children[i].RunID = childRunID
+		children[i].RunDir = childRunDir
+		children[i].PhasesDone = childDone
+		children[i].PhasesTotal = childTotal
+		children[i].Error = childErr
+		_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
+		if childStatus == string(tr.StatusPass) || childStatus == tr.RunStatePass {
+			_ = statusWriter.PhaseFinished(name, tr.PhaseStatePass, "")
+			logSuite("PASS child=%s run_id=%s", name, childRunID)
+			writeSuiteResult("running", "suite running", false)
+			continue
+		}
+		_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, childErr)
+		logSuite("FAIL child=%s run_id=%s error=%s", name, childRunID, childErr)
+		suiteStatus = tr.RunStateFail
+		summary = fmt.Sprintf("suite failed at %s", name)
+		break
+	}
+
+	if suiteStatus == tr.RunStatePass {
+		logSuite("PASS: %s", suite.Name)
+		writeSuiteResult("pass", summary, true)
+		_ = statusWriter.Finalize(tr.RunStatePass, "")
+		return 0
+	}
+	writeSuiteResult(suiteStatus, summary, true)
+	_ = statusWriter.Finalize(suiteStatus, summary)
+	return 1
+}
+
+func initialNativeSuiteChildren(suite *tr.SuiteConfig, runDir string) []nativeSuiteChild {
+	children := make([]nativeSuiteChild, 0, len(suite.Scenarios))
+	for i, sc := range suite.Scenarios {
+		name := sc.ID
+		if name == "" {
+			name = fmt.Sprintf("scenario-%d", i+1)
+		}
+		children = append(children, nativeSuiteChild{
+			Name:        name,
+			Status:      "pending",
+			ArtifactDir: filepath.Join(runDir, name),
+		})
+	}
+	return children
+}
+
+func runNativeSuiteChild(ctx context.Context, registry *tr.Registry, suite *tr.SuiteConfig, childName, scenarioFile, childDir string, logger *log.Logger) (*tr.ScenarioResult, string, string, error) {
+	scenario, err := tr.ParseFile(scenarioFile)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("parse child scenario: %w", err)
+	}
+	if scenario.Env == nil {
+		scenario.Env = make(map[string]string)
+	}
+	for k, v := range suite.Env {
+		scenario.Env[k] = v
+	}
+	resultsRoot := filepath.Join(childDir, "runs")
+	bundle, err := tr.CreateRunBundle(resultsRoot, scenarioFile, os.Args)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("create child bundle: %w", err)
+	}
+	scenario.Env["run_id"] = bundle.Manifest.RunID
+	scenario.Env["bundle_dir"] = bundle.Dir
+	scenario.Env["artifacts_dir"] = bundle.ArtifactsDir()
+	_ = os.WriteFile(filepath.Join(childDir, "child-run.txt"), []byte(bundle.Manifest.RunID+"\n"), 0644)
+
+	statusWriter, err := tr.NewStatusWriter(bundle.Dir, resultsRoot, tr.RunStatus{
+		RunID:       bundle.Manifest.RunID,
+		Scenario:    scenario.Name,
+		State:       tr.RunStateQueued,
+		PhasesTotal: countSchedulablePhases(scenario.Phases),
+	})
+	if err != nil {
+		return nil, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("child status writer: %w", err)
+	}
+
+	logFunc := func(format string, args ...interface{}) {
+		logger.Printf("[%s] "+format, append([]interface{}{childName}, args...)...)
+	}
+	engine := tr.NewEngine(registry, logFunc)
+	engine.PhaseHook = func(when, name, state, errMsg string) {
+		switch when {
+		case "before":
+			_ = statusWriter.PhaseStarted(name)
+		case "after":
+			switch state {
+			case string(tr.StatusPass):
+				_ = statusWriter.PhaseFinished(name, tr.PhaseStatePass, "")
+			case string(tr.StatusFail):
+				_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, errMsg)
+			default:
+				_ = statusWriter.PhaseFinished(name, state, errMsg)
+			}
+		}
+	}
+	engine.CancelCheck = statusWriter.CancelRequested
+	_ = statusWriter.SetState(tr.RunStateRunning)
+
+	actx, err := setupActionContext(scenario, logFunc)
+	if err != nil {
+		_ = statusWriter.Finalize(tr.RunStateError, err.Error())
+		return nil, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("setup child: %w", err)
+	}
+	defer cleanupNodes(actx)
+	actx.Bundle = bundle
+
+	clusterMgr := tr.NewClusterManager(scenario.Cluster, logFunc)
+	if err := clusterMgr.Setup(ctx, actx); err != nil {
+		_ = statusWriter.Finalize(tr.RunStateError, err.Error())
+		return nil, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("cluster setup child: %w", err)
+	}
+	defer clusterMgr.Teardown(ctx)
+	if clusterMgr.Skipped() {
+		result := &tr.ScenarioResult{Name: scenario.Name, Status: tr.StatusPass}
+		_ = bundle.Finalize(result)
+		_ = statusWriter.Finalize(tr.RunStatePass, "")
+		return result, bundle.Manifest.RunID, bundle.Dir, nil
+	}
+
+	result := engine.Run(ctx, scenario, actx)
+	if err := bundle.Finalize(result); err != nil {
+		logger.Printf("[%s] warning: finalize child bundle: %v", childName, err)
+	}
+	terminal, summary := terminalRunState(result)
+	_ = statusWriter.Finalize(terminal, summary)
+	if result.Status == tr.StatusFail {
+		return result, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("%s", result.Error)
+	}
+	return result, bundle.Manifest.RunID, bundle.Dir, nil
+}
+
+func resolveSuitePath(base, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(base, p)
+}
+
+func gitRevParse(dir string) string {
+	if dir == "" {
+		dir = "."
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
 }
 
 func coordinatorCmd(args []string) {

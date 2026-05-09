@@ -81,6 +81,9 @@ func TestStatusWriter_Lifecycle(t *testing.T) {
 	if got.State != RunStateFail || got.EndedAt == "" {
 		t.Errorf("terminal: state=%s ended=%q", got.State, got.EndedAt)
 	}
+	if got.WallClockS <= 0 {
+		t.Errorf("wall_clock_s = %v, want > 0", got.WallClockS)
+	}
 	if got.ErrorSummary != "phase nvme_dynamic_pvc failed" {
 		t.Errorf("error_summary = %q", got.ErrorSummary)
 	}
