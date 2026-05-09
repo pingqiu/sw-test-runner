@@ -61,6 +61,60 @@ func TestValidateBundle_MissingChildResultFails(t *testing.T) {
 	}
 }
 
+func TestValidateBundle_MissingCopiedChildStatusFails(t *testing.T) {
+	root := writeSuiteBundleFixture(t, true)
+	missing := filepath.Join(root, "nvme-p4-multipath-failover", "runs", "nvme-p4-multipath-failover-run", "status.json")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	report, err := ValidateBundle(root, BundleValidationOptions{
+		RequirePass:         true,
+		RequireChildBundles: true,
+		ExpectedChildren: []string{
+			"iscsi-p6-alua-failover",
+			"nvme-p4-multipath-failover",
+			"nvme-p5-csi-protocol",
+			"iscsi-p8-compat-soak",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK {
+		t.Fatal("expected missing child status to fail")
+	}
+	if !strings.Contains(strings.Join(report.Errors, "\n"), "missing child status.json") {
+		t.Fatalf("errors = %v, want missing child status.json", report.Errors)
+	}
+}
+
+func TestValidateBundle_ZeroWallClockFails(t *testing.T) {
+	root := writeSuiteBundleFixture(t, true)
+	for _, name := range []string{"result.json", "status.json"} {
+		path := filepath.Join(root, name)
+		var doc map[string]any
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["wall_clock_s"] = 0
+		writeJSONFixture(t, path, doc)
+	}
+	report, err := ValidateBundle(root, BundleValidationOptions{RequireTiming: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK {
+		t.Fatal("expected zero wall_clock_s to fail")
+	}
+	if !strings.Contains(strings.Join(report.Errors, "\n"), "wall_clock_s must be > 0") {
+		t.Fatalf("errors = %v, want wall_clock_s error", report.Errors)
+	}
+}
+
 func TestValidateBundle_CommitMismatchFails(t *testing.T) {
 	root := writeSuiteBundleFixture(t, true)
 	report, err := ValidateBundle(root, BundleValidationOptions{ExpectCommitPrefix: "deadbeef"})

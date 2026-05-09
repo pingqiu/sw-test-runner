@@ -55,8 +55,10 @@ func ValidateBundle(dir string, opts BundleValidationOptions) (*BundleValidation
 	}
 	var errors []string
 
-	if r, s := stringField(result, "run_id"), stringField(status, "run_id"); r != "" && s != "" && r != s {
-		errors = append(errors, fmt.Sprintf("run_id differs between result.json and status.json: %q vs %q", r, s))
+	resultRunID := stringField(result, "run_id")
+	statusRunID := stringField(status, "run_id")
+	if resultRunID == "" || statusRunID == "" || resultRunID != statusRunID {
+		errors = append(errors, fmt.Sprintf("run_id differs between result.json and status.json: %q vs %q", resultRunID, statusRunID))
 	}
 	if r, s := firstStringIn([]map[string]any{result}, "scenario", "name"), firstStringIn([]map[string]any{status}, "scenario"); r != "" && s != "" && r != s {
 		errors = append(errors, fmt.Sprintf("scenario differs between result.json and status.json: %q vs %q", r, s))
@@ -129,12 +131,13 @@ func validateChildBundles(root string, result, status map[string]any, opts Bundl
 		*errors = append(*errors, err.Error())
 		return
 	}
-	if got := mapKeysInOrder(resultPhases); !sameStringSlice(got, opts.ExpectedChildren) {
+	if got := resultPhases.order; !sameStringSlice(got, opts.ExpectedChildren) {
 		*errors = append(*errors, fmt.Sprintf("result child order mismatch: got %v want %v", got, opts.ExpectedChildren))
 	}
-	if got := mapKeysInOrder(statusPhases); !sameStringSlice(got, opts.ExpectedChildren) {
+	if got := statusPhases.order; !sameStringSlice(got, opts.ExpectedChildren) {
 		*errors = append(*errors, fmt.Sprintf("status child order mismatch: got %v want %v", got, opts.ExpectedChildren))
 	}
+
 	for _, child := range opts.ExpectedChildren {
 		rp, rok := resultPhases.Get(child)
 		sp, sok := statusPhases.Get(child)
@@ -150,23 +153,22 @@ func validateChildBundles(root string, result, status map[string]any, opts Bundl
 		if opts.RequirePass && rs != "pass" {
 			*errors = append(*errors, fmt.Sprintf("%s: status is %q, expected pass", child, firstStringIn([]map[string]any{rp}, "status", "state")))
 		}
-		if r, s := stringField(rp, "run_id"), stringField(sp, "run_id"); r != s {
-			*errors = append(*errors, fmt.Sprintf("%s: run_id differs between result/status: %q vs %q", child, r, s))
+		runID := stringField(rp, "run_id")
+		statusRunID := stringField(sp, "run_id")
+		if runID == "" || statusRunID == "" || runID != statusRunID {
+			*errors = append(*errors, fmt.Sprintf("%s: run_id differs between result/status: %q vs %q", child, runID, statusRunID))
 		}
 		if done, ok := intField(rp, "phases_done"); ok {
 			if total, ok := intField(rp, "phases_total"); ok && opts.RequirePass && done != total {
 				*errors = append(*errors, fmt.Sprintf("%s: phases_done=%d phases_total=%d", child, done, total))
 			}
 		}
-		if opts.RequireChildBundles {
-			runDir := stringField(rp, "run_dir")
-			if runDir == "" {
-				*errors = append(*errors, fmt.Sprintf("%s: missing run_dir", child))
-				continue
-			}
-			if !filepath.IsAbs(runDir) {
-				runDir = filepath.Join(root, runDir)
-			}
+		if opts.RequireChildBundles && runID != "" {
+			// Validate the bundle being inspected, not only an absolute run_dir
+			// pointer captured when the suite originally ran. Operators often
+			// copy bundles for negative tests or archival; stale absolute paths
+			// must not make a broken copy look valid.
+			runDir := filepath.Join(root, child, "runs", runID)
 			for _, name := range []string{"status.json", "result.json"} {
 				if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
 					*errors = append(*errors, fmt.Sprintf("%s: missing child %s at %s", child, name, runDir))
@@ -205,8 +207,6 @@ func namedObjects(doc map[string]any, field string) (orderedObjects, error) {
 	}
 	return out, nil
 }
-
-func mapKeysInOrder(o orderedObjects) []string { return append([]string(nil), o.order...) }
 
 func (o orderedObjects) Get(name string) (map[string]any, bool) {
 	v, ok := o.data[name]
@@ -281,8 +281,29 @@ func requireTiming(label string, doc map[string]any, requireEnded bool, errors *
 	if requireEnded && stringField(doc, "ended_at") == "" {
 		*errors = append(*errors, label+" missing ended_at")
 	}
-	if _, ok := doc["wall_clock_s"]; !ok {
+	value, ok := doc["wall_clock_s"]
+	if !ok {
 		*errors = append(*errors, label+" missing wall_clock_s")
+		return
+	}
+	if !positiveNumber(value) {
+		*errors = append(*errors, label+" wall_clock_s must be > 0")
+	}
+}
+
+func positiveNumber(v any) bool {
+	switch n := v.(type) {
+	case float64:
+		return n > 0
+	case int:
+		return n > 0
+	case int64:
+		return n > 0
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && f > 0
+	default:
+		return false
 	}
 }
 
