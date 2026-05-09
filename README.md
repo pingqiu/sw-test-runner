@@ -114,12 +114,8 @@ Validate a completed bundle without touching the lab:
 
 ```bash
 sw-test-runner validate-bundle \
-  --require-pass \
-  --require-timing \
-  --require-child-bundles \
-  --expect-scenario protocol-release-gate-suite \
+  --profile protocol-release-gate \
   --expect-commit a0175f8 \
-  --children iscsi-p6-alua-failover,nvme-p4-multipath-failover,nvme-p5-csi-protocol,iscsi-p8-compat-soak \
   results/protocol-release-gate-run
 ```
 

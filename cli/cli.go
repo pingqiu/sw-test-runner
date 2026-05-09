@@ -993,6 +993,7 @@ func validateBundleCmd(args []string) int {
 	requirePass := fs.Bool("require-pass", false, "Require top-level and child statuses to be pass")
 	requireTiming := fs.Bool("require-timing", false, "Require started_at, ended_at, and wall_clock_s in result/status")
 	requireChildBundles := fs.Bool("require-child-bundles", false, "Require each listed child run_dir to contain status.json and result.json")
+	profile := fs.String("profile", "", "Named validation profile (currently: protocol-release-gate)")
 	expectScenario := fs.String("expect-scenario", "", "Expected scenario name")
 	expectCommit := fs.String("expect-commit", "", "Expected product/source/git commit prefix")
 	children := fs.String("children", "", "Comma-separated expected child phase names, in order")
@@ -1010,6 +1011,10 @@ func validateBundleCmd(args []string) int {
 		ExpectScenario:      *expectScenario,
 		ExpectCommitPrefix:  *expectCommit,
 		ExpectedChildren:    splitCSV(*children),
+	}
+	if err := applyBundleValidationProfile(*profile, &opts); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
 	}
 	report, err := tr.ValidateBundle(fs.Arg(0), opts)
 	if err != nil {
@@ -1041,6 +1046,31 @@ func validateBundleCmd(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func applyBundleValidationProfile(profile string, opts *tr.BundleValidationOptions) error {
+	switch strings.TrimSpace(profile) {
+	case "":
+		return nil
+	case "protocol-release-gate":
+		opts.RequirePass = true
+		opts.RequireTiming = true
+		opts.RequireChildBundles = true
+		if opts.ExpectScenario == "" {
+			opts.ExpectScenario = "protocol-release-gate-suite"
+		}
+		if len(opts.ExpectedChildren) == 0 {
+			opts.ExpectedChildren = []string{
+				"iscsi-p6-alua-failover",
+				"nvme-p4-multipath-failover",
+				"nvme-p5-csi-protocol",
+				"iscsi-p8-compat-soak",
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown validate-bundle profile %q", profile)
+	}
 }
 
 func listCmd() {
