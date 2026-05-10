@@ -34,6 +34,68 @@ func TestValidateBundle_ProtocolSuitePass(t *testing.T) {
 	}
 }
 
+func TestValidateBundle_BetaHardeningSuitePass(t *testing.T) {
+	children := []string{
+		"iscsi-p6-alua-failover",
+		"nvme-p4-multipath-failover",
+		"nvme-p5-csi-protocol",
+		"iscsi-p8-compat-soak",
+		"csi-lifecycle-component",
+		"csi-rf1-durable-restart",
+		"operations-status-diagnostics",
+		"returned-replica-component",
+		"iscsi-returned-replica",
+		"cleanup-residue",
+	}
+	root := writeSuiteBundleFixtureWithChildren(t, true, "beta-hardening-gate", children)
+	report, err := ValidateBundle(root, BundleValidationOptions{
+		RequirePass:         true,
+		RequireTiming:       true,
+		RequireChildBundles: true,
+		ExpectScenario:      "beta-hardening-gate",
+		ExpectCommitPrefix:  "abc123",
+		ExpectedChildren:    children,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK {
+		t.Fatalf("report errors: %v", report.Errors)
+	}
+}
+
+func TestValidateBundle_BetaHardeningMissingCleanupResidueFails(t *testing.T) {
+	children := []string{
+		"iscsi-p6-alua-failover",
+		"nvme-p4-multipath-failover",
+		"nvme-p5-csi-protocol",
+		"iscsi-p8-compat-soak",
+		"csi-lifecycle-component",
+		"csi-rf1-durable-restart",
+		"operations-status-diagnostics",
+		"returned-replica-component",
+		"iscsi-returned-replica",
+	}
+	root := writeSuiteBundleFixtureWithChildren(t, true, "beta-hardening-gate", children)
+	expected := append(append([]string{}, children...), "cleanup-residue")
+	report, err := ValidateBundle(root, BundleValidationOptions{
+		RequirePass:         true,
+		RequireTiming:       true,
+		RequireChildBundles: true,
+		ExpectScenario:      "beta-hardening-gate",
+		ExpectedChildren:    expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK {
+		t.Fatal("expected missing cleanup-residue child to fail")
+	}
+	if !strings.Contains(strings.Join(report.Errors, "\n"), "cleanup-residue") {
+		t.Fatalf("errors = %v, want cleanup-residue", report.Errors)
+	}
+}
+
 func TestValidateBundle_MissingChildResultFails(t *testing.T) {
 	root := writeSuiteBundleFixture(t, true)
 	missing := filepath.Join(root, "nvme-p5-csi-protocol", "runs", "nvme-p5-csi-protocol-run", "result.json")
@@ -131,13 +193,18 @@ func TestValidateBundle_CommitMismatchFails(t *testing.T) {
 
 func writeSuiteBundleFixture(t *testing.T, pass bool) string {
 	t.Helper()
-	root := t.TempDir()
 	children := []string{
 		"iscsi-p6-alua-failover",
 		"nvme-p4-multipath-failover",
 		"nvme-p5-csi-protocol",
 		"iscsi-p8-compat-soak",
 	}
+	return writeSuiteBundleFixtureWithChildren(t, pass, "protocol-release-gate-suite", children)
+}
+
+func writeSuiteBundleFixtureWithChildren(t *testing.T, pass bool, scenario string, children []string) string {
+	t.Helper()
+	root := t.TempDir()
 	status := "pass"
 	if !pass {
 		status = "fail"
@@ -176,7 +243,7 @@ func writeSuiteBundleFixture(t *testing.T, pass bool) string {
 	}
 	common := map[string]any{
 		"run_id":              "suite-run",
-		"scenario":            "protocol-release-gate-suite",
+		"scenario":            scenario,
 		"product_commit":      "abc1234",
 		"runner_commit":       "runner123",
 		"remote_product_root": "/tmp/product",

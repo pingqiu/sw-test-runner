@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"reflect"
 	"testing"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -46,6 +47,34 @@ func TestApplyBundleValidationProfileProtocolReleaseGate(t *testing.T) {
 	}
 	if got, want := len(opts.ExpectedChildren), 4; got != want {
 		t.Fatalf("children = %d, want %d", got, want)
+	}
+}
+
+func TestApplyBundleValidationProfileBetaHardening(t *testing.T) {
+	var opts tr.BundleValidationOptions
+	if err := applyBundleValidationProfile("beta-hardening", &opts); err != nil {
+		t.Fatal(err)
+	}
+	if !opts.RequirePass || !opts.RequireTiming || !opts.RequireChildBundles {
+		t.Fatalf("profile did not enable strict gates: %+v", opts)
+	}
+	if opts.ExpectScenario != "beta-hardening-gate" {
+		t.Fatalf("scenario = %q", opts.ExpectScenario)
+	}
+	wantChildren := []string{
+		"iscsi-p6-alua-failover",
+		"nvme-p4-multipath-failover",
+		"nvme-p5-csi-protocol",
+		"iscsi-p8-compat-soak",
+		"csi-lifecycle-component",
+		"csi-rf1-durable-restart",
+		"operations-status-diagnostics",
+		"returned-replica-component",
+		"iscsi-returned-replica",
+		"cleanup-residue",
+	}
+	if !reflect.DeepEqual(opts.ExpectedChildren, wantChildren) {
+		t.Fatalf("children = %+v, want %+v", opts.ExpectedChildren, wantChildren)
 	}
 }
 

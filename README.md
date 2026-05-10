@@ -119,6 +119,16 @@ sw-test-runner validate-bundle \
   results/protocol-release-gate-run
 ```
 
+Named profiles encode product-owned suite contracts. For Seaweed Block beta
+hardening:
+
+```bash
+swblock validate-bundle \
+  --profile beta-hardening \
+  --expect-commit de165f0 \
+  results/beta-hardening-gate-run
+```
+
 ## Adding a product pack
 
 1. New directory `packs/yourproduct/`.

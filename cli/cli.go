@@ -1349,7 +1349,7 @@ func validateBundleCmd(args []string) int {
 	requirePass := fs.Bool("require-pass", false, "Require top-level and child statuses to be pass")
 	requireTiming := fs.Bool("require-timing", false, "Require started_at, ended_at, and wall_clock_s in result/status")
 	requireChildBundles := fs.Bool("require-child-bundles", false, "Require each listed child run_dir to contain status.json and result.json")
-	profile := fs.String("profile", "", "Named validation profile (currently: protocol-release-gate)")
+	profile := fs.String("profile", "", "Named validation profile (currently: protocol-release-gate, beta-hardening)")
 	expectScenario := fs.String("expect-scenario", "", "Expected scenario name")
 	expectCommit := fs.String("expect-commit", "", "Expected product/source/git commit prefix")
 	children := fs.String("children", "", "Comma-separated expected child phase names, in order")
@@ -1421,6 +1421,28 @@ func applyBundleValidationProfile(profile string, opts *tr.BundleValidationOptio
 				"nvme-p4-multipath-failover",
 				"nvme-p5-csi-protocol",
 				"iscsi-p8-compat-soak",
+			}
+		}
+		return nil
+	case "beta-hardening":
+		opts.RequirePass = true
+		opts.RequireTiming = true
+		opts.RequireChildBundles = true
+		if opts.ExpectScenario == "" {
+			opts.ExpectScenario = "beta-hardening-gate"
+		}
+		if len(opts.ExpectedChildren) == 0 {
+			opts.ExpectedChildren = []string{
+				"iscsi-p6-alua-failover",
+				"nvme-p4-multipath-failover",
+				"nvme-p5-csi-protocol",
+				"iscsi-p8-compat-soak",
+				"csi-lifecycle-component",
+				"csi-rf1-durable-restart",
+				"operations-status-diagnostics",
+				"returned-replica-component",
+				"iscsi-returned-replica",
+				"cleanup-residue",
 			}
 		}
 		return nil
