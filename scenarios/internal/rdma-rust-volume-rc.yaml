@@ -16,6 +16,9 @@ env:
   grpc_port: "28086"
   rdma_port: "18525"
   payload_size: "4194304"
+  bench_count: "200"
+  bench_depth: "8"
+  stream_load_count: "0"
 
 topology:
   nodes:
@@ -91,7 +94,7 @@ phases:
     actions:
       - action: exec
         node: m02
-        timeout: 3m
+        timeout: 5m
         save_as: stack_output
         cmd: |
           set -euo pipefail
@@ -149,6 +152,31 @@ phases:
               exit 1
             fi
           done
+
+          grpc_ready=0
+          for i in $(seq 1 80); do
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/{{ grpc_port }}' >/dev/null 2>&1; then
+              grpc_ready=1
+              break
+            fi
+            sleep 0.25
+            if ! kill -0 "$volume_pid" >/dev/null 2>&1; then
+              echo "VOLUME_EXITED_BEFORE_GRPC_READY" >&2
+              cat "$volume_log" >&2
+              exit 1
+            fi
+          done
+          if [ "$grpc_ready" != "1" ]; then
+            echo "GRPC_PORT_NOT_READY" >&2
+            cat "$volume_log" >&2
+            exit 1
+          fi
+
+          # Avoid racing /dir/assign against the master's first heartbeat and
+          # volume-growth gRPC dial. This reduces the chance that the first
+          # assign spends its whole timeout in a failed growth attempt before
+          # retries get useful signal.
+          sleep 2
 
           assign=""
           for i in $(seq 1 80); do
@@ -231,12 +259,82 @@ phases:
             --volume "{{ m02_rdma_ip }}:$rdma_port" \
             --fid "$fid" \
             --length "$size" \
-            --count 200 \
-            --depth 8 \
+            --count "{{ bench_count }}" \
+            --depth "{{ bench_depth }}" \
             --output json \
             2>/tmp/rv-rdma-client/bench.err | tee /tmp/rv-rdma-client/bench.json
       - action: assert_contains
         value: "{{ bench_json }}"
+        contains: '"errors": 0'
+      - action: assert_contains
+        value: "{{ bench_json }}"
+        contains: '"requests": {{ bench_count }}'
+
+  - name: rdma_stream_load
+    actions:
+      - action: exec
+        node: m01
+        timeout: 4m
+        save_as: stream_bench_json
+        cmd: |
+          set -euo pipefail
+          mkdir -p /tmp/rv-rdma-client
+          meta=$(ssh -i "{{ m02_key_from_m01 }}" -o StrictHostKeyChecking=no testdev@{{ m02_host }} \
+            'source /tmp/rv-rdma-run.env; printf "%s %s %s\n" "$FID" "$SIZE" "$RDMA_PORT"')
+          read -r fid size rdma_port <<< "$meta"
+          stream_count="{{ stream_load_count }}"
+          if [ "$stream_count" = "0" ]; then
+            printf '{\n  "mode": "stream",\n  "skipped": true,\n  "requests": 0,\n  "errors": 0\n}\n'
+            exit 0
+          fi
+          req_file=/tmp/rv-rdma-client/stream-load.requests
+          out_file=/tmp/rv-rdma-client/stream-load.out
+          err_file=/tmp/rv-rdma-client/stream-load.err
+          python3 - "$fid" "$size" "$stream_count" > "$req_file" <<'PY'
+          import sys
+          fid, size, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+          for request_id in range(1, count + 1):
+              print(f'{{"op":"get","fid":"{fid}","offset":0,"length":{size},"request_id":{request_id}}}')
+          PY
+          start_ns=$(date +%s%N)
+          "{{ bench_bin }}" \
+            --mode stream \
+            --server "{{ m02_rdma_ip }}:$rdma_port" \
+            --volume "{{ m02_rdma_ip }}:$rdma_port" \
+            --depth "{{ bench_depth }}" \
+            < "$req_file" \
+            > "$out_file" \
+            2> "$err_file"
+          end_ns=$(date +%s%N)
+          ok_count=$(grep -c '"status":"ok"' "$out_file" || true)
+          error_count=$(grep -c '"status":"error"' "$out_file" || true)
+          test "$ok_count" = "$stream_count"
+          test "$error_count" = "0"
+          python3 - "$ok_count" "$size" "$start_ns" "$end_ns" <<'PY'
+          import json, sys
+          requests = int(sys.argv[1])
+          size = int(sys.argv[2])
+          start_ns = int(sys.argv[3])
+          end_ns = int(sys.argv[4])
+          elapsed_s = max((end_ns - start_ns) / 1_000_000_000, 1e-9)
+          total_bytes = requests * size
+          print(json.dumps({
+              "mode": "stream",
+              "requests": requests,
+              "total_bytes": total_bytes,
+              "elapsed_s": elapsed_s,
+              "throughput_mbps": total_bytes * 8 / elapsed_s / 1_000_000,
+              "errors": 0,
+          }, indent=2))
+          PY
+      - action: assert_contains
+        value: "{{ stream_bench_json }}"
+        contains: '"mode": "stream"'
+      - action: assert_contains
+        value: "{{ stream_bench_json }}"
+        contains: '"requests": {{ stream_load_count }}'
+      - action: assert_contains
+        value: "{{ stream_bench_json }}"
         contains: '"errors": 0'
 
   - name: rdma_stream_verify
