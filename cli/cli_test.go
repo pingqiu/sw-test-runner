@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -18,6 +22,90 @@ func TestTerminalRunStateMapsCancelledResult(t *testing.T) {
 	}
 	if summary != "cancelled before phase k8s_fio" {
 		t.Fatalf("summary = %q", summary)
+	}
+}
+
+func TestDiscoverProductCommitFromChildBundleReadsAlphaImagesEnv(t *testing.T) {
+	childDir := t.TempDir()
+	artifactsDir := filepath.Join(childDir, "artifacts")
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tgzPath := filepath.Join(artifactsDir, "remote-phases.tgz")
+	writeTestTgz(t, tgzPath, map[string]string{
+		"remote/pin_build/alpha-images.env": "SW_BLOCK_IMAGE=sw-block:local\nGIT_REVISION=abc123def456\nGIT_DIRTY=false\n",
+	})
+	commit, found, err := discoverProductCommitFromChildBundle(childDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("commit evidence not found")
+	}
+	if commit != "abc123def456" {
+		t.Fatalf("commit = %q, want abc123def456", commit)
+	}
+}
+
+func TestDiscoverProductCommitFromChildBundleIgnoresNonPinEnv(t *testing.T) {
+	childDir := t.TempDir()
+	artifactsDir := filepath.Join(childDir, "artifacts")
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tgzPath := filepath.Join(artifactsDir, "remote-phases.tgz")
+	writeTestTgz(t, tgzPath, map[string]string{
+		"remote/nvme-dynamic/alpha-images.env":             "GIT_REVISION=badbad1\n",
+		"remote/pin_build/alpha-images.env":                "GIT_REVISION=abc123def456\n",
+		"remote/other/pin_build/alpha-images.env":          "GIT_REVISION=badbad2\n",
+		"remote/pin_build/not-alpha-images.env":            "GIT_REVISION=badbad3\n",
+		"remote/child/copied/pin-build/alpha-images.env":   "GIT_REVISION=badbad4\n",
+		"remote/child/copied/pin_build/alpha-images.env":   "GIT_REVISION=badbad5\n",
+		"remote/child/copied/pin_build/alpha-images.env.1": "GIT_REVISION=badbad6\n",
+	})
+	commit, found, err := discoverProductCommitFromChildBundle(childDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("commit evidence not found")
+	}
+	if commit != "abc123def456" {
+		t.Fatalf("commit = %q, want abc123def456", commit)
+	}
+}
+
+func TestGitRevisionFromAlphaImagesTgzRejectsMalformedRevision(t *testing.T) {
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "remote-phases.tgz")
+	writeTestTgz(t, tgzPath, map[string]string{
+		"remote/pin_build/alpha-images.env": "GIT_REVISION=unknown\n",
+	})
+	_, _, err := gitRevisionFromAlphaImagesTgz(tgzPath)
+	if err == nil {
+		t.Fatal("expected malformed revision error")
+	}
+}
+
+func writeTestTgz(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+	for name, body := range files {
+		hdr := &tar.Header{Name: name, Mode: 0644, Size: int64(len(body))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -152,6 +152,24 @@ func (w *StatusWriter) SetState(state string) error {
 	return w.write()
 }
 
+// SetProvenance updates optional suite-level provenance fields. It is used by
+// suite orchestration when child evidence reveals the product commit after the
+// suite status writer has already been initialized.
+func (w *StatusWriter) SetProvenance(productCommit, runnerCommit, remoteProductRoot string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if productCommit != "" {
+		w.status.ProductCommit = productCommit
+	}
+	if runnerCommit != "" {
+		w.status.RunnerCommit = runnerCommit
+	}
+	if remoteProductRoot != "" {
+		w.status.RemoteProductRoot = remoteProductRoot
+	}
+	return w.write()
+}
+
 // PhaseStarted marks a phase started and writes.
 func (w *StatusWriter) PhaseStarted(name string) error {
 	w.mu.Lock()

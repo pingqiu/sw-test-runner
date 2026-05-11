@@ -26,15 +26,19 @@
 package cli
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -845,7 +849,8 @@ func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers 
 		}
 	}
 
-	productCommit := gitRevParse(filepath.Dir(suiteFile))
+	sourceCommit := gitRevParse(filepath.Dir(suiteFile))
+	productCommit := ""
 	runnerCommit := gitRevParse(".")
 	statusWriter, err := tr.NewStatusWriter(runDir, resultsRoot, tr.RunStatus{
 		RunID:             runID,
@@ -872,7 +877,7 @@ func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers 
 			SchemaVersion:     "1.0",
 			RunID:             runID,
 			Scenario:          suite.Name,
-			SourceCommit:      productCommit,
+			SourceCommit:      sourceCommit,
 			ProductCommit:     productCommit,
 			RunnerCommit:      runnerCommit,
 			RemoteProductRoot: suite.Env["product_root"],
@@ -904,6 +909,8 @@ func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers 
 	suiteStatus := tr.RunStatePass
 	summary := "suite passed"
 	suiteBase := filepath.Dir(suiteFile)
+	observedProductCommit := ""
+	childrenMissingProductCommit := []string{}
 
 	logSuite("run_id=%s", runID)
 	logSuite("suite=%s children=%d", suite.Name, len(suite.Scenarios))
@@ -960,6 +967,74 @@ func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers 
 		children[i].PhasesDone = childDone
 		children[i].PhasesTotal = childTotal
 		children[i].Error = childErr
+		commit, commitFound, commitErr := discoverProductCommitFromChildBundle(childRunDir)
+		if commitErr != nil {
+			childErr = fmt.Sprintf("child product commit evidence invalid: %v", commitErr)
+			children[i].Status = tr.RunStateFail
+			children[i].RunID = childRunID
+			children[i].RunDir = childRunDir
+			children[i].PhasesDone = childDone
+			children[i].PhasesTotal = childTotal
+			children[i].Error = childErr
+			_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
+			_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, childErr)
+			logSuite("FAIL child=%s run_id=%s error=%s", name, childRunID, childErr)
+			suiteStatus = tr.RunStateFail
+			summary = fmt.Sprintf("suite failed at %s", name)
+			break
+		}
+		if commitFound && commit != "" && observedProductCommit == "" {
+			if len(childrenMissingProductCommit) > 0 {
+				childErr = fmt.Sprintf("child product commit evidence present at %s but earlier children missing evidence: %s", name, strings.Join(childrenMissingProductCommit, ","))
+				children[i].Status = tr.RunStateFail
+				children[i].RunID = childRunID
+				children[i].RunDir = childRunDir
+				children[i].PhasesDone = childDone
+				children[i].PhasesTotal = childTotal
+				children[i].Error = childErr
+				_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
+				_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, childErr)
+				logSuite("FAIL child=%s run_id=%s error=%s", name, childRunID, childErr)
+				suiteStatus = tr.RunStateFail
+				summary = fmt.Sprintf("suite failed at %s", name)
+				break
+			}
+			observedProductCommit = commit
+			productCommit = commit
+			_ = statusWriter.SetProvenance(productCommit, runnerCommit, suite.Env["product_root"])
+			logSuite("product_commit=%s source=child:%s", productCommit, name)
+		} else if commitFound && commit != "" && commit != observedProductCommit {
+			childErr = fmt.Sprintf("child product commit %s differs from suite product commit %s", commit, observedProductCommit)
+			children[i].Status = tr.RunStateFail
+			children[i].RunID = childRunID
+			children[i].RunDir = childRunDir
+			children[i].PhasesDone = childDone
+			children[i].PhasesTotal = childTotal
+			children[i].Error = childErr
+			_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
+			_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, childErr)
+			logSuite("FAIL child=%s run_id=%s error=%s", name, childRunID, childErr)
+			suiteStatus = tr.RunStateFail
+			summary = fmt.Sprintf("suite failed at %s", name)
+			break
+		} else if !commitFound {
+			if observedProductCommit != "" {
+				childErr = fmt.Sprintf("child product commit evidence missing after suite product commit was established as %s", observedProductCommit)
+				children[i].Status = tr.RunStateFail
+				children[i].RunID = childRunID
+				children[i].RunDir = childRunDir
+				children[i].PhasesDone = childDone
+				children[i].PhasesTotal = childTotal
+				children[i].Error = childErr
+				_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
+				_ = statusWriter.PhaseFinished(name, tr.PhaseStateFail, childErr)
+				logSuite("FAIL child=%s run_id=%s error=%s", name, childRunID, childErr)
+				suiteStatus = tr.RunStateFail
+				summary = fmt.Sprintf("suite failed at %s", name)
+				break
+			}
+			childrenMissingProductCommit = append(childrenMissingProductCommit, name)
+		}
 		_ = statusWriter.PhaseMetadata(name, childRunID, children[i].ArtifactDir, childRunDir, childDone, childTotal)
 		if childStatus == string(tr.StatusPass) || childStatus == tr.RunStatePass {
 			_ = statusWriter.PhaseFinished(name, tr.PhaseStatePass, "")
@@ -1085,6 +1160,97 @@ func runNativeSuiteChild(ctx context.Context, registry *tr.Registry, suite *tr.S
 		return result, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("%s", result.Error)
 	}
 	return result, bundle.Manifest.RunID, bundle.Dir, nil
+}
+
+func discoverProductCommitFromChildBundle(childRunDir string) (string, bool, error) {
+	if childRunDir == "" {
+		return "", false, nil
+	}
+	candidates := []string{
+		filepath.Join(childRunDir, "artifacts", "remote-phases.tgz"),
+	}
+	for _, candidate := range candidates {
+		commit, found, err := gitRevisionFromAlphaImagesTgz(candidate)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			return commit, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func gitRevisionFromAlphaImagesTgz(path string) (string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", false, err
+	}
+	defer gz.Close()
+	trd := tar.NewReader(gz)
+	for {
+		hdr, err := trd.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if hdr == nil || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := filepath.ToSlash(hdr.Name)
+		if !isPinBuildAlphaImagesEnvPath(name) {
+			continue
+		}
+		data, err := io.ReadAll(trd)
+		if err != nil {
+			return "", false, err
+		}
+		commit := parseEnvValue(string(data), "GIT_REVISION")
+		if !isCommitLike(commit) {
+			return "", false, fmt.Errorf("%s has invalid GIT_REVISION %q", name, commit)
+		}
+		return commit, true, nil
+	}
+	return "", false, nil
+}
+
+func parseEnvValue(data, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.Trim(strings.TrimPrefix(line, prefix), `"'`)
+		}
+	}
+	return ""
+}
+
+var commitLikePattern = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+
+func isCommitLike(value string) bool {
+	return commitLikePattern.MatchString(strings.TrimSpace(value))
+}
+
+func isPinBuildAlphaImagesEnvPath(name string) bool {
+	name = strings.Trim(filepath.ToSlash(name), "/")
+	parts := strings.Split(name, "/")
+	if len(parts) == 2 {
+		return (parts[0] == "pin_build" || parts[0] == "pin-build") && parts[1] == "alpha-images.env"
+	}
+	if len(parts) == 3 {
+		return (parts[1] == "pin_build" || parts[1] == "pin-build") && parts[2] == "alpha-images.env"
+	}
+	return false
 }
 
 func resolveSuitePath(base, p string) string {
