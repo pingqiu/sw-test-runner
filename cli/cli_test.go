@@ -47,6 +47,46 @@ func TestDiscoverProductCommitFromChildBundleReadsAlphaImagesEnv(t *testing.T) {
 	}
 }
 
+func TestDiscoverProductCommitFromChildBundleReadsVersionEvidence(t *testing.T) {
+	childDir := t.TempDir()
+	artifactsDir := filepath.Join(childDir, "artifacts")
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tgzPath := filepath.Join(artifactsDir, "remote-phases.tgz")
+	writeTestTgz(t, tgzPath, map[string]string{
+		"remote/pin_build/git.sha":                 "abc123def456\n",
+		"remote/pin_build/blockvolume.version.txt": "blockvolume revision=abc123def456 modified=false\n",
+	})
+	commit, found, err := discoverProductCommitFromChildBundle(childDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("commit evidence not found")
+	}
+	if commit != "abc123def456" {
+		t.Fatalf("commit = %q, want abc123def456", commit)
+	}
+}
+
+func TestDiscoverProductCommitFromChildBundleRejectsMixedEvidence(t *testing.T) {
+	childDir := t.TempDir()
+	artifactsDir := filepath.Join(childDir, "artifacts")
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tgzPath := filepath.Join(artifactsDir, "remote-phases.tgz")
+	writeTestTgz(t, tgzPath, map[string]string{
+		"remote/pin_build/git.sha":                 "abc123def456\n",
+		"remote/pin_build/blockvolume.version.txt": "blockvolume revision=def456abc123 modified=false\n",
+	})
+	_, _, err := discoverProductCommitFromChildBundle(childDir)
+	if err == nil {
+		t.Fatal("expected mixed evidence error")
+	}
+}
+
 func TestDiscoverProductCommitFromChildBundleIgnoresNonPinEnv(t *testing.T) {
 	childDir := t.TempDir()
 	artifactsDir := filepath.Join(childDir, "artifacts")
@@ -84,6 +124,15 @@ func TestGitRevisionFromAlphaImagesTgzRejectsMalformedRevision(t *testing.T) {
 	_, _, err := gitRevisionFromAlphaImagesTgz(tgzPath)
 	if err == nil {
 		t.Fatal("expected malformed revision error")
+	}
+}
+
+func TestProductCommitFromPinEvidenceRejectsDirtyInputs(t *testing.T) {
+	if _, err := productCommitFromPinEvidence("remote/pin_build/alpha-images.env", "GIT_REVISION=abc123def456\nGIT_DIRTY=true\n"); err == nil {
+		t.Fatal("expected dirty alpha-images env error")
+	}
+	if _, err := productCommitFromPinEvidence("remote/pin_build/blockvolume.version.txt", "blockvolume revision=abc123def456 modified=true\n"); err == nil {
+		t.Fatal("expected modified version error")
 	}
 }
 

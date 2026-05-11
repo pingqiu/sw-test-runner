@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -851,7 +852,7 @@ func runNativeSuite(suiteFile string, suite *tr.SuiteConfig, resultsRoot, tiers 
 
 	sourceCommit := gitRevParse(filepath.Dir(suiteFile))
 	productCommit := ""
-	runnerCommit := gitRevParse(".")
+	runnerCommit := runnerGitRevision()
 	statusWriter, err := tr.NewStatusWriter(runDir, resultsRoot, tr.RunStatus{
 		RunID:             runID,
 		Scenario:          suite.Name,
@@ -1196,6 +1197,7 @@ func gitRevisionFromAlphaImagesTgz(path string) (string, bool, error) {
 	}
 	defer gz.Close()
 	trd := tar.NewReader(gz)
+	commits := make(map[string]string)
 	for {
 		hdr, err := trd.Next()
 		if err == io.EOF {
@@ -1208,20 +1210,60 @@ func gitRevisionFromAlphaImagesTgz(path string) (string, bool, error) {
 			continue
 		}
 		name := filepath.ToSlash(hdr.Name)
-		if !isPinBuildAlphaImagesEnvPath(name) {
+		if !isPinBuildEvidencePath(name) {
 			continue
 		}
 		data, err := io.ReadAll(trd)
 		if err != nil {
 			return "", false, err
 		}
-		commit := parseEnvValue(string(data), "GIT_REVISION")
-		if !isCommitLike(commit) {
-			return "", false, fmt.Errorf("%s has invalid GIT_REVISION %q", name, commit)
+		commit, err := productCommitFromPinEvidence(name, string(data))
+		if err != nil {
+			return "", false, err
 		}
+		if commit == "" {
+			continue
+		}
+		commits[commit] = name
+		if len(commits) > 1 {
+			return "", false, fmt.Errorf("mixed child product commit evidence in %s", path)
+		}
+	}
+	for commit := range commits {
 		return commit, true, nil
 	}
 	return "", false, nil
+}
+
+func productCommitFromPinEvidence(name, data string) (string, error) {
+	switch {
+	case strings.HasSuffix(name, "/alpha-images.env") || name == "alpha-images.env":
+		commit := parseEnvValue(data, "GIT_REVISION")
+		if !isCommitLike(commit) {
+			return "", fmt.Errorf("%s has invalid GIT_REVISION %q", name, commit)
+		}
+		if dirty := parseEnvValue(data, "GIT_DIRTY"); strings.EqualFold(dirty, "true") {
+			return "", fmt.Errorf("%s reports GIT_DIRTY=true", name)
+		}
+		return commit, nil
+	case strings.HasSuffix(name, ".version.txt"):
+		commit := parseRevisionField(data)
+		if !isCommitLike(commit) {
+			return "", fmt.Errorf("%s has invalid revision %q", name, commit)
+		}
+		if modified := parseKeyValueField(data, "modified"); strings.EqualFold(modified, "true") {
+			return "", fmt.Errorf("%s reports modified=true", name)
+		}
+		return commit, nil
+	case strings.HasSuffix(name, "/git.sha") || name == "git.sha":
+		commit := strings.TrimSpace(data)
+		if !isCommitLike(commit) {
+			return "", fmt.Errorf("%s has invalid git sha %q", name, commit)
+		}
+		return commit, nil
+	default:
+		return "", nil
+	}
 }
 
 func parseEnvValue(data, key string) string {
@@ -1235,22 +1277,55 @@ func parseEnvValue(data, key string) string {
 	return ""
 }
 
+func parseRevisionField(data string) string {
+	return parseKeyValueField(data, "revision")
+}
+
+func parseKeyValueField(data, key string) string {
+	prefix := key + "="
+	fields := strings.Fields(data)
+	for _, field := range fields {
+		if strings.HasPrefix(field, prefix) {
+			return strings.Trim(strings.TrimPrefix(field, prefix), `"'`)
+		}
+	}
+	return ""
+}
+
 var commitLikePattern = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
 func isCommitLike(value string) bool {
 	return commitLikePattern.MatchString(strings.TrimSpace(value))
 }
 
-func isPinBuildAlphaImagesEnvPath(name string) bool {
+func isPinBuildEvidencePath(name string) bool {
 	name = strings.Trim(filepath.ToSlash(name), "/")
 	parts := strings.Split(name, "/")
+	var phase, file string
 	if len(parts) == 2 {
-		return (parts[0] == "pin_build" || parts[0] == "pin-build") && parts[1] == "alpha-images.env"
+		phase, file = parts[0], parts[1]
+	} else if len(parts) == 3 {
+		phase, file = parts[1], parts[2]
+	} else {
+		return false
 	}
-	if len(parts) == 3 {
-		return (parts[1] == "pin_build" || parts[1] == "pin-build") && parts[2] == "alpha-images.env"
+	if phase != "pin_build" && phase != "pin-build" {
+		return false
 	}
-	return false
+	return file == "alpha-images.env" || file == "git.sha" || strings.HasSuffix(file, ".version.txt")
+}
+
+func runnerGitRevision() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			return setting.Value
+		}
+	}
+	return ""
 }
 
 func resolveSuitePath(base, p string) string {
