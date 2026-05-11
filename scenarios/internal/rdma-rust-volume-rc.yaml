@@ -1,0 +1,274 @@
+name: rdma-rust-volume-rc
+timeout: 15m
+
+env:
+  ssh_key: "C:/work/dev_server/testdev_key"
+  m02_repo: "/opt/work/seaweed-volume-rust/seaweed-volume"
+  seaweedfs_path: "/opt/work/seaweedfs"
+  weed_bin: "/opt/work/weed"
+  bench_bin: "/tmp/sra-rdma-bench-integrated"
+  run_dir: "/tmp/rv-rdma-current"
+  m02_host: "192.168.1.184"
+  m02_rdma_ip: "10.0.0.3"
+  m02_key_from_m01: "/opt/work/testdev_key"
+  master_port: "19334"
+  http_port: "18086"
+  grpc_port: "28086"
+  rdma_port: "18525"
+  payload_size: "1048576"
+
+topology:
+  nodes:
+    m01:
+      host: 192.168.1.181
+      user: testdev
+      key: "{{ ssh_key }}"
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: exec
+        node: m02
+        timeout: 30s
+        cmd: |
+          set -euo pipefail
+          kill_if_cmd_matches() {
+            pid="${1:-}"
+            pattern="${2:-}"
+            [ -n "$pid" ] || return 0
+            [ -r "/proc/$pid/cmdline" ] || return 0
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+            if printf '%s\n' "$cmd" | grep -Eq -- "$pattern"; then
+              kill "$pid" >/dev/null 2>&1 || true
+            fi
+          }
+          if [ -f /tmp/rv-rdma-run.env ]; then
+            source /tmp/rv-rdma-run.env || true
+            kill_if_cmd_matches "${VOLUME_PID:-}" 'weed-volume .*--rdma-listen 10\.0\.0\.3:18525 .*--rdma-transport rc'
+            kill_if_cmd_matches "${MASTER_PID:-}" '/opt/work/weed master .*-port=19334'
+          fi
+          rm -rf "{{ run_dir }}"
+          mkdir -p "{{ run_dir }}"
+      - action: exec
+        node: m01
+        timeout: 30s
+        cmd: |
+          set -euo pipefail
+          rm -rf /tmp/rv-rdma-client
+          mkdir -p /tmp/rv-rdma-client
+
+  - name: build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        save_as: build_output
+        cmd: |
+          set -euo pipefail
+          source ~/.cargo/env 2>/dev/null || true
+          cd "{{ m02_repo }}"
+          SEAWEEDFS_PATH="{{ seaweedfs_path }}" \
+            cargo build --release --features rdma --bin weed-volume
+          echo "RUST_VOLUME_RDMA_BUILD_OK"
+      - action: assert_contains
+        value: "{{ build_output }}"
+        contains: "RUST_VOLUME_RDMA_BUILD_OK"
+
+  - name: start_and_upload
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        save_as: stack_output
+        cmd: |
+          set -euo pipefail
+          run="{{ run_dir }}"
+          mkdir -p "$run/master" "$run/vol"
+          master_log="$run/master.log"
+          volume_log="$run/volume.log"
+
+          "{{ weed_bin }}" master \
+            -ip=127.0.0.1 \
+            -port="{{ master_port }}" \
+            -mdir="$run/master" \
+            -defaultReplication=000 \
+            >"$master_log" 2>&1 &
+          master_pid=$!
+
+          for i in $(seq 1 80); do
+            if curl -fsS "http://127.0.0.1:{{ master_port }}/cluster/status" >/dev/null 2>&1 ||
+               curl -fsS "http://127.0.0.1:{{ master_port }}/dir/status" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+            if ! kill -0 "$master_pid" >/dev/null 2>&1; then
+              echo "MASTER_EXITED" >&2
+              cat "$master_log" >&2
+              exit 1
+            fi
+          done
+
+          cd "{{ m02_repo }}"
+          RUST_LOG=info SEAWEEDFS_PATH="{{ seaweedfs_path }}" \
+            ./target/release/weed-volume \
+            --ip="{{ m02_host }}" \
+            --ip.bind=0.0.0.0 \
+            --port "{{ http_port }}" \
+            --port.grpc "{{ grpc_port }}" \
+            --master "127.0.0.1:{{ master_port }}" \
+            --dir "$run/vol" \
+            --max 8 \
+            --preStopSeconds 0 \
+            --rdma-listen "{{ m02_rdma_ip }}:{{ rdma_port }}" \
+            --rdma-transport rc \
+            >"$volume_log" 2>&1 &
+          volume_pid=$!
+
+          for i in $(seq 1 120); do
+            if grep -q 'RDMA RC read listener serving' "$volume_log" &&
+               curl -fsS "http://127.0.0.1:{{ http_port }}/status" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+            if ! kill -0 "$volume_pid" >/dev/null 2>&1; then
+              echo "VOLUME_EXITED" >&2
+              cat "$volume_log" >&2
+              exit 1
+            fi
+          done
+
+          sleep 2
+          assign=$(curl -fsS "http://127.0.0.1:{{ master_port }}/dir/assign")
+          echo "$assign" > "$run/assign.json"
+          fid=$(python3 - "$run/assign.json" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1]))["fid"])
+          PY
+          )
+          url=$(python3 - "$run/assign.json" <<'PY'
+          import json, sys
+          j = json.load(open(sys.argv[1]))
+          print(j.get("publicUrl") or j.get("url"))
+          PY
+          )
+          python3 - <<'PY' > "$run/payload.bin"
+          import sys
+          size = int("{{ payload_size }}")
+          pat = b"rdma-rust-volume-runner\n"
+          sys.stdout.buffer.write((pat * ((size // len(pat)) + 1))[:size])
+          PY
+          curl -fsS -F "file=@$run/payload.bin" "http://$url/$fid" > "$run/upload.json"
+          payload_sha=$(sha256sum "$run/payload.bin" | awk '{print $1}')
+          size=$(wc -c < "$run/payload.bin")
+
+          cat > /tmp/rv-rdma-run.env <<EOF
+          RUN_DIR=$run
+          MASTER_PID=$master_pid
+          VOLUME_PID=$volume_pid
+          MASTER_PORT={{ master_port }}
+          HTTP_PORT={{ http_port }}
+          GRPC_PORT={{ grpc_port }}
+          RDMA_PORT={{ rdma_port }}
+          FID=$fid
+          SIZE=$size
+          PAYLOAD_SHA=$payload_sha
+          EOF
+
+          echo "RDMA_STACK_READY fid=$fid size=$size sha=$payload_sha endpoint={{ m02_rdma_ip }}:{{ rdma_port }}"
+          cat "$run/upload.json"
+      - action: assert_contains
+        value: "{{ stack_output }}"
+        contains: "RDMA_STACK_READY"
+
+  - name: rdma_bench
+    actions:
+      - action: exec
+        node: m01
+        timeout: 2m
+        save_as: bench_json
+        cmd: |
+          set -euo pipefail
+          mkdir -p /tmp/rv-rdma-client
+          meta=$(ssh -i "{{ m02_key_from_m01 }}" -o StrictHostKeyChecking=no testdev@{{ m02_host }} \
+            'source /tmp/rv-rdma-run.env; printf "%s %s %s\n" "$FID" "$SIZE" "$RDMA_PORT"')
+          read -r fid size rdma_port <<< "$meta"
+          "{{ bench_bin }}" \
+            --server "{{ m02_rdma_ip }}:$rdma_port" \
+            --volume "{{ m02_rdma_ip }}:$rdma_port" \
+            --fid "$fid" \
+            --length "$size" \
+            --count 200 \
+            --depth 8 \
+            --output json \
+            2>/tmp/rv-rdma-client/bench.err | tee /tmp/rv-rdma-client/bench.json
+      - action: assert_contains
+        value: "{{ bench_json }}"
+        contains: '"errors": 0'
+
+  - name: rdma_dump_verify
+    actions:
+      - action: exec
+        node: m01
+        timeout: 2m
+        save_as: dump_verify
+        cmd: |
+          set -euo pipefail
+          mkdir -p /tmp/rv-rdma-client
+          meta=$(ssh -i "{{ m02_key_from_m01 }}" -o StrictHostKeyChecking=no testdev@{{ m02_host }} \
+            'source /tmp/rv-rdma-run.env; printf "%s %s %s %s\n" "$FID" "$SIZE" "$RDMA_PORT" "$PAYLOAD_SHA"')
+          read -r fid size rdma_port payload_sha <<< "$meta"
+          rm -f /tmp/rv-rdma-client/dump.bin /tmp/rv-rdma-client/stream.out /tmp/rv-rdma-client/stream.err
+          printf '{"op":"get","fid":"%s","offset":0,"length":%s,"request_id":1}\n' "$fid" "$size" |
+            "{{ bench_bin }}" \
+              --mode stream \
+              --server "{{ m02_rdma_ip }}:$rdma_port" \
+              --volume "{{ m02_rdma_ip }}:$rdma_port" \
+              --depth 1 \
+              --dump-to /tmp/rv-rdma-client/dump.bin \
+              >/tmp/rv-rdma-client/stream.out \
+              2>/tmp/rv-rdma-client/stream.err
+          dump_sha=$(sha256sum /tmp/rv-rdma-client/dump.bin | awk '{print $1}')
+          cat /tmp/rv-rdma-client/stream.out
+          test "$dump_sha" = "$payload_sha"
+          echo "RDMA_DUMP_SHA_MATCH sha=$dump_sha"
+      - action: assert_contains
+        value: "{{ dump_verify }}"
+        contains: "RDMA_DUMP_SHA_MATCH"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "{{ run_dir }}"
+        name: "m02-rust-volume-rdma"
+        ignore_error: true
+      - action: collect_path
+        node: m01
+        path: "/tmp/rv-rdma-client"
+        name: "m01-rdma-client"
+        ignore_error: true
+      - action: exec
+        node: m02
+        timeout: 30s
+        ignore_error: true
+        cmd: |
+          kill_if_cmd_matches() {
+            pid="${1:-}"
+            pattern="${2:-}"
+            [ -n "$pid" ] || return 0
+            [ -r "/proc/$pid/cmdline" ] || return 0
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+            if printf '%s\n' "$cmd" | grep -Eq -- "$pattern"; then
+              kill "$pid" >/dev/null 2>&1 || true
+            fi
+          }
+          if [ -f /tmp/rv-rdma-run.env ]; then
+            source /tmp/rv-rdma-run.env || true
+            kill_if_cmd_matches "${VOLUME_PID:-}" 'weed-volume .*--rdma-listen 10\.0\.0\.3:18525 .*--rdma-transport rc'
+            kill_if_cmd_matches "${MASTER_PID:-}" '/opt/work/weed master .*-port=19334'
+          fi
