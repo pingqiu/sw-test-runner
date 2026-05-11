@@ -6,14 +6,14 @@ import (
 
 // Scenario is the top-level YAML structure for a test scenario.
 type Scenario struct {
-	Name      string            `yaml:"name"`
-	Timeout   Duration          `yaml:"timeout"`
-	Env       map[string]string `yaml:"env"`
-	Cluster   *ClusterSpec      `yaml:"cluster,omitempty"`
-	Topology  Topology          `yaml:"topology"`
+	Name      string                `yaml:"name"`
+	Timeout   Duration              `yaml:"timeout"`
+	Env       map[string]string     `yaml:"env"`
+	Cluster   *ClusterSpec          `yaml:"cluster,omitempty"`
+	Topology  Topology              `yaml:"topology"`
 	Targets   map[string]TargetSpec `yaml:"targets"`
-	Phases    []Phase           `yaml:"phases"`
-	Artifacts ArtifactSpec      `yaml:"artifacts"`
+	Phases    []Phase               `yaml:"phases"`
+	Artifacts ArtifactSpec          `yaml:"artifacts"`
 }
 
 // ClusterSpec declares what cluster the scenario needs.
@@ -86,20 +86,20 @@ type NodeSpec struct {
 
 // TargetSpec defines an iSCSI/NVMe target instance.
 type TargetSpec struct {
-	Node            string `yaml:"node"`
-	VolSize         string `yaml:"vol_size"`
-	WALSize         string `yaml:"wal_size"`
-	ISCSIPort       int    `yaml:"iscsi_port"`
-	AdminPort       int    `yaml:"admin_port"`
-	ReplicaDataPort int    `yaml:"replica_data_port"`
-	ReplicaCtrlPort int    `yaml:"replica_ctrl_port"`
-	RebuildPort     int    `yaml:"rebuild_port"`
-	IQNSuffix       string `yaml:"iqn_suffix"`
-	TPGID           int    `yaml:"tpg_id"`
-	NvmePort             int    `yaml:"nvme_port"`
-	NQNSuffix            string `yaml:"nqn_suffix"`
-	MaxConcurrentWrites  int    `yaml:"max_concurrent_writes"`
-	NvmeIOQueues         int    `yaml:"nvme_io_queues"`
+	Node                string `yaml:"node"`
+	VolSize             string `yaml:"vol_size"`
+	WALSize             string `yaml:"wal_size"`
+	ISCSIPort           int    `yaml:"iscsi_port"`
+	AdminPort           int    `yaml:"admin_port"`
+	ReplicaDataPort     int    `yaml:"replica_data_port"`
+	ReplicaCtrlPort     int    `yaml:"replica_ctrl_port"`
+	RebuildPort         int    `yaml:"rebuild_port"`
+	IQNSuffix           string `yaml:"iqn_suffix"`
+	TPGID               int    `yaml:"tpg_id"`
+	NvmePort            int    `yaml:"nvme_port"`
+	NQNSuffix           string `yaml:"nqn_suffix"`
+	MaxConcurrentWrites int    `yaml:"max_concurrent_writes"`
+	NvmeIOQueues        int    `yaml:"nvme_io_queues"`
 }
 
 // IQN returns the full IQN from the suffix, sanitized via the shared naming helper.
@@ -119,12 +119,12 @@ func (ts TargetSpec) NQN() string {
 
 // Phase is a sequential group of actions.
 type Phase struct {
-	Name      string `yaml:"name"`
-	Always    bool   `yaml:"always"`
-	Parallel  bool   `yaml:"parallel"`
-	Repeat    int    `yaml:"repeat"`
-	Aggregate string `yaml:"aggregate"` // "median" (default when repeat>1), "mean", "none"
-	TrimPct   int    `yaml:"trim_pct"`  // percentage of outliers to trim from each end (default: 20)
+	Name      string   `yaml:"name"`
+	Always    bool     `yaml:"always"`
+	Parallel  bool     `yaml:"parallel"`
+	Repeat    int      `yaml:"repeat"`
+	Aggregate string   `yaml:"aggregate"` // "median" (default when repeat>1), "mean", "none"
+	TrimPct   int      `yaml:"trim_pct"`  // percentage of outliers to trim from each end (default: 20)
 	Actions   []Action `yaml:"actions"`
 	// Include pulls phases from another YAML file.
 	// The included file's phases replace this phase entry.
@@ -156,6 +156,7 @@ type ArtifactSpec struct {
 
 // ScenarioResult is the final output of a scenario run.
 type ScenarioResult struct {
+	RunID     string            `json:"run_id,omitempty"`
 	Name      string            `json:"name"`
 	Status    ResultStatus      `json:"status"`
 	Cancelled bool              `json:"cancelled,omitempty"`

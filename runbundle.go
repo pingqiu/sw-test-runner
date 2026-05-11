@@ -51,13 +51,13 @@ type RunBundle struct {
 //   - missing data is a zero value, not an estimate;
 //   - all hashes are sha256 hex.
 type Provenance struct {
-	RunID            string             `json:"run_id"`
-	FrameworkVersion string             `json:"framework_version,omitempty"`
-	Scenario         ProvScenario       `json:"scenario"`
-	Git              ProvGit            `json:"git"`
-	Host             ProvHost           `json:"host"`
-	Images           []ProvImage        `json:"images"`
-	Binaries         []ProvBinary       `json:"binaries"`
+	RunID            string       `json:"run_id"`
+	FrameworkVersion string       `json:"framework_version,omitempty"`
+	Scenario         ProvScenario `json:"scenario"`
+	Git              ProvGit      `json:"git"`
+	Host             ProvHost     `json:"host"`
+	Images           []ProvImage  `json:"images"`
+	Binaries         []ProvBinary `json:"binaries"`
 }
 
 // ProvScenario records the scenario identity (name + frozen-bytes hash).
@@ -196,6 +196,9 @@ func (b *RunBundle) Finalize(result *ScenarioResult) error {
 	// from CHAP/SSH/token-fetch actions; redact by key name before
 	// the file hits disk.
 	redacted := *result
+	if redacted.RunID == "" {
+		redacted.RunID = b.Manifest.RunID
+	}
 	redacted.Vars = RedactMap(result.Vars)
 	if err := WriteJSON(&redacted, filepath.Join(b.Dir, "result.json")); err != nil {
 		return fmt.Errorf("write result.json: %w", err)
