@@ -156,15 +156,18 @@ type ArtifactSpec struct {
 
 // ScenarioResult is the final output of a scenario run.
 type ScenarioResult struct {
-	RunID     string            `json:"run_id,omitempty"`
-	Name      string            `json:"name"`
-	Status    ResultStatus      `json:"status"`
-	Cancelled bool              `json:"cancelled,omitempty"`
-	Duration  time.Duration     `json:"duration_ms"`
-	Phases    []PhaseResult     `json:"phases"`
-	Error     string            `json:"error,omitempty"`
-	Vars      map[string]string `json:"vars,omitempty"`
-	Artifacts []ArtifactEntry   `json:"artifacts,omitempty"`
+	RunID      string            `json:"run_id,omitempty"`
+	Name       string            `json:"name"`
+	Status     ResultStatus      `json:"status"`
+	StartedAt  string            `json:"started_at,omitempty"`
+	EndedAt    string            `json:"ended_at,omitempty"`
+	WallClockS float64           `json:"wall_clock_s,omitempty"`
+	Cancelled  bool              `json:"cancelled,omitempty"`
+	Duration   time.Duration     `json:"duration_ms"`
+	Phases     []PhaseResult     `json:"phases"`
+	Error      string            `json:"error,omitempty"`
+	Vars       map[string]string `json:"vars,omitempty"`
+	Artifacts  []ArtifactEntry   `json:"artifacts,omitempty"`
 }
 
 // ArtifactEntry records a collected artifact file.

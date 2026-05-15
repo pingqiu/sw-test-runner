@@ -199,6 +199,15 @@ func (b *RunBundle) Finalize(result *ScenarioResult) error {
 	if redacted.RunID == "" {
 		redacted.RunID = b.Manifest.RunID
 	}
+	if redacted.StartedAt == "" {
+		redacted.StartedAt = b.Manifest.StartedAt
+	}
+	if redacted.EndedAt == "" {
+		redacted.EndedAt = b.Manifest.FinishedAt
+	}
+	if redacted.WallClockS <= 0 {
+		redacted.WallClockS = scenarioWallClockSeconds(redacted.StartedAt, redacted.EndedAt, redacted.Duration)
+	}
 	redacted.Vars = RedactMap(result.Vars)
 	if err := WriteJSON(&redacted, filepath.Join(b.Dir, "result.json")); err != nil {
 		return fmt.Errorf("write result.json: %w", err)
@@ -220,6 +229,27 @@ func (b *RunBundle) Finalize(result *ScenarioResult) error {
 	}
 
 	return nil
+}
+
+func scenarioWallClockSeconds(startedAt, endedAt string, duration time.Duration) float64 {
+	if duration > 0 {
+		return duration.Seconds()
+	}
+	if startedAt == "" || endedAt == "" {
+		return 0
+	}
+	started, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return 0
+	}
+	ended, err := time.Parse(time.RFC3339, endedAt)
+	if err != nil {
+		return 0
+	}
+	if ended.Before(started) {
+		return 0
+	}
+	return ended.Sub(started).Seconds()
 }
 
 // RecordImage records an image (tag + digest) that this run produced
