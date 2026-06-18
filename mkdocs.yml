@@ -1,0 +1,45 @@
+site_name: sw-test-runner — TestOps
+site_description: Cross-product TestOps platform for SeaweedFS block / S3 / VFS.
+repo_url: https://github.com/pingqiu/sw-test-runner
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+# Start Here / Standard reuse the existing top-level docs/*.md; the wiki/ subdir
+# holds the connective reference pages (mirrors seaweed_block's docs/ + docs/wiki).
+nav:
+  - Home: wiki/index.md
+  - Start Here:
+      - Handbook: testops-handbook.md
+      - Tutorial: tutorial.md
+      - Scenario Spec: scenario-spec.md
+  - Standard: cross-product-testops-standard.md
+  - Architecture:
+      - Code Map: wiki/code-map.md
+      - Packs & Binaries: wiki/packs-and-binaries.md
+  - Product Testing Guides:
+      - Block (iSCSI / NVMe): wiki/guides/block.md
+      - S3 Gateway: wiki/guides/s3.md
+      - VFS / S3 over RDMA: wiki/guides/rdma.md
+  - Scenarios: wiki/scenario-catalog.md
+  - Live Dashboard: wiki/dashboard.md

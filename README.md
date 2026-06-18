@@ -39,6 +39,28 @@ sw-test-runner run scenario.yaml           # execute
 sw-test-runner validate-bundle results/RUN # offline result/status check
 ```
 
+## Docs and wiki
+
+Full documentation is a MkDocs wiki under `docs/` (mirrors the seaweed-block
+wiki). Serve it locally:
+
+```bash
+pip install -r requirements-docs.txt
+mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
+```
+
+- **Start here:** `docs/testops-handbook.md`, `docs/cross-product-testops-standard.md`, `docs/scenario-spec.md`, `docs/tutorial.md`
+- **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
+- **Live run dashboard:** http://192.168.1.181:9099/ (global, read-only)
+
+## Build
+
+```bash
+make build               # all cmd/ binaries into ./bin
+make test                # unit tests
+make wiki                # serve the wiki locally
+```
+
 ## Repository layout
 
 ```
