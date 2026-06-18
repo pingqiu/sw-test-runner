@@ -7,6 +7,15 @@ observable.
 
 If you were handed this link to start testing, read in this order:
 
+Related local docs:
+
+- [Seaweed Block Engineering Wiki](http://192.168.1.135:8010/wiki/) -
+  Kubernetes block-storage, CSI, operation-layer, lifecycle, and
+  storage-failure design.
+- [Seaweed RDMA Engineering Wiki](http://192.168.1.135:8011/wiki/) - Rust
+  RDMA data path, native RC/DC, UCX, pull-RDMA, and future GPU-style
+  destinations.
+
 1. **[Handbook](../testops-handbook.md)** — lab/env access, how to run, watch a
    run, the build→seed→test→cleanup process, gotchas.
 2. **[Cross-Product TestOps Standard](../cross-product-testops-standard.md)** —

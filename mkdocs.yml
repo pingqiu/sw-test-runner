@@ -29,6 +29,10 @@ markdown_extensions:
 # holds the connective reference pages (mirrors seaweed_block's docs/ + docs/wiki).
 nav:
   - Home: wiki/index.md
+  - Wiki Links:
+      - Block Wiki: http://192.168.1.135:8010/wiki/
+      - RDMA Wiki: http://192.168.1.135:8011/wiki/
+      - TestOps Wiki: http://192.168.1.135:8012/wiki/
   - Start Here:
       - Handbook: testops-handbook.md
       - Tutorial: tutorial.md
