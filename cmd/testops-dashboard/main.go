@@ -372,10 +372,10 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
 <style>
  body{font-family:-apple-system,Segoe UI,Roboto,monospace;background:#15151f;color:#e0e0e0;margin:0}
  header{background:#1d1d2e;padding:12px 20px;border-bottom:1px solid #2a2a4a;display:flex;gap:18px;align-items:baseline}
- h1{font-size:1.05em;color:#a0a0c0;margin:0} .muted{color:#777;font-size:.8em}
- .pill{padding:2px 8px;border-radius:3px;font-size:.72em;font-weight:bold}
+ h1{font-size:1.25em;color:#a0a0c0;margin:0} .muted{color:#777;font-size:.9em}
+ .pill{padding:3px 10px;border-radius:3px;font-size:.9em;font-weight:bold}
  .pass{background:#1e5631;color:#b7e4c7}.fail{background:#7a241c;color:#f5b7b1}.other{background:#5a4a08;color:#f9e79f}
- table{width:100%;border-collapse:collapse;font-size:.86em} th,td{text-align:left;padding:7px 14px;border-bottom:1px solid #24243a}
+ table{width:100%;border-collapse:collapse;font-size:1.12em} th,td{text-align:left;padding:10px 16px;border-bottom:1px solid #24243a}
  th{color:#8a8ab0;font-weight:600;position:sticky;top:0;background:#15151f} tr:hover{background:#1c1c30}
  a{color:#5aa0ff;text-decoration:none} a:hover{text-decoration:underline} code{color:#9ad}
  .proj{color:#c0a0e0}
