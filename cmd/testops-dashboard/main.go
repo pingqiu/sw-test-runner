@@ -54,6 +54,7 @@ type run struct {
 	Project string // top-level dir under root (the owning project/agent), or "-"
 	RelDir  string // run dir relative to root (used as the report key)
 	HasHTML bool
+	Phase   string // in-progress runs only: "current_phase done/total"
 }
 
 type server struct {
@@ -131,12 +132,31 @@ func (s *server) scan() {
 		if parts := strings.SplitN(rel, "/", 2); len(parts) > 1 {
 			project = parts[0]
 		}
+		// Authoritative status lives in status.json (the runner writes state:
+		// running/pass/fail there). manifest.json carries no status field, so only
+		// fall back to it for legacy/synthetic bundles that embed one.
+		phase := ""
+		if sraw, e := os.ReadFile(filepath.Join(runDir, "status.json")); e == nil {
+			var st struct {
+				State        string `json:"state"`
+				CurrentPhase string `json:"current_phase"`
+				PhasesDone   int    `json:"phases_done"`
+				PhasesTotal  int    `json:"phases_total"`
+			}
+			if json.Unmarshal(sraw, &st) == nil && st.State != "" {
+				m.Status = st.State
+				if strings.EqualFold(st.State, "running") && st.PhasesTotal > 0 {
+					phase = fmt.Sprintf("%s %d/%d", st.CurrentPhase, st.PhasesDone, st.PhasesTotal)
+				}
+			}
+		}
 		_, htmlErr := os.Stat(filepath.Join(runDir, "result.html"))
 		found = append(found, run{
 			manifest: m,
 			Project:  project,
 			RelDir:   rel,
 			HasHTML:  htmlErr == nil,
+			Phase:    phase,
 		})
 		return nil
 	})
@@ -232,14 +252,16 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	runs := s.snapshot()
 	projects := map[string]int{}
-	pass, fail, other := 0, 0, 0
+	pass, fail, other, running := 0, 0, 0, 0
 	for _, rn := range runs {
 		projects[rn.Project]++
 		switch strings.ToLower(rn.Status) {
-		case "pass":
+		case "pass", "passed":
 			pass++
-		case "fail", "error":
+		case "fail", "failed", "error":
 			fail++
+		case "running", "in_progress":
+			running++
 		default:
 			other++
 		}
@@ -250,6 +272,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Root":     s.root,
 		"Projects": len(projects),
 		"Total":    len(runs),
+		"Running":  running,
 		"Pass":     pass,
 		"Fail":     fail,
 		"Other":    other,
@@ -356,10 +379,12 @@ var docPageTmpl = template.Must(template.New("dp").Parse(`<!DOCTYPE html><html l
 
 func statusClass(s string) string {
 	switch strings.ToLower(s) {
-	case "pass":
+	case "pass", "passed":
 		return "pass"
-	case "fail", "error":
+	case "fail", "failed", "error":
 		return "fail"
+	case "running", "in_progress":
+		return "running"
 	default:
 		return "other"
 	}
@@ -375,6 +400,8 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
  h1{font-size:1.25em;color:#a0a0c0;margin:0} .muted{color:#777;font-size:.9em}
  .pill{padding:3px 10px;border-radius:3px;font-size:.9em;font-weight:bold}
  .pass{background:#1e5631;color:#b7e4c7}.fail{background:#7a241c;color:#f5b7b1}.other{background:#5a4a08;color:#f9e79f}
+ .running{background:#1c3a5e;color:#9ad0ff;animation:pulse 1.4s ease-in-out infinite}
+ @keyframes pulse{50%{opacity:.5}}
  table{width:100%;border-collapse:collapse;font-size:1.12em} th,td{text-align:left;padding:10px 16px;border-bottom:1px solid #24243a}
  th{color:#8a8ab0;font-weight:600;position:sticky;top:0;background:#15151f} tr:hover{background:#1c1c30}
  a{color:#5aa0ff;text-decoration:none} a:hover{text-decoration:underline} code{color:#9ad}
@@ -384,6 +411,7 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
  <a href="/docs" style="color:#5aa0ff;text-decoration:none;font-size:.85em">Docs ›</a>
  <span class="muted">root <code>{{.Root}}</code></span>
  <span class="muted">{{.Projects}} projects · {{.Total}} runs ·
+   {{if .Running}}<span class="pill running">{{.Running}} running</span>{{end}}
    <span class="pill pass">{{.Pass}} pass</span>
    <span class="pill fail">{{.Fail}} fail</span>
    <span class="pill other">{{.Other}} other</span></span>
@@ -395,7 +423,7 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
 {{range .Runs}}<tr>
  <td class="proj">{{.Project}}</td>
  <td>{{.ScenarioName}}</td>
- <td><span class="pill {{sclass .Status}}">{{.Status}}</span></td>
+ <td><span class="pill {{sclass .Status}}">{{.Status}}</span>{{if .Phase}} <span class="muted">{{.Phase}}</span>{{end}}</td>
  <td class="muted">{{.StartedAt}}</td>
  <td><code>{{.GitSHA}}</code></td>
  <td class="muted">{{.Host}}</td>
