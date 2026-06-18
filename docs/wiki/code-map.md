@@ -31,24 +31,20 @@ Where things live, and how a scenario flows through the code.
 
 ## How a run flows
 
-```text
-cmd/<product>/main.go        register core + that product's pack(s)
-        │  os.Exit(cli.Run(register, args))
-        ▼
-cli.Run  ──►  parser.go      load + validate the scenario YAML
-        │
-        ▼
-engine.go ──► registry       for each phase, dispatch each action by name+tier
-        │         │
-        │         ▼
-        │   actions/* or packs/*   handler(ctx, actx, act) → (map, error)
-        │         │  uses infra.Node (SSH/local) to do real work
-        ▼         ▼
-reporter + runbundle   →  results/<run>/{manifest,status,result.html,...}
-        │
-        ▼
-dashboard  scans the shared results root and lists the run
+```mermaid
+flowchart TD
+  M["cmd/&lt;product&gt;/main.go<br/>register core + pack(s)"] --> CLI["cli.Run"]
+  CLI --> PARSE["parser.go<br/>load + validate YAML"]
+  PARSE --> ENG["engine.go<br/>sequence phases"]
+  ENG --> REG["registry<br/>name + tier → handler"]
+  REG --> HAND["actions/* or packs/*<br/>handler(ctx, actx, act)"]
+  HAND --> NODE["infra.Node<br/>SSH / local exec"]
+  ENG --> REP["reporter + runbundle"]
+  REP --> OUT["results/&lt;run&gt;/<br/>manifest · status · result.html"]
+  OUT --> DASH["dashboard<br/>scans the results root"]
 ```
+
+See [How It Works](how-it-works.md) for the full sequence + component diagrams.
 
 ## Action handler shape
 

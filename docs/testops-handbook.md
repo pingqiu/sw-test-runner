@@ -127,6 +127,29 @@ swblock run testops/scenarios/<scenario>.yaml \
 >    scenario default is already `/tmp/...`) or prefix:
 >    `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' swblock run ...`.
 
+### Tag your run so the dashboard can group it (metadata)
+
+When several people/agents share the dashboard, pass identity so your runs are
+easy to find and filter (the dashboard shows test_id, run_by, team, and filters
+by project/team):
+
+```bash
+swblock run -env product_root=/tmp/seaweed_block \
+  -meta project=block-qa -meta run_by="$(whoami)" -meta team=block \
+  -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  testops/scenarios/<scenario>.yaml
+```
+
+- `-meta KEY=VALUE` is repeatable; it lands in `manifest.json` and shows on the
+  dashboard. Keys it renders specially: **project** (overrides the results-dir
+  name), **run_by** (or `runner`), **team**, **test_id**. Any other key is kept
+  in the manifest for your own tooling.
+- Test-intrinsic identity (`test_id`, `team`, `owner`) can instead live in the
+  scenario's `metadata:` block so it travels with the test — see
+  [Scenario Syntax](wiki/syntax.md).
+- No flag handy? Drop a `meta.json` (`{"run_by":"…","team":"…"}`) into the run's
+  bundle dir to annotate it after the fact.
+
 ## 5. Watch status & read the report
 
 ### CLI

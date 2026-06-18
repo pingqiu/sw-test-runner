@@ -50,9 +50,13 @@ sweeds3 run scenarios/s3-smoke-chain.yaml \
 
 | Section | What |
 |---|---|
+| [How It Works](how-it-works.md) | The design — core + packs + binaries, the run pipeline, phases, variables, status. |
+| [Run Lifecycle & Cleanup](lifecycle.md) | build → seed → test → cleanup, cluster control, the cleanup discipline. |
+| [Scenario Syntax](syntax.md) | The scenario YAML — fields, phases, actions, variables. |
 | [Code Map](code-map.md) | Repo layout — where the engine, packs, actions, and binaries live. |
 | [Packs & Binaries](packs-and-binaries.md) | The per-product binaries and which action packs each one carries. |
 | [Scenarios](scenario-catalog.md) | The scenario catalog (public set) + how to list / validate / run. |
+| [Deploy & Operate](deploy.md) | Build, lab topology, nodes, the dashboard service, disk janitor. |
 | [Product Testing Guides](guides/block.md) | Per-product recipes: block, S3, VFS/RDMA. |
 | [Live Dashboard](dashboard.md) | The global run + docs view at `http://192.168.1.181:9099/`. |
 

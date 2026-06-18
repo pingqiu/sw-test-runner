@@ -19,7 +19,11 @@ plugins:
 markdown_extensions:
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight
   - pymdownx.inlinehilite
   - toc:
@@ -38,9 +42,13 @@ nav:
       - Tutorial: tutorial.md
       - Scenario Spec: scenario-spec.md
   - Standard: cross-product-testops-standard.md
-  - Architecture:
+  - Design:
+      - How It Works: wiki/how-it-works.md
+      - Run Lifecycle & Cleanup: wiki/lifecycle.md
+      - Scenario Syntax: wiki/syntax.md
       - Code Map: wiki/code-map.md
       - Packs & Binaries: wiki/packs-and-binaries.md
+  - Deploy & Operate: wiki/deploy.md
   - Product Testing Guides:
       - Block (iSCSI / NVMe): wiki/guides/block.md
       - S3 Gateway: wiki/guides/s3.md
