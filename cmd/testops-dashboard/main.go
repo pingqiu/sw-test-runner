@@ -331,10 +331,11 @@ func (s *server) handleDocs(w http.ResponseWriter, r *http.Request) {
 // dir are hidden from the list, though still renderable by direct URL). Hand an
 // agent /docs and this is the path: how → the contract → the schema → optional.
 var docReadingOrder = []string{
-	"testops-handbook.md",              // how: lab access, run, watch, the process
-	"cross-product-testops-standard.md", // the contract to follow (observable runs)
-	"scenario-spec.md",                 // the exact YAML schema
-	"tutorial.md",                      // optional hands-on intro
+	"testops-handbook.md",                // how: lab access, run, watch, the process
+	"cross-product-testops-standard.md",  // the contract to follow (observable runs)
+	"scenario-spec.md",                   // the exact YAML schema
+	"tutorial.md",                        // optional hands-on intro
+	"rdma-vfs-s3-testing-start-here.md",  // product guide: VFS + S3 over RDMA (sra-next)
 }
 
 func docTitle(path string) string {
@@ -368,7 +369,7 @@ var docsListTmpl = template.Must(template.New("dl").Parse(`<!DOCTYPE html><html 
 <title>TestOps — docs</title><style>` + docCSS + `</style></head><body>
 <nav><a href="/">‹ Runs</a><a href="/docs">Docs</a></nav>
 <div class="wrap doclist"><h1>TestOps docs</h1>
-<p style="color:#8a8ab0">Read in order: <b>Handbook</b> (how, on our lab) → <b>Standard</b> (the contract to follow) → <b>Scenario Spec</b> (the YAML schema) → <b>Tutorial</b> (optional hands-on). Follow the Standard so runs land in the shared results root and show up here.</p>
+<p style="color:#8a8ab0">Read in order: <b>Handbook</b> (how, on our lab) → <b>Standard</b> (the contract to follow) → <b>Scenario Spec</b> (the YAML schema) → <b>Tutorial</b> (optional). Then <b>product testing guides</b> (e.g. VFS/S3 over RDMA). Follow the Standard so runs land in the shared results root and show up here.</p>
 {{range .Docs}}<a href="/docs?f={{.File}}"><b>{{.Title}}</b><div class="f">{{.File}}</div></a>{{else}}<p>no markdown under -docs dir</p>{{end}}
 </div></body></html>`))
 
