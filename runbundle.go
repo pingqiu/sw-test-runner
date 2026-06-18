@@ -29,6 +29,10 @@ type RunManifest struct {
 	Host           string `json:"host,omitempty"`
 	Status         string `json:"status,omitempty"`
 	CommandLine    string `json:"command_line,omitempty"`
+	// Metadata is free-form, dashboard-friendly identity for this run: the
+	// scenario's `metadata:` block (test_id, team, owner, ...) merged with any
+	// run-context passed via `run -meta key=value` (project, run_by, ...).
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // RunBundle manages the per-run output directory.
@@ -146,6 +150,7 @@ func CreateRunBundle(resultsRoot, scenarioFile string, cmdLine []string) (*RunBu
 		GitSHA:         gitSHA(),
 		Host:           hostname(),
 		CommandLine:    strings.Join(cmdLine, " "),
+		Metadata:       cloneMeta(scenario.Metadata),
 	}
 
 	b := &RunBundle{
@@ -301,6 +306,35 @@ func (b *RunBundle) writeProvenance() error {
 // ArtifactsDir returns the path to the artifacts subdirectory.
 func (b *RunBundle) ArtifactsDir() string {
 	return filepath.Join(b.Dir, "artifacts")
+}
+
+// cloneMeta returns a copy of m (nil for empty) so the bundle doesn't alias the
+// parsed scenario's map.
+func cloneMeta(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// MergeMetadata merges run-context key/values (e.g. project, run_by, team) into
+// the manifest's metadata map and rewrites manifest.json. Keys already present
+// (e.g. from the scenario's metadata block) are overwritten. Safe on nil/empty.
+func (b *RunBundle) MergeMetadata(kv map[string]string) error {
+	if b == nil || len(kv) == 0 {
+		return nil
+	}
+	if b.Manifest.Metadata == nil {
+		b.Manifest.Metadata = make(map[string]string, len(kv))
+	}
+	for k, v := range kv {
+		b.Manifest.Metadata[k] = v
+	}
+	return b.writeManifest()
 }
 
 func (b *RunBundle) writeManifest() error {

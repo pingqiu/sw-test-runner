@@ -7,6 +7,12 @@ import (
 // Scenario is the top-level YAML structure for a test scenario.
 type Scenario struct {
 	Name      string                `yaml:"name"`
+	// Metadata is free-form, dashboard-friendly identity for the TEST itself
+	// (e.g. test_id, team, owner, suite, labels). It flows into the run
+	// bundle's manifest.json so multiple agents/teams sharing one dashboard can
+	// tell runs apart and filter them. Run-context that varies per execution
+	// (project, run_by) is better passed with `run -meta key=value`.
+	Metadata  map[string]string     `yaml:"metadata,omitempty"`
 	Timeout   Duration              `yaml:"timeout"`
 	Env       map[string]string     `yaml:"env"`
 	Cluster   *ClusterSpec          `yaml:"cluster,omitempty"`
