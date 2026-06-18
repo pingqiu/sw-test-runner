@@ -267,12 +267,20 @@ func (s *server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	f := strings.TrimSpace(r.URL.Query().Get("f"))
 	if f == "" {
 		files, _ := filepath.Glob(filepath.Join(s.docsDir, "*.md"))
+		rank := map[string]int{}
+		for i, f := range docReadingOrder {
+			rank[f] = i
+		}
 		type entry struct{ File, Title string }
 		var docs []entry
 		for _, p := range files {
-			docs = append(docs, entry{File: filepath.Base(p), Title: docTitle(p)})
+			f := filepath.Base(p)
+			if _, ok := rank[f]; !ok {
+				continue // hide internal roadmap/evidence from the agent-facing list
+			}
+			docs = append(docs, entry{File: f, Title: docTitle(p)})
 		}
-		sort.Slice(docs, func(i, j int) bool { return docs[i].File < docs[j].File })
+		sort.Slice(docs, func(i, j int) bool { return rank[docs[i].File] < rank[docs[j].File] })
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		docsListTmpl.Execute(w, map[string]any{"Docs": docs})
 		return
@@ -293,6 +301,17 @@ func (s *server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	docPageTmpl.Execute(w, map[string]any{"Title": f, "Body": template.HTML(buf.String())})
+}
+
+// docReadingOrder is the curated, agent-facing follow-set shown at /docs, in
+// reading order. ONLY these are listed (internal roadmap/evidence md in the docs
+// dir are hidden from the list, though still renderable by direct URL). Hand an
+// agent /docs and this is the path: how → the contract → the schema → optional.
+var docReadingOrder = []string{
+	"testops-handbook.md",              // how: lab access, run, watch, the process
+	"cross-product-testops-standard.md", // the contract to follow (observable runs)
+	"scenario-spec.md",                 // the exact YAML schema
+	"tutorial.md",                      // optional hands-on intro
 }
 
 func docTitle(path string) string {
@@ -326,6 +345,7 @@ var docsListTmpl = template.Must(template.New("dl").Parse(`<!DOCTYPE html><html 
 <title>TestOps — docs</title><style>` + docCSS + `</style></head><body>
 <nav><a href="/">‹ Runs</a><a href="/docs">Docs</a></nav>
 <div class="wrap doclist"><h1>TestOps docs</h1>
+<p style="color:#8a8ab0">Read in order: <b>Handbook</b> (how, on our lab) → <b>Standard</b> (the contract to follow) → <b>Scenario Spec</b> (the YAML schema) → <b>Tutorial</b> (optional hands-on). Follow the Standard so runs land in the shared results root and show up here.</p>
 {{range .Docs}}<a href="/docs?f={{.File}}"><b>{{.Title}}</b><div class="f">{{.File}}</div></a>{{else}}<p>no markdown under -docs dir</p>{{end}}
 </div></body></html>`))
 
