@@ -38,6 +38,37 @@ Point the runner at the shared results root, under your project's subdir:
 The shared root is on SMB (`//192.168.1.34/Work`), so bundles do **not** consume
 m01/m02 local disk.
 
+## Run metadata (test_id · project · run_by · team)
+
+When several agents/teams share the dashboard, tag runs so they're easy to tell
+apart and filter. Metadata lands in `manifest.json` and the dashboard surfaces it
+(test_id under the scenario, run_by under the host, team as a chip; the project
+link and team chip filter the view, or use `?project=…` / `?team=…`).
+
+Three ways to set it, highest precedence last:
+
+1. **Scenario `metadata:` block** — test-intrinsic identity that travels with the
+   scenario:
+   ```yaml
+   name: vfs-rc-readonly-smoke
+   metadata:
+     test_id: vfs-rc-smoke
+     team: rdma
+     owner: vfs-rdma-qa
+   ```
+2. **`run -meta key=value`** (repeatable) — run-context that varies per execution:
+   ```bash
+   swblock run <scenario> -meta project=rdma-qa -meta run_by=vfs-rdma-agent \
+     -results-dir /mnt/smb/work/share/testops/results/rdma-qa
+   ```
+3. **`meta.json` sidecar** — drop
+   `{"test_id":…,"run_by":…,"team":…,"project":…}` into the bundle dir to annotate
+   a run after the fact (no runner change needed).
+
+Keys the dashboard renders specially: **test_id**, **project** (overrides the dir
+name), **run_by** (or `runner`), **team**. Any other keys stay in `manifest.json`
+for your own tooling.
+
 ## Deployment
 
 `testops-dashboard` runs as a **systemd service on M01** (auto-starts on boot):

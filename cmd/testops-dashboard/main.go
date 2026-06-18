@@ -47,14 +47,20 @@ type manifest struct {
 	GitSHA       string `json:"git_sha"`
 	Host         string `json:"host"`
 	Status       string `json:"status"`
+	// Metadata is the runner's free-form run metadata (scenario `metadata:` block
+	// + `run -meta key=value`): test_id, project, run_by, team, labels, ...
+	Metadata map[string]string `json:"metadata"`
 }
 
 type run struct {
 	manifest
-	Project string // top-level dir under root (the owning project/agent), or "-"
+	Project string // metadata.project, else the top-level dir under root, or "-"
 	RelDir  string // run dir relative to root (used as the report key)
 	HasHTML bool
 	Phase   string // in-progress runs only: "current_phase done/total"
+	TestID  string // metadata.test_id — stable id for the test (vs per-run RunID)
+	RunBy   string // metadata.run_by / runner — who / which agent ran it
+	Team    string // metadata.team — owning team
 }
 
 type server struct {
@@ -150,6 +156,27 @@ func (s *server) scan() {
 				}
 			}
 		}
+		// Metadata: manifest.metadata (scenario block + `run -meta`) overlaid with
+		// an optional meta.json sidecar so an agent can annotate a run post-hoc.
+		meta := map[string]string{}
+		for k, v := range m.Metadata {
+			meta[k] = v
+		}
+		if mraw, e := os.ReadFile(filepath.Join(runDir, "meta.json")); e == nil {
+			var sm map[string]string
+			if json.Unmarshal(mraw, &sm) == nil {
+				for k, v := range sm {
+					meta[k] = v
+				}
+			}
+		}
+		if p := meta["project"]; p != "" {
+			project = p // an explicit project wins over the directory name
+		}
+		runBy := meta["run_by"]
+		if runBy == "" {
+			runBy = meta["runner"]
+		}
 		_, htmlErr := os.Stat(filepath.Join(runDir, "result.html"))
 		found = append(found, run{
 			manifest: m,
@@ -157,6 +184,9 @@ func (s *server) scan() {
 			RelDir:   rel,
 			HasHTML:  htmlErr == nil,
 			Phase:    phase,
+			TestID:   meta["test_id"],
+			RunBy:    runBy,
+			Team:     meta["team"],
 		})
 		return nil
 	})
@@ -250,10 +280,20 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	runs := s.snapshot()
+	all := s.snapshot()
+	fProject := strings.TrimSpace(r.URL.Query().Get("project"))
+	fTeam := strings.TrimSpace(r.URL.Query().Get("team"))
+	runs := make([]run, 0, len(all))
 	projects := map[string]int{}
 	pass, fail, other, running := 0, 0, 0, 0
-	for _, rn := range runs {
+	for _, rn := range all {
+		if fProject != "" && rn.Project != fProject {
+			continue
+		}
+		if fTeam != "" && rn.Team != fTeam {
+			continue
+		}
+		runs = append(runs, rn)
 		projects[rn.Project]++
 		switch strings.ToLower(rn.Status) {
 		case "pass", "passed":
@@ -266,6 +306,16 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			other++
 		}
 	}
+	filter := ""
+	if fProject != "" {
+		filter = "project=" + fProject
+	}
+	if fTeam != "" {
+		if filter != "" {
+			filter += " · "
+		}
+		filter += "team=" + fTeam
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	indexTmpl.Execute(w, map[string]any{
 		"Runs":     runs,
@@ -276,6 +326,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Pass":     pass,
 		"Fail":     fail,
 		"Other":    other,
+		"Filter":   filter,
 		"Now":      time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 	})
 }
@@ -407,6 +458,9 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
  th{color:#8a8ab0;font-weight:600;position:sticky;top:0;background:#15151f} tr:hover{background:#1c1c30}
  a{color:#5aa0ff;text-decoration:none} a:hover{text-decoration:underline} code{color:#9ad}
  .proj{color:#c0a0e0}
+ .chip{background:#2a2a44;color:#b9b9e0;padding:1px 7px;border-radius:8px;font-size:.7em;margin-left:6px}
+ .sub{display:block;color:#777;font-size:.74em;margin-top:2px}
+ .bar{background:#23233a;padding:6px 20px;font-size:.85em;color:#9ad0ff}
 </style></head><body>
 <header><h1>TestOps — global runs</h1>
  <a href="/docs" style="color:#5aa0ff;text-decoration:none;font-size:.85em">Docs ›</a>
@@ -418,16 +472,17 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
    <span class="pill other">{{.Other}} other</span></span>
  <span class="muted" style="margin-left:auto">read-only · {{.Now}} · auto-refresh 15s</span>
 </header>
+{{if .Filter}}<div class="bar">filtered: <b>{{.Filter}}</b> · <a href="/">clear ✕</a></div>{{end}}
 <table><thead><tr>
  <th>project</th><th>scenario</th><th>status</th><th>started</th><th>commit</th><th>host</th><th>report</th>
 </tr></thead><tbody>
 {{range .Runs}}<tr>
- <td class="proj">{{.Project}}</td>
- <td>{{.ScenarioName}}</td>
+ <td class="proj"><a class="proj" href="/?project={{.Project}}">{{.Project}}</a>{{if .Team}}<a class="chip" href="/?team={{.Team}}">{{.Team}}</a>{{end}}</td>
+ <td>{{.ScenarioName}}{{if .TestID}}<span class="sub">{{.TestID}}</span>{{end}}</td>
  <td><span class="pill {{sclass .Status}}">{{.Status}}</span>{{if .Phase}} <span class="muted">{{.Phase}}</span>{{end}}</td>
  <td class="muted">{{.StartedAt}}</td>
  <td><code>{{.GitSHA}}</code></td>
- <td class="muted">{{.Host}}</td>
+ <td class="muted">{{.Host}}{{if .RunBy}}<span class="sub">by {{.RunBy}}</span>{{end}}</td>
  <td>{{if .HasHTML}}<a href="/report?run={{.RelDir}}" target="_blank">result.html</a>{{else}}<span class="muted">-</span>{{end}}</td>
 </tr>{{else}}<tr><td colspan="7" class="muted">no run bundles under root</td></tr>{{end}}
 </tbody></table></body></html>`))
