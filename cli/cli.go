@@ -1706,6 +1706,20 @@ func listCmd() {
 
 	byTier := registry.ListByTier()
 	tierOrder := []string{tr.TierCore, tr.TierBlock, tr.TierDevOps, tr.TierChaos, actions.TierK8s}
+	// Append any product-pack tiers not in the fixed order (e.g. s3, vfs) so a
+	// new pack's actions are visible in `list` without editing this slice.
+	known := make(map[string]bool, len(tierOrder))
+	for _, t := range tierOrder {
+		known[t] = true
+	}
+	extra := make([]string, 0)
+	for t := range byTier {
+		if !known[t] {
+			extra = append(extra, t)
+		}
+	}
+	sort.Strings(extra)
+	tierOrder = append(tierOrder, extra...)
 
 	fmt.Println("Registered actions:")
 	for _, tier := range tierOrder {
