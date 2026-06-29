@@ -39,6 +39,7 @@ nav:
       - TestOps Wiki: http://192.168.1.135:8012/wiki/
   - Start Here:
       - Handbook: testops-handbook.md
+      - Storage Platform SOP: storage-testops-platform.md
       - Tutorial: tutorial.md
       - Scenario Spec: scenario-spec.md
   - Standard: cross-product-testops-standard.md
