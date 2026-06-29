@@ -9,6 +9,7 @@ inject faults, collect artifacts, emit JUnit XML.
 ## What it is for
 
 - end-to-end smoke tests for block-storage products (V2 weed-block, V3 seaweed-block)
+- S3 gateway and RDMA lab gates for object/VFS data paths
 - iSCSI / NVMe-oF target integration scenarios
 - multi-node failover and rebuild scenarios
 - chaos / fault injection (`netem`, `iptables`, disk-fill, kill-loop)
@@ -86,6 +87,8 @@ make wiki                # serve the wiki locally
 ├── packs/                        product-specific action sets
 │   ├── block/                    V2 seaweedfs weed-block
 │   ├── kv/                       V2 seaweedfs kv/object
+│   ├── s3/                       SeaweedFS S3 gateway
+│   ├── rdma/                     M01/M02 RDMA lab gates
 │   └── v3block/                  V3 seaweed-block
 ├── scenarios/                    bundled scenario YAMLs (V2 baselines + V3)
 ├── cmd/sw-test-runner/           CLI entry
@@ -166,6 +169,10 @@ swblock validate-bundle \
 See `packs/v3block/` for a worked example (~600 LOC, 7 actions: spawn three
 V3 daemon types, apply cluster spec, wait for primary, parse status, assert
 no-V2-authority-leak in logs).
+
+For cross-product storage gates, start with
+`docs/storage-testops-platform.md`. It maps the current block, S3, VFS, and
+RDMA surfaces and points at the RDMA unified lab scenario.
 
 ## Tiers (action categories)
 
