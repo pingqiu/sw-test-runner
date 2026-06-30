@@ -323,8 +323,9 @@ first real team workflow.
      perf rows.
 
 4. **Add M01 controller-lite design.**
-   - Minimal service or systemd timer/poller.
-   - One queue, one lab lease, one runner command.
+   - Initial implementation: `scripts/testops-ci-submit.sh` and
+     `scripts/testops-ci-worker.sh`.
+   - One queue, one RDMA lab lease, one runner command.
    - Verify: one manual trigger creates a dashboard-visible run.
 
 5. **Add binary-store design and first implementation.**

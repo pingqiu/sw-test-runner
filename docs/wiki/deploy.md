@@ -72,6 +72,34 @@ sudo install -m 755 testops-dashboard /usr/local/bin/testops-dashboard
 sudo systemctl restart testops-dashboard
 ```
 
+## Controller-Lite (M01 RDMA CI)
+
+Before a full web/API controller exists, M01 can run a small file-queue worker
+for RDMA gates:
+
+```bash
+# Submit a run request.
+TESTOPS_MONO_REF=main ./scripts/testops-ci-submit.sh
+
+# Process one request, useful for manual validation.
+./scripts/testops-ci-worker.sh --once
+
+# Or run continuously under systemd/cron.
+TESTOPS_POLL_SECONDS=10 ./scripts/testops-ci-worker.sh
+```
+
+The worker:
+
+- reads requests from `/mnt/smb/work/share/testops/queue/rdma-ci`;
+- takes one lab lock at `/mnt/smb/work/share/testops/locks/rdma-lab.lock`;
+- calls `scripts/run-rdma-ci.sh`;
+- writes result bundles to `/mnt/smb/work/share/testops/results/rdma-ci`;
+- moves requests to `state/rdma-ci/done` or `state/rdma-ci/failed`;
+- writes logs under `/mnt/smb/work/share/testops/logs/rdma-ci`.
+
+This is intentionally smaller than the future controller. It proves the team
+workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
+
 ## Disk hygiene
 
 A weekly **`testops-janitor`** systemd timer on M01 + M02 prunes docker dangling
