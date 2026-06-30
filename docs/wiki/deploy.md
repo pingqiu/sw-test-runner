@@ -95,11 +95,26 @@ The worker:
 - calls `scripts/run-rdma-ci.sh`;
 - writes result bundles to `/mnt/smb/work/share/testops/results/rdma-ci`;
 - moves requests to `state/rdma-ci/done` or `state/rdma-ci/failed`;
+- writes request status JSON under `state/rdma-ci/status`;
+- updates `state/rdma-ci/status/last-run.json`;
 - writes logs under `/mnt/smb/work/share/testops/logs/rdma-ci`.
 
 On M01 the wrapper defaults to `TESTOPS_SSH_KEY=/home/testdev/.ssh/id_ed25519`
 so the scenario can SSH back into M01. Override `TESTOPS_SSH_KEY` when running
 from another controller host.
+
+Optional notifications:
+
+```bash
+# Send mail when a queued request finishes, if /usr/bin/mail is configured.
+TESTOPS_NOTIFY_EMAIL=dev@example.com ./scripts/testops-ci-worker.sh
+
+# Or call a custom hook. The worker exports TESTOPS_NOTIFY_STATE,
+# TESTOPS_NOTIFY_REQUEST_ID, TESTOPS_NOTIFY_LOG, TESTOPS_NOTIFY_BUNDLE,
+# TESTOPS_NOTIFY_SUBJECT, and TESTOPS_NOTIFY_BODY.
+TESTOPS_NOTIFY_CMD='printf "%s\n" "$TESTOPS_NOTIFY_BODY" >> /tmp/testops-notify.log' \
+  ./scripts/testops-ci-worker.sh
+```
 
 This is intentionally smaller than the future controller. It proves the team
 workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
