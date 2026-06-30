@@ -51,8 +51,34 @@ mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
 ```
 
 - **Start here:** `docs/testops-handbook.md`, `docs/cross-product-testops-standard.md`, `docs/scenario-spec.md`, `docs/tutorial.md`
+- **For development agents:** `docs/agent-testops-runbook.md` — the short
+  guide for Block, S3, VFS, and RDMA agents running shared lab tests and
+  reporting evidence.
 - **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
 - **Live run dashboard:** http://192.168.1.181:9099/ (global, read-only)
+
+## Agent quick start
+
+For RDMA PR/lab validation, submit to the M01 queue so the lab lock, shared
+results, and dashboard metadata are handled consistently:
+
+```bash
+ssh testdev@192.168.1.181
+cd /opt/rdma-lab-ci/sw-test-runner
+TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
+```
+
+For Block/S3/VFS scenarios, run the product binary with shared results and
+metadata:
+
+```bash
+swblock run <scenario.yaml> -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -meta project=block-qa -meta team=block -meta run_by=<agent> \
+  -meta test_id=<test-id> -meta branch=<branch-or-sha> -meta commit=<sha>
+```
+
+Watch runs at http://192.168.1.181:9099/. Report the `project/run_id`, bundle
+path, branch/commit, pass/fail, and key metrics.
 
 ## Build
 

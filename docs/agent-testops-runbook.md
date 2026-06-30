@@ -6,6 +6,51 @@ VFS, or RDMA tests.
 Use this when you need to prove a change. Do not invent a private test flow when
 a TestOps scenario already exists.
 
+## One-Minute Paths
+
+RDMA agent:
+
+```bash
+ssh testdev@192.168.1.181
+cd /opt/rdma-lab-ci/sw-test-runner
+TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
+```
+
+Then watch:
+
+```text
+http://192.168.1.181:9099/?project=rdma-ci
+```
+
+Block agent:
+
+```bash
+swblock run <scenario.yaml> \
+  -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -meta project=block-qa \
+  -meta team=block \
+  -meta run_by=<agent-name> \
+  -meta test_id=<stable-test-id> \
+  -meta branch=<branch-or-sha> \
+  -meta commit=<sha>
+```
+
+S3/VFS agent:
+
+```bash
+sweeds3 run <scenario.yaml> \
+  -results-dir /mnt/smb/work/share/testops/results/s3-qa \
+  -meta project=s3-qa \
+  -meta team=s3 \
+  -meta run_by=<agent-name> \
+  -meta test_id=<stable-test-id> \
+  -meta branch=<branch-or-sha> \
+  -meta commit=<sha>
+```
+
+Report the dashboard run, bundle path, commit, pass/fail, and the first failing
+assertion if the run fails.
+
 ## Golden Rules
 
 - Put every serious run on the shared dashboard.
