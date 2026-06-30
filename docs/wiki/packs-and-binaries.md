@@ -13,10 +13,12 @@ binaries**. You pick the binary that carries the packs you need; the all-in-one
 | `weedblock` | core + `block` + `kv` | V2 seaweed-block + KV (legacy V2 line). |
 | `weedv1` | core + `v1weed` | V1 weed (stub / legacy). |
 | `sweeds3` | core + `s3` | **S3 gateway** testing. |
+| `sweedrdma` | core + `rdma` | M01/M02 RDMA lab gates. |
 | `testops-dashboard` | — (read-only viewer) | Global runs + docs view ([dashboard](dashboard.md)). |
+| `testops-controller` | — (queue submit/status) | Safe RDMA queue submitter for the M01 controller-lite worker. |
 
 > `sw-test-runner` is the common all-in-one — it does **not** include the `s3` or
-> `v1weed` packs. Use `sweeds3` for S3 and `weedv1` for V1.
+> `v1weed` packs. Use `sweeds3` for S3, `sweedrdma` for RDMA, and `weedv1` for V1.
 
 ## Packs (`packs/`)
 

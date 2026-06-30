@@ -16,6 +16,14 @@ cd /opt/rdma-lab-ci/sw-test-runner
 TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 ```
 
+If the controller service is running, API submit is equivalent:
+
+```bash
+curl -X POST http://192.168.1.181:9109/api/rdma/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"mono_ref":"<branch-or-sha>","run_by":"<agent-name>"}'
+```
+
 Then watch:
 
 ```text

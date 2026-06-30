@@ -80,6 +80,15 @@ swblock run <scenario.yaml> -results-dir /mnt/smb/work/share/testops/results/blo
 Watch runs at http://192.168.1.181:9099/. Report the `project/run_id`, bundle
 path, branch/commit, pass/fail, and key metrics.
 
+If the controller service is running, the same RDMA queue can be submitted by
+web/API through `testops-controller`:
+
+```bash
+curl -X POST http://m01:9109/api/rdma/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"mono_ref":"main","run_by":"dev-agent"}'
+```
+
 ## Build
 
 ```bash
@@ -118,6 +127,7 @@ make wiki                # serve the wiki locally
 │   └── v3block/                  V3 seaweed-block
 ├── scenarios/                    bundled scenario YAMLs (V2 baselines + V3)
 ├── cmd/sw-test-runner/           CLI entry
+├── cmd/testops-controller/       safe RDMA queue submit/status web API
 └── internal/blockapi/            internal HTTP client (V2 master REST)
 ```
 

@@ -32,9 +32,9 @@ The same foundation should support two uses:
 | Agent mode | Exists as a foundation. It has coordinator/agent commands, persistent registration, token auth, `/run`, `/exec`, and `/artifacts`. |
 | Dashboard | Exists at `http://192.168.1.181:9099/`. It is read-only and scans shared result bundles. |
 | Shared results | Exists under `/mnt/smb/work/share/testops/results`. |
-| M01 CI | Exists as a lab runner for RDMA gates, but it is still script/service oriented rather than a full controller. |
+| M01 CI | Exists as a lab runner for RDMA gates. `testops-controller` can submit runs to the M01 queue; the worker executes them under the lab lock. |
 | Binary store | Not standardized yet. Lab runs still mix build-in-place, copied binaries, and product-specific scripts. |
-| Queue / lease | Not standardized yet. Singleton lab resources can still collide if two heavy runs start together. |
+| Queue / lease | Exists for RDMA M01/M02 gates. Other products still need the same pattern. |
 | Comparison database | Not standardized yet. The bundle has enough data, but trending and regression baselines are not first-class. |
 
 ## SSH and Agent Roles
@@ -216,6 +216,7 @@ Work:
 - add a small `testops-ci` service on M01;
 - implement one queue;
 - implement one lab lease for M01/M02 RDMA hardware;
+- add `testops-controller` as the safe web/API submitter for the queue;
 - invoke `sweedrdma run ...` or product-specific runners;
 - write bundles to the shared results root;
 - send optional email/GitHub status on pass/fail.
@@ -323,8 +324,9 @@ first real team workflow.
      perf rows.
 
 4. **Add M01 controller-lite design.**
-   - Initial implementation: `scripts/testops-ci-submit.sh` and
-     `scripts/testops-ci-worker.sh`.
+   - Status: implemented for RDMA.
+   - Initial implementation: `scripts/testops-ci-submit.sh`,
+     `scripts/testops-ci-worker.sh`, and `cmd/testops-controller`.
    - One queue, one RDMA lab lease, one runner command.
    - Verify: one manual trigger creates a dashboard-visible run.
 

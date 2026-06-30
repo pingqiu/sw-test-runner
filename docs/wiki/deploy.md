@@ -74,8 +74,8 @@ sudo systemctl restart testops-dashboard
 
 ## Controller-Lite (M01 RDMA CI)
 
-Before a full web/API controller exists, M01 can run a small file-queue worker
-for RDMA gates:
+M01 runs a small file-queue worker for RDMA gates. The worker is the only process
+that executes the gate; it takes the lab lock and calls `scripts/run-rdma-ci.sh`.
 
 ```bash
 # Submit a run request.
@@ -118,6 +118,62 @@ TESTOPS_NOTIFY_CMD='printf "%s\n" "$TESTOPS_NOTIFY_BODY" >> /tmp/testops-notify.
 
 This is intentionally smaller than the future controller. It proves the team
 workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
+
+## Controller Web/API
+
+`testops-controller` is the safe web/API submitter for the same queue. It does
+not run shell commands and does not replace the worker. A submit request only
+writes one `.env` file under the RDMA queue.
+
+```bash
+testops-controller \
+  -queue /mnt/smb/work/share/testops/queue/rdma-ci \
+  -state /mnt/smb/work/share/testops/state/rdma-ci \
+  -logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -dashboard http://192.168.1.181:9099/ \
+  -port 9109
+```
+
+Systemd example:
+
+```ini
+# /etc/systemd/system/testops-controller.service
+[Service]
+User=testdev
+WorkingDirectory=/opt/rdma-lab-ci/sw-test-runner
+Environment=TESTOPS_CONTROLLER_TOKEN=
+ExecStart=/usr/local/bin/testops-controller \
+  -queue /mnt/smb/work/share/testops/queue/rdma-ci \
+  -state /mnt/smb/work/share/testops/state/rdma-ci \
+  -logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -dashboard http://192.168.1.181:9099/ \
+  -port 9109
+Restart=always
+```
+
+Optional submit token:
+
+```bash
+TESTOPS_CONTROLLER_TOKEN=<token> testops-controller -port 9109
+```
+
+Submit by API:
+
+```bash
+curl -X POST http://m01:9109/api/rdma/submit \
+  -H 'Content-Type: application/json' \
+  -H 'X-TestOps-Token: <token>' \
+  -d '{"mono_ref":"rdma/my-branch","run_by":"dev-agent"}'
+```
+
+Check status:
+
+```bash
+curl http://m01:9109/api/status
+```
+
+Keep `testops-dashboard` read-only. Use `testops-controller` for submits and
+the dashboard for run reports.
 
 ## Disk hygiene
 
