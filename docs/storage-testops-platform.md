@@ -247,3 +247,8 @@ Current accepted RDMA gate shape:
 4. Keep RDMA hardware and software-RDMA gates as release blockers for RDMA PRs.
 5. Add comparison baselines against external products only when the workload and
    units are identical and reproducible.
+
+For the platform direction beyond individual gates, see
+[TestOps Control Plane Roadmap](testops-control-plane-roadmap.md): M01 CI,
+SSH/agent execution, binary stores, shared dashboard tracking, future UI, and
+SiteOps mode.

@@ -40,6 +40,7 @@ nav:
   - Start Here:
       - Handbook: testops-handbook.md
       - Storage Platform SOP: storage-testops-platform.md
+      - Control Plane Roadmap: testops-control-plane-roadmap.md
       - Tutorial: tutorial.md
       - Scenario Spec: scenario-spec.md
   - Standard: cross-product-testops-standard.md

@@ -18,11 +18,16 @@ Related local docs:
 
 1. **[Handbook](../testops-handbook.md)** — lab/env access, how to run, watch a
    run, the build→seed→test→cleanup process, gotchas.
-2. **[Cross-Product TestOps Standard](../cross-product-testops-standard.md)** —
+2. **[Storage Platform SOP](../storage-testops-platform.md)** — the shared
+   storage testing workflow across block, S3, VFS, and RDMA.
+3. **[Control Plane Roadmap](../testops-control-plane-roadmap.md)** — how the
+   runner, dashboard, M01 CI, SSH/agent execution, binary store, and future UI
+   grow into a team TestOps / SiteOps control plane.
+4. **[Cross-Product TestOps Standard](../cross-product-testops-standard.md)** —
    the contract every scenario follows so runs are observable and projects don't
    collide on the shared lab.
-3. **[Scenario Spec](../scenario-spec.md)** — the exact YAML schema.
-4. **[Tutorial](../tutorial.md)** — hands-on walkthrough (optional).
+5. **[Scenario Spec](../scenario-spec.md)** — the exact YAML schema.
+6. **[Tutorial](../tutorial.md)** — hands-on walkthrough (optional).
 
 ## The 5-minute model
 
