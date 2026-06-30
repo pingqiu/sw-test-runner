@@ -73,15 +73,33 @@ type server struct {
 }
 
 type controlConfig struct {
-	queueDir string
-	stateDir string
-	logDir   string
-	token    string
-	now      func() time.Time
+	queueRoot string
+	stateRoot string
+	logRoot   string
+	token     string
+	suites    map[string]suiteConfig
+	now       func() time.Time
+}
+
+type suiteConfig struct {
+	Name          string
+	Project       string
+	Team          string
+	DefaultTestID string
+	DefaultRef    string
+	DefaultRepo   string
+	SubmitEnabled bool
+}
+
+type suiteView struct {
+	suiteConfig
+	Status controlStatus
 }
 
 type controlSubmitRequest struct {
+	Suite    string `json:"suite"`
 	MonoRef  string `json:"mono_ref"`
+	Ref      string `json:"ref"`
 	MonoRepo string `json:"mono_repo"`
 	RunBy    string `json:"run_by"`
 	Team     string `json:"team"`
@@ -103,6 +121,7 @@ type controlFileEntry struct {
 }
 
 type controlStatus struct {
+	Suite       string             `json:"suite"`
 	Queue       []controlFileEntry `json:"queue"`
 	Running     []controlFileEntry `json:"running"`
 	Done        []controlFileEntry `json:"done"`
@@ -115,14 +134,34 @@ type controlStatus struct {
 const (
 	controlDefaultMonoRepo = "git@github.com:seaweedfs/seaweed-mono.git"
 	controlDefaultRunBy    = "testops-dashboard"
-	controlDefaultTeam     = "rdma"
-	controlDefaultProject  = "rdma-ci"
-	controlDefaultTestID   = "rdma-unified-lab-gate"
 	controlMaxFieldLen     = 256
 	controlMaxListedFiles  = 30
 )
 
 var controlSafeValue = regexp.MustCompile(`^[A-Za-z0-9._@:/+=,-]+$`)
+
+func defaultSuites() map[string]suiteConfig {
+	return map[string]suiteConfig{
+		"rdma": {
+			Name:          "rdma",
+			Project:       "rdma-ci",
+			Team:          "rdma",
+			DefaultTestID: "rdma-unified-lab-gate",
+			DefaultRef:    "main",
+			DefaultRepo:   controlDefaultMonoRepo,
+			SubmitEnabled: true,
+		},
+		"block": {
+			Name:          "block",
+			Project:       "block-ci",
+			Team:          "block",
+			DefaultTestID: "block-unified-gate",
+			DefaultRef:    "main",
+			DefaultRepo:   "",
+			SubmitEnabled: false,
+		},
+	}
+}
 
 // mdRenderer renders the handbook/standard markdown for /docs (GFM: tables,
 // fenced code, etc.). Compiled into the binary — still a single static file.
@@ -135,9 +174,12 @@ func main() {
 	reportBase := flag.String("report-base", "", "base URL for report links in -emit-md (e.g. http://lab:9099); empty = no links")
 	docs := flag.String("docs", "", "directory of markdown docs to serve at /docs (e.g. the runner's docs/)")
 	controller := flag.Bool("controller", false, "enable safe RDMA queue submit/status panel")
-	controllerQueue := flag.String("controller-queue", "/mnt/smb/work/share/testops/queue/rdma-ci", "controller RDMA queue directory")
-	controllerState := flag.String("controller-state", "/mnt/smb/work/share/testops/state/rdma-ci", "controller RDMA state directory")
-	controllerLogs := flag.String("controller-logs", "/mnt/smb/work/share/testops/logs/rdma-ci", "controller RDMA log directory")
+	controllerQueueRoot := flag.String("controller-queue-root", "/mnt/smb/work/share/testops/queue", "controller suite queue root")
+	controllerStateRoot := flag.String("controller-state-root", "/mnt/smb/work/share/testops/state", "controller suite state root")
+	controllerLogRoot := flag.String("controller-log-root", "/mnt/smb/work/share/testops/logs", "controller suite log root")
+	controllerQueue := flag.String("controller-queue", "", "legacy RDMA queue directory override")
+	controllerState := flag.String("controller-state", "", "legacy RDMA state directory override")
+	controllerLogs := flag.String("controller-logs", "", "legacy RDMA log directory override")
 	controllerToken := flag.String("controller-token", os.Getenv("TESTOPS_CONTROLLER_TOKEN"), "optional submit token for controller POSTs")
 	flag.Parse()
 
@@ -152,12 +194,23 @@ func main() {
 		}
 	}
 	if *controller {
+		queueRoot, stateRoot, logRoot := *controllerQueueRoot, *controllerStateRoot, *controllerLogRoot
+		if *controllerQueue != "" {
+			queueRoot = filepath.Dir(*controllerQueue)
+		}
+		if *controllerState != "" {
+			stateRoot = filepath.Dir(*controllerState)
+		}
+		if *controllerLogs != "" {
+			logRoot = filepath.Dir(*controllerLogs)
+		}
 		s.controller = &controlConfig{
-			queueDir: *controllerQueue,
-			stateDir: *controllerState,
-			logDir:   *controllerLogs,
-			token:    *controllerToken,
-			now:      time.Now,
+			queueRoot: queueRoot,
+			stateRoot: stateRoot,
+			logRoot:   logRoot,
+			token:     *controllerToken,
+			suites:    defaultSuites(),
+			now:       time.Now,
 		}
 		if err := s.ensureControlDirs(); err != nil {
 			log.Fatalf("controller dirs: %v", err)
@@ -180,7 +233,7 @@ func main() {
 	mux.HandleFunc("/docs", s.handleDocs)
 	mux.HandleFunc("/api/runs", s.handleAPIRuns)
 	mux.HandleFunc("/api/controller/status", s.handleAPIControllerStatus)
-	mux.HandleFunc("/api/rdma/submit", s.handleSubmitRDMA)
+	mux.HandleFunc("/api/", s.handleAPISuite)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 
 	mode := "read-only"
@@ -344,12 +397,21 @@ func (s *server) handleAPIControllerStatus(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "controller not enabled", http.StatusNotFound)
 		return
 	}
-	status := s.controlStatus()
+	status := s.controlStatus(strings.TrimSpace(r.URL.Query().Get("suite")))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
 
-func (s *server) handleSubmitRDMA(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleAPISuite(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "api" || parts[2] != "submit" {
+		http.NotFound(w, r)
+		return
+	}
+	s.handleSubmitSuite(w, r)
+}
+
+func (s *server) handleSubmitSuite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -362,7 +424,7 @@ func (s *server) handleSubmitRDMA(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	req, err := parseControlSubmit(r)
+	req, err := parseControlSubmit(r, suiteFromSubmitPath(r.URL.Path))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -386,20 +448,30 @@ func isJSONRequest(r *http.Request) bool {
 	return strings.EqualFold(ct, "application/json")
 }
 
+func suiteFromSubmitPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "api" {
+		return parts[1]
+	}
+	return ""
+}
+
 func (s *server) ensureControlDirs() error {
 	if s.controller == nil {
 		return nil
 	}
-	for _, dir := range []string{
-		s.controller.queueDir,
-		filepath.Join(s.controller.stateDir, "running"),
-		filepath.Join(s.controller.stateDir, "done"),
-		filepath.Join(s.controller.stateDir, "failed"),
-		filepath.Join(s.controller.stateDir, "status"),
-		s.controller.logDir,
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("%s: %w", dir, err)
+	for _, suite := range s.controller.suites {
+		for _, dir := range []string{
+			s.queueDir(suite),
+			filepath.Join(s.stateDir(suite), "running"),
+			filepath.Join(s.stateDir(suite), "done"),
+			filepath.Join(s.stateDir(suite), "failed"),
+			filepath.Join(s.stateDir(suite), "status"),
+			s.logDir(suite),
+		} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("%s: %w", dir, err)
+			}
 		}
 	}
 	return nil
@@ -418,7 +490,30 @@ func (s *server) controlAuthorized(r *http.Request) bool {
 	return false
 }
 
-func parseControlSubmit(r *http.Request) (controlSubmitRequest, error) {
+func (s *server) queueDir(suite suiteConfig) string {
+	return filepath.Join(s.controller.queueRoot, suite.Project)
+}
+
+func (s *server) stateDir(suite suiteConfig) string {
+	return filepath.Join(s.controller.stateRoot, suite.Project)
+}
+
+func (s *server) logDir(suite suiteConfig) string {
+	return filepath.Join(s.controller.logRoot, suite.Project)
+}
+
+func (s *server) suite(name string) (suiteConfig, error) {
+	if strings.TrimSpace(name) == "" {
+		name = "rdma"
+	}
+	suite, ok := s.controller.suites[strings.ToLower(name)]
+	if !ok {
+		return suiteConfig{}, fmt.Errorf("unknown suite %q", name)
+	}
+	return suite, nil
+}
+
+func parseControlSubmit(r *http.Request, pathSuite string) (controlSubmitRequest, error) {
 	var req controlSubmitRequest
 	if isJSONRequest(r) {
 		var raw map[string]string
@@ -426,7 +521,9 @@ func parseControlSubmit(r *http.Request) (controlSubmitRequest, error) {
 			return req, fmt.Errorf("invalid JSON: %w", err)
 		}
 		req = controlSubmitRequest{
+			Suite:    raw["suite"],
 			MonoRef:  raw["mono_ref"],
+			Ref:      raw["ref"],
 			MonoRepo: raw["mono_repo"],
 			RunBy:    raw["run_by"],
 			Team:     raw["team"],
@@ -438,7 +535,9 @@ func parseControlSubmit(r *http.Request) (controlSubmitRequest, error) {
 			return req, fmt.Errorf("invalid form: %w", err)
 		}
 		req = controlSubmitRequest{
+			Suite:    r.Form.Get("suite"),
 			MonoRef:  r.Form.Get("mono_ref"),
+			Ref:      r.Form.Get("ref"),
 			MonoRepo: r.Form.Get("mono_repo"),
 			RunBy:    r.Form.Get("run_by"),
 			Team:     r.Form.Get("team"),
@@ -446,40 +545,49 @@ func parseControlSubmit(r *http.Request) (controlSubmitRequest, error) {
 			TestID:   r.Form.Get("test_id"),
 		}
 	}
-	req = withControlDefaults(req)
-	return req, validateControlSubmit(req)
+	if req.Suite == "" {
+		req.Suite = pathSuite
+	}
+	if req.MonoRef == "" {
+		req.MonoRef = req.Ref
+	}
+	return req, nil
 }
 
-func withControlDefaults(req controlSubmitRequest) controlSubmitRequest {
+func withControlDefaults(req controlSubmitRequest, suite suiteConfig) controlSubmitRequest {
+	req.Suite = suite.Name
 	if req.MonoRef == "" {
-		req.MonoRef = "main"
+		req.MonoRef = suite.DefaultRef
 	}
 	if req.MonoRepo == "" {
-		req.MonoRepo = controlDefaultMonoRepo
+		req.MonoRepo = suite.DefaultRepo
 	}
 	if req.RunBy == "" {
 		req.RunBy = controlDefaultRunBy
 	}
 	if req.Team == "" {
-		req.Team = controlDefaultTeam
+		req.Team = suite.Team
 	}
 	if req.Project == "" {
-		req.Project = controlDefaultProject
+		req.Project = suite.Project
 	}
 	if req.TestID == "" {
-		req.TestID = controlDefaultTestID
+		req.TestID = suite.DefaultTestID
 	}
 	return req
 }
 
 func validateControlSubmit(req controlSubmitRequest) error {
 	checks := map[string]string{
-		"mono_ref":  req.MonoRef,
-		"mono_repo": req.MonoRepo,
-		"run_by":    req.RunBy,
-		"team":      req.Team,
-		"project":   req.Project,
-		"test_id":   req.TestID,
+		"suite":    req.Suite,
+		"mono_ref": req.MonoRef,
+		"run_by":   req.RunBy,
+		"team":     req.Team,
+		"project":  req.Project,
+		"test_id":  req.TestID,
+	}
+	if req.MonoRepo != "" {
+		checks["mono_repo"] = req.MonoRepo
 	}
 	for name, value := range checks {
 		if err := validateControlField(name, value); err != nil {
@@ -503,7 +611,14 @@ func validateControlField(name, value string) error {
 }
 
 func (s *server) submitControl(req controlSubmitRequest) (controlSubmitResponse, error) {
-	req = withControlDefaults(req)
+	suite, err := s.suite(req.Suite)
+	if err != nil {
+		return controlSubmitResponse{}, err
+	}
+	if !suite.SubmitEnabled {
+		return controlSubmitResponse{}, fmt.Errorf("suite %q is registered but submit is not enabled yet", suite.Name)
+	}
+	req = withControlDefaults(req, suite)
 	if err := validateControlSubmit(req); err != nil {
 		return controlSubmitResponse{}, err
 	}
@@ -512,11 +627,11 @@ func (s *server) submitControl(req controlSubmitRequest) (controlSubmitResponse,
 	}
 	now := s.controller.now().UTC()
 	requestID := fmt.Sprintf("%s-%09d-%s-%d", now.Format("20060102-150405"), now.Nanosecond(), sanitizeControlID(req.MonoRef), os.Getpid())
-	reqPath := filepath.Join(s.controller.queueDir, requestID+".env")
+	reqPath := filepath.Join(s.queueDir(suite), requestID+".env")
 	if _, err := os.Stat(reqPath); err == nil {
 		return controlSubmitResponse{}, fmt.Errorf("request id collision")
 	}
-	tmp, err := os.CreateTemp(s.controller.queueDir, "."+requestID+".*.tmp")
+	tmp, err := os.CreateTemp(s.queueDir(suite), "."+requestID+".*.tmp")
 	if err != nil {
 		return controlSubmitResponse{}, err
 	}
@@ -538,6 +653,8 @@ func (s *server) submitControl(req controlSubmitRequest) (controlSubmitResponse,
 func buildControlEnv(requestID string, req controlSubmitRequest) string {
 	lines := []string{
 		"REQUEST_ID=" + shellQuoteControl(requestID),
+		"TESTOPS_SUITE=" + shellQuoteControl(req.Suite),
+		"TESTOPS_REF=" + shellQuoteControl(req.MonoRef),
 		"TESTOPS_MONO_REF=" + shellQuoteControl(req.MonoRef),
 		"TESTOPS_MONO_REPO=" + shellQuoteControl(req.MonoRepo),
 		"TESTOPS_RUN_BY=" + shellQuoteControl(req.RunBy),
@@ -570,23 +687,29 @@ func sanitizeControlID(value string) string {
 	return out
 }
 
-func (s *server) controlStatus() controlStatus {
+func (s *server) controlStatus(suiteName string) controlStatus {
 	if s.controller == nil {
 		return controlStatus{}
 	}
-	last, _ := readJSONMap(filepath.Join(s.controller.stateDir, "status", "last-run.json"))
+	suite, err := s.suite(suiteName)
+	if err != nil {
+		return controlStatus{Suite: suiteName}
+	}
+	stateDir := s.stateDir(suite)
+	last, _ := readJSONMap(filepath.Join(stateDir, "status", "last-run.json"))
 	return controlStatus{
-		Queue:       listControlFiles(s.controller.queueDir, "*.env"),
-		Running:     listControlFiles(filepath.Join(s.controller.stateDir, "running"), "*.env"),
-		Done:        listControlFiles(filepath.Join(s.controller.stateDir, "done"), "*.env"),
-		Failed:      listControlFiles(filepath.Join(s.controller.stateDir, "failed"), "*.env"),
-		StatusFiles: listControlFiles(filepath.Join(s.controller.stateDir, "status"), "*.json"),
+		Suite:       suite.Name,
+		Queue:       listControlFiles(s.queueDir(suite), "*.env"),
+		Running:     listControlFiles(filepath.Join(stateDir, "running"), "*.env"),
+		Done:        listControlFiles(filepath.Join(stateDir, "done"), "*.env"),
+		Failed:      listControlFiles(filepath.Join(stateDir, "failed"), "*.env"),
+		StatusFiles: listControlFiles(filepath.Join(stateDir, "status"), "*.json"),
 		LastRun:     last,
 		Paths: map[string]string{
-			"queue":  s.controller.queueDir,
-			"state":  s.controller.stateDir,
-			"logs":   s.controller.logDir,
-			"status": filepath.Join(s.controller.stateDir, "status"),
+			"queue":  s.queueDir(suite),
+			"state":  stateDir,
+			"logs":   s.logDir(suite),
+			"status": filepath.Join(stateDir, "status"),
 		},
 	}
 }
@@ -683,9 +806,17 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		filter += "team=" + fTeam
 	}
-	var ctrl controlStatus
+	var suites []suiteView
 	if s.controller != nil {
-		ctrl = s.controlStatus()
+		names := make([]string, 0, len(s.controller.suites))
+		for name := range s.controller.suites {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			suite := s.controller.suites[name]
+			suites = append(suites, suiteView{suiteConfig: suite, Status: s.controlStatus(name)})
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	indexTmpl.Execute(w, map[string]any{
@@ -700,7 +831,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Filter":            filter,
 		"Now":               time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		"ControllerEnabled": s.controller != nil,
-		"Control":           ctrl,
+		"Suites":            suites,
 		"Submitted":         strings.TrimSpace(r.URL.Query().Get("submitted")),
 	})
 }
@@ -758,6 +889,8 @@ func (s *server) handleDocs(w http.ResponseWriter, r *http.Request) {
 var docReadingOrder = []string{
 	"testops-handbook.md",               // how: lab access, run, watch, the process
 	"cross-product-testops-standard.md", // the contract to follow (observable runs)
+	"control-plane-product-contract.md", // suite controller + shared envelope
+	"qa-bundle-assert.md",               // common acceptance assertion
 	"scenario-spec.md",                  // the exact YAML schema
 	"tutorial.md",                       // optional hands-on intro
 	"rdma-vfs-s3-testing-start-here.md", // product guide: VFS + S3 over RDMA (sra-next)
@@ -854,25 +987,33 @@ var indexTmpl = template.Must(template.New("idx").Funcs(template.FuncMap{
 </header>
 {{if .ControllerEnabled}}
 <section class="control">
- <h2>RDMA CI Controller</h2>
+ <h2>TestOps Controller</h2>
  {{if .Submitted}}<div class="submitted">queued request <code>{{.Submitted}}</code></div>{{end}}
- <form method="post" action="/api/rdma/submit">
-  <div><label>mono ref</label><input name="mono_ref" value="main" required></div>
+ {{range .Suites}}
+ <h3>{{.Name}} <span class="muted">project={{.Project}}</span></h3>
+ {{if .SubmitEnabled}}
+ <form method="post" action="/api/{{.Name}}/submit">
+  <input type="hidden" name="suite" value="{{.Name}}">
+  <div><label>ref</label><input name="mono_ref" value="{{.DefaultRef}}" required></div>
   <div><label>run by</label><input name="run_by" value="dashboard" required></div>
   <div><label>token, if configured</label><input name="token" type="password"></div>
-  <input type="hidden" name="team" value="rdma">
-  <input type="hidden" name="project" value="rdma-ci">
-  <input type="hidden" name="test_id" value="rdma-unified-lab-gate">
-  <button type="submit">Queue RDMA Gate</button>
+  <input type="hidden" name="team" value="{{.Team}}">
+  <input type="hidden" name="project" value="{{.Project}}">
+  <input type="hidden" name="test_id" value="{{.DefaultTestID}}">
+  <button type="submit">Queue {{.Name}} Gate</button>
  </form>
+ {{else}}
+ <div class="muted">submit disabled until this suite has a worker adapter.</div>
+ {{end}}
  <div class="controlgrid">
-  <div class="controlbox"><span class="muted">queued</span><b>{{len .Control.Queue}}</b></div>
-  <div class="controlbox"><span class="muted">running</span><b>{{len .Control.Running}}</b></div>
-  <div class="controlbox"><span class="muted">done</span><b>{{len .Control.Done}}</b></div>
-  <div class="controlbox"><span class="muted">failed</span><b>{{len .Control.Failed}}</b></div>
+  <div class="controlbox"><span class="muted">queued</span><b>{{len .Status.Queue}}</b></div>
+  <div class="controlbox"><span class="muted">running</span><b>{{len .Status.Running}}</b></div>
+  <div class="controlbox"><span class="muted">done</span><b>{{len .Status.Done}}</b></div>
+  <div class="controlbox"><span class="muted">failed</span><b>{{len .Status.Failed}}</b></div>
  </div>
- <div class="muted">API: <code>/api/controller/status</code> · submit: <code>/api/rdma/submit</code></div>
- {{if .Control.LastRun}}<div class="muted">last request: {{index .Control.LastRun "request_id"}} · {{index .Control.LastRun "state"}} · {{index .Control.LastRun "bundle_dir"}}</div>{{end}}
+ {{if .Status.LastRun}}<div class="muted">last request: {{index .Status.LastRun "request_id"}} · {{index .Status.LastRun "state"}} · {{index .Status.LastRun "bundle_dir"}}</div>{{end}}
+ {{end}}
+ <div class="muted">API: <code>/api/controller/status?suite=rdma</code> · submit: <code>/api/&lt;suite&gt;/submit</code></div>
 </section>
 {{end}}
 {{if .Filter}}<div class="bar">filtered: <b>{{.Filter}}</b> · <a href="/">clear ✕</a></div>{{end}}

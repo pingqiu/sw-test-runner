@@ -1,0 +1,13 @@
+# Block unified gate profile.
+#
+# Block has not emitted the common envelope yet. Once the block-ci worker and
+# unified gate are wired, qa-assert.sh will already check:
+#   __product=block
+#   __gate_pass=1
+#   __tested_ref
+#   __tested_sha
+#   __lab_run_id
+#
+# Add block-specific floors here as they stabilize, for example:
+#   __block_fio_write_iops>0
+#   __block_remount_sha_match=1

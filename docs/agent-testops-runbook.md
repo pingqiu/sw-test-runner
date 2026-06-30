@@ -24,6 +24,9 @@ curl -X POST http://192.168.1.181:9099/api/rdma/submit \
   -d '{"mono_ref":"<branch-or-sha>","run_by":"<agent-name>"}'
 ```
 
+The controller API is suite-shaped: `/api/<suite>/submit`. RDMA is enabled now;
+block is registered but stays disabled until the block worker adapter is added.
+
 Then watch:
 
 ```text
@@ -116,6 +119,7 @@ http://192.168.1.181:9099/?project=rdma-ci
 Status:
 
 ```bash
+curl http://192.168.1.181:9099/api/controller/status?suite=rdma
 ls -lt /mnt/smb/work/share/testops/state/rdma-ci/status
 test -f /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json && \
   cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
@@ -217,6 +221,17 @@ Every handoff should include:
 - failed phase/action, if any;
 - root cause if known;
 - what was not tested.
+
+For accepted product gates, run the shared bundle assertion when the gate emits
+the common envelope:
+
+```bash
+scripts/qa-assert.sh <bundle-dir> --ref <branch-or-sha> \
+  --profile docs/qa-profiles/rdma.expect
+```
+
+Use `docs/qa-profiles/block.expect` for the block unified gate once block emits
+`__product`, `__gate_pass`, `__tested_ref`, `__tested_sha`, and `__lab_run_id`.
 
 Good example:
 

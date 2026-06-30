@@ -128,18 +128,18 @@ workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
 ## Controller Web/API
 
 The preferred setup is one URL: `testops-dashboard -controller` on port 9099.
-It shows historical result bundles and a small RDMA queue submit/status panel on
-the same page. It does not run shell commands and does not replace the worker. A
-submit request only writes one `.env` file under the RDMA queue.
+It shows historical result bundles and a small suite submit/status panel on the
+same page. It does not run shell commands and does not replace the worker. A
+submit request only writes one `.env` file under the selected suite queue.
 
 ```bash
 testops-dashboard \
   -root /mnt/smb/work/share/testops/results \
   -docs /mnt/smb/work/share/testops/docs \
   -controller \
-  -controller-queue /mnt/smb/work/share/testops/queue/rdma-ci \
-  -controller-state /mnt/smb/work/share/testops/state/rdma-ci \
-  -controller-logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -controller-queue-root /mnt/smb/work/share/testops/queue \
+  -controller-state-root /mnt/smb/work/share/testops/state \
+  -controller-log-root /mnt/smb/work/share/testops/logs \
   -port 9099
 ```
 
@@ -178,8 +178,13 @@ curl -X POST http://m01:9099/api/rdma/submit \
 Check status:
 
 ```bash
-curl http://m01:9099/api/controller/status
+curl http://m01:9099/api/controller/status?suite=rdma
+curl http://m01:9099/api/controller/status?suite=block
 ```
+
+The legacy `-controller-queue`, `-controller-state`, and `-controller-logs`
+flags are still accepted as RDMA-only overrides. New deployments should use the
+root flags above so one service can expose multiple suites.
 
 If you want a separate submitter process, `testops-controller` can still run on
 9109 with the same queue/state paths. The normal M01 setup should use the merged

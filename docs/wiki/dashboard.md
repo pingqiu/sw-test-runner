@@ -1,8 +1,8 @@
 # Live Dashboard
 
 A global run view across projects, served by the `testops-dashboard` binary.
-Result reports are read-only. On M01, the same service can also enable the RDMA
-queue submit/status panel.
+Result reports are read-only. On M01, the same service can also enable the
+suite queue submit/status panel.
 
 **URL:** `http://192.168.1.181:9099/` (M01)
 
@@ -12,8 +12,8 @@ queue submit/status panel.
 | `/report?run=…` | That run's `result.html`. |
 | `/docs` | The curated doc follow-set (Handbook → Standard → Scenario Spec → Tutorial → product guides), rendered. |
 | `/api/runs` | JSON of all runs. |
-| `/api/controller/status` | RDMA queue/running/done/failed state, when controller mode is enabled. |
-| `/api/rdma/submit` | Queue one RDMA gate request, when controller mode is enabled. |
+| `/api/controller/status?suite=<suite>` | Queue/running/done/failed state for one suite, when controller mode is enabled. |
+| `/api/<suite>/submit` | Queue one suite gate request, when submit is enabled for that suite. |
 | `/healthz` | Liveness. |
 
 ## How status works
@@ -32,15 +32,16 @@ The index re-scans the results root on every request, so a new run appears
 ## RDMA queue submit
 
 When M01 starts the dashboard with `-controller`, the home page includes a small
-RDMA CI panel:
+TestOps Controller panel:
 
-- submit `mono_ref`;
-- see queued/running/done/failed counts;
+- submit a ref for enabled suites such as RDMA;
+- see queued/running/done/failed counts per suite;
 - open the normal result report after the worker finishes.
 
 The panel does not execute shell commands. It writes one `.env` request file
-under `/mnt/smb/work/share/testops/queue/rdma-ci`; the M01 worker owns execution
-and the lab lock.
+under `/mnt/smb/work/share/testops/queue/<project>`; the suite worker owns
+execution and the lab lock. Block is registered in the panel but submit remains
+disabled until a block worker adapter is installed.
 
 ## Make your run show up
 
