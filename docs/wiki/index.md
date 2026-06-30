@@ -16,18 +16,21 @@ Related local docs:
   RDMA data path, native RC/DC, UCX, pull-RDMA, and future GPU-style
   destinations.
 
-1. **[Handbook](../testops-handbook.md)** — lab/env access, how to run, watch a
+1. **[Agent Runbook](../agent-testops-runbook.md)** — the short operating
+   guide for development agents: what to run, where results appear, and what
+   evidence to report.
+2. **[Handbook](../testops-handbook.md)** — lab/env access, how to run, watch a
    run, the build→seed→test→cleanup process, gotchas.
-2. **[Storage Platform SOP](../storage-testops-platform.md)** — the shared
+3. **[Storage Platform SOP](../storage-testops-platform.md)** — the shared
    storage testing workflow across block, S3, VFS, and RDMA.
-3. **[Control Plane Roadmap](../testops-control-plane-roadmap.md)** — how the
+4. **[Control Plane Roadmap](../testops-control-plane-roadmap.md)** — how the
    runner, dashboard, M01 CI, SSH/agent execution, binary store, and future UI
    grow into a team TestOps / SiteOps control plane.
-4. **[Cross-Product TestOps Standard](../cross-product-testops-standard.md)** —
+5. **[Cross-Product TestOps Standard](../cross-product-testops-standard.md)** —
    the contract every scenario follows so runs are observable and projects don't
    collide on the shared lab.
-5. **[Scenario Spec](../scenario-spec.md)** — the exact YAML schema.
-6. **[Tutorial](../tutorial.md)** — hands-on walkthrough (optional).
+6. **[Scenario Spec](../scenario-spec.md)** — the exact YAML schema.
+7. **[Tutorial](../tutorial.md)** — hands-on walkthrough (optional).
 
 ## The 5-minute model
 
