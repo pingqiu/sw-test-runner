@@ -97,6 +97,10 @@ The worker:
 - moves requests to `state/rdma-ci/done` or `state/rdma-ci/failed`;
 - writes logs under `/mnt/smb/work/share/testops/logs/rdma-ci`.
 
+On M01 the wrapper defaults to `TESTOPS_SSH_KEY=/home/testdev/.ssh/id_ed25519`
+so the scenario can SSH back into M01. Override `TESTOPS_SSH_KEY` when running
+from another controller host.
+
 This is intentionally smaller than the future controller. It proves the team
 workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
 

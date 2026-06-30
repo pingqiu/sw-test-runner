@@ -16,6 +16,7 @@ SCENARIO="${TESTOPS_RDMA_SCENARIO:-scenarios/rdma-unified-lab-gate.yaml}"
 RESULTS_DIR="${TESTOPS_RESULTS_DIR:-/mnt/smb/work/share/testops/results/rdma-ci}"
 MONO_REF="${TESTOPS_MONO_REF:-${MONO_REF:-main}}"
 MONO_REPO="${TESTOPS_MONO_REPO:-git@github.com:seaweedfs/seaweed-mono.git}"
+SSH_KEY="${TESTOPS_SSH_KEY:-/home/testdev/.ssh/id_ed25519}"
 RUN_BY="${TESTOPS_RUN_BY:-${USER:-testops-ci}}"
 TEAM="${TESTOPS_TEAM:-rdma}"
 PROJECT="${TESTOPS_PROJECT:-rdma-ci}"
@@ -37,6 +38,7 @@ echo "  scenario:    $SCENARIO"
 echo "  results_dir: $RESULTS_DIR"
 echo "  mono_repo:   $MONO_REPO"
 echo "  mono_ref:    $MONO_REF"
+echo "  ssh_key:     $SSH_KEY"
 echo "  run_by:      $RUN_BY"
 
 set +e
@@ -44,6 +46,7 @@ set +e
   -results-dir "$RESULTS_DIR" \
   -env "mono_repo=$MONO_REPO" \
   -env "mono_ref=$MONO_REF" \
+  -env "ssh_key=$SSH_KEY" \
   -meta "project=$PROJECT" \
   -meta "team=$TEAM" \
   -meta "run_by=$RUN_BY" \
