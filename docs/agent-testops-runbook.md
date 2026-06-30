@@ -107,7 +107,9 @@ http://192.168.1.181:9099/?project=rdma-ci
 Status:
 
 ```bash
-cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
+ls -lt /mnt/smb/work/share/testops/state/rdma-ci/status
+test -f /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json && \
+  cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
 ```
 
 Logs:
@@ -240,7 +242,9 @@ When a run fails:
 For RDMA CI worker failures, check:
 
 ```bash
-cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
+ls -lt /mnt/smb/work/share/testops/state/rdma-ci/status
+test -f /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json && \
+  cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
 tail -100 /mnt/smb/work/share/testops/logs/rdma-ci/<request>.log
 systemctl status testops-rdma-ci-worker.service
 ```
