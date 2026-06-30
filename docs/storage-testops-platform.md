@@ -230,6 +230,17 @@ The RDMA scenario calls the existing M01/M02 lab runner and records the normal
 TestOps bundle/dashboard result. It checks object RC push, RC pull, DC push,
 VFS read/write correctness, and loader matrix rows.
 
+For team-visible CI-style runs on M01, use the wrapper so metadata, shared
+results, and bundle validation are consistent:
+
+```bash
+TESTOPS_MONO_REF=main ./scripts/run-rdma-ci.sh
+```
+
+The wrapper writes to `/mnt/smb/work/share/testops/results/rdma-ci`, tags the
+run with `project/team/run_by/test_id/branch/commit`, validates the completed
+bundle, and points reviewers at the dashboard.
+
 Current accepted RDMA gate shape:
 
 | Row | Meaning | Floor |

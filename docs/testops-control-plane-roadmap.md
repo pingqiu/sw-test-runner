@@ -314,9 +314,11 @@ first real team workflow.
    - Verify: `/healthz` and `/api/runs` stay stable.
 
 3. **Standardize RDMA gate publication.**
-   - Use `sweedrdma run scenarios/rdma-unified-lab-gate.yaml`.
+   - Use `scripts/run-rdma-ci.sh` for team-visible M01 runs.
    - Results go to `/mnt/smb/work/share/testops/results/rdma-ci` or
      `/mnt/smb/work/share/testops/results/rdma-dev`.
+   - The wrapper runs `sweedrdma`, tags the run with metadata, and validates
+     the completed bundle.
    - Verify: dashboard shows the run with `test_id`, `branch`, `commit`, and
      perf rows.
 
