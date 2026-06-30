@@ -16,10 +16,10 @@ cd /opt/rdma-lab-ci/sw-test-runner
 TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 ```
 
-If the controller service is running, API submit is equivalent:
+If the dashboard is running with controller enabled, API submit is equivalent:
 
 ```bash
-curl -X POST http://192.168.1.181:9109/api/rdma/submit \
+curl -X POST http://192.168.1.181:9099/api/rdma/submit \
   -H 'Content-Type: application/json' \
   -d '{"mono_ref":"<branch-or-sha>","run_by":"<agent-name>"}'
 ```
@@ -79,7 +79,8 @@ Open:
 http://192.168.1.181:9099/
 ```
 
-The dashboard is read-only. It shows bundles under:
+The result view is read-only. On M01, the same dashboard may also show a small
+RDMA queue submit/status panel. Result bundles live under:
 
 ```text
 /mnt/smb/work/share/testops/results

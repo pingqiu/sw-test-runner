@@ -26,7 +26,7 @@ flowchart LR
     M01 <-- "25 Gbps RoCE" --> M02
   end
   WS -- writes bundles --> SMB[("SMB //192.168.1.34/Work<br/>testops/results + docs")]
-  M01 -- serves --> DASH["dashboard :9099<br/>reads SMB results"]
+  M01 -- serves --> DASH["dashboard/controller :9099<br/>reads SMB results · submits RDMA queue"]
   SMB --> DASH
 ```
 
@@ -52,8 +52,9 @@ swblock run <scenario> -results-dir /mnt/smb/work/share/testops/results/<project
 
 ## Dashboard (systemd on M01)
 
-The read-only [dashboard](dashboard.md) runs as a systemd service so it survives
-reboots:
+The [dashboard](dashboard.md) runs as a systemd service so it survives reboots.
+The result-browser part is read-only. When `-controller` is set, the same
+service also exposes the RDMA queue submit/status panel:
 
 ```ini
 # /etc/systemd/system/testops-dashboard.service
@@ -61,7 +62,12 @@ reboots:
 User=testdev
 ExecStart=/usr/local/bin/testops-dashboard \
   -root /mnt/smb/work/share/testops/results \
-  -docs /mnt/smb/work/share/testops/docs -port 9099
+  -docs /mnt/smb/work/share/testops/docs \
+  -controller \
+  -controller-queue /mnt/smb/work/share/testops/queue/rdma-ci \
+  -controller-state /mnt/smb/work/share/testops/state/rdma-ci \
+  -controller-logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -port 9099
 Restart=always
 ```
 
@@ -121,17 +127,20 @@ workflow first: safe trigger, serialized lab use, dashboard-visible evidence.
 
 ## Controller Web/API
 
-`testops-controller` is the safe web/API submitter for the same queue. It does
-not run shell commands and does not replace the worker. A submit request only
-writes one `.env` file under the RDMA queue.
+The preferred setup is one URL: `testops-dashboard -controller` on port 9099.
+It shows historical result bundles and a small RDMA queue submit/status panel on
+the same page. It does not run shell commands and does not replace the worker. A
+submit request only writes one `.env` file under the RDMA queue.
 
 ```bash
-testops-controller \
-  -queue /mnt/smb/work/share/testops/queue/rdma-ci \
-  -state /mnt/smb/work/share/testops/state/rdma-ci \
-  -logs /mnt/smb/work/share/testops/logs/rdma-ci \
-  -dashboard http://192.168.1.181:9099/ \
-  -port 9109
+testops-dashboard \
+  -root /mnt/smb/work/share/testops/results \
+  -docs /mnt/smb/work/share/testops/docs \
+  -controller \
+  -controller-queue /mnt/smb/work/share/testops/queue/rdma-ci \
+  -controller-state /mnt/smb/work/share/testops/state/rdma-ci \
+  -controller-logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -port 9099
 ```
 
 Systemd example:
@@ -154,13 +163,13 @@ Restart=always
 Optional submit token:
 
 ```bash
-TESTOPS_CONTROLLER_TOKEN=<token> testops-controller -port 9109
+TESTOPS_CONTROLLER_TOKEN=<token> testops-dashboard -controller -port 9099
 ```
 
 Submit by API:
 
 ```bash
-curl -X POST http://m01:9109/api/rdma/submit \
+curl -X POST http://m01:9099/api/rdma/submit \
   -H 'Content-Type: application/json' \
   -H 'X-TestOps-Token: <token>' \
   -d '{"mono_ref":"rdma/my-branch","run_by":"dev-agent"}'
@@ -169,11 +178,12 @@ curl -X POST http://m01:9109/api/rdma/submit \
 Check status:
 
 ```bash
-curl http://m01:9109/api/status
+curl http://m01:9099/api/controller/status
 ```
 
-Keep `testops-dashboard` read-only. Use `testops-controller` for submits and
-the dashboard for run reports.
+If you want a separate submitter process, `testops-controller` can still run on
+9109 with the same queue/state paths. The normal M01 setup should use the merged
+9099 dashboard/controller to avoid two URLs.
 
 ## Disk hygiene
 

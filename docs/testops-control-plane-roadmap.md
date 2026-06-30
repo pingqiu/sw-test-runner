@@ -30,7 +30,7 @@ The same foundation should support two uses:
 | Scenario runner | Exists. `sw-test-runner`, `swblock`, `sweeds3`, and `sweedrdma` run YAML scenarios. |
 | SSH executor | Exists. It is the current default for M01/M02 and is good for bootstrap/debug. |
 | Agent mode | Exists as a foundation. It has coordinator/agent commands, persistent registration, token auth, `/run`, `/exec`, and `/artifacts`. |
-| Dashboard | Exists at `http://192.168.1.181:9099/`. It is read-only and scans shared result bundles. |
+| Dashboard/controller | Exists at `http://192.168.1.181:9099/`. It scans shared result bundles; on M01 it can also expose the RDMA queue submit/status panel. |
 | Shared results | Exists under `/mnt/smb/work/share/testops/results`. |
 | M01 CI | Exists as a lab runner for RDMA gates. `testops-controller` can submit runs to the M01 queue; the worker executes them under the lab lock. |
 | Binary store | Not standardized yet. Lab runs still mix build-in-place, copied binaries, and product-specific scripts. |
@@ -197,7 +197,8 @@ Work:
   - `vfs-rdma-qa`
   - `s3-qa`
   - `block-qa`
-- keep `http://192.168.1.181:9099/` read-only;
+- keep result-bundle browsing read-only;
+- expose RDMA submit only through the controlled queue panel;
 - make dashboard docs link to this control-plane roadmap;
 - add bundle validation to CI-style runs.
 
@@ -216,7 +217,7 @@ Work:
 - add a small `testops-ci` service on M01;
 - implement one queue;
 - implement one lab lease for M01/M02 RDMA hardware;
-- add `testops-controller` as the safe web/API submitter for the queue;
+- add the dashboard controller panel as the safe web/API submitter for the queue;
 - invoke `sweedrdma run ...` or product-specific runners;
 - write bundles to the shared results root;
 - send optional email/GitHub status on pass/fail.
@@ -309,10 +310,11 @@ first real team workflow.
    - Status: this document.
    - Verify: MkDocs builds and the roadmap is linked from the wiki.
 
-2. **Keep the current dashboard as read-only tracking.**
+2. **Keep result tracking read-only.**
    - Do not add arbitrary command execution to `testops-dashboard`.
-   - Dashboard reads bundles only.
-   - Verify: `/healthz` and `/api/runs` stay stable.
+   - Dashboard reads bundles for reports.
+   - RDMA submit writes only queue request files.
+   - Verify: `/healthz`, `/api/runs`, and `/api/controller/status` stay stable.
 
 3. **Standardize RDMA gate publication.**
    - Use `scripts/run-rdma-ci.sh` for team-visible M01 runs.
@@ -326,7 +328,7 @@ first real team workflow.
 4. **Add M01 controller-lite design.**
    - Status: implemented for RDMA.
    - Initial implementation: `scripts/testops-ci-submit.sh`,
-     `scripts/testops-ci-worker.sh`, and `cmd/testops-controller`.
+     `scripts/testops-ci-worker.sh`, and the dashboard controller panel.
    - One queue, one RDMA lab lease, one runner command.
    - Verify: one manual trigger creates a dashboard-visible run.
 

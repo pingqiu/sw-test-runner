@@ -55,7 +55,7 @@ mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
   guide for Block, S3, VFS, and RDMA agents running shared lab tests and
   reporting evidence.
 - **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
-- **Live run dashboard:** http://192.168.1.181:9099/ (global, read-only)
+- **Live run dashboard/controller:** http://192.168.1.181:9099/ (global run view; M01 can enable RDMA queue submit)
 
 ## Agent quick start
 
@@ -80,11 +80,11 @@ swblock run <scenario.yaml> -results-dir /mnt/smb/work/share/testops/results/blo
 Watch runs at http://192.168.1.181:9099/. Report the `project/run_id`, bundle
 path, branch/commit, pass/fail, and key metrics.
 
-If the controller service is running, the same RDMA queue can be submitted by
-web/API through `testops-controller`:
+If the dashboard is started with controller flags, the same page can submit the
+RDMA queue:
 
 ```bash
-curl -X POST http://m01:9109/api/rdma/submit \
+curl -X POST http://m01:9099/api/rdma/submit \
   -H 'Content-Type: application/json' \
   -d '{"mono_ref":"main","run_by":"dev-agent"}'
 ```

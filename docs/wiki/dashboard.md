@@ -1,7 +1,8 @@
 # Live Dashboard
 
-A **read-only global view** of every run across projects, served by the
-`testops-dashboard` binary.
+A global run view across projects, served by the `testops-dashboard` binary.
+Result reports are read-only. On M01, the same service can also enable the RDMA
+queue submit/status panel.
 
 **URL:** `http://192.168.1.181:9099/` (M01)
 
@@ -11,6 +12,8 @@ A **read-only global view** of every run across projects, served by the
 | `/report?run=…` | That run's `result.html`. |
 | `/docs` | The curated doc follow-set (Handbook → Standard → Scenario Spec → Tutorial → product guides), rendered. |
 | `/api/runs` | JSON of all runs. |
+| `/api/controller/status` | RDMA queue/running/done/failed state, when controller mode is enabled. |
+| `/api/rdma/submit` | Queue one RDMA gate request, when controller mode is enabled. |
 | `/healthz` | Liveness. |
 
 ## How status works
@@ -25,6 +28,19 @@ The dashboard reads each bundle's **`status.json`** for the authoritative
 
 The index re-scans the results root on every request, so a new run appears
 **without restarting** the dashboard.
+
+## RDMA queue submit
+
+When M01 starts the dashboard with `-controller`, the home page includes a small
+RDMA CI panel:
+
+- submit `mono_ref`;
+- see queued/running/done/failed counts;
+- open the normal result report after the worker finishes.
+
+The panel does not execute shell commands. It writes one `.env` request file
+under `/mnt/smb/work/share/testops/queue/rdma-ci`; the M01 worker owns execution
+and the lab lock.
 
 ## Make your run show up
 
