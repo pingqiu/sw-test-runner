@@ -169,6 +169,15 @@ func defaultSuites() map[string]suiteConfig {
 			DefaultRepo:   "",
 			SubmitEnabled: true,
 		},
+		"s3": {
+			Name:          "s3",
+			Project:       "s3-ci",
+			Team:          "storage",
+			DefaultTestID: "s3-smoke",
+			DefaultRef:    "master",
+			DefaultRepo:   "",
+			SubmitEnabled: true,
+		},
 	}
 }
 
