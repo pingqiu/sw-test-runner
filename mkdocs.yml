@@ -38,6 +38,7 @@ nav:
       - RDMA Wiki: http://192.168.1.135:8011/wiki/
       - TestOps Wiki: http://192.168.1.135:8012/wiki/
   - Start Here:
+      - Unified TestOps: unified-testops.md
       - Agent Runbook: agent-testops-runbook.md
       - Handbook: testops-handbook.md
       - Storage Platform SOP: storage-testops-platform.md
@@ -57,6 +58,7 @@ nav:
   - Product Testing Guides:
       - Block (iSCSI / NVMe): wiki/guides/block.md
       - S3 Gateway: wiki/guides/s3.md
-      - VFS / S3 over RDMA: wiki/guides/rdma.md
+      - VFS (POSIX / shared-data): wiki/guides/vfs.md
+      - RDMA lab gate (object / VFS): wiki/guides/rdma.md
   - Scenarios: wiki/scenario-catalog.md
   - Live Dashboard: wiki/dashboard.md

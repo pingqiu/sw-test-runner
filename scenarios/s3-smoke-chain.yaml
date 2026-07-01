@@ -21,6 +21,7 @@ env:
   # unsupported — weed must be built from a cloned source. For real S3 validation
   # swap this for the enterprise weed (`cd enterprise && make install`).
   weed_repo: "https://github.com/seaweedfs/seaweedfs"
+  weed_ref: "master"
   root: "/tmp/sw-s3-smoke"
   weed_bin: "/tmp/sw-s3-smoke/bin/weed"
   data_dir: "/tmp/sw-s3-smoke/data"
@@ -51,6 +52,10 @@ phases:
         node: m02
         timeout: 12m
         cmd: "mkdir -p {{ root }}/bin && cd {{ root }} && git clone --depth 1 {{ weed_repo }} src 2>&1 | tail -1 && cd src/weed && go build -o {{ weed_bin }} . && {{ weed_bin }} version | head -1"
+      - action: exec
+        node: m02
+        cmd: "git -C {{ root }}/src rev-parse --short HEAD"
+        save_as: weed_sha   # the tested commit — stamped by the build (NOT runner-cwd git)
 
   - name: seed
     actions:
@@ -77,6 +82,14 @@ phases:
       - action: assert_greater
         actual: "{{ obj_count }}"
         threshold: "0"
+      # Emit the common control-plane envelope so one qa-assert validates this
+      # bundle (docs/control-plane-product-contract.md §1). Reached only on pass.
+      - action: emit_provenance
+        product: s3
+        tested_ref: "{{ weed_ref }}"
+        tested_sha: "{{ weed_sha }}"
+        __s3_object_count: "{{ obj_count }}"
+        __s3_roundtrip_sha_match: "1"
 
   - name: cleanup
     always: true
