@@ -160,6 +160,15 @@ func defaultSuites() map[string]suiteConfig {
 			DefaultRepo:   "",
 			SubmitEnabled: false,
 		},
+		"vfs": {
+			Name:          "vfs",
+			Project:       "vfs-ci",
+			Team:          "storage",
+			DefaultTestID: "vfs-cross-access",
+			DefaultRef:    "master",
+			DefaultRepo:   "",
+			SubmitEnabled: true,
+		},
 	}
 }
 
