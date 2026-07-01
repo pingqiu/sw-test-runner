@@ -72,9 +72,13 @@ http://192.168.1.181:9099/?project=<suite>-ci
 
 The controller is safe: the UI submits a **scenario + controlled parameters**; it
 writes ONE request file to `queue/<project>`; a per-product **worker** owns
-execution + the lab lease. No shell from the UI. Until a product has a worker it
-runs via its CLI (`sweeds3 run …`, `swblock run …`) — the honest interim, same
-bundle contract.
+execution + the lab lease. No shell from the UI. **All four suites — `rdma`,
+`s3`, `block`, `vfs` — have a worker**, so any of them can be submitted from
+9099 (e.g. `POST /api/s3/submit {"ref":"master"}`). The workers on M01
+(`testops-{rdma,vfs,block,s3}-ci-worker.service`) share the same generic
+`testops-ci-worker.sh` + the same `qa-assert.sh`, and serialize on one lab lease.
+A CLI run of the same scenario produces the same bundle — the interim before a
+worker, still valid for local debug.
 
 ---
 
@@ -137,20 +141,30 @@ requirement is the **M01 mount** (stateful FUSE/kernel), which is why it needs a
 standalone gate instead of riding the object HTTP path. Only **block** is a
 separate data model.
 
-## 5. Can each product share the platform today?
+## 5. Product status — 4/4 fully wired
 
-Suites are **data models** (§4a); transport/API are matrix parameters, not rows.
+The four CI **suites** are operational units (one worker + one gate + one project
+each). Conceptually (§4a) `rdma` and `s3` are two access×transport points on the
+one **object/KV** dataset; `vfs` is a third access method (POSIX mount) over that
+same data; `block` is a separate data model (LUN).
 
-| Suite (data model) | Runner + pack | Unified gate | Worker (9099) | Envelope | qa-profile | Project | On the platform today |
+| Suite | Runner + pack | Gate scenario | 9099 worker | Envelope | qa-profile | Project | Status |
 |---|---|---|---|---|---|---|---|
-| **object/KV** — S3 API + raw-KV over transports http/rc/dc/rdma | ✅ `sweedrdma`,`sweeds3` / `packs/rdma`,`s3` (`kv` for raw) | ✅ `rdma-unified-lab-gate` (rc/dc/http matrix) + `s3-smoke-chain` (http row) | ✅ RDMA M01 worker+lease; S3 via CLI | ✅ RDMA (bridged) + S3 (`emit_provenance`) | ✅ `rdma.expect`, `s3.expect` | ✅ `rdma-ci`, `s3-qa` | **YES — mature reference.** Remaining: fold raw-KV + more transport rows into one matrix suite. |
-| **block** — iSCSI/NVMe LUN | ✅ `swblock` / `packs/block`,`v3block` | ✅ helm first-volume / e2e / phase gates | ⛔ suite registered, submit disabled | ✅ `emit_provenance` | ✅ `block.expect` | ✅ `block-qa`/`-ci` | **YES — run+track+assert done** (first-volume gate → `QA_BUNDLE_ASSERT_OK product=block`); block-ci worker next |
-| **VFS** — POSIX **access** over object/KV (needs M01 mount) | ⚠️ mono `seaweed-vfs`/`sw-rdma-vfs` + core `exec` | ⚠️ rides the RDMA gate's VFS rows; standalone + **S3↔VFS cross-access** gate pending | ⛔ (needs M01 mount lease) | ⛔ | ⛔ `vfs.expect` | ✅ `vfs-rdma-qa` | **PARTIAL** — VFS read/write validated inside the RDMA gate; own suite + the shared-data cross-access gate not split out yet |
+| **rdma** — object/KV over RC/DC | `sweedrdma` / `packs/rdma` | `rdma-unified-lab-gate` | ✅ | ✅ (rdma-prefixed, bridged) | `rdma.expect` | `rdma-ci` | ✅ **full reference** |
+| **s3** — object/KV over HTTP | `sweeds3` / `packs/s3` | `s3-smoke-chain` | ✅ | ✅ `emit_provenance` | `s3.expect` | `s3-ci` | ✅ **full** |
+| **block** — iSCSI/NVMe LUN | `swblock` / `packs/block`,`v3block` | `helm-single-node-first-volume` | ✅ (SMB harness → product_root) | ✅ `emit_provenance` | `block.expect` | `block-ci` | ✅ **full** (published image) |
+| **vfs** — POSIX mount over object/KV | `sweeds3` + FUSE mount | `vfs-cross-access-chain` | ✅ (M01 mount, root) | ✅ `emit_provenance` | `vfs.expect` | `vfs-ci` | ✅ **full** — proves **S3↔VFS shared data** |
 
-**Shared today by all:** the dashboard view, run metadata (`project/team/run_by/
-test_id/branch/commit`), the bundle format, `qa-assert.sh`, and result roots on
-shared SMB. RDMA is fully wired end-to-end; S3 is wired on the product side (this
-is the second reference); block/VFS/KV are onboarding.
+Every suite: `POST /api/<suite>/submit` → generic worker → gate emits the common
+envelope → **same `qa-assert.sh --profile <suite>.expect` → `QA_BUNDLE_ASSERT_OK`**
+→ dashboard. Verified end-to-end for all four (2026-07-01).
+
+**Shared by all:** the one controller/dashboard, the generic `testops-ci-worker.sh`
+(one per suite, shared lab lease), `emit_provenance` + the common envelope,
+`qa-assert.sh`, run metadata, and SMB result roots. **Remaining polish:** raw-KV +
+more transport matrix rows under object/KV; a VFS mount lease distinct from the
+shared lab lock; the block SMB harness is a snapshot (refresh when the seaweed_block
+scenario/scripts/charts change).
 
 ---
 

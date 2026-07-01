@@ -105,6 +105,24 @@ The worker:
 - updates `state/rdma-ci/status/last-run.json`;
 - writes logs under `/mnt/smb/work/share/testops/logs/rdma-ci`.
 
+### All four suites (rdma / s3 / block / vfs)
+
+The same generic `testops-ci-worker.sh` runs once **per suite** on M01, differing
+only by env (`TESTOPS_QUEUE_DIR`, `TESTOPS_RESULTS_DIR`, `TESTOPS_LOCK_FILE`,
+`TESTOPS_RDMA_CI_SCRIPT`). All four are deployed + enabled:
+
+| Service | Queue | Run script | Project |
+|---|---|---|---|
+| `testops-rdma-ci-worker` | `queue/rdma-ci` | `run-rdma-ci.sh` | `rdma-ci` |
+| `testops-s3-ci-worker` | `queue/s3-ci` | `run-s3-ci.sh` | `s3-ci` |
+| `testops-block-ci-worker` | `queue/block-ci` | `run-block-ci.sh` | `block-ci` |
+| `testops-vfs-ci-worker` | `queue/vfs-ci` | `run-vfs-ci.sh` | `vfs-ci` |
+
+They share one lab lease (`locks/rdma-lab.lock`) so lab gates serialize. Submit any
+via `POST /api/<suite>/submit`. rdma/s3/vfs are self-contained in this repo; block's
+run script stages its harness (scenario + scripts + charts) from SMB into
+product_root on m02 (the block gate lives in the seaweed_block repo).
+
 On M01 the wrapper defaults to `TESTOPS_SSH_KEY=/home/testdev/.ssh/id_ed25519`
 so the scenario can SSH back into M01. Override `TESTOPS_SSH_KEY` when running
 from another controller host.
