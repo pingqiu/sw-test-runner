@@ -155,10 +155,10 @@ func defaultSuites() map[string]suiteConfig {
 			Name:          "block",
 			Project:       "block-ci",
 			Team:          "block",
-			DefaultTestID: "block-unified-gate",
-			DefaultRef:    "main",
+			DefaultTestID: "helm-single-node-first-volume",
+			DefaultRef:    "sha-28a99ce4f644", // published sw-block image tag under test
 			DefaultRepo:   "",
-			SubmitEnabled: false,
+			SubmitEnabled: true,
 		},
 		"vfs": {
 			Name:          "vfs",
