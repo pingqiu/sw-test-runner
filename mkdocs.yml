@@ -39,6 +39,7 @@ nav:
       - TestOps Wiki: http://192.168.1.135:8012/wiki/
   - Start Here:
       - Unified TestOps: unified-testops.md
+      - Submit & Author: wiki/submitting.md
       - Agent Runbook: agent-testops-runbook.md
       - Handbook: testops-handbook.md
       - Storage Platform SOP: storage-testops-platform.md

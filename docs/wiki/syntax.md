@@ -78,6 +78,37 @@ phases:
 | `retry` / `timeout` | Retry count; per-action timeout. |
 | `ignore_error` | `true` → a failure doesn't fail the phase. |
 
+## Topology: service ↔ client
+
+`topology.nodes` maps a **name → machine**; an action runs on it via `node: <name>`.
+There is no role field — a node is a "service" or "client" purely by *which actions
+target it*.
+
+```yaml
+topology:
+  nodes:
+    m01: { host: 192.168.1.181, user: testdev, key: "{{ ssh_key }}" }   # client
+    m02: { host: 192.168.1.184, user: testdev, key: "{{ ssh_key }}" }   # service
+phases:
+  - name: setup
+    actions:
+      - { action: exec, node: m02, cmd: "start-server --ip 192.168.1.184" }   # advertise a REACHABLE ip
+      - { action: exec, node: m02, cmd: "compute value", save_as: server_val } # cross-node value
+  - name: test
+    actions:
+      - { action: exec, node: m01, cmd: "connect 192.168.1.184; check == {{ server_val }}" }
+```
+
+- **Advertise a reachable IP** on the service (`192.168.1.x`, not `127.0.0.1`), or
+  the client node can't reach it — the #1 cross-node gate bug.
+- **Pass values across nodes** with `save_as` on one node + `{{ var }}` on another.
+- `key` uses `{{ ssh_key }}` from `env`; under CI the worker overrides it to the
+  M01 linux key. `alt_ips` (e.g. an RDMA address) and `is_local: true` are also
+  available; `agents:` is for coordinator mode.
+
+Worked cross-node example: `scenarios/vfs-cross-access-chain.yaml` (service on m02,
+client mount on m01). See also [Submitting & Authoring](submitting.md).
+
 ## Variables
 
 - `env:` values and `-env K=V` overrides.
