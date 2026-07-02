@@ -5,6 +5,24 @@ runner that tests **block (iSCSI/NVMe)**, **S3**, and **VFS / S3-over-RDMA** on
 the shared m01/m02 lab, with a global read-only dashboard so every run is
 observable.
 
+## Read these four first
+
+The core of the platform, in order — read these and a dev can go from "submit a
+ref" to "onboard a new product":
+
+1. **[Unified TestOps](unified-testops.md)** — the overview: the 4 suites
+   (rdma / s3 / block / vfs), the 9099 entry, the shared SOP, the taxonomy, status.
+2. **[Submit & Author](submitting.md)** — run an existing gate (submit a `ref`),
+   run locally, add a new gate, and define service/client topology.
+3. **[Control-Plane Product Contract](../control-plane-product-contract.md)** — the
+   common envelope + one `qa-assert` + the 5-item contract a product implements.
+4. **[QA Bundle Assert](../qa-bundle-assert.md)** — the single acceptance check
+   (`qa-assert.sh` + per-suite profiles).
+
+Everything else below is reference and QA-run detail.
+
+---
+
 If you were handed this link to start testing, read in this order:
 
 Related local docs:
