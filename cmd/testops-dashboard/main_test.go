@@ -93,8 +93,9 @@ func TestDashboardControllerSubmitUsesSuiteDefaults(t *testing.T) {
 	}
 }
 
-func TestDashboardControllerBlockSuiteRegisteredButDisabled(t *testing.T) {
+func TestDashboardControllerBlockSuiteSubmitWritesQueue(t *testing.T) {
 	s := dashboardTestServer(t.TempDir())
+	s.controller.now = func() time.Time { return time.Date(2026, 6, 30, 15, 0, 0, 0, time.UTC) }
 	if err := s.ensureControlDirs(); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -102,11 +103,27 @@ func TestDashboardControllerBlockSuiteRegisteredButDisabled(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	s.handleAPISuite(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `suite "block" is registered but submit is not enabled yet`) {
-		t.Fatalf("unexpected body: %s", rec.Body.String())
+	var resp controlSubmitResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	raw, err := os.ReadFile(resp.QueuePath)
+	if err != nil {
+		t.Fatalf("read queue: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"TESTOPS_SUITE='block'",
+		"TESTOPS_REF='main'",
+		"TESTOPS_PROJECT='block-ci'",
+		"TESTOPS_RUN_BY='block-test'",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in:\n%s", want, text)
+		}
 	}
 }
 

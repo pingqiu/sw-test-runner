@@ -10,7 +10,7 @@ observable.
 The core of the platform, in order — read these and a dev can go from "submit a
 ref" to "onboard a new product":
 
-1. **[Unified TestOps](unified-testops.md)** — the overview: the 4 suites
+1. **[Unified TestOps](../unified-testops.md)** — the overview: the 4 suites
    (rdma / s3 / block / vfs), the 9099 entry, the shared SOP, the taxonomy, status.
 2. **[Submit & Author](submitting.md)** — run an existing gate (submit a `ref`),
    run locally, add a new gate, and define service/client topology.
