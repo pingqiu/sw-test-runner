@@ -179,7 +179,10 @@ func TestAgent_Phase_FailStopsExecution(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(phaseReq)
-	resp, _ := http.Post(baseURL+"/phase", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(baseURL+"/phase", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("phase: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var phaseResp PhaseResponse
@@ -212,7 +215,10 @@ func TestAgent_Upload_PathSafety(t *testing.T) {
 	// Attempt outside base path.
 	req2, _ := http.NewRequest("POST", baseURL+"/upload?path=/etc/evil", bytes.NewReader([]byte("evil")))
 	req2.Header.Set("Content-Type", "application/octet-stream")
-	resp2, _ := http.DefaultClient.Do(req2)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("upload outside base: %v", err)
+	}
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusForbidden {
@@ -413,7 +419,10 @@ func TestAgent_Phase_VarSubstitution(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(phaseReq)
-	resp, _ := http.Post(baseURL+"/phase", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(baseURL+"/phase", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("phase: %v", err)
+	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
