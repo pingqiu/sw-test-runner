@@ -135,6 +135,10 @@ func assertNoActiveISCSISessions(ctx context.Context, actx *tr.ActionContext, ac
 	if code == 0 && strings.TrimSpace(stdout) == "" {
 		return map[string]string{"sessions": "", "count": "0"}, nil
 	}
+	if code != 0 {
+		return nil, fmt.Errorf("assert_no_active_iscsi_sessions: %s exit=%d stderr=%s",
+			bin, code, strings.TrimSpace(stderr))
+	}
 
 	// Parse sessions: each line is "tcp: [N] host:port,tpgt iqn ..."
 	matched := 0
