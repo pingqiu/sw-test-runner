@@ -7,6 +7,12 @@ import (
 // Scenario is the top-level YAML structure for a test scenario.
 type Scenario struct {
 	Name      string                `yaml:"name"`
+	// Metadata is free-form, dashboard-friendly identity for the TEST itself
+	// (e.g. test_id, team, owner, suite, labels). It flows into the run
+	// bundle's manifest.json so multiple agents/teams sharing one dashboard can
+	// tell runs apart and filter them. Run-context that varies per execution
+	// (project, run_by) is better passed with `run -meta key=value`.
+	Metadata  map[string]string     `yaml:"metadata,omitempty"`
 	Timeout   Duration              `yaml:"timeout"`
 	Env       map[string]string     `yaml:"env"`
 	Cluster   *ClusterSpec          `yaml:"cluster,omitempty"`
@@ -156,15 +162,18 @@ type ArtifactSpec struct {
 
 // ScenarioResult is the final output of a scenario run.
 type ScenarioResult struct {
-	RunID     string            `json:"run_id,omitempty"`
-	Name      string            `json:"name"`
-	Status    ResultStatus      `json:"status"`
-	Cancelled bool              `json:"cancelled,omitempty"`
-	Duration  time.Duration     `json:"duration_ms"`
-	Phases    []PhaseResult     `json:"phases"`
-	Error     string            `json:"error,omitempty"`
-	Vars      map[string]string `json:"vars,omitempty"`
-	Artifacts []ArtifactEntry   `json:"artifacts,omitempty"`
+	RunID      string            `json:"run_id,omitempty"`
+	Name       string            `json:"name"`
+	Status     ResultStatus      `json:"status"`
+	StartedAt  string            `json:"started_at,omitempty"`
+	EndedAt    string            `json:"ended_at,omitempty"`
+	WallClockS float64           `json:"wall_clock_s,omitempty"`
+	Cancelled  bool              `json:"cancelled,omitempty"`
+	Duration   time.Duration     `json:"duration_ms"`
+	Phases     []PhaseResult     `json:"phases"`
+	Error      string            `json:"error,omitempty"`
+	Vars       map[string]string `json:"vars,omitempty"`
+	Artifacts  []ArtifactEntry   `json:"artifacts,omitempty"`
 }
 
 // ArtifactEntry records a collected artifact file.

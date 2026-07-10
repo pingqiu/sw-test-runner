@@ -102,8 +102,8 @@ func TestCoordinator_ResolveActionAgent(t *testing.T) {
 		},
 		Topology: Topology{
 			Nodes: map[string]NodeSpec{
-				"node_tp01":  {Agent: "tp01"},
-				"node_m01":   {Agent: "m01"},
+				"node_tp01": {Agent: "tp01"},
+				"node_m01":  {Agent: "m01"},
 			},
 		},
 	}
@@ -516,7 +516,10 @@ func TestCoordinator_RegisterTokenValidation(t *testing.T) {
 	req3, _ := http.NewRequest("POST", "http://"+c.ListenAddr()+"/register", bytes.NewReader(body))
 	req3.Header.Set("Content-Type", "application/json")
 	req3.Header.Set(AuthTokenHeader, "secret")
-	resp3, _ := http.DefaultClient.Do(req3)
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("register with correct token: %v", err)
+	}
 	defer resp3.Body.Close()
 	if resp3.StatusCode != http.StatusOK {
 		t.Errorf("correct token: expected 200, got %d", resp3.StatusCode)

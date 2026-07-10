@@ -166,6 +166,8 @@ func runCmd(args []string) {
 	allowMutating := fs.Bool("allow-mutating", false, "Permit actions registered as mutating (docker_push, infra-affecting chaos, etc.)")
 	envOverrides := newKVFlag()
 	fs.Var(envOverrides, "env", "Set scenario.env entry (repeatable). Format: KEY=VALUE. Overrides any same-named entry from the YAML.")
+	metaOverrides := newKVFlag()
+	fs.Var(metaOverrides, "meta", "Set run metadata (repeatable). Format: KEY=VALUE. Recorded in manifest.json for the dashboard (e.g. project, run_by, team, test_id).")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -202,6 +204,14 @@ func runCmd(args []string) {
 			logger.Printf("warning: failed to create run bundle: %v (continuing without)", err)
 		} else {
 			logger.Printf("run bundle: %s", bundle.Dir)
+			// Merge run-context metadata (project, run_by, team, ...) into the
+			// manifest so a shared dashboard can group/filter runs by who/which
+			// project ran them. The scenario's own metadata block is already in.
+			if len(metaOverrides.values) > 0 {
+				if mErr := bundle.MergeMetadata(metaOverrides.values); mErr != nil {
+					logger.Printf("warning: failed to record -meta: %v", mErr)
+				}
+			}
 			// Inject run_id / bundle_dir / artifacts_dir into scenario env so
 			// phases can route their per-step artifacts under the bundle. The
 			// scenario references these as {{ run_id }} / {{ bundle_dir }} /
@@ -1706,6 +1716,20 @@ func listCmd() {
 
 	byTier := registry.ListByTier()
 	tierOrder := []string{tr.TierCore, tr.TierBlock, tr.TierDevOps, tr.TierChaos, actions.TierK8s}
+	// Append any product-pack tiers not in the fixed order (e.g. s3, vfs) so a
+	// new pack's actions are visible in `list` without editing this slice.
+	known := make(map[string]bool, len(tierOrder))
+	for _, t := range tierOrder {
+		known[t] = true
+	}
+	extra := make([]string, 0)
+	for t := range byTier {
+		if !known[t] {
+			extra = append(extra, t)
+		}
+	}
+	sort.Strings(extra)
+	tierOrder = append(tierOrder, extra...)
 
 	fmt.Println("Registered actions:")
 	for _, tier := range tierOrder {
