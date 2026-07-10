@@ -4,6 +4,11 @@
 # is checked by scripts/qa-assert.sh itself. Keep only RDMA-specific metrics here.
 
 __rdma_perf_rc_push_mib_s>=5120
+# Client-visible (载体) RC-push: proxy fetches, copies out, drops, returns status.
+# Reflects real consumer bandwidth (~half the sampled datapath row above), so it
+# guards the copy-path regression the datapath row can't see. Floor = the migration
+# ">5 GB/s client" contract; observed ~6040, keep margin below to avoid variance flakes.
+__rdma_perf_rc_push_discard_mib_s>=5120
 __rdma_perf_dc_push_mib_s>=5120
 __rdma_perf_rc_pull_mib_s>0
 __rdma_loader_rows>8
