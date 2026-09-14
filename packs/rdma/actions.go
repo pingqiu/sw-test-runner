@@ -46,16 +46,24 @@ func runMonoGate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	runner := paramOr(act.Params, "runner", defaultRunner)
 	enableDC := boolParam(act.Params["enable_dc"], true)
 
-	cmd := strings.Join([]string{
+	cmdEnv := []string{
 		"MONO_REPO=" + shellQuote(monoRepo),
 		"M01_WORKDIR=" + shellQuote(m01Workdir),
 		"M02_WORKDIR=" + shellQuote(m02Workdir),
 		"ARTIFACT_DIR=" + shellQuote(artifactDir),
+	}
+	if actx.Bundle != nil && strings.TrimSpace(actx.Bundle.Dir) != "" {
+		cmdEnv = append(cmdEnv, "TESTOPS_RESULT_DIR="+shellQuote(actx.Bundle.Dir))
+	} else if bundleDir := strings.TrimSpace(actx.Scenario.Env["bundle_dir"]); bundleDir != "" {
+		cmdEnv = append(cmdEnv, "TESTOPS_RESULT_DIR="+shellQuote(bundleDir))
+	}
+
+	cmd := strings.Join(append(cmdEnv, []string{
 		"bash",
 		shellQuote(runner),
 		"--ref", shellQuote(ref),
 		"--profile", shellQuote(profile),
-	}, " ")
+	}...), " ")
 	if enableDC {
 		cmd += " --enable-dc"
 	}
