@@ -21,6 +21,10 @@ type ActionContext struct {
 	// Build/render actions use Bundle.RecordImage / Bundle.RecordBinary
 	// to populate provenance.json.
 	Bundle *RunBundle
+
+	// Safety is shared typed custody, not serialized in the variable map.
+	// Until a reviewed agent/queue adapter exists, only local fake backends use it.
+	Safety *RunScope
 }
 
 // NodeRunner abstracts remote command execution (implemented by infra.Node).
