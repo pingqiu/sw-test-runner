@@ -1,6 +1,7 @@
 # S0 Run Safety: Partial Implementation And Interface Draft
 
 Status: **not S0-complete; not launch-ready; blocked on scope repricing**.
+Current S0a scope, NEED-1..5 correction and budget stop: see s0a-needs.md.
 Base: c646219321adef0c4b2ed8ce6733d0da1d3b092e.
 Request: Claude01 6ae3b20b9c9fd1ba9ca5271f; accepted port plan
 `V:/share/rdma/codex01-testrunner-port-plan-20261029/PLAN.md`.

@@ -11,13 +11,19 @@ import (
 
 // This node never executes processes or opens network connections.
 type fakeOwnedNode struct {
-	mu                               sync.Mutex
-	ids                              map[string]ProcessIdentity
-	settled                          []string
-	authorized                       int
-	lostReply, replaced, unknownExit bool
-	seen                             RunAdmission
-	args                             []string
+	exitSignal                                                    int
+	waited, killed                                                int
+	mu                                                            sync.Mutex
+	ids                                                           map[string]ProcessIdentity
+	specs                                                         map[string]JobSpec
+	settleDelay                                                   time.Duration
+	exitCode                                                      int
+	waitUnsettled, waitWrongIdentity, waitWrongPath, killNotAlive bool
+	settled                                                       []string
+	authorized                                                    int
+	lostReply, replaced, unknownExit                              bool
+	seen                                                          RunAdmission
+	args                                                          []string
 }
 
 func (n *fakeOwnedNode) Enroll(_ context.Context, id string, a RunAdmission, spec JobSpec) (ProcessIdentity, error) {
@@ -25,6 +31,7 @@ func (n *fakeOwnedNode) Enroll(_ context.Context, id string, a RunAdmission, spe
 	defer n.mu.Unlock()
 	i := ProcessIdentity{Node: spec.Node, BootID: "boot", RunID: a.RunID, ExecutableSHA256: spec.SHA256, PID: 41, PGID: 41, StartTime: 9}
 	n.ids[id] = i
+	n.specs[id] = spec
 	n.seen, n.args = a, spec.Argv
 	if n.lostReply {
 		return ProcessIdentity{}, errors.New("reply lost after inert enrollment")
@@ -46,6 +53,13 @@ func (n *fakeOwnedNode) Authorize(_ context.Context, id string, i ProcessIdentit
 }
 
 func (n *fakeOwnedNode) Settle(ctx context.Context, id string) error {
+	if n.settleDelay > 0 {
+		select {
+		case <-time.After(n.settleDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.settled = append(n.settled, id)
@@ -59,13 +73,49 @@ func (n *fakeOwnedNode) Settle(ctx context.Context, id string) error {
 	return nil
 }
 
+func (n *fakeOwnedNode) Wait(ctx context.Context, id string) (ExitInfo, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.waited++
+	if ctx.Err() != nil {
+		return ExitInfo{}, ctx.Err()
+	}
+	i := ExitInfo{Identity: n.ids[id], Code: n.exitCode, Signal: n.exitSignal, StdoutPath: n.specs[id].StdoutPath, StderrPath: n.specs[id].StderrPath, Settled: !n.waitUnsettled}
+	if n.waitWrongIdentity {
+		i.Identity.StartTime++
+	}
+	if n.waitWrongPath {
+		i.StdoutPath = "/somewhere/else"
+	}
+	if i.Settled {
+		delete(n.ids, id)
+	}
+	return i, nil
+}
+
+func (n *fakeOwnedNode) Kill(ctx context.Context, id string) (KillWitness, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if ctx.Err() != nil {
+		return KillWitness{}, ctx.Err()
+	}
+	if n.replaced {
+		return KillWitness{}, errors.New("generation changed: no signal")
+	}
+	if !n.killNotAlive {
+		n.killed++
+	}
+	return KillWitness{Identity: n.ids[id], AliveBefore: !n.killNotAlive, Signal: "KILL", AppliedAt: time.Now()}, nil
+}
+
 func testAdmission() RunAdmission {
-	return RunAdmission{RunID: "run", Workload: "kv", RequestID: "fresh-kv", ManifestSHA256: strings.Repeat("a", 64), WorkDeadline: time.Now().Add(time.Minute), HardDeadline: time.Now().Add(2 * time.Minute), CleanupReserve: time.Second}
+	return RunAdmission{RunID: "run", Workload: "kv", RequestID: "fresh-kv", ManifestSHA256: strings.Repeat("a", 64), OutputDir: "/run/fake", WorkDeadline: time.Now().Add(time.Minute), HardDeadline: time.Now().Add(2 * time.Minute), CleanupReserve: time.Second}
 }
 
 func fakeScope(t *testing.T, ctx context.Context, n *fakeOwnedNode, a RunAdmission) *RunScope {
 	t.Helper()
 	n.ids = make(map[string]ProcessIdentity)
+	n.specs = make(map[string]JobSpec)
 	s, err := NewRunScope(ctx, a, n, func(_ context.Context, a RunAdmission) error {
 		if a.RequestID != "fresh-"+a.Workload {
 			return errors.New("wrong request/workload")
