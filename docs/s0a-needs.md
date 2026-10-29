@@ -1,5 +1,8 @@
 # S0a NEED-1 Through NEED-5: Corrective Head And Cut Line
 
+The 900-line budget ruling below is historical. The final 1,150-line ruling
+and subsequent concrete-draft stop are recorded in s0a-final-cut-line.md.
+
 Owner ruling 6ae3b7bd9c9fd1ba9ca5275b: S0a hard 900 production Go lines;
 NEED-1/2/3 are correctness, Wait and witnessed Kill are mandatory. NEED-6/7
 are not implemented here and stay with the packs unless separately repriced.
