@@ -1,0 +1,20 @@
+{
+  "scope": "Projection of retained FAILED v3A; no qualification or retune",
+  "run": "kv-candidate-20261029T195756Z",
+  "module": "b0e5cb99",
+  "source": "a9ad629a",
+  "archive_sha256": "b2f9799097b62011ec7d9ee6d2a0cf78fed7fc0c2b757d383015a75335c6a5f7",
+  "fixture_sha256": "96c47b10bb75e363cb6f1305e5c97b0106ab2cdf55a6b89a076493fc7718070e",
+  "legacy_function_source_sha256": "fc5e4011defe534862d9a86b4b29ebf32e66b2d009a04aee347e0525ed40ca67",
+  "projection": {
+    "start": "./soak-go.json start_epoch",
+    "offers": "offered.epoch/skipped",
+    "writes": "dispatched SET ID/writer/bytes/epoch; native submitted callback monotonic projected with complete-row(submitted_epoch - submitted); native completed similarly; parent complete epoch; ACK journal joined by(writer,key,sequence)",
+    "reads": "complete GET row submitted_epoch+completed-submitted; ok is True and results in(None,[True])",
+    "selection": "known stage or read epoch in [begin+300,begin+840); source scan through begin+900"
+  },
+  "source_event_lines_scanned": 97678,
+  "offers": 10517,
+  "writes": 181,
+  "reads": 16692
+}
