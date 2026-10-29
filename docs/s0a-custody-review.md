@@ -1,5 +1,7 @@
 # S0a Custody Trial: Independent Review Entry
 
+Historical trial input. Current successor and limits: [s0a-handoff.md](s0a-handoff.md).
+
 The R1-R3-only correction and pack limits/prices are in s0a-r123.md. The
 historical trial and its five captured hashes below are preserved as review
 input, not re-labelled as the corrected source. R4-R6/TierChaos remain open.

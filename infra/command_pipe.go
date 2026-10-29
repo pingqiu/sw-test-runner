@@ -2,10 +2,15 @@ package infra
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
+	"net"
+	"os"
 	"os/exec"
 	"runtime"
+	"sync"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type CommandPipe struct {
@@ -16,80 +21,108 @@ type CommandPipe struct {
 
 func (p *CommandPipe) Close() error { return p.CloseSession() }
 
-// OpenCommand is an unprivileged, one-shot stdin/stdout session, not a daemon.
-// A late session receives no input and is closed; it cannot authorize work.
+// OpenCommand owns a separate connection, never a session on Node.client.
+// Closing it interrupts blocked channel writes without affecting other jobs.
+// ctx bounds creation only; the caller owns the returned pipe's lifetime.
 func (n *Node) OpenCommand(ctx context.Context, argv ...string) (*CommandPipe, error) {
 	command, err := ShellArgv(argv...)
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if n.IsNative || n.IsLocal {
+		c := exec.Command("bash", "-c", command)
+		if n.IsLocal && runtime.GOOS == "windows" {
+			c = exec.Command("wsl", "-e", "bash", "-c", command)
+		}
+		in, writer, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer in.Close()
+		reader, out, err := os.Pipe()
+		if err != nil {
+			writer.Close()
+			return nil, err
+		}
+		defer out.Close()
+		c.Stdin, c.Stdout = in, out
+		var once sync.Once
+		closePipe := func() error {
+			once.Do(func() { _ = writer.Close(); _ = reader.Close() })
+			return nil
+		}
+		if err := c.Start(); err != nil {
+			_ = closePipe()
+			return nil, err
+		}
+		// Our pipe descriptors survive Wait until the decoder consumes EOF.
+		go c.Wait()
+		p := &CommandPipe{reader, writer, closePipe}
+		if err := ctx.Err(); err != nil {
+			_ = p.Close()
+			return nil, err
+		}
+		return p, nil
+	}
+	config, err := n.sshConfig()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", n.sshAddress())
+	if err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	type result struct {
 		pipe *CommandPipe
 		err  error
 	}
-	done := make(chan result)
+	done := make(chan result, 1)
 	go func() {
-		var p *CommandPipe
-		var err error
-		if n.IsNative || n.IsLocal {
-			c := exec.Command("bash", "-c", command)
-			if n.IsLocal && runtime.GOOS == "windows" {
-				c = exec.Command("wsl", "-e", "bash", "-c", command)
-			}
-			out, e := c.StdoutPipe()
-			if e != nil {
-				err = e
-			} else {
-				in, e := c.StdinPipe()
-				if e != nil {
-					err = e
-				} else if err = c.Start(); err == nil {
-					p = &CommandPipe{out, in, in.Close}
-					go c.Wait()
-				}
-			}
-		} else {
-			n.mu.Lock()
-			client := n.client
-			n.mu.Unlock()
-			if client == nil {
-				err = fmt.Errorf("SSH not connected")
-			} else {
-				s, e := client.NewSession()
-				if e != nil {
-					err = e
-				} else {
-					out, e := s.StdoutPipe()
-					if e != nil {
-						err = e
-					} else {
-						in, e := s.StdinPipe()
-						if e != nil {
-							err = e
-						} else if err = s.Start(command); err == nil {
-							p = &CommandPipe{out, in, s.Close}
-						}
-					}
-					if err != nil {
-						_ = s.Close()
-					} else {
-						go s.Wait()
-					}
-				}
-			}
+		cc, channels, requests, err := ssh.NewClientConn(conn, n.sshAddress(), config)
+		if err != nil {
+			done <- result{err: err}
+			return
 		}
-		select {
-		case done <- result{p, err}:
-		case <-ctx.Done():
-			if p != nil {
-				_ = p.Close()
-			}
+		client := ssh.NewClient(cc, channels, requests)
+		s, err := client.NewSession()
+		if err != nil {
+			done <- result{err: err}
+			return
 		}
+		out, err := s.StdoutPipe()
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		in, err := s.StdinPipe()
+		if err == nil {
+			err = s.Start(command)
+		}
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		go s.Wait()
+		done <- result{pipe: &CommandPipe{out, in, conn.Close}}
 	}()
 	select {
 	case r := <-done:
+		if !stop() || ctx.Err() != nil {
+			_ = conn.Close()
+			return nil, errors.Join(ctx.Err(), r.err)
+		}
+		if r.err != nil {
+			_ = conn.Close()
+		}
 		return r.pipe, r.err
 	case <-ctx.Done():
+		_ = conn.Close()
+		stop()
+		<-done // Socket closure settles handshake/channel creation too.
 		return nil, ctx.Err()
 	}
 }

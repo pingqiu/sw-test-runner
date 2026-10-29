@@ -33,28 +33,11 @@ func (n *Node) Connect() error {
 	if n.IsLocal || n.IsNative {
 		return nil
 	}
-
-	key, err := os.ReadFile(n.KeyFile)
+	config, err := n.sshConfig()
 	if err != nil {
-		return fmt.Errorf("read SSH key %s: %w", n.KeyFile, err)
+		return err
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return fmt.Errorf("parse SSH key: %w", err)
-	}
-
-	config := &ssh.ClientConfig{
-		User:            n.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-
-	addr := n.Host
-	if !strings.Contains(addr, ":") {
-		addr += ":22"
-	}
-
+	addr := n.sshAddress()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.client, err = ssh.Dial("tcp", addr, config)
@@ -62,6 +45,31 @@ func (n *Node) Connect() error {
 		return fmt.Errorf("SSH dial %s: %w", addr, err)
 	}
 	return nil
+}
+
+func (n *Node) sshConfig() (*ssh.ClientConfig, error) {
+	key, err := os.ReadFile(n.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read SSH key %s: %w", n.KeyFile, err)
+	}
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("parse SSH key: %w", err)
+	}
+
+	return &ssh.ClientConfig{
+		User:            n.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}, nil
+}
+
+func (n *Node) sshAddress() string {
+	if _, _, err := net.SplitHostPort(n.Host); err == nil {
+		return n.Host
+	}
+	return net.JoinHostPort(strings.Trim(n.Host, "[]"), "22")
 }
 
 // Run executes a command and returns stdout, stderr, exit code.

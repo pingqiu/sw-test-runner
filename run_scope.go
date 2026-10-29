@@ -31,6 +31,7 @@ type JobSpec struct {
 	Node, Executable, SHA256 string
 	StdoutPath, StderrPath   string
 	Argv                     []string
+	Restoration              bool // Set only by the scope's cleanup path.
 }
 
 type ExitInfo struct {
@@ -80,23 +81,25 @@ type restoration struct {
 	restore     func(context.Context) error
 	verify      func(context.Context) error
 	cleared     bool
+	applyErr    error
 }
 
 // mu protects admission/indexes only. RPCs and callbacks never hold it.
 type RunScope struct {
-	mu        sync.Mutex
-	admission RunAdmission
-	backend   OwnedJobBackend
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closed    bool
-	jobs      map[string]*ownedJob
-	logs      map[string]bool
-	restores  map[string]*restoration
-	order     []string
-	once      sync.Once
-	done      chan struct{}
-	err       error
+	mu            sync.Mutex
+	admission     RunAdmission
+	backend       OwnedJobBackend
+	ctx           context.Context
+	cancel        context.CancelFunc
+	closed        bool
+	jobs          map[string]*ownedJob
+	logs          map[string]bool
+	restores      map[string]*restoration
+	order         []string
+	once          sync.Once
+	done          chan struct{}
+	err           error
+	faultReceipts map[string]FaultReceipt
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -129,6 +132,11 @@ func validSHA256(v string) bool {
 }
 
 func (s *RunScope) Start(spec JobSpec) (JobHandle, error) {
+	return s.start(s.ctx, spec, false)
+}
+
+func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (JobHandle, error) {
+	spec.Restoration = restoration
 	if spec.Node == "" || !path.IsAbs(spec.Executable) || !validSHA256(spec.SHA256) {
 		return JobHandle{}, errors.New("unbound job")
 	}
@@ -160,7 +168,7 @@ func (s *RunScope) Start(spec JobSpec) (JobHandle, error) {
 	spec.Argv = append([]string(nil), spec.Argv...)
 	j := &ownedJob{ready: make(chan struct{}), gate: make(chan struct{}, 1), spec: spec}
 	s.mu.Lock()
-	if s.closed || s.ctx.Err() != nil {
+	if (s.closed && !restoration) || ctx.Err() != nil {
 		s.mu.Unlock()
 		return JobHandle{}, errors.New("run admission closed")
 	}
@@ -173,7 +181,7 @@ func (s *RunScope) Start(spec JobSpec) (JobHandle, error) {
 	s.mu.Unlock()
 	defer close(j.ready)
 	h := JobHandle{s, id, j}
-	i, err := s.backend.Enroll(s.ctx, id, s.admission, spec)
+	i, err := s.backend.Enroll(ctx, id, s.admission, spec)
 	if err != nil {
 		return h, fmt.Errorf("enrollment UNKNOWN: %w", err)
 	}
@@ -184,10 +192,10 @@ func (s *RunScope) Start(spec JobSpec) (JobHandle, error) {
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
-	if closed || s.ctx.Err() != nil {
+	if (closed && !restoration) || ctx.Err() != nil {
 		return h, errors.New("run closed before authorization")
 	}
-	return h, s.backend.Authorize(s.ctx, id, i)
+	return h, s.backend.Authorize(ctx, id, i)
 }
 
 // ready fences creation; gate serializes only this entry, with bounded waiting.
@@ -318,7 +326,8 @@ func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Co
 	s.order = append(s.order, key)
 	s.mu.Unlock()
 	defer close(r.ready)
-	return apply(s.ctx)
+	r.applyErr = cleanupCall(s.ctx, apply)
+	return r.applyErr
 }
 
 func (s *RunScope) cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -342,12 +351,11 @@ func (s *RunScope) ClearFault(ctx context.Context, key string) error {
 		return err
 	}
 	defer func() { <-r.gate }()
+	var restoreErr error
 	if !r.cleared {
-		if err := cleanupCall(ctx, r.restore); err != nil {
-			return err
-		}
+		restoreErr = cleanupCall(ctx, r.restore)
 	}
-	if err := cleanupCall(ctx, r.verify); err != nil {
+	if err := errors.Join(restoreErr, cleanupCall(ctx, r.verify)); err != nil {
 		return err
 	}
 	r.cleared = true
@@ -382,6 +390,16 @@ func (s *RunScope) Close() error {
 		for n := len(order) - 1; n >= 0; n-- {
 			if err := s.ClearFault(ctx, order[n]); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
+			}
+			s.mu.Lock()
+			r := s.restores[order[n]]
+			s.mu.Unlock()
+			select {
+			case <-r.ready:
+				if r.applyErr != nil {
+					errs = append(errs, fmt.Errorf("apply %s: %w", order[n], r.applyErr))
+				}
+			default:
 			}
 		}
 		sort.Slice(jobs, func(i, j int) bool { return jobs[i].id < jobs[j].id })

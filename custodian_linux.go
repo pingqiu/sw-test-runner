@@ -143,26 +143,31 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 		return errors.New("no enrollment")
 	}
 	a, s := first.Admission, first.Spec
-	if first.Operation != "enroll" || !a.WorkDeadline.After(time.Now()) || a.CleanupReserve <= 0 || a.CleanupReserve > time.Minute || a.WorkDeadline.Add(a.CleanupReserve).After(a.HardDeadline) {
+	if first.Operation != "enroll" || (!s.Restoration && !a.WorkDeadline.After(time.Now())) || !a.HardDeadline.After(time.Now()) || a.CleanupReserve <= 0 || a.CleanupReserve > time.Minute || a.WorkDeadline.Add(a.CleanupReserve).After(a.HardDeadline) {
 		return errors.New("invalid custody envelope")
 	}
-	file, err := os.Open(s.Executable)
+	file, err := snapshotExecutable(s.Executable, s.SHA256)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	logRoot, err := custodyLogRoot(a.OutputDir)
+	if err != nil {
+		return err
+	}
+	defer logRoot.Close()
 	gate, authorize, err := os.Pipe()
 	if err != nil {
 		return err
 	}
 	defer gate.Close()
 	defer authorize.Close()
-	out, err := os.OpenFile(s.StdoutPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	out, err := custodyLog(logRoot, a.OutputDir, s.StdoutPath)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	errout, err := os.OpenFile(s.StderrPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	errout, err := custodyLog(logRoot, a.OutputDir, s.StderrPath)
 	if err != nil {
 		return err
 	}
@@ -174,6 +179,9 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 	cmd := exec.Command(self, append([]string{"owned-exec", s.Executable}, s.Argv...)...)
 	cmd.ExtraFiles, cmd.Stdout, cmd.Stderr = []*os.File{file, gate}, out, errout
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !a.HardDeadline.After(time.Now()) || (!s.Restoration && !a.WorkDeadline.After(time.Now())) {
+		return errors.New("enrollment expired while pinning files")
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -225,7 +233,11 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 			var callErr error
 			switch q.Operation {
 			case "authorize":
-				if authorized || q.Identity != identity || !a.WorkDeadline.After(time.Now()) {
+				deadline := a.WorkDeadline
+				if s.Restoration {
+					deadline = a.HardDeadline
+				}
+				if authorized || q.Identity != identity || !deadline.After(time.Now()) {
 					callErr = errors.New("authorization refused")
 				} else {
 					_, callErr = authorize.Write([]byte{1})

@@ -3,10 +3,11 @@
 package testrunner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -34,11 +35,19 @@ func TestCustodyAcceptsSettlementAfterWorkDeadline(t *testing.T) {
 	}
 	defer func() { _ = input.Close(); _ = cmd.Wait() }()
 	a := testAdmission()
-	a.WorkDeadline = time.Now().Add(250 * time.Millisecond)
+	a.OutputDir = t.TempDir()
+	if err := os.Chmod(a.OutputDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(bytes)
+	a.WorkDeadline = time.Now().Add(time.Second)
 	a.CleanupReserve = time.Second
 	a.HardDeadline = a.WorkDeadline.Add(time.Second)
-	a.OutputDir = t.TempDir()
-	spec := JobSpec{Node: "local", Executable: exe, SHA256: strings.Repeat("a", 64), Argv: []string{"s0a-empty-workload"}, StdoutPath: a.OutputDir + "/out", StderrPath: a.OutputDir + "/err"}
+	spec := JobSpec{Node: "local", Executable: exe, SHA256: hex.EncodeToString(hash[:]), Argv: []string{"s0a-empty-workload"}, StdoutPath: a.OutputDir + "/out", StderrPath: a.OutputDir + "/err"}
 	e, d := json.NewEncoder(input), json.NewDecoder(output)
 	if err = e.Encode(custodyRequest{Sequence: 1, Operation: "enroll", Admission: a, Spec: spec}); err != nil {
 		t.Fatal(err)

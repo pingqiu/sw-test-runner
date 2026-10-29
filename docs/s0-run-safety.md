@@ -1,4 +1,7 @@
-# S0 Run Safety: Partial Implementation And Interface Draft
+# S0 Run Safety: Historical Initial Interface Draft
+
+Current SSH-only S0a review/handoff: [s0a-handoff.md](s0a-handoff.md).
+The status and missing-backend statements below describe the initial head only.
 
 Status: **not S0-complete; not launch-ready; blocked on scope repricing**.
 Current S0a scope, NEED-1..5 correction and budget stop: see s0a-needs.md.

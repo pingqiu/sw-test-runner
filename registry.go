@@ -25,6 +25,8 @@ type ActionContext struct {
 	// Safety is shared typed custody, not serialized in the variable map.
 	// Until a reviewed agent/queue adapter exists, only local fake backends use it.
 	Safety *RunScope
+	// FaultPlans are immutable, manifest-bound providers supplied by the pack.
+	FaultPlans map[string]WitnessedFault
 }
 
 // NodeRunner abstracts remote command execution (implemented by infra.Node).

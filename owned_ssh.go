@@ -34,6 +34,7 @@ type custodyChannel struct {
 	sequence uint64
 	replies  chan custodyReply
 	poisoned bool
+	release  func()
 }
 
 // SSHJobs uses an already-connected Node and an installed runner executable.
@@ -43,6 +44,7 @@ type SSHJobs struct {
 	Nodes  map[string]*infra.Node
 	Runner string
 	jobs   map[string]*custodyChannel
+	slots  chan struct{}
 }
 
 func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (ProcessIdentity, error) {
@@ -50,6 +52,7 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 	b.mu.Lock()
 	if b.jobs == nil {
 		b.jobs = make(map[string]*custodyChannel)
+		b.slots = make(chan struct{}, 8)
 	}
 	if b.jobs[id] != nil {
 		b.mu.Unlock()
@@ -61,14 +64,23 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 	if n == nil {
 		return ProcessIdentity{}, errors.New("unknown custody node")
 	}
+	select {
+	case b.slots <- struct{}{}:
+	case <-ctx.Done():
+		return ProcessIdentity{}, ctx.Err()
+	}
+	release := sync.OnceFunc(func() { <-b.slots })
+	c.release = release
 	p, err := n.OpenCommand(ctx, b.Runner, "owned-custodian")
 	if err != nil {
+		release()
 		return ProcessIdentity{}, err
 	}
 	c.pipe = p
 	lifetime, cancel := context.WithDeadline(context.Background(), a.HardDeadline)
 	context.AfterFunc(lifetime, func() { _ = p.Close() })
 	go func() {
+		defer release()
 		defer cancel()
 		defer close(c.replies)
 		d := json.NewDecoder(p)
@@ -141,8 +153,15 @@ func (b *SSHJobs) command(ctx context.Context, id, op string, identity ProcessId
 		return custodyReply{}, fmt.Errorf("unknown custody id %s", id)
 	}
 	r, err := c.call(ctx, custodyRequest{Operation: op, Identity: identity})
+	if err == nil && op == "settle" && !r.Exit.Settled {
+		err = errors.New("custody settlement UNKNOWN")
+	}
 	if err == nil && (op == "settle" || r.Exit.Settled) {
 		_ = c.pipe.Close()
+		c.release()
+		b.mu.Lock()
+		delete(b.jobs, id)
+		b.mu.Unlock()
 	}
 	return r, err
 }
