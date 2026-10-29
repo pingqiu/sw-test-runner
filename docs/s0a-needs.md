@@ -53,11 +53,11 @@ logs without following foreign symlinks or overwriting another run's evidence;
 lexical scope checks are not a substitute for concrete filesystem ownership.
 Queue/GO binding remains S0b; the current verifier is not real launch authority.
 
-Only a test fake implements this backend. NEED-1/2/3 are corrected in the actual
-RunScope, but NEED-4/5's **concrete SSH execution remains open**, not closed by
-their fake receipts. There is no agent endpoint, background service, native
-helper, pack state registry or in-process goroutine supervisor hidden here.
-No S0a acceptance, real controller-death proof, launch or retirement is claimed.
+The original 298b0e0 head has only a test-fake backend. The exact 559-line
+concrete SSH custody trial is now separately submitted for independent review
+under ruling 6ae3c15b9c9fd1ba9ca52868; see s0a-custody-review.md for its known
+gaps. It is not qualified by those fake receipts. No S0a acceptance, real
+controller-death proof, lab launch or retirement is claimed.
 
 ## Budget Stop
 

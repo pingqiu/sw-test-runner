@@ -1,5 +1,10 @@
 # S0a Final 1,150-Line Cut Line
 
+Historical stop record. Ruling 6ae3c15b9c9fd1ba9ca52868 subsequently released
+the exact 559-line custody trial for commit and independent review only,
+without TierChaos witnesses or lab use. See s0a-custody-review.md. The final
+cap remains 1,150; the wider program decision is with Ping.
+
 Status: BLOCKED at the explicit final-cap stop, not S0a delivery or acceptance.
 Owner ruling 6ae3bd579c9fd1ba9ca52816 supersedes the earlier 900-line cap.
 The existing Scope correction remains production head 298b0e0, with 567

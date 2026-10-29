@@ -57,6 +57,13 @@ var pkgRegister func(*tr.Registry)
 // Run dispatches a sw-test-runner subcommand against the supplied
 // product-pack registration callback. Returns a process exit code.
 func Run(register func(*tr.Registry), args []string) int {
+	if handled, err := tr.OwnedEntrypoint(args); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if register == nil {
 		fmt.Fprintln(os.Stderr, "cli.Run: register callback is required")
 		return 2
