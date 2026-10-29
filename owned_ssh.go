@@ -33,7 +33,7 @@ type custodyChannel struct {
 	pipe     io.ReadWriteCloser
 	sequence uint64
 	replies  chan custodyReply
-	failed   chan struct{}
+	poisoned bool
 }
 
 // SSHJobs uses an already-connected Node and an installed runner executable.
@@ -46,7 +46,7 @@ type SSHJobs struct {
 }
 
 func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (ProcessIdentity, error) {
-	c := &custodyChannel{replies: make(chan custodyReply, 1), failed: make(chan struct{})}
+	c := &custodyChannel{replies: make(chan custodyReply, 1)}
 	b.mu.Lock()
 	if b.jobs == nil {
 		b.jobs = make(map[string]*custodyChannel)
@@ -66,8 +66,11 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 		return ProcessIdentity{}, err
 	}
 	c.pipe = p
+	lifetime, cancel := context.WithDeadline(context.Background(), a.HardDeadline)
+	context.AfterFunc(lifetime, func() { _ = p.Close() })
 	go func() {
-		defer close(c.failed)
+		defer cancel()
+		defer close(c.replies)
 		d := json.NewDecoder(p)
 		for {
 			var r custodyReply
@@ -76,7 +79,7 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 			}
 			select {
 			case c.replies <- r:
-			case <-ctx.Done():
+			case <-lifetime.Done():
 				return
 			}
 		}
@@ -88,7 +91,10 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 func (c *custodyChannel) call(ctx context.Context, q custodyRequest) (custodyReply, error) {
 	c.gate.Lock()
 	defer c.gate.Unlock()
-	if c.pipe == nil {
+	if err := ctx.Err(); err != nil {
+		return custodyReply{}, err
+	}
+	if c.pipe == nil || c.poisoned {
 		return custodyReply{}, errors.New("custody transport UNKNOWN")
 	}
 	c.sequence++
@@ -98,14 +104,22 @@ func (c *custodyChannel) call(ctx context.Context, q custodyRequest) (custodyRep
 	select {
 	case err := <-written:
 		if err != nil {
+			c.poisoned = true
+			_ = c.pipe.Close()
 			return custodyReply{}, err
 		}
 	case <-ctx.Done():
+		c.poisoned = true
+		_ = c.pipe.Close()
+		<-written
 		return custodyReply{}, ctx.Err()
 	}
 	for {
 		select {
-		case r := <-c.replies:
+		case r, ok := <-c.replies:
+			if !ok {
+				return custodyReply{}, errors.New("custody reply UNKNOWN")
+			}
 			if r.Sequence != q.Sequence {
 				continue
 			}
@@ -113,8 +127,6 @@ func (c *custodyChannel) call(ctx context.Context, q custodyRequest) (custodyRep
 				return r, errors.New(r.Error)
 			}
 			return r, nil
-		case <-c.failed:
-			return custodyReply{}, errors.New("custody reply UNKNOWN")
 		case <-ctx.Done():
 			return custodyReply{}, ctx.Err()
 		}

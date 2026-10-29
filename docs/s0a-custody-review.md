@@ -1,5 +1,9 @@
 # S0a Custody Trial: Independent Review Entry
 
+The R1-R3-only correction and pack limits/prices are in s0a-r123.md. The
+historical trial and its five captured hashes below are preserved as review
+input, not re-labelled as the corrected source. R4-R6/TierChaos remain open.
+
 Ruling 6ae3c15b9c9fd1ba9ca52868 releases the measured 559-line SSH custody
 trial for commit on Draft runner#4 and independent review by Claude02.
 It does not release TierChaos witness code, lab use, merge or S1 activation.

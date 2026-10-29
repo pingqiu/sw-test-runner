@@ -210,13 +210,13 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 	if err := enc.Encode(custodyReply{Sequence: first.Sequence, Identity: identity}); err != nil {
 		return err
 	}
-	timer := time.NewTimer(time.Until(a.WorkDeadline))
+	timer := time.NewTimer(time.Until(a.HardDeadline))
 	defer timer.Stop()
 	authorized := false
 	for {
 		select {
 		case <-timer.C:
-			return errors.New("work deadline")
+			return errors.New("hard deadline")
 		case q, ok := <-requests:
 			if !ok {
 				return errors.New("controller disconnected")
