@@ -207,6 +207,20 @@ class OwnedServiceReadiness(unittest.TestCase):
                     self.assertEqual(set(record['processes']),{'master','filer','volume'})
                     for role,child in zip(config['roles'],children):
                         self.assertEqual(record['processes'][role]['identity']['pid'],child.pid)
+                # The declared ports are live globally, but on another PID.
+                # An exact live generation alone cannot claim those listeners.
+                generation = root/'volume-generation.json'
+                original = generation.read_text()
+                foreign = json.loads(original)
+                foreign.update(profile.process(children[0].pid))
+                generation.write_text(json.dumps(foreign))
+                short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
+                                              datetime.timedelta(seconds=.3)).isoformat())
+                refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
+                    '--config',json.dumps(short),'--action','ready'],capture_output=True,timeout=3)
+                self.assertNotEqual(refused.returncode,0)
+                self.assertIn(b'listeners not owned',refused.stderr)
+                generation.write_text(original)
                 # A live service/socket alone cannot replace the writer marker.
                 (root/'volume.stdout').write_text('FIXTURE_LISTENING\n')
                 short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
