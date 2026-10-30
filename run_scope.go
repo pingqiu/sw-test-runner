@@ -489,6 +489,7 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 		return err
 	}
 	defer func() { <-r.gate }()
+	priorFinal := r.finalVerified
 	r.finalVerified = false
 	var restoreErr error
 	if !r.cleared {
@@ -501,7 +502,9 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 		return err
 	}
 	r.cleared = true
-	r.finalVerified = final
+	// A successful always-phase recheck preserves an already final proof.
+	// Failure above invalidates it; public clear cannot revive failed proof.
+	r.finalVerified = final || priorFinal
 	return r.cleanupErr
 }
 
