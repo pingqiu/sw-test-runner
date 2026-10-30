@@ -176,3 +176,9 @@ hash if you need stability across the move.
 ## License
 
 Apache-2.0. See `LICENSE`.
+
+## Deployment inventory contract
+
+Cloud provisioning and on-prem deployment share the versioned
+[`seaweed.inventory/v1` contract](inventory/README.md). The standalone validator
+checks data only; it cannot authorize or launch jobs.

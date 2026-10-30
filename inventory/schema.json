@@ -1,0 +1,910 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "seaweed.inventory/v1"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "requested",
+        "resolved"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "target": {
+      "type": "string",
+      "enum": [
+        "azure",
+        "aws",
+        "gcp",
+        "onprem"
+      ]
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "http",
+        "rc",
+        "dc"
+      ]
+    },
+    "artifact_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "managed_resource_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_./:@+=-]{1,2048}$"
+      },
+      "minItems": 0,
+      "maxItems": 4096,
+      "uniqueItems": true
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/host"
+      },
+      "minItems": 1,
+      "maxItems": 128
+    },
+    "observation": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/observation"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "state",
+    "run_id",
+    "target",
+    "transport",
+    "artifact_manifest_sha256",
+    "managed_resource_ids",
+    "hosts"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "target": {
+            "const": "onprem"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "managed_resource_ids": {
+            "maxItems": 0
+          },
+          "hosts": {
+            "items": {
+              "properties": {
+                "resource_id": {
+                  "const": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "managed_resource_ids": {
+            "minItems": 1
+          },
+          "hosts": {
+            "items": {
+              "properties": {
+                "resource_id": {
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "requested"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "observation": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "observation": {
+            "$ref": "#/$defs/observation"
+          },
+          "hosts": {
+            "items": {
+              "properties": {
+                "management": {
+                  "properties": {
+                    "host_key": {
+                      "minLength": 1
+                    }
+                  }
+                },
+                "data": {
+                  "properties": {
+                    "nic": {
+                      "minLength": 1
+                    },
+                    "mtu": {
+                      "type": "integer",
+                      "minimum": 576,
+                      "maximum": 65535
+                    }
+                  }
+                },
+                "disks": {
+                  "items": {
+                    "properties": {
+                      "device_id": {
+                        "minLength": 17
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "observation"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "http"
+          },
+          "state": {
+            "const": "requested"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "properties": {
+                "rdma": {
+                  "$ref": "#/$defs/rdma_na"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "http"
+          },
+          "state": {
+            "const": "resolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "properties": {
+                "rdma": {
+                  "$ref": "#/$defs/rdma_na"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "rc"
+          },
+          "state": {
+            "const": "requested"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "if": {
+                "properties": {
+                  "roles": {
+                    "contains": {
+                      "enum": [
+                        "client",
+                        "volume"
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "rdma": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/rdma_requested"
+                      },
+                      {
+                        "properties": {
+                          "capabilities": {
+                            "contains": {
+                              "const": "rc"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "rdma": {
+                    "$ref": "#/$defs/rdma_na"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "rc"
+          },
+          "state": {
+            "const": "resolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "if": {
+                "properties": {
+                  "roles": {
+                    "contains": {
+                      "enum": [
+                        "client",
+                        "volume"
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "rdma": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/rdma_observed"
+                      },
+                      {
+                        "properties": {
+                          "capabilities": {
+                            "contains": {
+                              "const": "rc"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "rdma": {
+                    "$ref": "#/$defs/rdma_na"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "dc"
+          },
+          "state": {
+            "const": "requested"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "if": {
+                "properties": {
+                  "roles": {
+                    "contains": {
+                      "enum": [
+                        "client",
+                        "volume"
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "rdma": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/rdma_requested"
+                      },
+                      {
+                        "properties": {
+                          "capabilities": {
+                            "contains": {
+                              "const": "dc"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "rdma": {
+                    "$ref": "#/$defs/rdma_na"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "dc"
+          },
+          "state": {
+            "const": "resolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "if": {
+                "properties": {
+                  "roles": {
+                    "contains": {
+                      "enum": [
+                        "client",
+                        "volume"
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "rdma": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/rdma_observed"
+                      },
+                      {
+                        "properties": {
+                          "capabilities": {
+                            "contains": {
+                              "const": "dc"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "rdma": {
+                    "$ref": "#/$defs/rdma_na"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:seaweed:inventory:v1",
+  "title": "Seaweed inventory v1: data, never authorization",
+  "$defs": {
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource_id": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "master",
+              "filer",
+              "volume",
+              "s3",
+              "client"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "management": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "ipv4"
+                },
+                {
+                  "type": "string",
+                  "format": "ipv6"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+                }
+              ]
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "user": {
+              "type": "string",
+              "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+            },
+            "credential_ref": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+            },
+            "host_key": {
+              "type": "string",
+              "pattern": "^(?:|[A-Za-z0-9@._+-]+ [A-Za-z0-9+/]+={0,2})$"
+            }
+          },
+          "required": [
+            "address",
+            "port",
+            "user",
+            "credential_ref",
+            "host_key"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "ipv4"
+                },
+                {
+                  "type": "string",
+                  "format": "ipv6"
+                }
+              ]
+            },
+            "nic": {
+              "type": "string",
+              "pattern": "^(?:|[A-Za-z0-9_.:-]{1,64})$"
+            },
+            "mtu": {
+              "anyOf": [
+                {
+                  "const": 0
+                },
+                {
+                  "type": "integer",
+                  "minimum": 576,
+                  "maximum": 65535
+                }
+              ]
+            }
+          },
+          "required": [
+            "address",
+            "nic",
+            "mtu"
+          ]
+        },
+        "run_root": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_./-]+$"
+        },
+        "disks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/disk"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "rdma": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rdma_na"
+            },
+            {
+              "$ref": "#/$defs/rdma_requested"
+            },
+            {
+              "$ref": "#/$defs/rdma_observed"
+            }
+          ]
+        }
+      },
+      "required": [
+        "resource_id",
+        "id",
+        "roles",
+        "management",
+        "data",
+        "run_root",
+        "disks",
+        "rdma"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "roles": {
+                "contains": {
+                  "const": "volume"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disks": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "disk": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "device_id": {
+          "type": "string",
+          "pattern": "^(?:|/dev/disk/by-id/[A-Za-z0-9_./-]+)$"
+        },
+        "mount": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_./-]+$"
+        },
+        "format_allowed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "device_id",
+        "mount",
+        "format_allowed"
+      ]
+    },
+    "rdma_na": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "not_applicable"
+        },
+        "device": {
+          "const": ""
+        },
+        "port": {
+          "const": 0
+        },
+        "gid_index": {
+          "type": "null"
+        },
+        "gid": {
+          "const": ""
+        },
+        "link_layer": {
+          "const": ""
+        },
+        "active_mtu": {
+          "const": 0
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          ]
+        },
+        "fabric_evidence_sha256": {
+          "const": ""
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "rdma_requested": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "requested"
+        },
+        "device": {
+          "type": "string",
+          "pattern": "^(?:|[A-Za-z0-9_.:-]{1,64})$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "gid_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "gid": {
+          "type": "string",
+          "pattern": "^(?:|[0-9a-f]{32})$"
+        },
+        "link_layer": {
+          "type": "string",
+          "enum": [
+            "",
+            "ethernet",
+            "infiniband"
+          ]
+        },
+        "active_mtu": {
+          "type": "integer",
+          "enum": [
+            0,
+            256,
+            512,
+            1024,
+            2048,
+            4096
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "rc",
+              "dc"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "fabric_evidence_sha256": {
+          "const": ""
+        }
+      },
+      "required": [
+        "status",
+        "capabilities"
+      ]
+    },
+    "rdma_observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "observed"
+        },
+        "device": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "gid_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "gid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "not": {
+            "const": "00000000000000000000000000000000"
+          }
+        },
+        "link_layer": {
+          "type": "string",
+          "enum": [
+            "ethernet",
+            "infiniband"
+          ]
+        },
+        "active_mtu": {
+          "type": "integer",
+          "enum": [
+            256,
+            512,
+            1024,
+            2048,
+            4096
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "rc",
+              "dc"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "fabric_evidence_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "status",
+        "device",
+        "port",
+        "gid_index",
+        "gid",
+        "link_layer",
+        "active_mtu",
+        "capabilities",
+        "fabric_evidence_sha256"
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requested_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "host_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+              },
+              "boot_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "captured_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "evidence_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "host_id",
+              "boot_id",
+              "captured_at",
+              "evidence_sha256"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "requested_sha256",
+        "hosts"
+      ]
+    }
+  }
+}

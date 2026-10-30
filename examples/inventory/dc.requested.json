@@ -1,0 +1,55 @@
+{
+  "schema": "seaweed.inventory/v1",
+  "state": "requested",
+  "run_id": "dc-example",
+  "target": "onprem",
+  "transport": "dc",
+  "artifact_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "managed_resource_ids": [],
+  "hosts": [
+    {
+      "id": "node1",
+      "roles": [
+        "master",
+        "filer",
+        "volume",
+        "s3",
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 22,
+        "user": "testdev",
+        "credential_ref": "operator-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "192.0.2.10",
+        "nic": "eth0",
+        "mtu": 9000
+      },
+      "run_root": "/data/nvme/test-runs/example",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/mnt/seaweed-cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "requested",
+        "device": "mlx5_0",
+        "port": 1,
+        "gid_index": 3,
+        "gid": "00000000000000000000ffffc000020a",
+        "link_layer": "ethernet",
+        "active_mtu": 4096,
+        "capabilities": [
+          "dc"
+        ]
+      },
+      "resource_id": ""
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "schema": "seaweed.inventory/v1",
+  "state": "resolved",
+  "run_id": "http-example",
+  "target": "onprem",
+  "transport": "http",
+  "artifact_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "managed_resource_ids": [],
+  "hosts": [
+    {
+      "id": "node1",
+      "roles": [
+        "master",
+        "filer",
+        "volume",
+        "s3",
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 22,
+        "user": "testdev",
+        "credential_ref": "operator-ssh",
+        "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB"
+      },
+      "data": {
+        "address": "192.0.2.10",
+        "nic": "eth0",
+        "mtu": 1500
+      },
+      "run_root": "/data/nvme/test-runs/example",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "/dev/disk/by-id/example-cache",
+          "mount": "/mnt/seaweed-cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "resource_id": ""
+    }
+  ],
+  "observation": {
+    "requested_sha256": "2b04ee06f8bbe2770398e34b3a13395d5f8408f8f2dd494ab5fff5f15f65cab7",
+    "hosts": [
+      {
+        "host_id": "node1",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ]
+  }
+}
