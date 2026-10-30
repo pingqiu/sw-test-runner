@@ -8,6 +8,7 @@ import (
 // ActionContext provides action handlers with access to the scenario's
 // infrastructure (nodes, targets) and variable store.
 type ActionContext struct {
+	approved    *ApprovedRun // populated only by ApprovedRun.Execute
 	Scenario    *Scenario
 	Nodes       map[string]NodeRunner
 	Targets     map[string]TargetRunner
@@ -21,6 +22,13 @@ type ActionContext struct {
 	// Build/render actions use Bundle.RecordImage / Bundle.RecordBinary
 	// to populate provenance.json.
 	Bundle *RunBundle
+
+	// Safety is shared typed custody, not serialized in the variable map.
+	// The approved worker adapter supplies the verified SSH scope; legacy paths
+	// must not infer authority from YAML, Vars or the tier name.
+	Safety *RunScope
+	// FaultPlans are immutable, manifest-bound providers supplied by the pack.
+	FaultPlans map[string]WitnessedFault
 }
 
 // NodeRunner abstracts remote command execution (implemented by infra.Node).

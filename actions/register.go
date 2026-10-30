@@ -13,4 +13,5 @@ func RegisterCore(r *tr.Registry) {
 	RegisterResultActions(r)
 	RegisterRecoveryActions(r)
 	RegisterBuildActions(r)
+	RegisterProvenanceActions(r)
 }
