@@ -176,3 +176,5 @@ hash if you need stability across the move.
 ## License
 
 Apache-2.0. See `LICENSE`.
+
+GCP plan-only provisioning: [provision/terraform/gcp](provision/terraform/gcp/README.md). Static Draft, no provider plan/apply GO.
