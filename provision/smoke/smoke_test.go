@@ -216,3 +216,64 @@ func TestStrictJSONRefusesAliasesDuplicatesAndTrailing(t *testing.T) {
 		}
 	}
 }
+
+func TestUnknownApplyStaysUnknownAcrossEmptyRecoveryAndVerify(t *testing.T) {
+	c := fixture(t)
+	first := controller(&fake{fail: "apply"}).Execute(context.Background(), "run", c)
+	if first.Code != "APPLY_FAILED_OR_UNKNOWN" || !first.CreateUnresolved {
+		t.Fatal(first)
+	}
+	for _, mode := range []string{"destroy", "verify", "verify"} {
+		r := controller(&fake{}).Execute(context.Background(), mode, c)
+		if r.Code != "CREATE_UNRESOLVED" || !r.CreateUnresolved || !r.RemainingObserved || len(r.Remaining) != 0 {
+			t.Fatalf("%s: %+v", mode, r)
+		}
+	}
+}
+
+func TestMissingOrMalformedApplyReceiptNeverCertifiesClean(t *testing.T) {
+	for _, kind := range []string{"missing", "malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			c := fixture(t)
+			if r := controller(&fake{}).Execute(context.Background(), "run", c); r.Code != "COMPLETE" {
+				t.Fatal(r)
+			}
+			p := filepath.Join(c.Output, "apply-succeeded")
+			var e error
+			if kind == "missing" {
+				e = os.Rename(p, p+".saved")
+			} else {
+				e = os.WriteFile(p, []byte("partial"), 0600)
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			for _, mode := range []string{"destroy", "verify"} {
+				r := controller(&fake{}).Execute(context.Background(), mode, c)
+				if r.Code != "CREATE_UNRESOLVED" || !r.CreateUnresolved {
+					t.Fatal(r)
+				}
+			}
+		})
+	}
+}
+
+func TestVerifyTimeoutCannotCertifyAbsence(t *testing.T) {
+	c := fixture(t)
+	if r := controller(&fake{}).Execute(context.Background(), "run", c); r.Code != "COMPLETE" {
+		t.Fatal(r)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ctl := Controller{Command: func(cx context.Context, _ string, tool string, _ ...string) ([]byte, error) {
+		if tool != "az" {
+			t.Fatal("verify mutated")
+		}
+		<-cx.Done()
+		return nil, cx.Err()
+	}}
+	r := ctl.Execute(ctx, "verify", c)
+	if r.Code != "RESOURCES_REMAIN" || r.RemainingObserved {
+		t.Fatal(r)
+	}
+}

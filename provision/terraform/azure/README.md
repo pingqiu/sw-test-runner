@@ -2,7 +2,7 @@
 
 This is the provision layer of the accepted deploy-platform design. It creates a run-owned network and explicit HTTP nodes in an **existing dedicated test resource group** and emits `seaweed.inventory/v1` requested JSON. The shared Seaweed pack owns deployment, preflight, workload and collection across cloud and on-prem. There is no provisioner or cloud-specific deploy script here.
 
-No apply, subscription plan, Azure authentication, price/availability check or VM workload has been run. Local delivery is `fmt`, `validate` and schema-backed mock-provider tests only (no real provider plan/apply). `terraform validate` checks provider schema and configuration consistency, not Azure API behavior. Container Gate 0a and VF Gate 0b precede the future Azure runtime gate; their implementation waits for S0b-min.
+No apply, subscription plan, Azure authentication, price/availability check or VM workload has been run. Local delivery is `fmt`, `validate` and schema-backed mock-provider tests only (no real provider plan/apply). `terraform validate` checks provider schema and configuration consistency, not Azure API behavior. Container Gate 0a, VF Gate 0b and cloud runtime qualification remain separate review/launch gates.
 
 ## Inputs and output seam
 
@@ -16,11 +16,11 @@ Each node supplies a stable private IPv4, VM size, roles, cache-disk GiB, explic
 
 ## Admission and teardown launch gates
 
-No execution entrypoint is provided in this Draft. A future controller must bind the authoritative GO, budget/deadlines, exact configuration/artifacts/inventory, state and observed identities through S0b. Use only a Linux controller; credentials and private Terraform state stay there, never tp01 or guests. Guests receive only the SSH public key. This module creates no RG, managed identity, Automation account or RBAC assignment.
+The small [one-VM smoke controller](../../smoke/README.md) uses a pinned saved Terraform plan/apply, the existing shared pack's normal S0b admission, then destroy and an independent full RG list. It has no outer S0b, second admission or delete-identity fence: the dedicated existing RG and one existing lease/run are the reviewed assumptions. Credentials/private Terraform state stay on Linux, never tp01 or guests. Guests get only the public key. This module creates no RG, managed identity, Automation account or RBAC assignment. Runtime still requires the manager's launch token; local tests grant none.
 
 The NSG admits controller SSH and listed private-subnet TCP services, then denies other inbound traffic (including Azure's default broad VNet allowance). No RDMA is advertised: all hosts are HTTP with RDMA `not_applicable`. Cloud-init only installs Noble prerequisite package names, including `librdmacm1t64`; it neither uploads Seaweed artifacts nor launches services.
 
-Before any future destroy, compare recorded VM/OS-disk/attachment identity and bindings with live Azure state. AzureRM's VM deletion can remove its OS disk; a changed or replacement child is a refusal, not authorization to delete it. A raw `terraform destroy` alone is not the identity-safe cleanup/absence proof. Run the accepted bounded cleanup and an independent full run-inventory absence check, while preserving the pre-existing RG/RBAC. Failed/unknown operations must settle and be reconciled; there is no automatic unknown-create retry. Review this runtime integration before any spend. VM shutdown, fixed teardown deadlines and billing limits are controller responsibilities; no session-death deletion guarantee is claimed.
+The controller preserves failed/UNKNOWN apply evidence across recovery. A currently empty list cannot settle a pending create: without the original successful-apply receipt, recovery/verify reports CREATE_UNRESOLVED and asks for operator/provider-operation resolution. There is no automatic apply retry, blind state editing or marker-clear command. Terraform destroy retains the RG/RBAC; the full read-only RG list is independent of Terraform state. Native shutdown deallocates compute only, not disks/IPs, and is not a guaranteed billing cutoff.
 
 ## Static checks (no cloud)
 
@@ -40,9 +40,9 @@ References: [validate semantics](https://developer.hashicorp.com/terraform/cli/c
 
 The module accepts a required `run_declaration` object (no defaults): RFC3339 UTC `work_deadline`, `hard_deadline`, positive integer `cloud_cleanup_reserve_seconds`, positive `budget_usd` and `abort_estimate_usd <= budget_usd`. Hard deadline must leave at least the declared cloud cleanup reserve after work deadline. It echoes a `seaweed.provision-declaration/v1` object with run/artifact identity and currency USD. The validation root forwards it and the separate managed-resource ID list. These are typed declarations, **not** a watchdog, price check, cost guarantee, provider timeout or authentic approval. Static validate does not exercise live values/API behavior.
 
-The future reviewed controller owns: authentic GO and its current budget/deadlines; fresh regional compute/disk/IP/network/tax-tail estimates; the exact input/config/plan/declaration/inventory hashes; process/lease admission and work stop; the fixed hard end and cleanup; cost accrual/abort checks; retained journal/state; and independent absence. It must refuse an expired declaration, a cost estimate at/above its authorized abort threshold, a changed price/topology/binding or a declaration that expands authentic authority. The module does not infer authority from successful parsing or Terraform state. Cloud cleanup reserve is separate from S0a's <=60-second process reserve and must include observed provider settlement time.
+The one-VM controller checks pinned configuration/lock/vars, declared estimate/cap and fixed work/hard times. Fresh regional prices and the launch/lease token are operator prerequisites, not a new price/authority service. The cloud cleanup gap is best effort: normal S0b process settlement may consume part of it, and provider deletion may exceed it. The hard deadline is never extended automatically. Process and cloud reserves are distinct declarations, not guarantees of provider settlement or minimum teardown time.
 
-The accepted #11 contract (`0664d799`) is now emitted: inventory `deadlines.work/hard` copy the exact canonical UTC declarations; `deadlines.cleanup_reserve_ms` comes from the required integer `process_cleanup_reserve_ms` (1..60000), separately bounded within those dates. It is NOT converted from `cloud_cleanup_reserve_seconds`. Services preserve each explicit node list, with unique known names/ports and required HTTP/gRPC listeners per role. This HTTP module admits `master_http`, `master_grpc`, `filer_http`, `filer_grpc`, `volume_http`, `volume_grpc`, `s3_http`; no RDMA listener/device is invented. The subnet service rule uses exactly the union of declared ports, and is absent when that union is empty; controller SSH stays separate. The requested inventory still lacks trusted host/device observations. Canonical UTC spelling and exact Join preservation are data checks, not authentic S0b admission. No provider controller/adapter is implemented here; partial-create recovery, identity-safe destroy and independent absence still need their separate review and GO.
+The accepted #11 contract (`0664d799`) is now emitted: inventory `deadlines.work/hard` copy the exact canonical UTC declarations; `deadlines.cleanup_reserve_ms` comes from the required integer `process_cleanup_reserve_ms` (1..60000), separately bounded within those dates. It is NOT converted from `cloud_cleanup_reserve_seconds`. Services preserve each explicit node list, with unique known names/ports and required HTTP/gRPC listeners per role. This HTTP module admits `master_http`, `master_grpc`, `filer_http`, `filer_grpc`, `volume_http`, `volume_grpc`, `s3_http`; no RDMA listener/device is invented. The subnet service rule uses exactly the union of declared ports, and is absent when that union is empty; controller SSH stays separate. The requested inventory still lacks trusted host/device observations. Canonical UTC spelling and exact Join preservation are data checks, not authentic S0b admission. The separate small controller has local/fake evidence only; no account API, live deployment or cleanup qualification follows. No deletion identity fence is claimed.
 
 ## Exact export and consumer handoff
 
@@ -73,63 +73,16 @@ python3 provision/terraform/tests/export_contract.py \
 
 The explicit main-guarded test uses synthetic **resource-free local state**, invokes real Terraform `output -raw` and the actual inventory CLI, and checks raw export -> Decode -> exact-digest Join. It also requires quoted `-json` strings and reserialized request bytes to refuse. It needs no provider, init, credentials, Azure, lab or running cluster. HTTP/DC fixtures only test serialization; DC provisioning is not claimed. This is not a test of module-generated values after apply, hardware facts, S0b trust, partial-create recovery or safe destroy.
 
-## Future lifecycle and recovery procedure (disabled now)
+## Small lifecycle and recovery
 
-The commands below are the payloads a **future reviewed Linux controller** must own; they are documentation, not a runnable launcher or current GO. Do not run plan/apply/destroy today. No custom guard, retry loop or replacement controller is introduced. For every future command the controller records operation ID, exact argv/config/plan hashes, UTC start/end, exit/timeout, stdout/stderr and settlement in its retained journal. It admits jobs through the accepted S0b path, not a YAML boolean. Native Terraform diagnostics remain available with `-json`; stable shell-level refusal/UNKNOWN codes and remedy hints belong to that reviewed controller.
-
-1. **Admit and prepare.** Require separate spend/runtime GO, accepted S0b-min PR3 and runtime adapter, the reviewed local Gates 0a/0b, reviewed inventory deadline/service-port bindings, exact existing RG/account identities and pinned artifacts. Verify current prices/quota/image, estimate all billable tails, freeze topology and deadlines with cleanup time reserved. On a private Linux controller directory (`umask 077`), retain the pinned root/module, private tfvars, lockfile, state, journal and receipts; credentials remain on that controller, never tp01/guests. Independently inventory the dedicated RG before create; unknown/pre-existing resources are a refusal. There is no automatic deletion after controller/session death; record residual billing exposure and the recovery owner.
-
-2. **Plan and bind before effects.** After admission only, controller-owned bounded payloads are:
-
-   ```sh
-   terraform -chdir="$TF_ROOT" init -input=false -lockfile=readonly
-   timeout -k 10s "${PLAN_SECONDS}s" terraform -chdir="$TF_ROOT" plan -input=false -out="$RUN_DIR/create.tfplan"
-   terraform -chdir="$TF_ROOT" show -json "$RUN_DIR/create.tfplan" > "$RUN_DIR/create-plan.json"
-   sha256sum "$RUN_DIR/create.tfplan" "$RUN_DIR/create-plan.json"
-   ```
-
-   The future controller bounds init/show too, reviews exact additions/replacements/cascades and subscription/RG scope, and binds the saved plan plus all data to authentic authority. Any unknown result or plan/scope/hash/authority change refuses. Never substitute `-auto-approve`, target only part of the plan, or retry an uncertain create.
-
-3. **Apply once, then hand off.** Only after those exact checks and authentic approval does the controller admit the single saved-plan payload:
-
-   ```sh
-   timeout -k 10s "${APPLY_SECONDS}s" terraform -chdir="$TF_ROOT" apply -input=false "$RUN_DIR/create.tfplan"
-   ```
-
-   Time budgets come from remaining fixed authority/deadlines, not unbounded retry. Success requires settled provider operations plus complete live identity/inventory checks. Export raw inventory as above; resolve trusted facts and bind them before the shared pack can deploy anything. This module installs prerequisites only. HTTP/DC data transport and required evidence still belong to the one shared pack.
-
-4. **Partial/UNKNOWN apply.** Stop further creates. Preserve original UNKNOWN receipt, stdout/stderr, input/plan hashes and state; create a **separate observed settlement** record. Do not re-apply, `state rm`, import a replacement, force-unlock or invent complete outputs. Controller-owned read-only diagnostics include:
-
-   ```sh
-   terraform -chdir="$TF_ROOT" state pull > "$RUN_DIR/recovery-state.json"
-   terraform -chdir="$TF_ROOT" state list > "$RUN_DIR/state-addresses.txt"
-   az resource list --subscription "$SUBSCRIPTION_ID" -g "$TEST_RG" -o json > "$RUN_DIR/live-resources.json"
-   az monitor activity-log list --subscription "$SUBSCRIPTION_ID" --resource-group "$TEST_RG" --start-time "$CREATE_START" --end-time "$OBSERVED_END" -o json > "$RUN_DIR/activity.json"
-   ```
-
-   Bound these reads. Reconcile state **and** activity/operation results/full live inventory against every intended create, including OS disks and resources absent from outputs/state. Wait boundedly for creating/deleting operations to settle. If outcome/identity/binding cannot be established, report UNKNOWN with unresolved billable IDs and escalate for exact cleanup authority; never certify absence from empty state alone. Activity log absence is not resource absence. No recovery behavior here is runtime-qualified.
-
-5. **Teardown on every admitted outcome.** Stop/settle only owned pack processes and export evidence. Before deletion, independently recheck the exact live resource generations, VM children/OS-disk IDs, attachments and dependencies against approved ownership. Changed/replacement resources or new bindings stop destructive work. After those checks, a bounded destroy **plan** is a separately reviewed payload:
-
-   ```sh
-   timeout -k 10s "${DESTROY_PLAN_SECONDS}s" terraform -chdir="$TF_ROOT" plan -destroy -input=false -out="$RUN_DIR/destroy.tfplan"
-   terraform -chdir="$TF_ROOT" show -json "$RUN_DIR/destroy.tfplan" > "$RUN_DIR/destroy-plan.json"
-   # Recheck exact identities/bindings/cascades and admission immediately before
-   # the approved saved destroy plan. This fence is NOT implemented in this PR.
-   timeout -k 10s "${DESTROY_SECONDS}s" terraform -chdir="$TF_ROOT" apply -input=false "$RUN_DIR/destroy.tfplan"
-   ```
-
-   A raw Terraform destroy/apply does not implement that identity fence. In particular VM deletion can cascade to an OS disk. The future controller/executor must close that race and retain cleanup authority before any runtime activation; this document does not qualify it. A timeout/nonzero is UNKNOWN until read-only provider observation settles it; no blind destructive retry. Never delete the pre-existing RG or alter its RBAC. Recovery uses the same exact reviewed ownership, not broad RG/tag deletion.
-
-6. **Independent closure.** A separate verifier queries every recorded/intended full resource ID plus the full RG inventory and outstanding operations, checks run resources absent and no unexpected creations, and verifies RG plus original RBAC retained. A tag filter, empty Terraform state, empty outputs or successful CLI exit is insufficient. COMPLETE requires terminal provider settlement and this independent proof; otherwise report unresolved billable IDs/cost exposure. Account for actual VM/disk/IP lifetimes and all tail charges until proven absent. This absence/closure verifier is still unimplemented and unqualified; no runtime GO follows from these instructions.
-
+See the [controller recipe](../../smoke/README.md) for pins/plan/run/destroy/verify, private evidence and manual recovery. No cloud-specific deployment code or additional admission layer is added to the pack. On UNKNOWN, retain the original evidence, report remaining IDs/unknown list observations, and have the operator resolve the original provider operation. Repeating destroy plus an empty list never turns an unresolved create into COMPLETE. Standalone verify uses a finite 30-second read deadline, with timeout remaining non-clean. No resources, RBAC or credential changes are authorized by this documentation.
 
 ## Actual module output contract controls (no account)
 
 After local init/validate, run the committed mock-only test and actual accepted
 inventory CLI. No credentials or Azure subscription API are used. The two
 mock apply states are synthetic; they do not prove real provider operation,
-resource identity, disk formatting, SSH trust, or teardown. Thirteen mock runs require reserve/date/service refusals; one additional
+resource identity, disk formatting, SSH trust, or teardown. Fifteen mock runs require reserve/date/service refusals; one additional
 mock plan accepts canonical fractional UTC dates. A zero-test success is refused.
 
 ```sh
