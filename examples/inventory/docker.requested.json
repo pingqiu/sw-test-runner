@@ -1,0 +1,693 @@
+{
+  "schema": "seaweed.inventory/v1",
+  "state": "requested",
+  "run_id": "docker-gate0a",
+  "target": "docker",
+  "transport": "http",
+  "artifact_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "managed_resource_ids": [
+    "docker:m01:network:docker-gate0a-net",
+    "docker:m01:container:docker-gate0a-master1",
+    "docker:m01:container:docker-gate0a-master2",
+    "docker:m01:container:docker-gate0a-master3",
+    "docker:m01:container:docker-gate0a-filer1",
+    "docker:m01:container:docker-gate0a-filer2",
+    "docker:m01:container:docker-gate0a-volume1",
+    "docker:m01:container:docker-gate0a-volume2",
+    "docker:m01:container:docker-gate0a-volume3",
+    "docker:m01:container:docker-gate0a-volume4",
+    "docker:m01:container:docker-gate0a-client1",
+    "docker:m01:container:docker-gate0a-client2",
+    "docker:m01:container:docker-gate0a-client3",
+    "docker:m01:container:docker-gate0a-client4",
+    "docker:m01:container:docker-gate0a-metadata1"
+  ],
+  "hosts": [
+    {
+      "id": "master1",
+      "resource_id": "docker:m01:container:docker-gate0a-master1",
+      "roles": [
+        "master"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2201,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.1",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-master1",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": [
+        {
+          "name": "master_http",
+          "port": 9333
+        },
+        {
+          "name": "master_grpc",
+          "port": 19333
+        }
+      ]
+    },
+    {
+      "id": "master2",
+      "resource_id": "docker:m01:container:docker-gate0a-master2",
+      "roles": [
+        "master"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2202,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.2",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-master2",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": [
+        {
+          "name": "master_http",
+          "port": 9333
+        },
+        {
+          "name": "master_grpc",
+          "port": 19333
+        }
+      ]
+    },
+    {
+      "id": "master3",
+      "resource_id": "docker:m01:container:docker-gate0a-master3",
+      "roles": [
+        "master"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2203,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.3",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-master3",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": [
+        {
+          "name": "master_http",
+          "port": 9333
+        },
+        {
+          "name": "master_grpc",
+          "port": 19333
+        }
+      ]
+    },
+    {
+      "id": "filer1",
+      "resource_id": "docker:m01:container:docker-gate0a-filer1",
+      "roles": [
+        "filer"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2204,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.4",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-filer1",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "metadata_host_id": "metadata1",
+      "services": [
+        {
+          "name": "filer_http",
+          "port": 8888
+        },
+        {
+          "name": "filer_grpc",
+          "port": 18888
+        }
+      ]
+    },
+    {
+      "id": "filer2",
+      "resource_id": "docker:m01:container:docker-gate0a-filer2",
+      "roles": [
+        "filer"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2205,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.5",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-filer2",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "metadata_host_id": "metadata1",
+      "services": [
+        {
+          "name": "filer_http",
+          "port": 8888
+        },
+        {
+          "name": "filer_grpc",
+          "port": 18888
+        }
+      ]
+    },
+    {
+      "id": "volume1",
+      "resource_id": "docker:m01:container:docker-gate0a-volume1",
+      "roles": [
+        "volume"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2206,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.6",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/data/cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-volume1",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": [
+          {
+            "disk_id": "cache",
+            "source_path": "/data/nvme/seaweed-runs/docker-gate0a/volume1/cache",
+            "source_device": "",
+            "source_inode": ""
+          }
+        ]
+      },
+      "services": [
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        }
+      ]
+    },
+    {
+      "id": "volume2",
+      "resource_id": "docker:m01:container:docker-gate0a-volume2",
+      "roles": [
+        "volume"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2207,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.7",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/data/cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-volume2",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": [
+          {
+            "disk_id": "cache",
+            "source_path": "/data/nvme/seaweed-runs/docker-gate0a/volume2/cache",
+            "source_device": "",
+            "source_inode": ""
+          }
+        ]
+      },
+      "services": [
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        }
+      ]
+    },
+    {
+      "id": "volume3",
+      "resource_id": "docker:m01:container:docker-gate0a-volume3",
+      "roles": [
+        "volume"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2208,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.8",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/data/cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-volume3",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": [
+          {
+            "disk_id": "cache",
+            "source_path": "/data/nvme/seaweed-runs/docker-gate0a/volume3/cache",
+            "source_device": "",
+            "source_inode": ""
+          }
+        ]
+      },
+      "services": [
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        }
+      ]
+    },
+    {
+      "id": "volume4",
+      "resource_id": "docker:m01:container:docker-gate0a-volume4",
+      "roles": [
+        "volume"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2209,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.9",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/data/cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-volume4",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": [
+          {
+            "disk_id": "cache",
+            "source_path": "/data/nvme/seaweed-runs/docker-gate0a/volume4/cache",
+            "source_device": "",
+            "source_inode": ""
+          }
+        ]
+      },
+      "services": [
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        }
+      ]
+    },
+    {
+      "id": "client1",
+      "resource_id": "docker:m01:container:docker-gate0a-client1",
+      "roles": [
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2210,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.10",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-client1",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": []
+    },
+    {
+      "id": "client2",
+      "resource_id": "docker:m01:container:docker-gate0a-client2",
+      "roles": [
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2211,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.11",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-client2",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": []
+    },
+    {
+      "id": "client3",
+      "resource_id": "docker:m01:container:docker-gate0a-client3",
+      "roles": [
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2212,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.12",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-client3",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": []
+    },
+    {
+      "id": "client4",
+      "resource_id": "docker:m01:container:docker-gate0a-client4",
+      "roles": [
+        "client"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2213,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.13",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-client4",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": []
+      },
+      "services": []
+    },
+    {
+      "id": "metadata1",
+      "resource_id": "docker:m01:container:docker-gate0a-metadata1",
+      "roles": [
+        "metadata"
+      ],
+      "management": {
+        "address": "192.0.2.10",
+        "port": 2214,
+        "user": "swtest",
+        "credential_ref": "container-ssh",
+        "host_key": ""
+      },
+      "data": {
+        "address": "198.18.0.14",
+        "nic": "",
+        "mtu": 0
+      },
+      "run_root": "/run/seaweed/docker-gate0a",
+      "disks": [
+        {
+          "id": "cache",
+          "device_id": "",
+          "mount": "/data/cache",
+          "format_allowed": false
+        }
+      ],
+      "rdma": {
+        "status": "not_applicable"
+      },
+      "container": {
+        "parent_id": "m01",
+        "name": "docker-gate0a-metadata1",
+        "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "",
+        "netns_inode": "",
+        "privileged": false,
+        "mounts": [
+          {
+            "disk_id": "cache",
+            "source_path": "/data/nvme/seaweed-runs/docker-gate0a/metadata1/cache",
+            "source_device": "",
+            "source_inode": ""
+          }
+        ]
+      },
+      "services": []
+    }
+  ],
+  "docker": {
+    "parent": {
+      "id": "m01",
+      "management": {
+        "address": "192.0.2.10",
+        "port": 22,
+        "user": "testdev",
+        "credential_ref": "parent-ssh",
+        "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB"
+      },
+      "run_root": "/data/nvme/seaweed-runs/docker-gate0a",
+      "executor_ref": "approved-docker-adapter",
+      "executor_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "boot_id": "",
+      "root_device": "",
+      "root_inode": ""
+    },
+    "network": {
+      "name": "docker-gate0a-net",
+      "id": ""
+    },
+    "rdma_mode": "none",
+    "unavailable_transports": [
+      {
+        "transport": "dc",
+        "status": "not_applicable",
+        "reason": "software_profile_no_dc"
+      }
+    ],
+    "metadata_host_id": "metadata1",
+    "metadata_store": "mysql"
+  },
+  "deadlines": {
+    "work": "2026-10-30T00:09:00Z",
+    "hard": "2026-10-30T00:10:00Z",
+    "cleanup_reserve_ms": 60000
+  }
+}

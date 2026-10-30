@@ -6,29 +6,32 @@ const Version = "seaweed.inventory/v1"
 
 // Document is requested infrastructure or a separately observed resolution.
 type Document struct {
-	Schema                 string       `json:"schema"`
-	State                  string       `json:"state"`
-	RunID                  string       `json:"run_id"`
-	Target                 string       `json:"target"`
-	Transport              string       `json:"transport"`
-	ArtifactManifestSHA256 string       `json:"artifact_manifest_sha256"`
-	ManagedResourceIDs     []string     `json:"managed_resource_ids"`
-	Hosts                  []Host       `json:"hosts"`
-	Deadlines              Deadlines    `json:"deadlines"`
-	Observation            *Observation `json:"observation,omitempty"`
+	Schema                 string         `json:"schema"`
+	State                  string         `json:"state"`
+	RunID                  string         `json:"run_id"`
+	Target                 string         `json:"target"`
+	Transport              string         `json:"transport"`
+	ArtifactManifestSHA256 string         `json:"artifact_manifest_sha256"`
+	ManagedResourceIDs     []string       `json:"managed_resource_ids"`
+	Hosts                  []Host         `json:"hosts"`
+	Deadlines              Deadlines      `json:"deadlines"`
+	Observation            *Observation   `json:"observation,omitempty"`
+	Docker                 *DockerProfile `json:"docker,omitempty"`
 }
 
 // Host binds one stable node to declared roles, networks and disks.
 type Host struct {
-	ResourceID string      `json:"resource_id"`
-	ID         string      `json:"id"`
-	Roles      []string    `json:"roles"`
-	Management Management  `json:"management"`
-	Data       DataNetwork `json:"data"`
-	RunRoot    string      `json:"run_root"`
-	Disks      []Disk      `json:"disks"`
-	Services   []Service   `json:"services"`
-	RDMA       RDMA        `json:"rdma"`
+	ResourceID     string      `json:"resource_id"`
+	ID             string      `json:"id"`
+	Roles          []string    `json:"roles"`
+	Management     Management  `json:"management"`
+	Data           DataNetwork `json:"data"`
+	RunRoot        string      `json:"run_root"`
+	Disks          []Disk      `json:"disks"`
+	Services       []Service   `json:"services"`
+	RDMA           RDMA        `json:"rdma"`
+	Container      *Container  `json:"container,omitempty"`
+	MetadataHostID *string     `json:"metadata_host_id,omitempty"`
 }
 
 // Management names a controller-held credential and an out-of-band host key.

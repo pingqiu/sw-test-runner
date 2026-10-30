@@ -116,3 +116,7 @@ refuse Decode. Their static acceptance is not runtime compatibility: producers
 must emit the same explicit deadlines/services (never infer them) before use.
 The independent provisioning cost/deadline declaration is not substituted for
 this inventory envelope. No provider, host or cloud qualification is claimed.
+
+Decoding uses exact JSON tag spellings recursively, before Go struct decoding; unknown, noncanonical and duplicate-by-case keys are refused. Optional primitive fields may be omitted, but supplied null is rejected where the published schema requires a string/integer. Published nullable observation/GID-index/N/A-capabilities declarations remain subject to their existing state-specific validation.
+
+Gate 0a data extension: [Docker schema-only profile](DOCKER.md). It adds container placement/generation/storage and explicit software DC N/A declarations; it does not qualify a Docker/VF adapter or authorize execution. Gate 0b remains unsupported.

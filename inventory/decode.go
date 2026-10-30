@@ -28,7 +28,7 @@ func Decode(data []byte) (*Document, error) {
 		return nil, fmt.Errorf("inventory has trailing JSON")
 	}
 	// encoding/json otherwise accepts case-insensitive matches for struct tags.
-	if err := canonicalKeys(data, reflect.TypeOf(Document{}), "inventory"); err != nil {
+	if err := checkFields(data, reflect.TypeOf(Document{}), "inventory"); err != nil {
 		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -39,9 +39,6 @@ func Decode(data []byte) (*Document, error) {
 	}
 	if d.Transport != "http" && d.Transport != "rc" && d.Transport != "dc" {
 		return nil, fmt.Errorf("transport must explicitly be http, rc or dc")
-	}
-	if err := requiredFields(data, reflect.TypeOf(d), "inventory"); err != nil {
-		return nil, err
 	}
 	if err := validate(&d); err != nil {
 		return nil, err
@@ -88,49 +85,9 @@ func uniqueValue(d *json.Decoder, depth int) error {
 	return nil
 }
 
-// canonicalKeys checks exact JSON tag spellings before typed decoding. It never
-// relies on encoding/json's case-insensitive struct-field matching.
-func canonicalKeys(raw []byte, typ reflect.Type, where string) error {
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	switch typ.Kind() {
-	case reflect.Struct:
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return err
-		}
-		fields := map[string]reflect.Type{}
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			fields[strings.Split(f.Tag.Get("json"), ",")[0]] = f.Type
-		}
-		for key, value := range obj {
-			field, ok := fields[key]
-			if !ok {
-				return fmt.Errorf("%s has noncanonical or unknown field %q", where, key)
-			}
-			if err := canonicalKeys(value, field, where+"."+key); err != nil {
-				return err
-			}
-		}
-	case reflect.Slice:
-		var values []json.RawMessage
-		if err := json.Unmarshal(raw, &values); err != nil {
-			return err
-		}
-		for _, value := range values {
-			if err := canonicalKeys(value, typ.Elem(), where+"[]"); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Non-omitempty Go fields are required, including explicit false/empty values.
-// This prevents JSON null or omission from silently becoming a Go zero value.
-func requiredFields(raw []byte, typ reflect.Type, where string) error {
+// checkFields is one recursive shape pass: exact tags, required declarations
+// and schema-specific nullability, before encoding/json can match case aliases.
+func checkFields(raw []byte, typ reflect.Type, where string) error {
 	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
@@ -143,26 +100,35 @@ func requiredFields(raw []byte, typ reflect.Type, where string) error {
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return err
 		}
+		fields := map[string]reflect.StructField{}
 		for i := 0; i < typ.NumField(); i++ {
 			f := typ.Field(i)
-			tag := strings.Split(f.Tag.Get("json"), ",")
-			value, present := obj[tag[0]]
-			optional := len(tag) > 1 && tag[1] == "omitempty"
+			fields[strings.Split(f.Tag.Get("json"), ",")[0]] = f
+		}
+		for key := range obj {
+			if _, ok := fields[key]; !ok {
+				return fmt.Errorf("%s has noncanonical or unknown field %q", where, key)
+			}
+		}
+		for name, f := range fields {
+			value, present := obj[name]
+			optional := strings.Contains(f.Tag.Get("json"), ",omitempty")
 			if !present {
 				if optional {
 					continue
 				}
-				return fmt.Errorf("%s.%s is required and non-null", where, tag[0])
+				return fmt.Errorf("%s.%s is required and non-null", where, name)
 			}
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-				// Published schema permits null for observation, GID index and N/A
-				// capabilities. Semantic validation restricts the states where allowed.
-				if optional && (f.Type.Kind() == reflect.Pointer || f.Type.Kind() == reflect.Slice) {
+				// These are the only nullable declarations in the published v1 schema.
+				// State-specific validation still refuses observed nil GIDs/capabilities.
+				nullable := typ == reflect.TypeOf(Document{}) && name == "observation" || typ == reflect.TypeOf(RDMA{}) && (name == "gid_index" || name == "capabilities")
+				if optional && nullable {
 					continue
 				}
-				return fmt.Errorf("%s.%s cannot be null", where, tag[0])
+				return fmt.Errorf("%s.%s cannot be null", where, name)
 			}
-			if err := requiredFields(value, f.Type, where+"."+tag[0]); err != nil {
+			if err := checkFields(value, f.Type, where+"."+name); err != nil {
 				return err
 			}
 		}
@@ -172,7 +138,7 @@ func requiredFields(raw []byte, typ reflect.Type, where string) error {
 			return err
 		}
 		for _, value := range values {
-			if err := requiredFields(value, typ.Elem(), where+"[]"); err != nil {
+			if err := checkFields(value, typ.Elem(), where+"[]"); err != nil {
 				return err
 			}
 		}

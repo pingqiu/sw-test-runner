@@ -67,6 +67,9 @@ func Join(requested, resolved []byte) (*Document, error) {
 			}
 		}
 	}
+	if err := joinDocker(want, got); err != nil {
+		return nil, err
+	}
 	return got, nil
 }
 func sameSet(a, b []string) bool {
