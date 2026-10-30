@@ -1,0 +1,69 @@
+{
+  "run": "V:\\share\\testops\\exec\\evidence\\codex03-chaos-soak-v2-warm-20261029\\harness\\kv-candidate-20261029T132324Z",
+  "original_status": "PASS",
+  "policy": "9b5d0dca-replacement",
+  "scope": "All five original resource checks, projected to consumed fields; originals remain sealed",
+  "sources": {
+    "assess_soak.py": "d206793e64447ee4078f42c8eb2f0d22976bd369ec85602cdbd57ea4676f30df",
+    "go_memory_gate.py": "8ef0fd67726961dfdb7b0eac951130f1050de22a55c26592f55deef2a66c4a31",
+    "go_memory_r6b.py": "a7c9e5796f386a76a8c402fe4f6fe6acd55c18218f6db0991bd2bfe9399b7f3f",
+    "capacity_probe.py": "ac5f17b920e9a0944fd1cb38b47c87bf5c37853749e2afb3bcc5f85405556e87",
+    "quiescence.py": "ad3ed109a10f01f6ac8b815f8acd65e7e0f87140d993f549a0ba1c722242f461"
+  },
+  "archives": {
+    "m01": "716183d2f9c6ebab8d6fab7b18ac969a89a4135fc9bfa692166ec3dd5a0744af",
+    "m02": "991964146b4eface2ef003b78e647854fb234b9f0d99441889753cb9be20bfc8"
+  },
+  "members": [
+    {
+      "host": "m01",
+      "member": "quiesce-final.json",
+      "sha256": "612b38f8d50e59c4310d4f9ca954a1a43ab5ad14a8563da1ec983a4f9e67dfd2"
+    },
+    {
+      "host": "m01",
+      "member": "soak-partial.json",
+      "sha256": "cf469790c195da2ef55c9fbe4ba7748891e6345c6a607953ac926e05df4e1473"
+    },
+    {
+      "host": "m01",
+      "member": "series.jsonl",
+      "sha256": "e22238459cb30b60c31295063636c11bf2af2b551dd2a2427a0416af87931d59"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/filer-111649-3532558-quiescent_gc.heap",
+      "sha256": "582ffe2baf5fb7d7266fd514481044c0c8934a0c7794ded9be350f8556da008c"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/filer-111649-3532558-warm.heap",
+      "sha256": "bf508af2a8763e976779c6d19123593e77f50f11860b046fdef183bc382f4e64"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/filer-77325-3022343-warm.heap",
+      "sha256": "6179670d811dae16932a78f5791c83dc4accf777b39cf62dfed398f5a7a21e3d"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/master-107212-3424162-warm.heap",
+      "sha256": "33aa3e93d3524546377e80f06b4d573888655d32e6592022046defe49868e969"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/filer-102807-3323065-warm.heap",
+      "sha256": "5f1c14d1102576bb8fd0884c189f75442bc8cdbe789da1df4cbe90dcc2995774"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/master-107212-3424162-quiescent_gc.heap",
+      "sha256": "30b543026018c5228969f6c5981dc430b169ca4019c16f20b4af5a513f8cf7c2"
+    },
+    {
+      "host": "m02",
+      "member": "go-memory/master-77299-3022141-warm.heap",
+      "sha256": "7e230c89c57002bd9eed6a99c531b074527fc1b69c76049bf354b9798287e06a"
+    }
+  ]
+}
