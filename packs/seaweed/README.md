@@ -35,7 +35,7 @@ and explicit per-host service names/ports. It preserves them through Join.
 producer seam; `inventory.Resolve` binds an observed data document to the exact
 request; `inventory.Bind` is the consumer check. At runtime the pack binds to:
 
-- S0b's original run/workload/transport, artifact manifest digest, deadlines and
+- S0b's original run/workload/transport, deadlines and
   cleanup reserve; no restarted timeout or inferred service port;
 - the exact admitted host/SSH/user/key/root set and read-back boot generations;
 - no formatting permission in this slice, and S0b's exact shared per-host output
@@ -49,6 +49,41 @@ The plan is in `scenario.metadata.seaweed_plan`, therefore inside the exact
 independently approved scenario digest. Runtime actions accept no parameters;
 Engine Vars cannot rewrite the plan. A pack refusal also revokes/records failure
 in the original ApprovedRun, so `ignore_error` cannot turn it into a PASS.
+
+### Static payload P versus approved host descriptor D
+
+Producers must now supply `Plan.Payload` (`payload_manifest`) as an exact UTF-8
+JSON **string** inside the GO-pinned Plan. P has this shape (use real file hashes):
+
+```json
+{"version":"seaweed.payload/v1","files":[{"node":"node1","path":"/opt/seaweed/weed","sha256":"<64 lowercase hex>"},{"node":"node1","path":"/opt/seaweed/native/seaweedkv_native/_native.so","sha256":"<64 lowercase hex>"}]}
+```
+
+The inventory's existing `artifact_manifest_sha256` is SHA256 of those exact
+inner JSON bytes, including whitespace and ordering. Freeze P and requested
+inventory before provisioning; never reserialize either after host observation.
+Node IDs and installation paths are stable placements, not IP/key/boot identities.
+Both HTTP/cloud and RC/DC/on-prem producers use this contract; old Plans without
+P refuse at execution (no D fallback). Terraform and inventory formats are unchanged.
+
+Every approved deployment file carrying `product` or `native` must appear once
+in P for its node/path. `ApprovedPackInputs` projects those roles from independent
+policy and clones the actual admitted readback hashes. P must match the complete
+projection and readback, including every expanded native package member labeled
+native. Missing/extra/duplicate/foreign/changed files refuse before jobs. Config,
+runner, adapter and interpreter files still undergo full S0b readback; they are
+not silently selected as static payload. Mixed-role product/native files remain
+in the projection. Producers must label the complete expanded package set; a tar
+checksum cannot replace the installed-member manifest. Build packaging should
+archive the tar SHA alongside its expanded path/SHA mapping, then place the
+expanded entries (not the tar digest) in P. No installer or authority is added.
+
+`RunBinding.Artifacts.SHA256` continues to pin the full host-bound approved
+deployment descriptor D, including Host/HostKey and independent policy equality.
+Request/GO equality, pinned SSH, boot/UID/tree readback and dispatch rechecks are
+unchanged. P is an additional byte join, not an authorization or a replacement
+readback receipt. Trusted fresh-host install/observation and authentic request/GO
+handoff remain separate, open prerequisites. Historical receipts are unchanged.
 
 `preflight`, service startup, readiness and collector labels refer to programs
 whose exact bytes/argv must be independently reviewed and installed in S0b's

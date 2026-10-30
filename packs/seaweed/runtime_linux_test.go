@@ -177,7 +177,8 @@ func newCPUFixture(t *testing.T) *cpuFixture {
 	}
 	f.policy.Scripts = f.scriptPins
 	artifacts := f.write(t, "artifacts.json", tr.ApprovedArtifacts{Version: "s0b-artifacts-v1", Deployments: f.policy.Deployments})
-	d.ArtifactManifestSHA256 = artifacts.SHA256
+	payload := fixturePayload(f)
+	d.ArtifactManifestSHA256 = hash([]byte(payload))
 	requested := *d
 	requested.Hosts = append([]inventory.Host(nil), d.Hosts...)
 	for i := range requested.Hosts {
@@ -191,7 +192,7 @@ func newCPUFixture(t *testing.T) *cpuFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.plan = Plan{Version: "seaweed.pack-plan/v1", Requested: string(req), Resolved: string(resolved), Smoke: SmokeSettings{NativeDir: "/opt/seaweed/native", HelperDir: "/opt/seaweed/worker", Keys: 2, Length: 4096}}
+	f.plan = Plan{Payload: payload, Version: "seaweed.pack-plan/v1", Requested: string(req), Resolved: string(resolved), Smoke: SmokeSettings{NativeDir: "/opt/seaweed/native", HelperDir: "/opt/seaweed/worker", Keys: 2, Length: 4096}}
 	add := func(host, role, label string) Step {
 		f.policy.Jobs[label] = tr.JobPin{Node: host, Executable: "/opt/seaweed/product", SHA256: strings.Repeat("d", 64), Argv: []string{label}}
 		return Step{Host: host, Role: role, Job: label}

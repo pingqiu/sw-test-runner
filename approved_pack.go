@@ -15,6 +15,9 @@ type PackInputs struct {
 	Boots    map[string]string
 	Scripts  map[string][]byte
 	Files    map[string]map[string]string
+	// PayloadFiles is the product/native role projection of independently
+	// approved policy, not a guest-selected subset of the readback.
+	PayloadFiles map[string]map[string]string
 }
 
 // ApprovedPackInputs only succeeds inside this ApprovedRun's exact Engine
@@ -29,6 +32,17 @@ func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
 	p := PackInputs{Binding: a.request.Binding, Jobs: maps.Clone(a.runPolicy.Jobs), Boots: map[string]string{}, Scripts: map[string][]byte{}}
 	p.Scenario = append([]byte(nil), a.inputs.Scenario...)
 	p.Files = map[string]map[string]string{}
+	p.PayloadFiles = map[string]map[string]string{}
+	for _, d := range a.runPolicy.Deployments {
+		p.PayloadFiles[d.NodeID] = map[string]string{}
+		for _, f := range d.Files {
+			for _, role := range f.Roles {
+				if role == "product" || role == "native" {
+					p.PayloadFiles[d.NodeID][f.Path] = f.SHA256
+				}
+			}
+		}
+	}
 	for node, r := range a.readbacks {
 		p.Files[node] = maps.Clone(r.Files)
 	}

@@ -23,6 +23,7 @@ import (
 // S0b's independent GO. It cannot nominate an executor, authority or credential.
 // Protected installation is a separate prerequisite; deploy starts owned jobs.
 type Plan struct {
+	Payload   string        `json:"payload_manifest"`
 	Version   string        `json:"version"`
 	Requested string        `json:"requested_inventory"`
 	Resolved  string        `json:"resolved_inventory"`
@@ -137,12 +138,16 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		}
 	}
 	b := in.Binding
+	payloadSHA, err := bindPayload(p.Payload, in)
+	if err != nil {
+		return err
+	}
 	rdma := d.Target == "onprem" && (d.Transport == "rc" || d.Transport == "dc") && b.Transport == "rdma"
 	http := d.Target == "azure" && d.Transport == "http" && b.Transport == "http"
 	if b.Workload != "kv" || (!rdma && !http) {
 		return errors.New("require explicit on-prem RC/DC or Azure HTTP KV profile; no transport fallback")
 	}
-	cb := inventory.ConsumerBinding{RequestedSHA256: hash([]byte(p.Requested)), ResolvedSHA256: hash([]byte(p.Resolved)), RunID: b.RunID, Transport: d.Transport, ArtifactManifestSHA256: b.Artifacts.SHA256, Deadlines: inventory.Deadlines{Work: b.WorkDeadline.UTC().Format(time.RFC3339Nano), Hard: b.HardDeadline.UTC().Format(time.RFC3339Nano), CleanupReserveMS: b.CleanupReserveMS}}
+	cb := inventory.ConsumerBinding{RequestedSHA256: hash([]byte(p.Requested)), ResolvedSHA256: hash([]byte(p.Resolved)), RunID: b.RunID, Transport: d.Transport, ArtifactManifestSHA256: payloadSHA, Deadlines: inventory.Deadlines{Work: b.WorkDeadline.UTC().Format(time.RFC3339Nano), Hard: b.HardDeadline.UTC().Format(time.RFC3339Nano), CleanupReserveMS: b.CleanupReserveMS}}
 	for _, h := range b.Hosts {
 		address, port, err := net.SplitHostPort(h.Host)
 		if err != nil {

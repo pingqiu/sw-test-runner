@@ -37,7 +37,8 @@ func newHTTPFixture(t *testing.T) *cpuFixture {
 	f.binding.Inventory = f.write(t, "inventory.json", tr.ApprovedInventory{Version: "s0b-inventory-v1", Hosts: f.binding.Hosts})
 	f.policy.Deployments = f.policy.Deployments[1:]
 	f.binding.Artifacts = f.write(t, "artifacts.json", tr.ApprovedArtifacts{Version: "s0b-artifacts-v1", Deployments: f.policy.Deployments})
-	d.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256
+	f.plan.Payload = fixturePayload(f)
+	d.ArtifactManifestSHA256 = hash([]byte(f.plan.Payload))
 	requested := d
 	requested.State = "requested"
 	requested.Observation = nil

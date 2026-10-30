@@ -33,7 +33,8 @@ func TestReviewerNoClientCannotQualifyKVSmoke(t *testing.T) {
 	f.binding.Inventory = f.write(t, "inventory.json", tr.ApprovedInventory{Version: "s0b-inventory-v1", Hosts: f.binding.Hosts})
 	f.policy.Deployments = f.policy.Deployments[1:]
 	f.binding.Artifacts = f.write(t, "artifacts.json", tr.ApprovedArtifacts{Version: "s0b-artifacts-v1", Deployments: f.policy.Deployments})
-	observed.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256
+	f.plan.Payload = fixturePayload(f)
+	observed.ArtifactManifestSHA256 = hash([]byte(f.plan.Payload))
 	requested := observed
 	requested.Hosts = append([]inventory.Host(nil), observed.Hosts...)
 	requested.State, requested.Observation = "requested", nil
@@ -137,7 +138,7 @@ func TestReviewerCompetingHelperPackageMustBeRefused(t *testing.T) {
 	if err := json.Unmarshal([]byte(f.plan.Resolved), &obs); err != nil {
 		t.Fatal(err)
 	}
-	req.ArtifactManifestSHA256, obs.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256, f.binding.Artifacts.SHA256
+	req.ArtifactManifestSHA256, obs.ArtifactManifestSHA256 = hash([]byte(f.plan.Payload)), hash([]byte(f.plan.Payload))
 	raw, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
