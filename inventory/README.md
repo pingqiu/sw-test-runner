@@ -17,7 +17,8 @@ bounded regular files are read. No deploy/run operation exists.
 
 1. Terraform emits **requested** inventory; on-prem users write the same format.
    Keep the exact bytes: resolved observations bind their SHA256, not a rewritten
-   or normalized JSON equivalent. Empty host-key/NIC/device hints are explicit
+   or normalized JSON equivalent. Repository JSON fixtures use LF on every
+   platform so a Windows checkout does not invalidate their bindings. Empty host-key/NIC/device hints are explicit
    pending facts, not a permission to discover and trust anything.
 2. **Resolved** inventory records per-host boot ID, actual capture time and
    evidence digest, exact host-key pins, NIC/MTU and by-id disks. `Join` preserves

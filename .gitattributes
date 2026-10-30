@@ -3,3 +3,8 @@
 *.yaml  text eol=lf
 *.yml   text eol=lf
 *.go    text eol=lf
+
+# These example resolutions bind the exact requested JSON bytes.
+examples/inventory/*.json text eol=lf
+inventory/*.json text eol=lf
+inventory/testdata/*.json text eol=lf
