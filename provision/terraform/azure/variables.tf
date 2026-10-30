@@ -85,10 +85,10 @@ variable "nodes" {
     condition = alltrue([for n in values(var.nodes) : try(
       length(distinct([for s in n.services : s.name])) == length(n.services) &&
       length(distinct([for s in n.services : s.port])) == length(n.services) &&
-      alltrue([for s in n.services : contains(["master_http", "master_grpc", "filer_http", "filer_grpc", "volume_http", "volume_grpc", "s3_http"], s.name) && s.port >= 1 && s.port <= 65535 && s.port == floor(s.port)]) &&
+      alltrue([for s in n.services : contains(["master_http", "master_grpc", "filer_http", "filer_grpc", "volume_http", "volume_grpc", "s3_http"], s.name) && s.port >= 1 && s.port <= 65535 && s.port != 22 && s.port == floor(s.port)]) &&
       alltrue(flatten([for role in n.roles : [for name in lookup({ master = ["master_http", "master_grpc"], filer = ["filer_http", "filer_grpc"], volume = ["volume_http", "volume_grpc"], s3 = ["s3_http"], client = [] }, role, []) : contains([for s in n.services : s.name], name)]])), false)
     ])
-    error_message = "Require explicit HTTP module service names, distinct integer ports 1..65535, and every declared role's HTTP/gRPC listeners; clients may declare []."
+    error_message = "Require explicit HTTP module service names, distinct integer ports 1..65535 excluding management port 22, and every declared role's HTTP/gRPC listeners; clients may declare []."
   }
 }
 
@@ -111,8 +111,8 @@ variable "run_declaration" {
     abort_estimate_usd            = number
   })
   validation {
-    condition     = alltrue([for t in [var.run_declaration.work_deadline, var.run_declaration.hard_deadline] : can(formatdate("YYYY", t)) && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]*[1-9])?Z$", t))])
-    error_message = "Declare canonical RFC3339 UTC Z deadlines (no offset alias or trailing fractional zero). Data is not admission."
+    condition     = alltrue([for t in [var.run_declaration.work_deadline, var.run_declaration.hard_deadline] : can(formatdate("YYYY", t)) && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{0,8}[1-9])?Z$", t))])
+    error_message = "Declare canonical RFC3339 UTC Z deadlines (at most 9 fractional digits; no offset alias or trailing fractional zero). Data is not admission."
   }
   validation {
     condition     = var.run_declaration.cloud_cleanup_reserve_seconds > 0 && var.run_declaration.cloud_cleanup_reserve_seconds == floor(var.run_declaration.cloud_cleanup_reserve_seconds) && try(timecmp(timeadd(var.run_declaration.work_deadline, format("%ds", var.run_declaration.cloud_cleanup_reserve_seconds)), var.run_declaration.hard_deadline) <= 0, false)

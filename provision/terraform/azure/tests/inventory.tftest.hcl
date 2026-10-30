@@ -37,12 +37,17 @@ variables {
 }
 run "inventory_output" {
   command = apply
+  variables { run_declaration = { work_deadline = "2030-01-01T01:00:00.123456789Z", hard_deadline = "2030-01-01T02:00:00.123456789Z", cloud_cleanup_reserve_seconds = 1200, budget_usd = 3, abort_estimate_usd = 2.5 } }
   assert {
     condition     = toset([for r in azurerm_network_security_group.run.security_rule : r.destination_port_ranges if r.name == "internal-services"][0]) == toset([for s in var.nodes.smoke.services : tostring(s.port)])
     error_message = "NSG must use the same explicit service ports as inventory, not old defaults."
   }
   assert {
-    condition     = jsondecode(output.inventory_json).deadlines == { work = "2030-01-01T01:00:00Z", hard = "2030-01-01T02:00:00Z", cleanup_reserve_ms = 15000 }
+    condition     = alltrue([for r in azurerm_network_security_group.run.security_rule : r.name == "controller-ssh" ? r.source_address_prefix == var.operator_cidr && r.destination_port_range == "22" : r.name != "internal-services" || !contains(r.destination_port_ranges, "22")])
+    error_message = "SSH 22 must remain controller-only; valid non-22 service ports must not widen it."
+  }
+  assert {
+    condition     = jsondecode(output.inventory_json).deadlines == { work = "2030-01-01T01:00:00.123456789Z", hard = "2030-01-01T02:00:00.123456789Z", cleanup_reserve_ms = 15000 }
     error_message = "Inventory must preserve the declared deadlines and independent process reserve."
   }
   assert {
@@ -140,4 +145,16 @@ run "services_fraction_port" {
 run "canonical_fraction" {
   command = plan
   variables { run_declaration = { work_deadline = "2030-01-01T01:00:00.1Z", hard_deadline = "2030-01-01T02:00:00.1Z", cloud_cleanup_reserve_seconds = 1200, budget_usd = 3, abort_estimate_usd = 2.5 } }
+}
+
+run "ten_digit_fraction" {
+  command = plan
+  variables { run_declaration = { work_deadline = "2030-01-01T01:00:00.1234567891Z", hard_deadline = "2030-01-01T02:00:00Z", cloud_cleanup_reserve_seconds = 1200, budget_usd = 3, abort_estimate_usd = 2.5 } }
+  expect_failures = [var.run_declaration]
+}
+
+run "management_port" {
+  command = plan
+  variables { nodes = { smoke = { roles = ["master"], size = "Standard_D2s_v5", private_ip = "10.84.1.10", cache_disk_gib = 0, format_allowed = false, services = [{ name = "master_http", port = 22 }, { name = "master_grpc", port = 19444 }] } } }
+  expect_failures = [var.nodes]
 }

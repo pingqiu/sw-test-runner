@@ -29,8 +29,8 @@ def main():
     (a.evidence/'terraform-test.stderr').write_bytes(result.stderr)
     rows = [json.loads(row) for row in result.stdout.splitlines() if row]
     summary = [row['test_summary'] for row in rows if row.get('type') == 'test_summary']
-    if result.returncode or len(summary)!=1 or summary[0]['status']!='pass' or summary[0]['passed']!=16:
-        raise AssertionError('expected all 16 mock-only runs, never zero-test success')
+    if result.returncode or len(summary)!=1 or summary[0]['status']!='pass' or summary[0]['passed']!=18:
+        raise AssertionError('expected all 18 mock-only runs, never zero-test success')
     states = {row['@testrun']:row['test_state']['outputs']['inventory_json']['value'] for row in rows if row.get('type')=='test_state'}
     if set(states)!={'inventory_output','client_only'}:
         raise AssertionError('both actual module outputs required')
@@ -81,7 +81,7 @@ def main():
             quoted=subprocess.run([tf,'-chdir='+str(root),'output','-json','inventory_json'],capture_output=True,check=True,timeout=10,env=env)
             req.write_bytes(quoted.stdout)
             invoke(['validate',str(req)],2,'INVENTORY_INVALID')
-    print(json.dumps(dict(status='PASS',code='OK',remedy='data tests grant no deployment authority',terraform_mock_runs=16,cli_export_join_checks=checks,account_api=False,execution_authorized=False)))
+    print(json.dumps(dict(status='PASS',code='OK',remedy='data tests grant no deployment authority',terraform_mock_runs=18,cli_export_join_checks=checks,account_api=False,execution_authorized=False)))
 
 
 if __name__=='__main__':
