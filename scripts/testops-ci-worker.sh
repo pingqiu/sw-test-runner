@@ -134,6 +134,45 @@ run_request() {
   fi
 
   echo "[$started_at] starting $base" | tee -a "$log"
+  local status=0
+  if [[ -n "${TESTOPS_APPROVED_ADAPTER:-}${TESTOPS_APPROVED_ADAPTER_SHA256:-}${TESTOPS_APPROVED_POLICY:-}" ]]; then
+    # These are service configuration, never fields read from the request.
+    # The approved entry parses the claimed file as data. A refusal must not
+    # fall through to the legacy source/RUN_SCRIPT path.
+    write_status "$base" "running" 0 "$started_at" "" "$log" ""
+    (
+      python3 - "${TESTOPS_APPROVED_ADAPTER:-}" "${TESTOPS_APPROVED_ADAPTER_SHA256:-}" "$running" "${TESTOPS_APPROVED_POLICY:-}" <<'PYAPPROVED'
+import hashlib, os, pathlib, re, stat, sys
+adapter, expected, request, policy = sys.argv[1:]
+if not re.fullmatch(r"[0-9a-f]{64}", expected) or not policy:
+    raise SystemExit("missing service adapter/policy pin")
+p = pathlib.Path(adapter)
+if not p.is_absolute() or str(p) != adapter or ".." in p.parts:
+    raise SystemExit("noncanonical adapter")
+for ancestor in [p, *p.parents]:
+    st = ancestor.lstat()
+    if stat.S_ISLNK(st.st_mode) or st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022:
+        raise SystemExit("unprotected service adapter path")
+    if ancestor != p and not stat.S_ISDIR(st.st_mode):
+        raise SystemExit("invalid adapter ancestor")
+fd = os.open(adapter, os.O_RDONLY | os.O_NOFOLLOW)
+before = os.fstat(fd)
+if not stat.S_ISREG(before.st_mode) or not before.st_mode & 0o111:
+    raise SystemExit("adapter is not executable")
+h = hashlib.sha256()
+while True:
+    chunk = os.read(fd, 1024 * 1024)
+    if not chunk: break
+    h.update(chunk)
+def stable(st):
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+if stable(os.fstat(fd)) != stable(before) or h.hexdigest() != expected:
+    raise SystemExit("adapter bytes changed or pin mismatched")
+# Execute this verified inode, not a path looked up again after hashing.
+os.execve(fd, [adapter, "approved-run", "--request", request, "--policy", policy], os.environ)
+PYAPPROVED
+    ) >>"$log" 2>&1 || status=$?
+  else
   set +u
   # shellcheck disable=SC1090
   source "$running"
@@ -148,10 +187,10 @@ run_request() {
   export TESTOPS_COMMIT="${TESTOPS_COMMIT:-}"
   write_status "$base" "running" 0 "$started_at" "" "$log" ""
 
-  local status=0
   (
     "$RUN_SCRIPT"
   ) >>"$log" 2>&1 || status=$?
+  fi
   local ended_at
   local bundle_dir
   ended_at="$(date -Is)"

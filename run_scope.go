@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// RunAdmission binds the local envelope. Queue/GO integration remains S0b.
+// RunAdmission binds the local envelope. ApprovedRun supplies verified S0b data.
 type RunAdmission struct {
 	RunID, Workload, RequestID, ManifestSHA256 string
 	OutputDir                                  string
@@ -53,7 +53,7 @@ type KillWitness struct {
 // atomically check an owned child/pidfd, not check-then-kill by PID. Settle and
 // Wait.Settled prove issuer/descendant absence. Kill witnesses the exact live
 // victim, not absence. Calls honor ctx. The concrete adapter independently
-// enforces controller loss/deadlines; no production adapter is enabled yet.
+// enforces controller loss/deadlines; ApprovedRun supplies independent trust.
 type OwnedJobBackend interface {
 	Enroll(context.Context, string, RunAdmission, JobSpec) (ProcessIdentity, error)
 	Authorize(context.Context, string, ProcessIdentity) error
@@ -88,22 +88,34 @@ type restoration struct {
 	applyErr    error
 }
 
+type faultAuthority interface {
+	bindFault(context.Context, string, WitnessedFault, FaultObservation) error
+	bindFaultJob(string, string, bool, JobSpec) error
+}
+type faultJobContextKey struct{}
+type faultJobContext struct {
+	scope *RunScope
+	key   string
+}
+
 // mu protects admission/indexes only. RPCs and callbacks never hold it.
 type RunScope struct {
-	mu            sync.Mutex
-	admission     RunAdmission
-	backend       OwnedJobBackend
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closed        bool
-	jobs          map[string]*ownedJob
-	logs          map[string]bool
-	restores      map[string]*restoration
-	order         []string
-	once          sync.Once
-	done          chan struct{}
-	err           error
-	faultReceipts map[string]FaultReceipt
+	mu              sync.Mutex
+	admission       RunAdmission
+	backend         OwnedJobBackend
+	ctx             context.Context
+	cancel          context.CancelFunc
+	closed          bool
+	jobs            map[string]*ownedJob
+	logs            map[string]bool
+	restores        map[string]*restoration
+	order           []string
+	once            sync.Once
+	done            chan struct{}
+	err             error
+	faultReceipts   map[string]FaultReceipt
+	cleanupDeadline time.Time
+	authority       faultAuthority
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -126,6 +138,9 @@ func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify 
 	}
 	work, cancel := context.WithDeadline(ctx, a.WorkDeadline)
 	s := &RunScope{admission: a, backend: b, ctx: work, cancel: cancel, jobs: make(map[string]*ownedJob), logs: make(map[string]bool), restores: make(map[string]*restoration), done: make(chan struct{})}
+	if authority, ok := b.(faultAuthority); ok {
+		s.authority = authority
+	}
 	go func() { <-work.Done(); _ = s.Close() }()
 	return s, nil
 }
@@ -185,6 +200,23 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	s.mu.Unlock()
 	defer close(j.ready)
 	h := JobHandle{s, id, j}
+	if s.authority != nil {
+		binding, ok := ctx.Value(faultJobContextKey{}).(faultJobContext)
+		if restoration && !ok {
+			s.retired(h)
+			return h, errors.Join(ErrJobNotStarted, errors.New("missing private restoration custody"))
+		}
+		if ok {
+			if binding.scope != s {
+				s.retired(h)
+				return h, errors.Join(ErrJobNotStarted, errors.New("foreign fault custody"))
+			}
+			if err := s.authority.bindFaultJob(id, binding.key, restoration, spec); err != nil {
+				s.retired(h)
+				return h, errors.Join(ErrJobNotStarted, err)
+			}
+		}
+	}
 	i, err := s.backend.Enroll(ctx, id, s.admission, spec)
 	if err != nil {
 		if errors.Is(err, ErrJobNotStarted) {
@@ -340,6 +372,11 @@ func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Co
 
 func (s *RunScope) cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
 	deadline := time.Now().Add(s.admission.CleanupReserve)
+	s.mu.Lock()
+	if !s.cleanupDeadline.IsZero() && deadline.After(s.cleanupDeadline) {
+		deadline = s.cleanupDeadline
+	}
+	s.mu.Unlock()
 	if deadline.After(s.admission.HardDeadline) {
 		deadline = s.admission.HardDeadline
 	}
@@ -370,6 +407,27 @@ func (s *RunScope) ClearFault(ctx context.Context, key string) error {
 	return nil
 }
 
+// Closing fences admission before this snapshot. A failed settlement prevents
+// restoration: an UNKNOWN issuer could otherwise apply a late fault after UP.
+func (s *RunScope) settleWork(ctx context.Context) error {
+	s.mu.Lock()
+	var jobs []JobHandle
+	for id, j := range s.jobs {
+		if !j.spec.Restoration {
+			jobs = append(jobs, JobHandle{s, id, j})
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].id < jobs[j].id })
+	var errs []error
+	for _, h := range jobs {
+		if err := s.Stop(ctx, h); err != nil {
+			errs = append(errs, fmt.Errorf("settle issuer %s: %w", h.id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func cleanupCall(ctx context.Context, fn func(context.Context) error) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -385,6 +443,10 @@ func (s *RunScope) Close() error {
 		defer close(s.done)
 		s.mu.Lock()
 		s.closed = true
+		s.cleanupDeadline = time.Now().Add(s.admission.CleanupReserve)
+		if s.cleanupDeadline.After(s.admission.HardDeadline) {
+			s.cleanupDeadline = s.admission.HardDeadline
+		}
 		order := append([]string(nil), s.order...)
 		jobs := make([]JobHandle, 0, len(s.jobs))
 		for id, j := range s.jobs {
@@ -395,7 +457,14 @@ func (s *RunScope) Close() error {
 		ctx, cancel := s.cleanupContext(context.Background())
 		defer cancel()
 		var errs []error
-		for n := len(order) - 1; n >= 0; n-- {
+		var issuerErr error
+		if s.authority != nil {
+			issuerErr = s.settleWork(ctx)
+		}
+		if issuerErr != nil {
+			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
+		}
+		for n := len(order) - 1; issuerErr == nil && n >= 0; n-- {
 			if err := s.ClearFault(ctx, order[n]); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
 			}

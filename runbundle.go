@@ -115,6 +115,12 @@ func CreateRunBundle(resultsRoot, scenarioFile string, cmdLine []string) (*RunBu
 	if err != nil {
 		return nil, fmt.Errorf("read scenario: %w", err)
 	}
+	return createRunBundleSnapshot(resultsRoot, scenarioFile, cmdLine, scenarioData, now)
+}
+
+// Approved admission supplies the already hashed bytes, avoiding a second
+// mutable path read between authority verification and evidence creation.
+func createRunBundleSnapshot(resultsRoot, scenarioFile string, cmdLine []string, scenarioData []byte, now time.Time) (*RunBundle, error) {
 	h := sha256.Sum256(scenarioData)
 	scenarioHash := hex.EncodeToString(h[:])
 

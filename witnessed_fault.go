@@ -95,7 +95,12 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 			return errors.Join(err, errors.New("fault baseline differs from reviewed plan"))
 		}
 		baseline = true
-		apply, receipt.ApplyExit, err = s.faultJob(ctx, p.Apply, false)
+		if s.authority != nil {
+			if err = s.authority.bindFault(ctx, key, p, receipt.Before); err != nil {
+				return err
+			}
+		}
+		apply, receipt.ApplyExit, err = s.faultJob(context.WithValue(ctx, faultJobContextKey{}, faultJobContext{s, key}), p.Apply, false)
 		var probeErr error
 		receipt.Applied, probeErr = observe(ctx)
 		store()
@@ -106,6 +111,14 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 	}, func(ctx context.Context) error {
 		if !baseline {
 			return nil
+		}
+		s.mu.Lock()
+		closing := s.closed
+		s.mu.Unlock()
+		if closing && s.authority != nil {
+			if err := s.settleWork(ctx); err != nil {
+				return fmt.Errorf("possible mutation issuer: %w", err)
+			}
 		}
 		if apply.scope != nil {
 			if err := s.Stop(ctx, apply); err != nil {
@@ -130,7 +143,7 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 			store()
 			return nil
 		}
-		_, exit, err := s.faultJob(ctx, p.Restore, true)
+		_, exit, err := s.faultJob(context.WithValue(ctx, faultJobContextKey{}, faultJobContext{s, key}), p.Restore, true)
 		receipt.RestoreExit = exit
 		store()
 		if exit.Identity.BootID != receipt.Before.BootID {

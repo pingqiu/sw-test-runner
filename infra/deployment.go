@@ -44,6 +44,13 @@ type DeploymentReceipt struct {
 	Transcript                                        string
 }
 
+// ValidateDeploymentPolicy checks the same bounded role/path set used by the
+// real readback, without opening a connection or executing candidate bytes.
+func ValidateDeploymentPolicy(p DeploymentPolicy) error {
+	_, _, err := deploymentPaths(p)
+	return err
+}
+
 func deploymentPaths(p DeploymentPolicy) ([]string, map[string]bool, error) {
 	validPath := func(v string) bool {
 		return path.IsAbs(v) && path.Clean(v) == v && len(v) <= 4096 && !strings.ContainsAny(v, "\x00\r\n|")

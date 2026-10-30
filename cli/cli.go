@@ -76,6 +76,8 @@ func Run(register func(*tr.Registry), args []string) int {
 	}
 
 	switch args[0] {
+	case "approved-run":
+		return approvedRunCmd(args[1:])
 	case "run":
 		runCmd(args[1:])
 	case "suite":
@@ -112,6 +114,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `sw-test-runner — YAML-driven test platform for SeaweedFS BlockVol
 
 Usage:
+	  sw-test-runner approved-run --request <claimed> --policy <bootstrap>  Approved worker entry
   sw-test-runner run [flags] <scenario.yaml>           Run a test scenario (SSH mode)
   sw-test-runner suite [flags] <suite.yaml>            Deploy once, run N scenarios
   sw-test-runner coordinator [flags] <scenario.yaml>   Run as coordinator (multi-node)

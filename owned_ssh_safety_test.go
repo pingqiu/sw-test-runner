@@ -19,8 +19,12 @@ import (
 )
 
 var nativeCustodyTestWorkload func([]string) bool
+var approvedWorkerTestEntrypoint func([]string) bool
 
 func TestMain(m *testing.M) {
+	if approvedWorkerTestEntrypoint != nil && approvedWorkerTestEntrypoint(os.Args[1:]) {
+		os.Exit(0)
+	}
 	if nativeCustodyTestWorkload != nil && nativeCustodyTestWorkload(os.Args[1:]) {
 		os.Exit(0)
 	}

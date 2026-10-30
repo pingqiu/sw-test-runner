@@ -207,6 +207,21 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 	cleanupCtx := context.Background()
 	cleanupCtx, cleanupCancel := context.WithTimeout(cleanupCtx, 60*time.Second)
 	defer cleanupCancel()
+	// Admitted runs retain their original cleanup envelope. Always phases may
+	// assess evidence, but cannot reopen ordinary execution after settlement.
+	if actx.Safety != nil && actx.Safety.authority != nil {
+		if ctx.Err() != nil {
+			failed, result.Status = true, StatusFail
+			result.Error = strings.TrimSpace(result.Error + " work envelope: " + ctx.Err().Error())
+		}
+		if err := actx.Safety.Close(); err != nil {
+			failed, result.Status = true, StatusFail
+			result.Error = strings.TrimSpace(result.Error + " owned cleanup: " + err.Error())
+		}
+		cleanupCancel()
+		cleanupCtx, cleanupCancel = actx.Safety.cleanupContext(context.Background())
+		defer cleanupCancel()
+	}
 	for _, phase := range alwaysPhases {
 		e.callPhaseHook("before", phase.Name, "", "")
 		pr := e.runPhase(cleanupCtx, actx, phase)
