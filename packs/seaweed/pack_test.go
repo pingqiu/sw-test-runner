@@ -136,3 +136,20 @@ func TestPlanRejectsUnsupportedAction(t *testing.T) {
 	}
 	checkResult(t, out, "ACTION_UNSUPPORTED")
 }
+
+func TestEnginePreservesJSONOnRuntimeRefusal(t *testing.T) {
+	r := tr.NewRegistry()
+	r.AllowMutating = true
+	RegisterPack(r)
+	s := &tr.Scenario{Name: "refusal", Phases: []tr.Phase{{Name: "deploy", Actions: []tr.Action{{Action: "seaweed_deploy"}}}}}
+	n := &forbiddenNode{}
+	result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Nodes: map[string]tr.NodeRunner{"n": n}})
+	if result.Status != tr.StatusFail || len(result.Phases) != 1 || len(result.Phases[0].Actions) != 1 || n.calls != 0 {
+		t.Fatalf("result=%+v calls=%d", result, n.calls)
+	}
+	action := result.Phases[0].Actions[0]
+	if action.Error == "" {
+		t.Fatal("runtime refusal lost")
+	}
+	checkResult(t, map[string]string{"value": action.Output}, "S0B_UNAVAILABLE")
+}
