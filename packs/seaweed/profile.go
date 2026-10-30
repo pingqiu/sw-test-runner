@@ -71,6 +71,9 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 	var h, server *inventory.Host
 	for i := range d.Hosts {
 		x := &d.Hosts[i]
+		if x.ID != "m01" && x.ID != "m02" {
+			return nil, errors.New("profile supports exactly M01 and M02")
+		}
 		if x.ID == host {
 			h = x
 		}

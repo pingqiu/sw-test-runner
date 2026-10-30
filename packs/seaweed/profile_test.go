@@ -51,6 +51,10 @@ func TestProfileArgsRefuseForeignRoleOrMissingPins(t *testing.T) {
 	if _, err := ProfileArgs(d, "m02", "deploy", "volume", s, nil); err == nil {
 		t.Fatal("missing product pin admitted")
 	}
+	d.Hosts[0].ID = "foreign"
+	if _, err := ProfileArgs(d, "foreign", "preflight", "", s, nil); err == nil {
+		t.Fatal("foreign named host admitted to M01/M02 profile")
+	}
 }
 
 func TestProfileBundleIsPinnedDataOnly(t *testing.T) {
