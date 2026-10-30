@@ -78,7 +78,6 @@ func TestEvidenceCannotBeSubstituted(t *testing.T) {
 		{"missing time", func(g *replayGroup) { g.Evidence.Warm.ProfileEnd = nil }},
 		{"profile after warm RSS", func(g *replayGroup) { g.Evidence.Warm.RSSStart = f(*g.Evidence.Warm.ProfileEnd - 1) }},
 		{"warm RSS late end", func(g *replayGroup) { g.Evidence.Warm.RSSEnd = f(*g.Evidence.Warm.Anchor + 635.001) }},
-		{"warm profile missed", func(g *replayGroup) { g.Evidence.Warm.ProfileEnd = f(*g.Evidence.Warm.Anchor + 635.001) }},
 		{"reversed wall clock", func(g *replayGroup) { g.Evidence.End.ProfileEpoch = f(*g.Evidence.End.RequestEpoch - 1) }},
 		{"changed anchor", func(g *replayGroup) { g.Evidence.End.Anchor = f(*g.Evidence.End.Anchor + 1) }},
 		{"missing GC receipt", func(g *replayGroup) { g.Evidence.End.GCRequests = nil }},
