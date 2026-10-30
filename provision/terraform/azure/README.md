@@ -1,14 +1,14 @@
-# Azure provisioning module (Draft, static validation only)
+# Azure provisioning module (Draft, local mock validation only)
 
 This is the provision layer of the accepted deploy-platform design. It creates a run-owned network and explicit HTTP nodes in an **existing dedicated test resource group** and emits `seaweed.inventory/v1` requested JSON. The shared Seaweed pack owns deployment, preflight, workload and collection across cloud and on-prem. There is no provisioner or cloud-specific deploy script here.
 
-No apply, subscription plan, Azure authentication, price/availability check or VM workload has been run. Local delivery is `fmt` plus `validate` only. `terraform validate` checks provider schema and configuration consistency, not Azure API behavior. Container Gate 0a and VF Gate 0b precede the future Azure runtime gate; their implementation waits for S0b-min.
+No apply, subscription plan, Azure authentication, price/availability check or VM workload has been run. Local delivery is `fmt`, `validate` and schema-backed mock-provider tests only (no real provider plan/apply). `terraform validate` checks provider schema and configuration consistency, not Azure API behavior. Container Gate 0a and VF Gate 0b precede the future Azure runtime gate; their implementation waits for S0b-min.
 
 ## Inputs and output seam
 
 Use the sibling `azure-validation` root as an explicit wiring example. Supply your subscription in the root provider, existing RG, region, exact Ubuntu 24.04 server image version, controller IPv4 /32, public SSH key, pinned artifact-manifest SHA256, a typed `run_declaration` and a node map. There is no hardcoded subscription, region, VM SKU, private key or cloud login in this module. Terraform/provider versions are pinned and the validation root commits its lock file.
 
-Each node supplies a stable private IPv4, VM size, roles, cache-disk GiB and explicit format declaration. Adding a map entry does not renumber other IPs. Volume nodes require a managed cache disk; this initial HTTP gate does not format ephemeral NVMe. No disk is formatted by cloud-init. LUN 0 alone is not device identity: the observer must bind the actual managed disk to a stable `/dev/disk/by-id` before a reviewed pack may format it. Small disposable gates can choose small SKUs and disks; there is no automatic expensive topology.
+Each node supplies a stable private IPv4, VM size, roles, cache-disk GiB, explicit format declaration and required `services = [{name, port}]` (explicit `[]` for a client-only node). Adding a map entry does not renumber other IPs. Volume nodes require a managed cache disk; this initial HTTP gate does not format ephemeral NVMe. No disk is formatted by cloud-init. LUN 0 alone is not device identity: the observer must bind the actual managed disk to a stable `/dev/disk/by-id` before a reviewed pack may format it. Small disposable gates can choose small SKUs and disks; there is no automatic expensive topology.
 
 `inventory_json` is an exact JSON string. After a future authorized apply, export those bytes, validate with the inventory CLI from Draft #11 and keep their SHA256. Host keys, actual data NIC/MTU, boot generations and disk device identities are deliberately pending. Trusted observation fills them in a separate resolved document; `inventory.Join` must preserve scope. This output is data, never GO, host trust, a lease or permission to deploy/format.
 
@@ -42,7 +42,7 @@ The module accepts a required `run_declaration` object (no defaults): RFC3339 UT
 
 The future reviewed controller owns: authentic GO and its current budget/deadlines; fresh regional compute/disk/IP/network/tax-tail estimates; the exact input/config/plan/declaration/inventory hashes; process/lease admission and work stop; the fixed hard end and cleanup; cost accrual/abort checks; retained journal/state; and independent absence. It must refuse an expired declaration, a cost estimate at/above its authorized abort threshold, a changed price/topology/binding or a declaration that expands authentic authority. The module does not infer authority from successful parsing or Terraform state. Cloud cleanup reserve is separate from S0a's <=60-second process reserve and must include observed provider settlement time.
 
-Inventory deadline and per-host service ports remain the **explicit ratified #11 deferral**. This separate provision declaration does not silently add those fields to `seaweed.inventory/v1`, nor satisfy the missing inventory binding. Before runtime v1 freeze/pack activation, the same inventory must gain reviewed typed deadlines/ports with exact Join preservation and the controller must bind them to authentic S0b authority. Until then this is still a static slice, not r1 completion. No provider controller/adapter is implemented here; it waits for S0b-min PR3 and a separate review/GO.
+The accepted #11 contract (`0664d799`) is now emitted: inventory `deadlines.work/hard` copy the exact canonical UTC declarations; `deadlines.cleanup_reserve_ms` comes from the required integer `process_cleanup_reserve_ms` (1..60000), separately bounded within those dates. It is NOT converted from `cloud_cleanup_reserve_seconds`. Services preserve each explicit node list, with unique known names/ports and required HTTP/gRPC listeners per role. This HTTP module admits `master_http`, `master_grpc`, `filer_http`, `filer_grpc`, `volume_http`, `volume_grpc`, `s3_http`; no RDMA listener/device is invented. The subnet service rule uses exactly the union of declared ports, and is absent when that union is empty; controller SSH stays separate. The requested inventory still lacks trusted host/device observations. Canonical UTC spelling and exact Join preservation are data checks, not authentic S0b admission. No provider controller/adapter is implemented here; partial-create recovery, identity-safe destroy and independent absence still need their separate review and GO.
 
 ## Exact export and consumer handoff
 
@@ -122,3 +122,33 @@ The commands below are the payloads a **future reviewed Linux controller** must 
    A raw Terraform destroy/apply does not implement that identity fence. In particular VM deletion can cascade to an OS disk. The future controller/executor must close that race and retain cleanup authority before any runtime activation; this document does not qualify it. A timeout/nonzero is UNKNOWN until read-only provider observation settles it; no blind destructive retry. Never delete the pre-existing RG or alter its RBAC. Recovery uses the same exact reviewed ownership, not broad RG/tag deletion.
 
 6. **Independent closure.** A separate verifier queries every recorded/intended full resource ID plus the full RG inventory and outstanding operations, checks run resources absent and no unexpected creations, and verifies RG plus original RBAC retained. A tag filter, empty Terraform state, empty outputs or successful CLI exit is insufficient. COMPLETE requires terminal provider settlement and this independent proof; otherwise report unresolved billable IDs/cost exposure. Account for actual VM/disk/IP lifetimes and all tail charges until proven absent. This absence/closure verifier is still unimplemented and unqualified; no runtime GO follows from these instructions.
+
+
+## Actual module output contract controls (no account)
+
+After local init/validate, run the committed mock-only test and actual accepted
+inventory CLI. No credentials or Azure subscription API are used. The two
+mock apply states are synthetic; they do not prove real provider operation,
+resource identity, disk formatting, SSH trust, or teardown. Thirteen mock runs require reserve/date/service refusals; one additional
+mock plan accepts canonical fractional UTC dates. A zero-test success is refused.
+
+```sh
+python3 provision/terraform/tests/azure_inventory_contract.py \
+  --terraform /absolute/path/to/terraform \
+  --inventory-cli /absolute/path/to/seaweed-inventory \
+  --module provision/terraform/azure \
+  --evidence /private/local/test-output
+```
+
+This explicitly invoked test selects only `tests/inventory.tftest.hcl` with
+`mock_provider "azurerm"`, captures the actual `inventory_json` values, exports
+them via real `output -raw` in resource-free local state, and checks the real
+Go Decode/Join. It checks both all-role/nondefault-port and client-only/empty
+service outputs, field drift and missing-service refusals, and quoted-string
+refusal. Synthetic observations test the Join seam only. The previous
+`export_contract.py` remains a serialization fixture check; it is not substituted
+for this module-output test. Import/discovery causes no native or remote work.
+
+Terraform mock provider semantics and JSON test-state format are documented at
+https://developer.hashicorp.com/terraform/language/tests/mocking and
+https://developer.hashicorp.com/terraform/internals/machine-readable-ui .

@@ -17,10 +17,16 @@ locals {
     run_id                   = var.run_id
     artifact_manifest_sha256 = var.artifact_manifest_sha256
     managed_resource_ids     = local.owned_ids
+    deadlines = {
+      work               = var.run_declaration.work_deadline
+      hard               = var.run_declaration.hard_deadline
+      cleanup_reserve_ms = var.process_cleanup_reserve_ms
+    }
     hosts = [for id in sort(keys(var.nodes)) : {
       id          = id
       resource_id = azurerm_linux_virtual_machine.node[id].id
       roles       = sort(tolist(var.nodes[id].roles))
+      services    = var.nodes[id].services
       management = {
         address        = azurerm_public_ip.node[id].ip_address
         port           = 22
@@ -49,7 +55,7 @@ output "managed_resource_ids" {
 }
 
 output "run_declaration" {
-  description = "Typed data, separately bound by a future controller; not S0b authority or an inventory deadline."
+  description = "Typed provision declaration; inventory carries the same work/hard dates. Neither output grants S0b authority."
   value = {
     schema                        = "seaweed.provision-declaration/v1"
     run_id                        = var.run_id
