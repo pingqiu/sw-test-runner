@@ -40,11 +40,41 @@
       "rdma": {
         "status": "not_applicable"
       },
-      "resource_id": ""
+      "resource_id": "",
+      "services": [
+        {
+          "name": "master_http",
+          "port": 9333
+        },
+        {
+          "name": "master_grpc",
+          "port": 19333
+        },
+        {
+          "name": "filer_http",
+          "port": 8888
+        },
+        {
+          "name": "filer_grpc",
+          "port": 18888
+        },
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        },
+        {
+          "name": "s3_http",
+          "port": 8333
+        }
+      ]
     }
   ],
   "observation": {
-    "requested_sha256": "2b04ee06f8bbe2770398e34b3a13395d5f8408f8f2dd494ab5fff5f15f65cab7",
+    "requested_sha256": "6523ffc263db46dae2aa3aafb6c513221b047fe3ffda24363a09449e73a14ff0",
     "hosts": [
       {
         "host_id": "node1",
@@ -53,5 +83,10 @@
         "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       }
     ]
+  },
+  "deadlines": {
+    "work": "2030-01-01T00:09:00Z",
+    "hard": "2030-01-01T00:10:00Z",
+    "cleanup_reserve_ms": 60000
   }
 }

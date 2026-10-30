@@ -50,11 +50,45 @@
         ],
         "fabric_evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       },
-      "resource_id": ""
+      "resource_id": "",
+      "services": [
+        {
+          "name": "master_http",
+          "port": 9333
+        },
+        {
+          "name": "master_grpc",
+          "port": 19333
+        },
+        {
+          "name": "filer_http",
+          "port": 8888
+        },
+        {
+          "name": "filer_grpc",
+          "port": 18888
+        },
+        {
+          "name": "volume_http",
+          "port": 8080
+        },
+        {
+          "name": "volume_grpc",
+          "port": 18080
+        },
+        {
+          "name": "s3_http",
+          "port": 8333
+        },
+        {
+          "name": "rdma",
+          "port": 18516
+        }
+      ]
     }
   ],
   "observation": {
-    "requested_sha256": "ec68a53428aa0bc2c32d8aec0debe1076033d58056ee6fd12fd97e205517fb45",
+    "requested_sha256": "22fea0a2046a6223dc54f1e4aca7b4a025c60f017714257c0441a3101ba16e31",
     "hosts": [
       {
         "host_id": "node1",
@@ -63,5 +97,10 @@
         "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       }
     ]
+  },
+  "deadlines": {
+    "work": "2030-01-01T00:09:00Z",
+    "hard": "2030-01-01T00:10:00Z",
+    "cleanup_reserve_ms": 60000
   }
 }

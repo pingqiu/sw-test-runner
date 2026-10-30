@@ -88,10 +88,30 @@ JSON is the default; `seaweed-inventory --json validate FILE` (or `join REQUESTE
 
 This CLI has no mutating steps. Executable plans belong to the reviewed shared pack, not to inventory validation.
 
-### Explicit r1 scope deferral (review R3)
+### Execution envelope and producer/consumer binding
 
-This Draft does **not** yet declare envelope deadlines or per-host service ports from design r1. Both are explicitly deferred to the reviewed S0b/shared-pack integration before v1 is frozen for runtime consumption. The current validator cannot validate or preserve either field; supplying them remains an unknown-field refusal. No consumer may infer default service ports or a deadline from their absence. The Azure Draft's provisioning NSG rules are not an inventory service-port declaration.
+The former R3 deferral is closed. `deadlines` is required: canonical UTC
+RFC3339Nano `work` and `hard`, plus positive `cleanup_reserve_ms` <=60000.
+`work + reserve <= hard`. Validation does not check the current clock: saved
+historical evidence remains decodable; live S0b admission enforces freshness.
+Every host declares `services` as exact name/port pairs. Master/filer/volume
+HTTP and gRPC listeners, S3 HTTP and an RDMA volume listener are mandatory for
+the corresponding role/transport. Names and ports are unique on a host; there
+is no implicit +10000 arithmetic or transport fallback. Empty client services
+are explicit. Optional `kv_coordinator` declares that listener when installed.
+Join preserves the complete service set and original deadlines exactly.
 
-Before runtime activation, add typed deadline and role/service-port declarations to the same inventory schema, exact request-preserving Join controls and producer/consumer bindings. A declared deadline remains data only; authoritative S0b deadlines and admission are separately enforced. This deferral does not waive those requirements or authorize a deployment. The pack stays unconditionally refused until the reviewed adapter and these bindings land. It is separate from the accepted design-r2 container/VF extension, which also awaits review before runtime use.
+`Resolve(requested, observed)` is the data producer: it binds the exact request
+bytes and refuses altered declarations before emitting resolved JSON. It does
+not discover facts or create trusted receipts. `Bind(requested, resolved,
+ConsumerBinding)` is the consumer seam: it pins both byte streams and joins the
+run/transport/artifact/deadline envelope and exact host/SSH/root/boot set to
+values from independent admission. A caller-created ConsumerBinding is not GO.
+The shared pack supplies those values from S0b's admitted request/readbacks;
+raw variables and successful validation cannot authorize effects.
 
-Decoding uses exact JSON tag spellings recursively, before Go struct decoding; unknown, noncanonical and duplicate-by-case keys are refused. Optional primitive fields may be omitted, but supplied null is rejected where the published schema requires a string/integer. Published nullable observation/GID-index/N/A-capabilities declarations remain subject to their existing state-specific validation.
+Cloud module outputs predating this successor lack required fields and now
+refuse Decode. Their static acceptance is not runtime compatibility: producers
+must emit the same explicit deadlines/services (never infer them) before use.
+The independent provisioning cost/deadline declaration is not substituted for
+this inventory envelope. No provider, host or cloud qualification is claimed.
