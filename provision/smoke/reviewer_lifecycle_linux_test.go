@@ -42,7 +42,9 @@ func TestReviewerRecoveryMustNotDeclareUnknownCreateClean(t *testing.T) {
 		}
 		t.Error("fake asynchronous create did not settle")
 	}()
-	first := (Controller{}).Execute(context.Background(), "run", c)
+	// Keep the actual native UNKNOWN-create witness below the new pre-apply
+	// approval gate; this compiled seam grants no CLI bypass.
+	first := (Controller{Pack: ApprovedPack}).Execute(context.Background(), "run", c)
 	if first.Code != "APPLY_FAILED_OR_UNKNOWN" {
 		t.Fatalf("first=%+v", first)
 	}

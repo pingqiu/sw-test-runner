@@ -27,7 +27,9 @@ func TestNativeChainReachesRealAdmissionRefusalAndCleans(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	r := (Controller{}).Execute(context.Background(), "run", c)
+	// Compiled CPU seam retains the original native lifecycle/admission control.
+	// Native CLI's new protected-approval refusal is tested separately.
+	r := (Controller{Pack: ApprovedPack}).Execute(context.Background(), "run", c)
 	if r.Code != "PACK_FAILED" || !r.RemainingObserved || len(r.Remaining) != 0 || !strings.Contains(r.Error, "request.json") {
 		t.Fatalf("%+v", r)
 	}

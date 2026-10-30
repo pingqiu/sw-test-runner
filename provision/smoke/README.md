@@ -119,6 +119,69 @@ owner on failures; the command does not send external messages automatically.
 
 ## Local verification scope
 
+### Fresh-host materialization (Draft successor of #22/#20)
+
+Native `run` now requires `/etc/sw-test-runner/codex02/cloud-approval.json`
+before issuing any cloud command. Candidate Config cannot nominate another
+approval, template or setup program. This protected `seaweed.fresh-approval/v1`
+record pins `template`, `executable` and `recipe` FilePins. The executable must
+be this controller's real installed path and hash. Pins/ownership/cancellation
+are rechecked before publication. Missing approval returns
+`FRESH_APPROVAL_REFUSED` with zero creates. `plan` remains local, no effects;
+it does not imply these launch prerequisites exist.
+
+The template is the canonical exact JSON export of private `freshTemplate`
+(`seaweed.fresh-template/v1`), not a patch map or general string interpolator.
+Manager pre-approval fixes Config/module/variables, raw inventory shape and exact
+resource IDs, one node, public host key, MTU bounds/disk slots, Binding, full
+policy/files/UID/jobs, P/Plan, scenario phases, GO source and bootstrap paths.
+Request/GO pins are recomputed; no authority field is learned from the guest.
+Canonical re-encoding must equal the approved template bytes, so aliases,
+duplicates, unknown fields and alternate legacy field spellings refuse.
+
+Only management IP from the exact Terraform export, fixed public key into the
+resolved empty slot, a stable boot, declared blank NIC/MTU/device-ID slots and
+bounded capture evidence are resolved. Fixed data IP, resource IDs, roles,
+ports, UID, files, argv, lease, deadlines and budget stay unchanged. The initial
+slice has no job-argv/config/topology substitution slots: use fixed private data
+endpoints and the ordinary approved host/deployment SSH endpoint/boot slots.
+Requested bytes remain exact. The ordinary strict pack performs independent
+readback and live lease checks again.
+
+The protected setup recipe is a separately pinned **launch prerequisite**, not
+supplied/implemented by this materializer. Its only argv is the private exact
+requested-inventory path. It must complete bounded pre-generated host-key
+cloud-init installation, fixed artifact/UID setup and pinned-SSH fact collection,
+then emit <=16KiB exact `freshFacts` JSON, no free text/keys/private material:
+`export_sha256`, stable `boot`/`boot_after`, fixed `data_address`, `nic`, `mtu`,
+declared disk ID/resource-ID/LUN/device-ID facts, and actual `start`/`end` times.
+Failed exit with positive stdout refuses. The controller calls the existing
+`VerifyDeployment` against fixed expected files/key/boot/UID afterward.
+No installer service or automatic remote build is added.
+
+All generated files are exclusive and atomically linked in their protected
+directories; bootstrap is published last. A per-run marker refuses a second
+materialization. `derivation.json` binds template/executable/recipe/source,
+exact export, observed probe/readback and generated file hashes. Failures enter
+the existing destroy/list path (`MATERIALIZATION_REFUSED`), without changing
+sticky UNKNOWN apply semantics. The receipt is provenance, not a second oracle.
+
+Cloud-init, saved state/plan and any generated host private key remain private;
+Terraform plan/apply/init/destroy stdout is now withheld from command transcripts.
+Only the exact nonsecret inventory output and RG list are retained there. Do not
+archive private variables/state/plan. Protected recipe errors do not echo its
+stdout. This PR generates no keypair and installs no recipe/tool/credential.
+
+Azure must hold/renew/release its separately approved `locks/azure-<rg>.lock`
+and ordinary ledger records through the protected launch procedure. This
+materializer reuses `ReadLiveLease` before create/publication and refuses missing,
+foreign, released or stale records; it does not create a lease broker or pretend
+an absent acquire/renew/release writer is installed. The installed setup/launch
+recipe, key/cloud-init wiring and Azure lock/ledger lifecycle remain explicit
+runtime prerequisites to qualify before a live token. M01/M02 dry run and
+native controller/tool approvals remain separate. No live cloud/install/lease
+qualification is claimed by the CPU controls.
+
 `go test ./provision/smoke ./cmd/seaweed-cloud`: pinned inputs, no-effect dry-run,
 single apply, failure/UNKNOWN, cancellation, residual/unknown list, sticky
 workload failure and explicit recovery. Linux controls execute fake CLIs and

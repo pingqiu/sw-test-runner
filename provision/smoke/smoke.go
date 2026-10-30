@@ -51,6 +51,7 @@ type Pack func(context.Context, string, string, []byte) (string, error)
 type Controller struct {
 	Command Runner
 	Pack    Pack
+	fresh   *freshAuthority // compiled CPU seam only; never decoded from Config
 }
 
 func StrictJSON(raw []byte, dst any) error {
@@ -234,7 +235,19 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Code = "PLAN_ONLY"
 		out.Remedy = "review estimate, module/lock/vars pins and normal pack admission; obtain launch token before run"
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": 1, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack normal S0b admission", "terraform destroy", "independent read-only RG list"}}
+		out.Plan["fresh_approval_path"] = freshApprovalPath
+		out.Plan["fresh_setup"] = "blocked until the protected pinned template/materializer/setup and Azure lease are installed; run performs fixed setup and typed publication before pack"
 		return
+	}
+	if mode == "run" && (ctl.Pack == nil || ctl.fresh != nil) {
+		if ctl.fresh == nil {
+			ctl.fresh, err = loadFresh(c)
+		}
+		if err != nil || ctl.fresh == nil || ctl.fresh.check(c) != nil {
+			out.Code = "FRESH_APPROVAL_REFUSED"
+			out.Remedy = "install manager-pinned template/materializer/setup on the protected controller"
+			return
+		}
 	}
 	if ctl.Command == nil {
 		ctl.Command = Native
@@ -253,7 +266,11 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			return nil, e
 		}
 		b, e := ctl.Command(cx, root, tool, args...)
-		if w := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600); w != nil {
+		captured := b
+		if tool == "terraform" && args[0] != "output" {
+			captured = []byte("private Terraform output withheld; state/plan remain private\n")
+		}
+		if w := os.WriteFile(filepath.Join(c.Output, label+"-output"), captured, 0600); w != nil {
 			e = errors.Join(e, w)
 		}
 		status := []byte("OK")
@@ -411,6 +428,15 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Code = "EVIDENCE_FAILED"
 		out.Error = e.Error()
 		return
+	}
+	if ctl.fresh != nil {
+		out.Effects = append(out.Effects, "fixed setup + typed materialization")
+		if e = ctl.fresh.publish(work, c, b); e != nil {
+			out.Code = "MATERIALIZATION_REFUSED"
+			out.Error = e.Error()
+			out.Remedy = "preserve private derivation evidence; restore the exact approved setup/template"
+			return
+		}
 	}
 	out.Effects = append(out.Effects, "normal S0b pack")
 	if out.Bundle, e = ctl.Pack(work, c.Request, c.Policy, b); e != nil {
