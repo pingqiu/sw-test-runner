@@ -115,11 +115,31 @@ Already-Before records RestoreNotNeeded without fabricating an executed restore.
 Named bounds: initial record capture 5 s; authority watch every 1 s with a 2 s
 read bound; SSH/readback uses PR2's 15 s bound, clipped to original work time.
 Close caches min(close+reserve, original hard deadline), reserve <=60 s.
+An approved `ClearFault` also enters this terminal cleanup transition, even
+with live WORK authority: it fences admission and settles all other possible
+issuers before restoration. Continuing ordinary work after an early clear is
+not supported by this minimal adapter. Legacy non-approved clearing is unchanged.
 Approved always phases run after owned settlement, cannot reopen work, and use
 that cached cleanup deadline. Watch/readers join under the same bound; an
 unsettled read remains UNKNOWN. Engine join is bounded by original hard time.
 Renewal does not extend it. Existing S0a controller-loss/remote settlement
 guarantees are unchanged; this is not automatic cloud teardown.
+
+Registered cleanup effects, their observation/proof and dispatch contexts are
+additionally clipped to the original grant. Custody `EffectDeadline` carries
+min(grant, current cleanup envelope) separately from `HardDeadline`, which
+retains the original settlement obligation. The concrete custodian acknowledges
+this effect bound before authorization, checks it again at the gate and stops
+the owned child at expiry without a controller stop request. An absent/mismatched
+echo refuses authorization, including an older custodian that ignores the field.
+Expiry or refused late authorization does not discard the settlement channel;
+absence proof can still be collected inside original custody time. No grant is
+extended to obtain a successful cleanup outcome.
+
+Already-Before qualifies the same retained grant, boot, resource/ownership and
+protected bytes before recording RestoreNotNeeded; final closure qualifies them
+again under the grant bound. An expired grant or changed restore bytes therefore
+cannot bypass qualification through a no-command result.
 
 Custody evidence retains up to 10,000 ordinary job observations and 128 reserved
 cleanup observations. Capacity exhaustion refuses new execution. The existing

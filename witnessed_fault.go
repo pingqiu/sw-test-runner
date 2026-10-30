@@ -112,10 +112,8 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 		if !baseline {
 			return nil
 		}
-		s.mu.Lock()
-		closing := s.closed
-		s.mu.Unlock()
-		if closing && s.authority != nil {
+		if s.authority != nil {
+			s.beginCleanup()
 			if err := s.settleWork(ctx); err != nil {
 				return fmt.Errorf("possible mutation issuer: %w", err)
 			}
@@ -124,6 +122,15 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 			if err := s.Stop(ctx, apply); err != nil {
 				return fmt.Errorf("possible fault issuer: %w", err)
 			}
+		}
+		if s.authority != nil {
+			deadline, err := s.authority.faultDeadline(key)
+			if err != nil {
+				return err
+			}
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
 		}
 		current, err := observe(ctx)
 		if err != nil {
@@ -139,6 +146,11 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 			}
 		}
 		if maps.Equal(current.State, p.Before) {
+			if s.authority != nil {
+				if err := s.authority.qualifyRestoration(ctx, key); err != nil {
+					return err
+				}
+			}
 			receipt.RestoreNotNeeded = true
 			store()
 			return nil
@@ -154,6 +166,18 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 		if !baseline {
 			return errors.New("no qualified baseline; no restoration claim")
 		}
+		if s.authority != nil {
+			deadline, err := s.authority.faultDeadline(key)
+			if err != nil {
+				return err
+			}
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
+			if err := s.authority.qualifyRestoration(ctx, key); err != nil {
+				return err
+			}
+		}
 		var err error
 		receipt.Restored, err = observe(ctx)
 		store()
@@ -165,6 +189,19 @@ func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p 
 }
 
 func (s *RunScope) faultJob(ctx context.Context, spec JobSpec, restoration bool) (h JobHandle, exit ExitInfo, err error) {
+	if restoration && s.authority != nil {
+		binding, ok := ctx.Value(faultJobContextKey{}).(faultJobContext)
+		if !ok || binding.scope != s {
+			return h, exit, errors.New("missing private restoration custody")
+		}
+		deadline, e := s.authority.faultDeadline(binding.key)
+		if e != nil {
+			return h, exit, e
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
 	h, err = s.start(ctx, spec, restoration)
 	defer func() {
 		if h.scope != nil {

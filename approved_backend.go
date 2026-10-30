@@ -87,7 +87,7 @@ func (b *approvedJobs) work(ctx context.Context, id string, s JobSpec) error {
 		if !registered || !equalJSON(row.spec, s) {
 			return errors.New("private fault job binding changed")
 		}
-		return b.permitFault(ctx, row, fault)
+		return b.permitFault(ctx, row, fault, false)
 	}
 	for _, grant := range b.run.approval.Cleanup {
 		if sameJob(grant.Apply, s) || sameJob(grant.Restore, s) {

@@ -143,6 +143,13 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 		return errors.New("no enrollment")
 	}
 	a, s := first.Admission, first.Spec
+	effect := a.HardDeadline
+	if !a.EffectDeadline.IsZero() {
+		effect = a.EffectDeadline
+	}
+	if !effect.After(time.Now()) || effect.After(a.HardDeadline) {
+		return errors.New("invalid effect deadline")
+	}
 	if first.Operation != "enroll" || (!s.Restoration && !a.WorkDeadline.After(time.Now())) || !a.HardDeadline.After(time.Now()) || a.CleanupReserve <= 0 || a.CleanupReserve > time.Minute || a.WorkDeadline.Add(a.CleanupReserve).After(a.HardDeadline) {
 		return errors.New("invalid custody envelope")
 	}
@@ -179,7 +186,7 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 	cmd := exec.Command(self, append([]string{"owned-exec", s.Executable}, s.Argv...)...)
 	cmd.ExtraFiles, cmd.Stdout, cmd.Stderr = []*os.File{file, gate}, out, errout
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if !a.HardDeadline.After(time.Now()) || (!s.Restoration && !a.WorkDeadline.After(time.Now())) {
+	if !effect.After(time.Now()) || (!s.Restoration && !a.WorkDeadline.After(time.Now())) {
 		return errors.New("enrollment expired while pinning files")
 	}
 	if err := cmd.Start(); err != nil {
@@ -215,14 +222,30 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 	}
 	identity := ProcessIdentity{Node: s.Node, RunID: a.RunID, BootID: strings.TrimSpace(string(boot)), PID: pid, PGID: pid, StartTime: start, ExecutableSHA256: s.SHA256}
 	enc := json.NewEncoder(output)
-	if err := enc.Encode(custodyReply{Sequence: first.Sequence, Identity: identity}); err != nil {
+	if err := enc.Encode(custodyReply{Sequence: first.Sequence, Identity: identity, EffectDeadline: a.EffectDeadline}); err != nil {
 		return err
 	}
 	timer := time.NewTimer(time.Until(a.HardDeadline))
 	defer timer.Stop()
+	var effectTimer *time.Timer
+	var effectExpired <-chan time.Time
+	if !a.EffectDeadline.IsZero() {
+		effectTimer = time.NewTimer(time.Until(effect))
+		defer effectTimer.Stop()
+		effectExpired = effectTimer.C
+	}
 	authorized := false
 	for {
 		select {
+		case <-effectExpired:
+			effectExpired = nil
+			ctx, cancel := context.WithDeadline(context.Background(), a.HardDeadline)
+			err := settleChildren(ctx, pid, &status, &exited)
+			cancel()
+			if err != nil {
+				return err
+			}
+			settled = true // Keep the pipe for a settlement receipt under the ORIGINAL envelope.
 		case <-timer.C:
 			return errors.New("hard deadline")
 		case q, ok := <-requests:
@@ -235,7 +258,10 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 			case "authorize":
 				deadline := a.WorkDeadline
 				if s.Restoration {
-					deadline = a.HardDeadline
+					deadline = effect
+				}
+				if deadline.After(effect) {
+					deadline = effect
 				}
 				if authorized || q.Identity != identity || !deadline.After(time.Now()) {
 					callErr = errors.New("authorization refused")
@@ -285,7 +311,7 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 			if err := enc.Encode(r); err != nil {
 				return err
 			}
-			if settled {
+			if settled && (q.Operation == "status" || q.Operation == "settle") {
 				return callErr
 			}
 		}

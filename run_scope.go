@@ -18,7 +18,9 @@ type RunAdmission struct {
 	RunID, Workload, RequestID, ManifestSHA256 string
 	OutputDir                                  string
 	WorkDeadline, HardDeadline                 time.Time
-	CleanupReserve                             time.Duration
+	// Optional earlier not-after for effects; HardDeadline still bounds custody.
+	EffectDeadline time.Time
+	CleanupReserve time.Duration
 }
 
 type ProcessIdentity struct {
@@ -91,6 +93,8 @@ type restoration struct {
 type faultAuthority interface {
 	bindFault(context.Context, string, WitnessedFault, FaultObservation) error
 	bindFaultJob(string, string, bool, JobSpec) error
+	faultDeadline(string) (time.Time, error)
+	qualifyRestoration(context.Context, string) error
 }
 type faultJobContextKey struct{}
 type faultJobContext struct {
@@ -200,6 +204,7 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	s.mu.Unlock()
 	defer close(j.ready)
 	h := JobHandle{s, id, j}
+	admission := s.admission
 	if s.authority != nil {
 		binding, ok := ctx.Value(faultJobContextKey{}).(faultJobContext)
 		if restoration && !ok {
@@ -215,9 +220,20 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 				s.retired(h)
 				return h, errors.Join(ErrJobNotStarted, err)
 			}
+			if restoration {
+				deadline, err := s.authority.faultDeadline(binding.key)
+				if err != nil {
+					s.retired(h)
+					return h, errors.Join(ErrJobNotStarted, err)
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+				admission.EffectDeadline, _ = ctx.Deadline()
+			}
 		}
 	}
-	i, err := s.backend.Enroll(ctx, id, s.admission, spec)
+	i, err := s.backend.Enroll(ctx, id, admission, spec)
 	if err != nil {
 		if errors.Is(err, ErrJobNotStarted) {
 			s.retired(h)
@@ -437,23 +453,33 @@ func cleanupCall(ctx context.Context, fn func(context.Context) error) (err error
 	return fn(ctx)
 }
 
-// Close closes admission before waiting for bounded per-entry creation/settlement.
-func (s *RunScope) Close() error {
-	s.once.Do(func() {
-		defer close(s.done)
-		s.mu.Lock()
-		s.closed = true
+// Early S0b ClearFault is a terminal cleanup transition, just like Close.
+// Fence admission before taking the issuer snapshot; never reset its bound.
+func (s *RunScope) beginCleanup() {
+	s.mu.Lock()
+	s.closed = true
+	if s.cleanupDeadline.IsZero() {
 		s.cleanupDeadline = time.Now().Add(s.admission.CleanupReserve)
 		if s.cleanupDeadline.After(s.admission.HardDeadline) {
 			s.cleanupDeadline = s.admission.HardDeadline
 		}
+	}
+	s.mu.Unlock()
+	s.cancel()
+}
+
+// Close closes admission before waiting for bounded per-entry creation/settlement.
+func (s *RunScope) Close() error {
+	s.once.Do(func() {
+		defer close(s.done)
+		s.beginCleanup()
+		s.mu.Lock()
 		order := append([]string(nil), s.order...)
 		jobs := make([]JobHandle, 0, len(s.jobs))
 		for id, j := range s.jobs {
 			jobs = append(jobs, JobHandle{s, id, j})
 		}
 		s.mu.Unlock()
-		s.cancel()
 		ctx, cancel := s.cleanupContext(context.Background())
 		defer cancel()
 		var errs []error

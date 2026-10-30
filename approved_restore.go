@@ -17,6 +17,16 @@ type registeredFault struct {
 	boot, planSHA256 string
 }
 
+func (b *approvedJobs) faultDeadline(key string) (time.Time, error) {
+	b.mu.Lock()
+	f, ok := b.faults[key]
+	b.mu.Unlock()
+	if !ok || !f.grant.Deadline.After(time.Now()) || f.grant.Deadline.After(b.run.request.Binding.HardDeadline) {
+		return time.Time{}, errors.New("missing/expired original cleanup grant")
+	}
+	return f.grant.Deadline, nil
+}
+
 func (b *approvedJobs) bindFault(ctx context.Context, key string, p WitnessedFault, before FaultObservation) error {
 	if !b.run.approval.AllowMutating {
 		return errors.New("independent GO does not consent to mutation")
@@ -83,7 +93,17 @@ func (b *approvedJobs) bindFaultJob(id, key string, restore bool, s JobSpec) err
 	return nil
 }
 
-func (b *approvedJobs) permitFault(ctx context.Context, row approvedJob, f registeredFault) error {
+func (b *approvedJobs) qualifyRestoration(ctx context.Context, key string) error {
+	b.mu.Lock()
+	f, ok := b.faults[key]
+	b.mu.Unlock()
+	if !ok {
+		return errors.New("missing retained cleanup custody")
+	}
+	return b.permitFault(ctx, approvedJob{spec: f.plan.Restore, restore: true}, f, true)
+}
+
+func (b *approvedJobs) permitFault(ctx context.Context, row approvedJob, f registeredFault, observationOnly bool) error {
 	if !f.grant.Deadline.After(time.Now()) || f.grant.Deadline.After(b.run.request.Binding.HardDeadline) {
 		return errors.New("original cleanup grant expired")
 	}
@@ -125,7 +145,7 @@ func (b *approvedJobs) permitFault(ctx context.Context, row approvedJob, f regis
 	if !row.restore && !maps.Equal(observation.State, f.grant.Before) {
 		return errors.New("apply no longer has the exact baseline")
 	}
-	if row.restore && maps.Equal(observation.State, f.grant.Before) {
+	if row.restore && !observationOnly && maps.Equal(observation.State, f.grant.Before) {
 		return errors.New("resource already restored; no mutation authorized")
 	}
 	return nil

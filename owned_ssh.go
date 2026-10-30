@@ -21,11 +21,12 @@ type custodyRequest struct {
 }
 
 type custodyReply struct {
-	Sequence uint64
-	Error    string
-	Identity ProcessIdentity
-	Exit     ExitInfo
-	Kill     KillWitness
+	EffectDeadline time.Time
+	Sequence       uint64
+	Error          string
+	Identity       ProcessIdentity
+	Exit           ExitInfo
+	Kill           KillWitness
 }
 
 type custodyChannel struct {
@@ -107,6 +108,9 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 		}
 	}()
 	r, err := c.call(ctx, custodyRequest{Operation: "enroll", Admission: a, Spec: s})
+	if err == nil && !a.EffectDeadline.IsZero() && !r.EffectDeadline.Equal(a.EffectDeadline) {
+		err = errors.New("custodian did not bind effect deadline; authorization refused")
+	}
 	return r.Identity, err
 }
 
