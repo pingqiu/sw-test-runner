@@ -156,8 +156,12 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		return err
 	}
 	hosts := map[string]inventory.Host{}
+	roles := map[string]int{}
 	for _, h := range d.Hosts {
 		hosts[h.ID] = h
+		for _, role := range h.Roles {
+			roles[role]++
+		}
 		if h.RunRoot != b.OutputDir {
 			return errors.New("S0b requires one exact per-host output root")
 		}
@@ -166,6 +170,9 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 				return errors.New("formatting is outside this reproduction slice")
 			}
 		}
+	}
+	if roles["client"] == 0 || len(p.Workload) == 0 || roles["master"] == 0 || roles["filer"] != 1 || roles["volume"] != 1 {
+		return errors.New("required smoke needs a client, nonempty workload, master, one filer and one volume")
 	}
 	used := map[string]bool{}
 	check := func(steps []Step, kind string) error {
@@ -292,6 +299,10 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
 	}
 	for _, step := range p.steps(act.Action) {
+		if err = ctx.Err(); err != nil {
+			s.terminal = err
+			return refusal(act.Action, "OWNED_JOB_FAILED", err)
+		}
 		background := act.Action == phases[1] && containsStep(p.Deploy, step.Job)
 		if _, _, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
 			s.terminal = err

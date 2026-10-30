@@ -58,7 +58,7 @@ func procFields(pid int) ([]string, error) {
 
 // A direct child cannot be recycled while it is ours and unreaped. pidfds
 // prevent signal-by-PID races; subreaping brings escaped grandchildren here.
-func settleChildren(ctx context.Context, leader int, status *unix.WaitStatus, exited *bool) error {
+func settleChildren(ctx context.Context, leader int, status *unix.WaitStatus, exited *bool, stoppedLeader ...*bool) error {
 	for {
 		for {
 			var ws unix.WaitStatus
@@ -97,6 +97,9 @@ func settleChildren(ctx context.Context, leader int, status *unix.WaitStatus, ex
 				return err
 			}
 			err = unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+			if err == nil && pid == leader && f[0] != "Z" && len(stoppedLeader) == 1 {
+				*stoppedLeader[0] = true
+			}
 			_ = unix.Close(fd)
 			if err != nil && err != unix.ESRCH {
 				return err
@@ -263,6 +266,9 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 				if deadline.After(effect) {
 					deadline = effect
 				}
+				if !a.AuthorizeDeadline.IsZero() && deadline.After(a.AuthorizeDeadline) {
+					deadline = a.AuthorizeDeadline
+				}
 				if authorized || q.Identity != identity || !deadline.After(time.Now()) {
 					callErr = errors.New("authorization refused")
 				} else {
@@ -291,12 +297,14 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 					}
 				}
 				if callErr == nil && (exited || q.Operation == "settle") {
+					cleanupStopped := q.Operation == "settle" && authorized && !exited
+					stoppedLeader := false
 					ctx, cancel := context.WithDeadline(context.Background(), a.HardDeadline)
-					callErr = settleChildren(ctx, pid, &status, &exited)
+					callErr = settleChildren(ctx, pid, &status, &exited, &stoppedLeader)
 					cancel()
 					settled = callErr == nil
 					if settled {
-						r.Exit = ExitInfo{Identity: identity, Code: status.ExitStatus(), StdoutPath: s.StdoutPath, StderrPath: s.StderrPath, Settled: true}
+						r.Exit = ExitInfo{Identity: identity, Code: status.ExitStatus(), StdoutPath: s.StdoutPath, StderrPath: s.StderrPath, Settled: true, CleanupStopped: cleanupStopped && stoppedLeader && status.Signaled() && status.Signal() == unix.SIGKILL}
 						if status.Signaled() {
 							r.Exit.Signal = int(status.Signal())
 						}

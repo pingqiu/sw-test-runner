@@ -57,7 +57,16 @@ func (c *ActionContext) RunApprovedPackJob(ctx context.Context, label string, ba
 	if !ok {
 		return JobHandle{}, ExitInfo{}, errors.New("unknown approved pack job")
 	}
-	h, err := c.Safety.Start(JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv})
+	// Keep the action's tighter bound through enrollment and authorization;
+	// cancellation of the original work envelope still fences this context.
+	work, cancel := context.WithDeadline(ctx, c.Safety.admission.WorkDeadline)
+	defer cancel()
+	stop := context.AfterFunc(c.Safety.ctx, cancel)
+	defer stop()
+	if err := work.Err(); err != nil {
+		return JobHandle{}, ExitInfo{}, err
+	}
+	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background}, false)
 	if err != nil || background {
 		return h, ExitInfo{}, err
 	}

@@ -20,7 +20,10 @@ type RunAdmission struct {
 	WorkDeadline, HardDeadline                 time.Time
 	// Optional earlier not-after for effects; HardDeadline still bounds custody.
 	EffectDeadline time.Time
-	CleanupReserve time.Duration
+	// Optional tighter dispatch bound; unlike EffectDeadline it does not end
+	// the lifetime of an already authorized background service.
+	AuthorizeDeadline time.Time
+	CleanupReserve    time.Duration
 }
 
 type ProcessIdentity struct {
@@ -34,6 +37,7 @@ type JobSpec struct {
 	StdoutPath, StderrPath   string
 	Argv                     []string
 	Restoration              bool // Set only by the scope's cleanup path.
+	retainExit               bool // Private pack background ownership, never caller authority.
 }
 
 type ExitInfo struct {
@@ -42,6 +46,9 @@ type ExitInfo struct {
 	Signal                 int
 	StdoutPath, StderrPath string
 	Settled                bool
+	// True only when the custodian observed the authorized leader still alive
+	// at explicit cleanup and stopped it. Absence/SETTLED alone is not an exit.
+	CleanupStopped bool
 }
 
 type KillWitness struct {
@@ -192,7 +199,7 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	spec.Argv = append([]string(nil), spec.Argv...)
 	j := &ownedJob{ready: make(chan struct{}), gate: make(chan struct{}, 1), spec: spec}
 	s.mu.Lock()
-	if (s.closed && !restoration) || ctx.Err() != nil {
+	if ((s.closed || s.ctx.Err() != nil) && !restoration) || ctx.Err() != nil {
 		s.mu.Unlock()
 		return JobHandle{}, errors.New("run admission closed")
 	}
@@ -206,6 +213,9 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	defer close(j.ready)
 	h := JobHandle{s, id, j}
 	admission := s.admission
+	if deadline, ok := ctx.Deadline(); ok && (admission.AuthorizeDeadline.IsZero() || deadline.Before(admission.AuthorizeDeadline)) {
+		admission.AuthorizeDeadline = deadline
+	}
 	if s.authority != nil {
 		binding, ok := ctx.Value(faultJobContextKey{}).(faultJobContext)
 		if restoration && !ok {
@@ -249,7 +259,7 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
-	if (closed && !restoration) || ctx.Err() != nil {
+	if ((closed || s.ctx.Err() != nil) && !restoration) || ctx.Err() != nil {
 		return h, errors.New("run closed before authorization")
 	}
 	return h, s.backend.Authorize(ctx, id, i)
@@ -298,6 +308,27 @@ func (s *RunScope) Stop(ctx context.Context, h JobHandle) error {
 	if j.settled {
 		return nil
 	}
+	if j.spec.retainExit {
+		b, ok := s.backend.(interface {
+			settleExit(context.Context, string) (ExitInfo, error)
+		})
+		if !ok {
+			return errors.New("background terminal receipt unavailable")
+		}
+		i, err := b.settleExit(ctx, h.id)
+		if err != nil {
+			return err
+		}
+		if !validJobExit(i, j) {
+			return errors.New("unproven background exit receipt")
+		}
+		j.exit = &i
+		s.retired(h)
+		if !i.CleanupStopped || i.Code != -1 || i.Signal != 9 {
+			return errors.New("background service exited before intentional cleanup")
+		}
+		return nil
+	}
 	if err := s.backend.Settle(ctx, h.id); err != nil {
 		return err
 	}
@@ -325,13 +356,17 @@ func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
 	if err != nil {
 		return i, err
 	}
-	validExit := (i.Code >= 0 && i.Code <= 255 && i.Signal == 0) || (i.Code == -1 && i.Signal > 0 && i.Signal <= 64)
-	if !i.Settled || !validExit || j.identity.PID <= 0 || i.Identity != j.identity || i.StdoutPath != j.spec.StdoutPath || i.StderrPath != j.spec.StderrPath {
+	if !validJobExit(i, j) {
 		return i, errors.New("unproven exit receipt")
 	}
 	j.exit = &i
 	s.retired(h)
 	return i, nil
+}
+
+func validJobExit(i ExitInfo, j *ownedJob) bool {
+	valid := (i.Code >= 0 && i.Code <= 255 && i.Signal == 0) || (i.Code == -1 && i.Signal > 0 && i.Signal <= 64)
+	return i.Settled && valid && j.identity.PID > 0 && i.Identity == j.identity && i.StdoutPath == j.spec.StdoutPath && i.StderrPath == j.spec.StderrPath
 }
 
 func (s *RunScope) Kill(ctx context.Context, h JobHandle) (KillWitness, error) {

@@ -203,6 +203,16 @@ func (b *approvedJobs) Settle(ctx context.Context, id string) error {
 	b.mu.Unlock()
 	return nil
 }
+
+// Pack services retain their actual terminal reply through the same bounded
+// settlement. Wait validates/records it before either live index is pruned.
+func (b *approvedJobs) settleExit(ctx context.Context, id string) (ExitInfo, error) {
+	if err := b.run.runtime.Jobs.Settle(ctx, id); err != nil {
+		b.observe(id, "UNKNOWN", ProcessIdentity{}, nil, err)
+		return ExitInfo{}, err
+	}
+	return b.Wait(ctx, id)
+}
 func (b *approvedJobs) Wait(ctx context.Context, id string) (ExitInfo, error) {
 	b.mu.Lock()
 	_, ok := b.jobs[id]

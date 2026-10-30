@@ -1,5 +1,5 @@
 """Small external-stack CLI around the accepted KV worker/oracle. No lifecycle."""
-import argparse, datetime, hashlib, json, os, sys
+import argparse, datetime, hashlib, json, os, sys, pathlib, types
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -29,9 +29,22 @@ def witness(before, after, config):
                 loader_write_bytes=expected, server_write_join='NOT_OBSERVED')
 
 
+def exact_helper(name):
+    # Read/compile the protected sibling source itself: ordinary imports can
+    # prefer a same-name package or bytecode over the pinned/scanned .py file.
+    source = pathlib.Path(__file__).resolve().with_name(name+'.py')
+    module = types.ModuleType('_seaweed_pinned_'+name)
+    module.__file__ = str(source)
+    sys.modules[module.__name__] = module  # dataclasses resolves this exact module
+    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+    return module
+
+
 def run(conn, c, metadata, emit):
-    from soak_native_worker import work, payload, validate_ack_metadata, validate_api
-    from soak_oracle import Oracle
+    helper = exact_helper('soak_native_worker')
+    work, payload = helper.work, helper.payload
+    validate_ack_metadata, validate_api = helper.validate_ack_metadata, helper.validate_api
+    Oracle = exact_helper('soak_oracle').Oracle
     validate_api(type(conn))
     oracle = Oracle()
     before = json.loads(conn.stats_json())

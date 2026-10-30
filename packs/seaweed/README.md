@@ -73,6 +73,10 @@ client device/port/GID, transport and run/client namespace from joined inventory
 The approved job argv must match exactly, including the canonical JSON config.
 The pack requires the compiled-in smoke/helper hashes in both scanned script
 inputs and the client's protected read-back set, plus its native extension.
+Missing clients, empty workloads or missing smoke server roles refuse before
+any job starts. The helpers execute by compiling the exact sibling `.py`
+sources; same-name packages/bytecode cannot override them and competing
+protected helper candidates are refused.
 The script uses isolated Python, the pinned helper/native directories, clears
 inherited RDMA selectors and constructs `loader-rdma` with fallback disabled.
 
@@ -96,6 +100,21 @@ settlement. Collect runs approved owned collectors before settlement; this
 slice does not introduce an out-of-band SSH/SCP reader or pretend remote logs
 were locally exported. Operators must retain/export owned evidence through the
 reviewed collector/bootstrap contract before a hardware qualification result.
+
+Action deadlines fence enrollment and authorization, including a delayed
+enrollment reply. The custodian also receives the absolute authorization bound;
+this is separate from the lifetime of an already authorized service. The
+original run hard/cleanup envelope is unchanged. Background services require
+their actual terminal receipt through settlement. A custodian-observed live
+leader killed by explicit cleanup is distinguished from a service that exited
+earlier (even exit 0); unexpected or unproven exits fail. Older custodians that
+do not supply that distinction cannot qualify background cleanup. Protected
+runner/helper deployment hashes therefore need updating before any runtime use.
+
+RC direct-byte counters qualify transport, **not the declared local device or
+GID**. Actual RC-device qualification remains NOT_PROVEN until the independently
+reviewed preflight/profile supplies route/device evidence. This correction does
+not add a device-selection product API or a hardware claim.
 
 ## Planning, JSON and recovery
 

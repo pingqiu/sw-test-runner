@@ -45,6 +45,7 @@ type SSHJobs struct {
 	Nodes  map[string]*infra.Node
 	Runner string
 	jobs   map[string]*custodyChannel
+	exits  map[string]ExitInfo
 	slots  chan struct{}
 }
 
@@ -174,6 +175,10 @@ func (b *SSHJobs) command(ctx context.Context, id, op string, identity ProcessId
 		_ = c.pipe.Close()
 		c.release()
 		b.mu.Lock()
+		if b.exits == nil {
+			b.exits = map[string]ExitInfo{}
+		}
+		b.exits[id] = r.Exit
 		delete(b.jobs, id)
 		b.mu.Unlock()
 	}
@@ -194,6 +199,12 @@ func (b *SSHJobs) Kill(ctx context.Context, id string) (KillWitness, error) {
 }
 func (b *SSHJobs) Wait(ctx context.Context, id string) (ExitInfo, error) {
 	for {
+		b.mu.Lock()
+		exit, terminal := b.exits[id]
+		b.mu.Unlock()
+		if terminal {
+			return exit, nil
+		}
 		r, err := b.command(ctx, id, "status", ProcessIdentity{})
 		if err != nil || r.Exit.Settled {
 			return r.Exit, err

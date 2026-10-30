@@ -22,15 +22,16 @@ import (
 // Fake only at the transport boundary: no SSH, native import, host or network.
 // The strict records, lease, GO, readback qualification and Engine are real.
 type cpuNode struct {
-	mu          sync.Mutex
-	ids         map[string]tr.ProcessIdentity
-	specs       map[string]tr.JobSpec
-	boots       map[string]string
-	live        map[string]bool
-	authorized  int
-	unknown     bool
-	lostReply   bool
-	onAuthorize func()
+	mu             sync.Mutex
+	ids            map[string]tr.ProcessIdentity
+	specs          map[string]tr.JobSpec
+	boots          map[string]string
+	live           map[string]bool
+	cleanupStopped map[string]bool
+	authorized     int
+	unknown        bool
+	lostReply      bool
+	onAuthorize    func()
 }
 
 func (n *cpuNode) Enroll(_ context.Context, id string, a tr.RunAdmission, s tr.JobSpec) (tr.ProcessIdentity, error) {
@@ -63,6 +64,10 @@ func (n *cpuNode) Settle(_ context.Context, id string) error {
 	if n.unknown {
 		return errors.New("CPU UNKNOWN settlement")
 	}
+	if n.cleanupStopped == nil {
+		n.cleanupStopped = map[string]bool{}
+	}
+	n.cleanupStopped[id] = n.live[id]
 	delete(n.live, id)
 	return nil
 }
@@ -71,7 +76,11 @@ func (n *cpuNode) Wait(_ context.Context, id string) (tr.ExitInfo, error) {
 	defer n.mu.Unlock()
 	s := n.specs[id]
 	delete(n.live, id)
-	return tr.ExitInfo{Identity: n.ids[id], Code: 0, Settled: true, StdoutPath: s.StdoutPath, StderrPath: s.StderrPath}, nil
+	exit := tr.ExitInfo{Identity: n.ids[id], Code: 0, Settled: true, StdoutPath: s.StdoutPath, StderrPath: s.StderrPath}
+	if n.cleanupStopped[id] {
+		exit.Code, exit.Signal, exit.CleanupStopped = -1, 9, true
+	}
+	return exit, nil
 }
 func (n *cpuNode) Kill(context.Context, string) (tr.KillWitness, error) {
 	return tr.KillWitness{}, errors.New("unexpected kill")
@@ -261,13 +270,32 @@ func TestStrictEntryRunsAllFiveSeaweedPhases(t *testing.T) {
 	if len(result.Phases) != 5 || len(f.node.live) != 0 || f.node.authorized != 11 {
 		t.Fatalf("phases=%d remaining=%d jobs=%d", len(result.Phases), len(f.node.live), f.node.authorized)
 	}
-	if raw, err := os.ReadFile(filepath.Join(bundle, "artifacts", "authority.json")); err != nil || !strings.Contains(string(raw), "pack-request") {
+	raw, err := os.ReadFile(filepath.Join(bundle, "artifacts", "authority.json"))
+	if err != nil || !strings.Contains(string(raw), "pack-request") {
 		t.Fatalf("authority evidence %s %v", raw, err)
+	}
+	var evidence struct {
+		Jobs map[string]tr.ApprovedJobReceipt
+	}
+	if err := json.Unmarshal(raw, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	background := 0
+	for _, receipt := range evidence.Jobs {
+		if len(receipt.Spec.Argv) > 0 && strings.HasPrefix(receipt.Spec.Argv[0], "deploy-") {
+			background++
+			if receipt.State != "EXIT_SETTLED" || receipt.Exit == nil || !receipt.Exit.CleanupStopped || receipt.Exit.Code != -1 || receipt.Exit.Signal != 9 {
+				t.Fatalf("background exit not retained: %+v", receipt)
+			}
+		}
+	}
+	if background != 4 {
+		t.Fatalf("background receipts=%d", background)
 	}
 }
 
 func TestStrictEntryRefusesForeignPackBindingsBeforeJobs(t *testing.T) {
-	for _, mode := range []string{"foreign-go", "released-lease", "stale-lease", "deadline", "artifact", "missing-host-phase", "wrong-workload-selector", "helper-not-scanned", "reordered"} {
+	for _, mode := range []string{"foreign-go", "released-lease", "stale-lease", "deadline", "artifact", "empty-workload", "missing-host-phase", "wrong-workload-selector", "helper-not-scanned", "reordered"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCPUFixture(t)
 			switch mode {
@@ -296,6 +324,9 @@ func TestStrictEntryRefusesForeignPackBindingsBeforeJobs(t *testing.T) {
 				}
 				f.plan.Requested = string(raw)
 				f.plan.Resolved = string(out)
+				f.publish(t, nil)
+			case "empty-workload":
+				f.plan.Workload = nil
 				f.publish(t, nil)
 			case "missing-host-phase":
 				f.plan.Collect = f.plan.Collect[:1]

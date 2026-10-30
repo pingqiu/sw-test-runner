@@ -1,5 +1,5 @@
 """Explicit CPU controls; discovery/import never contacts hosts or imports native."""
-import copy, datetime, importlib.util, json, os, pathlib, sys, unittest
+import copy, datetime, importlib.util, json, os, pathlib, sys, unittest, tempfile, subprocess, shutil
 ROOT=pathlib.Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT))
 import kv_smoke
@@ -25,6 +25,17 @@ class FakeConnector:
     def close(self):os.close(self.r);os.close(self.w)
 
 class SmokeControls(unittest.TestCase):
+    def test_exact_helpers_win_over_competing_import_packages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=pathlib.Path(temp)
+            for name in ('kv_smoke.py','test_kv_smoke.py','soak_native_worker.py','soak_oracle.py'):
+                shutil.copyfile(ROOT/name,root/name)
+            for name in ('soak_native_worker','soak_oracle'):
+                (root/name).mkdir()
+                (root/name/'__init__.py').write_text("raise AssertionError('shadow package executed')\n")
+            code="import sys;sys.path.insert(0,sys.argv[1]);import test_kv_smoke;t=test_kv_smoke.SmokeControls();r,_,_=t.run_mode('good');assert r['status']=='PASS'"
+            result=subprocess.run([sys.executable,'-I','-B','-c',code,str(root)],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
     def run_mode(self,mode):
         c=dict(run_id='cpu',client='m01',transport='dc',keys=2,length=64,root='/testops/cpu/m01')
         conn=FakeConnector(mode);events=[]

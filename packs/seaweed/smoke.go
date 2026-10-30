@@ -102,6 +102,13 @@ func checkSmoke(j tr.JobPin, in tr.PackInputs, d *inventory.Document, client str
 		}
 	}
 	files := in.Files[client]
+	for name := range files {
+		for _, stem := range []string{"soak_native_worker", "soak_oracle"} {
+			if strings.HasPrefix(name, path.Join(s.HelperDir, stem)+"/") || name == path.Join(s.HelperDir, stem+".pyc") || strings.HasPrefix(name, path.Join(s.HelperDir, "__pycache__", stem)+".") {
+				return errors.New("competing smoke helper package/bytecode refused")
+			}
+		}
+	}
 	for _, name := range []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"} {
 		body, err := workerFiles.ReadFile("worker/" + name)
 		if err != nil {
