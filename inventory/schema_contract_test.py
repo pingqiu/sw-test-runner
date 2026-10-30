@@ -53,6 +53,18 @@ def main():
    bad=copy.deepcopy(dc);bad['hosts'][0]['rdma'][field]=None;validate(bad,False)
   # Schema explicitly permits a requested nullable GID index; do not tighten it accidentally.
   bad=copy.deepcopy(dc);bad['hosts'][0]['rdma']['gid_index']=None;validate(bad,True)
+  # Execution-envelope refusals through the actual compiled CLI and schema.
+  for mode in ('missing_deadlines','null_deadlines','missing_hard','reserve_over','missing_services','zero_port','deadline_alias','offset_spelling'):
+   bad=copy.deepcopy(base)
+   if mode=='missing_deadlines':del bad['deadlines']
+   elif mode=='null_deadlines':bad['deadlines']=None
+   elif mode=='missing_hard':del bad['deadlines']['hard']
+   elif mode=='reserve_over':bad['deadlines']['cleanup_reserve_ms']=60001
+   elif mode=='missing_services':del bad['hosts'][0]['services']
+   elif mode=='zero_port':bad['hosts'][0]['services'][0]['port']=0
+   elif mode=='deadline_alias':bad['deadlines']['Work']=bad['deadlines']['work']
+   elif mode=='offset_spelling':bad['deadlines']['work']='2030-01-01T00:09:00+00:00'
+   validate(bad,False)
   p=subprocess.run([str(binary),'run'],capture_output=True,text=True,timeout=5);assert p.returncode==2;checks+=1
  print(json.dumps(dict(status='PASS',checks=checks,network_calls=0,authority_granted=False)))
 if __name__=='__main__':main()
