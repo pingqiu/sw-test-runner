@@ -176,3 +176,5 @@ hash if you need stability across the move.
 ## License
 
 Apache-2.0. See `LICENSE`.
+
+AWS plan-only provisioning: [provision/terraform/aws](provision/terraform/aws/README.md). Static Draft, no provider plan/apply GO.
