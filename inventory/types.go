@@ -14,6 +14,7 @@ type Document struct {
 	ArtifactManifestSHA256 string       `json:"artifact_manifest_sha256"`
 	ManagedResourceIDs     []string     `json:"managed_resource_ids"`
 	Hosts                  []Host       `json:"hosts"`
+	Deadlines              Deadlines    `json:"deadlines"`
 	Observation            *Observation `json:"observation,omitempty"`
 }
 
@@ -26,6 +27,7 @@ type Host struct {
 	Data       DataNetwork `json:"data"`
 	RunRoot    string      `json:"run_root"`
 	Disks      []Disk      `json:"disks"`
+	Services   []Service   `json:"services"`
 	RDMA       RDMA        `json:"rdma"`
 }
 
@@ -80,4 +82,18 @@ type HostObservation struct {
 	BootID         string `json:"boot_id"`
 	CapturedAt     string `json:"captured_at"`
 	EvidenceSHA256 string `json:"evidence_sha256"`
+}
+
+// Deadlines preserves the original work envelope. Decode validates data, not GO
+// or freshness; live admission checks the clock and may never extend this bound.
+type Deadlines struct {
+	Work             string `json:"work"`
+	Hard             string `json:"hard"`
+	CleanupReserveMS int64  `json:"cleanup_reserve_ms"`
+}
+
+// Service declares an explicit per-host listener; no implicit port arithmetic.
+type Service struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
 }

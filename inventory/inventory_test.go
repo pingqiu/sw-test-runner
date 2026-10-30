@@ -125,8 +125,11 @@ func TestJoinBindsRequestAndNeverExpandsAuthority(t *testing.T) {
 		"foreign request digest": func(d map[string]any) {
 			d["observation"].(map[string]any)["requested_sha256"] = strings.Repeat("c", 64)
 		},
-		"run changed":         func(d map[string]any) { d["run_id"] = "other" },
-		"transport changed":   func(d map[string]any) { d["transport"] = "dc" },
+		"run changed": func(d map[string]any) { d["run_id"] = "other" },
+		"transport changed": func(d map[string]any) {
+			d["transport"] = "dc"
+			firstHost(d)["services"] = append(firstHost(d)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
+		},
 		"artifact changed":    func(d map[string]any) { d["artifact_manifest_sha256"] = strings.Repeat("d", 64) },
 		"endpoint changed":    func(d map[string]any) { firstHost(d)["management"].(map[string]any)["address"] = "192.0.2.11" },
 		"credential changed":  func(d map[string]any) { firstHost(d)["management"].(map[string]any)["credential_ref"] = "another-key" },
@@ -157,6 +160,7 @@ func TestRequiredRDMACannotUseHTTPOrIncompleteObservation(t *testing.T) {
 		t.Run(transport, func(t *testing.T) {
 			requested := fixture(t)
 			requested["transport"] = transport
+			firstHost(requested)["services"] = append(firstHost(requested)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
 			firstHost(requested)["rdma"] = map[string]any{"status": "requested", "capabilities": []any{transport}}
 			raw := bytesOf(t, requested)
 			if _, err := inventory.Decode(raw); err != nil {
@@ -164,6 +168,7 @@ func TestRequiredRDMACannotUseHTTPOrIncompleteObservation(t *testing.T) {
 			}
 			_, resolved := pair(t)
 			resolved["transport"] = transport
+			firstHost(resolved)["services"] = firstHost(requested)["services"]
 			rdma := map[string]any{"status": "observed", "device": "mlx5_0", "port": float64(1), "gid_index": float64(3), "gid": "00000000000000000000ffff0a000001", "link_layer": "ethernet", "active_mtu": float64(4096), "capabilities": []any{transport}, "fabric_evidence_sha256": strings.Repeat("c", 64)}
 			firstHost(resolved)["rdma"] = rdma
 			digest := sha256.Sum256(raw)
@@ -191,12 +196,14 @@ func TestRequiredRDMACannotUseHTTPOrIncompleteObservation(t *testing.T) {
 func TestPinnedDiskAndRDMAPrescriptionCannotChange(t *testing.T) {
 	requested := fixture(t)
 	requested["transport"] = "dc"
+	firstHost(requested)["services"] = append(firstHost(requested)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
 	h := firstHost(requested)
 	h["rdma"] = map[string]any{"status": "requested", "device": "mlx5_0", "capabilities": []any{"dc"}}
 	h["disks"].([]any)[0].(map[string]any)["device_id"] = "/dev/disk/by-id/approved"
 	raw := bytesOf(t, requested)
 	_, resolved := pair(t)
 	resolved["transport"] = "dc"
+	firstHost(resolved)["services"] = append(firstHost(resolved)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
 	firstHost(resolved)["rdma"] = map[string]any{"status": "observed", "device": "mlx5_1", "port": float64(1), "gid_index": float64(3), "gid": "00000000000000000000ffff0a000001", "link_layer": "ethernet", "active_mtu": float64(4096), "capabilities": []any{"dc"}, "fabric_evidence_sha256": strings.Repeat("c", 64)}
 	digest := sha256.Sum256(raw)
 	resolved["observation"].(map[string]any)["requested_sha256"] = hex.EncodeToString(digest[:])

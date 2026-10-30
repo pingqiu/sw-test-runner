@@ -26,7 +26,7 @@ func Join(requested, resolved []byte) (*Document, error) {
 	if got.Observation.RequestedSHA256 != hex.EncodeToString(digest[:]) {
 		return nil, fmt.Errorf("resolution does not bind exact requested bytes")
 	}
-	if want.RunID != got.RunID || want.Target != got.Target || want.Transport != got.Transport || want.ArtifactManifestSHA256 != got.ArtifactManifestSHA256 || !sameSet(want.ManagedResourceIDs, got.ManagedResourceIDs) || len(want.Hosts) != len(got.Hosts) {
+	if want.Deadlines != got.Deadlines || want.RunID != got.RunID || want.Target != got.Target || want.Transport != got.Transport || want.ArtifactManifestSHA256 != got.ArtifactManifestSHA256 || !sameSet(want.ManagedResourceIDs, got.ManagedResourceIDs) || len(want.Hosts) != len(got.Hosts) {
 		return nil, fmt.Errorf("resolution changed request envelope or resource scope")
 	}
 	hosts := map[string]Host{}
@@ -38,7 +38,7 @@ func Join(requested, resolved []byte) (*Document, error) {
 		if !ok {
 			return nil, fmt.Errorf("resolution changed host set")
 		}
-		if w.ResourceID != h.ResourceID || !sameSet(w.Roles, h.Roles) || w.RunRoot != h.RunRoot || w.Management.Address != h.Management.Address || w.Management.Port != h.Management.Port || w.Management.User != h.Management.User || w.Management.CredentialRef != h.Management.CredentialRef || *w.Management.HostKey != "" && *w.Management.HostKey != *h.Management.HostKey {
+		if !sameServices(w.Services, h.Services) || w.ResourceID != h.ResourceID || !sameSet(w.Roles, h.Roles) || w.RunRoot != h.RunRoot || w.Management.Address != h.Management.Address || w.Management.Port != h.Management.Port || w.Management.User != h.Management.User || w.Management.CredentialRef != h.Management.CredentialRef || *w.Management.HostKey != "" && *w.Management.HostKey != *h.Management.HostKey {
 			return nil, fmt.Errorf("resolution changed host identity/roles/root")
 		}
 		if w.Data.Address != h.Data.Address || w.Data.NIC != "" && w.Data.NIC != h.Data.NIC || w.Data.MTU != 0 && w.Data.MTU != h.Data.MTU {

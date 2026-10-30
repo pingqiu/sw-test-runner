@@ -81,6 +81,9 @@ func validate(d *Document) error {
 	if d.Schema != Version || !oneOf(d.State, "requested", "resolved") || !slug.MatchString(d.RunID) || !oneOf(d.Target, "azure", "aws", "gcp", "onprem") {
 		return fmt.Errorf("invalid schema, state, run_id or target")
 	}
+	if err := validateEnvelope(d); err != nil {
+		return err
+	}
 	if !sha.MatchString(d.ArtifactManifestSHA256) {
 		return fmt.Errorf("artifact manifest digest is required")
 	}

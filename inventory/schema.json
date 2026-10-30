@@ -64,6 +64,9 @@
           "$ref": "#/$defs/observation"
         }
       ]
+    },
+    "deadlines": {
+      "$ref": "#/$defs/deadlines"
     }
   },
   "required": [
@@ -74,7 +77,8 @@
     "transport",
     "artifact_manifest_sha256",
     "managed_resource_ids",
-    "hosts"
+    "hosts",
+    "deadlines"
   ],
   "allOf": [
     {
@@ -607,6 +611,38 @@
               "$ref": "#/$defs/rdma_observed"
             }
           ]
+        },
+        "services": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "port"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "master_http",
+                  "master_grpc",
+                  "filer_http",
+                  "filer_grpc",
+                  "volume_http",
+                  "volume_grpc",
+                  "s3_http",
+                  "rdma",
+                  "kv_coordinator"
+                ]
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
         }
       },
       "required": [
@@ -617,7 +653,8 @@
         "data",
         "run_root",
         "disks",
-        "rdma"
+        "rdma",
+        "services"
       ],
       "allOf": [
         {
@@ -905,6 +942,32 @@
         "requested_sha256",
         "hosts"
       ]
+    },
+    "deadlines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work",
+        "hard",
+        "cleanup_reserve_ms"
+      ],
+      "properties": {
+        "work": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "hard": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "cleanup_reserve_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      }
     }
   }
 }
