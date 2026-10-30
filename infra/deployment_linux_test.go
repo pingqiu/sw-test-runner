@@ -30,6 +30,10 @@ func deploymentFixture(t *testing.T) (*Node, DeploymentPolicy) {
 }
 
 func deploymentFixtureGate(t *testing.T, gate func()) (*Node, DeploymentPolicy) {
+	return deploymentFixtureCommand(t, gate, nil)
+}
+
+func deploymentFixtureCommand(t *testing.T, gate func(), rewrite func(string) string) (*Node, DeploymentPolicy) {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("local Linux root needed to model a protected installation and unprivileged SSH child")
@@ -131,6 +135,9 @@ func deploymentFixtureGate(t *testing.T, gate func()) (*Node, DeploymentPolicy) 
 						request.Reply(true, nil)
 						if gate != nil {
 							gate()
+						}
+						if rewrite != nil {
+							payload.Command = rewrite(payload.Command)
 						}
 						ctx, cancel := context.WithTimeout(connectionCtx, 15*time.Second)
 						cmd := exec.CommandContext(ctx, "/bin/sh", "-c", payload.Command)
@@ -337,5 +344,52 @@ func TestDeploymentReadbackVerifiesActualProtectedFilesThroughPinnedSSH(t *testi
 	}
 	if _, err := node.VerifyDeployment(t.Context(), policy); err != nil {
 		t.Fatalf("fresh independent recheck: %v", err)
+	}
+}
+
+// Barrier after genuine find output models an independent privileged installation.
+func TestDeploymentReadbackRefusesEntryAddedAfterEnumeration(t *testing.T) {
+	scratch, mkErr := os.MkdirTemp("/opt", "codex01-readback-barrier-")
+	if mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	t.Cleanup(func() { os.RemoveAll(scratch) })
+	if err := os.Chmod(scratch, 0777); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(scratch, "find-barrier")
+	marker, resume := filepath.Join(scratch, "enumerated"), filepath.Join(scratch, "resume")
+	script := "#!/bin/sh\n/usr/bin/find \"$@\" || exit $?\nprintf yes > '" + marker + "'\nwhile [ ! -f '" + resume + "' ]; do /usr/bin/sleep 0.01; done\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0555); err != nil {
+		t.Fatal(err)
+	}
+	node, policy := deploymentFixtureCommand(t, nil, func(command string) string {
+		return strings.ReplaceAll(command, "/usr/bin/find", wrapper)
+	})
+	added := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(marker); err == nil {
+				err := os.WriteFile(filepath.Join(policy.InstallRoot, "native/extra.so"), []byte("late unapproved native"), 0444)
+				if err == nil {
+					err = os.WriteFile(resume, []byte("continue"), 0444)
+				}
+				added <- err
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		added <- os.ErrDeadlineExceeded
+	}()
+	receipt, err := node.VerifyDeployment(t.Context(), policy)
+	if addErr := <-added; addErr != nil {
+		t.Fatal(addErr)
+	}
+	if err == nil {
+		t.Fatalf("qualified despite an unapproved extra file present before BEFORE metadata; receipt files=%d", len(receipt.Files))
+	}
+	if err.Error() != "deployment changed during readback" {
+		t.Fatalf("wrong refusal cause: %v", err)
 	}
 }

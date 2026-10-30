@@ -112,7 +112,6 @@ func deploymentCommand(p DeploymentPolicy, paths []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	script.WriteString(command + "\n")
 	metadata := func(label string) error {
 		for i, name := range paths {
 			fmt.Fprintf(&script, "printf '%s|%d|'\n", label, i)
@@ -127,6 +126,7 @@ func deploymentCommand(p DeploymentPolicy, paths []string) (string, error) {
 	if err := metadata("BEFORE"); err != nil {
 		return "", err
 	}
+	script.WriteString(command + "\n")
 	for i, f := range p.Files {
 		fmt.Fprintf(&script, "printf 'HASH|%d|'\n", i)
 		command, err := ShellArgv("/usr/bin/sha256sum", "--", f.Path)
