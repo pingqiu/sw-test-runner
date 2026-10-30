@@ -6,9 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/pingqiu/sw-test-runner/inventory"
 	"io"
 	"os"
+
+	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
 func read(name string) ([]byte, error) {
@@ -26,40 +27,52 @@ func read(name string) ([]byte, error) {
 	}
 	return io.ReadAll(io.LimitReader(f, inventory.MaxBytes+1))
 }
-func run(args []string) error {
-	if len(args) == 1 && args[0] == "schema" {
-		_, err := os.Stdout.Write(inventory.Schema())
-		return err
+
+// execute emits one JSON result on both success and refusal. JSON is the default;
+// --json is an explicit spelling for agent callers. Schema emits JSON Schema.
+func execute(args []string, w io.Writer) int {
+	if len(args) > 0 && args[0] == "--json" {
+		args = args[1:]
 	}
-	if len(args) != 2 && len(args) != 3 {
-		return fmt.Errorf("usage: seaweed-inventory validate FILE | join REQUESTED RESOLVED | schema")
+	emit := func(v any, exit int) int {
+		if json.NewEncoder(w).Encode(v) != nil {
+			return 1
+		}
+		return exit
+	}
+	refuse := func(code, remedy string) int {
+		return emit(map[string]any{"schema": "seaweed.inventory-result/v1", "status": "refused", "code": code, "remedy": remedy, "execution_authorized": false}, 2)
+	}
+	if len(args) == 1 && args[0] == "schema" {
+		if _, err := w.Write(inventory.Schema()); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if !((len(args) == 2 && args[0] == "validate") || (len(args) == 3 && args[0] == "join")) {
+		return refuse("USAGE", "use seaweed-inventory [--json] validate FILE | join REQUESTED RESOLVED | schema; this command never executes inventory")
 	}
 	raw, err := read(args[1])
 	if err != nil {
-		return err
+		return refuse("INPUT_UNREADABLE", "supply a readable bounded regular inventory file on the controller")
 	}
 	var d *inventory.Document
-	switch {
-	case args[0] == "validate" && len(args) == 2:
+	if args[0] == "validate" {
 		d, err = inventory.Decode(raw)
-	case args[0] == "join" && len(args) == 3:
+		if err != nil {
+			return refuse("INVENTORY_INVALID", "correct input against seaweed.inventory/v1 using the schema command; validation grants no execution")
+		}
+	} else {
 		observed, e := read(args[2])
 		if e != nil {
-			return e
+			return refuse("INPUT_UNREADABLE", "supply a readable bounded regular resolved inventory file on the controller")
 		}
 		d, err = inventory.Join(raw, observed)
-	default:
-		return fmt.Errorf("unknown operation; this command never executes inventory")
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return refuse("INVENTORY_JOIN_REFUSED", "validate both documents and bind the exact requested digest without changing host, resource, role, disk or transport scope")
+		}
 	}
 	digest := sha256.Sum256(raw)
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "valid_data_only", "state": d.State, "input_sha256": hex.EncodeToString(digest[:]), "execution_authorized": false})
+	return emit(map[string]any{"schema": "seaweed.inventory-result/v1", "status": "valid_data_only", "code": "OK", "remedy": "validation grants no execution; obtain reviewed S0b admission before any effect", "state": d.State, "input_sha256": hex.EncodeToString(digest[:]), "execution_authorized": false}, 0)
 }
-func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-}
+func main() { os.Exit(execute(os.Args[1:], os.Stdout)) }

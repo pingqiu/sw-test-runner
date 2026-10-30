@@ -73,3 +73,17 @@ python inventory/schema_contract_test.py # explicit CPU check; needs jsonschema
 The examples use TEST-NET addresses, synthetic public keys and fabricated
 observations solely as contract fixtures. They are not an M01/M02 inventory,
 trusted host receipts, deployment admission or a hardware PASS.
+
+### Agent output contract
+
+JSON is the default; `seaweed-inventory --json validate FILE` (or `join REQUESTED RESOLVED`, `schema`) makes the choice explicit. Validate/join emit one `seaweed.inventory-result/v1` envelope on stdout for success and refusal. Stable fields include `status`, `code`, `remedy`, `execution_authorized:false`; success adds state and exact input digest. `schema` emits the structural JSON Schema itself. Exit 0 means valid data only, 2 means refusal, 1 means the output could not be written. Refusals do not echo raw input or local paths.
+
+| Code | Remedy |
+| --- | --- |
+| `OK` | Obtain reviewed S0b admission before effects; validation grants none. |
+| `USAGE` | Choose validate, join or schema; no run/apply command exists. |
+| `INPUT_UNREADABLE` | Supply a readable bounded regular local file. |
+| `INVENTORY_INVALID` | Correct the input against the emitted v1 schema. |
+| `INVENTORY_JOIN_REFUSED` | Validate both documents, preserve scope and bind the exact request digest. |
+
+This CLI has no mutating steps. Executable plans belong to the reviewed shared pack, not to inventory validation.

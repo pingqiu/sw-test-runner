@@ -16,7 +16,7 @@ def main():
    path=tmp/'case.json';path.write_text(json.dumps(doc))
    result=subprocess.run([str(binary),'validate',str(path)],capture_output=True,text=True,timeout=5)
    assert (result.returncode==0)==expected,(result.stdout,result.stderr)
-   if expected:assert json.loads(result.stdout)['execution_authorized'] is False
+   envelope=json.loads(result.stdout);assert envelope['execution_authorized'] is False;assert envelope['code']==('OK' if expected else 'INVENTORY_INVALID');assert envelope['remedy']
    checks+=1
   for transport in ('http','dc'):
    reqpath=root/f'examples/inventory/{transport}.requested.json';obspath=root/f'examples/inventory/{transport}.resolved.json'
