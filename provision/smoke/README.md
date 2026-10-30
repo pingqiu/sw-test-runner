@@ -24,7 +24,10 @@ This replaces #20's outer-run/identity-fence design. No cloud call is made by
   prerequisites, not a second admission. The command neither self-signs them nor
   learns guest keys by TOFU. If they are not ready when apply/export finishes,
   admission fails and teardown runs; no arbitrary bootstrap hook is executed.
-- Normal pack deadlines must leave cloud cleanup reserve. Exact module export
+- The work/hard gap declares a best-effort cloud cleanup window; normal S0b
+  process settlement can consume part of it. This is not a guaranteed minimum
+  provider settlement duration; the original hard end is never extended.
+  Exact module export
   must match scenario `seaweed_plan.requested_inventory`, resolved Join and the
   normal approved bindings. Only one Azure/HTTP host is accepted.
 
@@ -72,6 +75,15 @@ the expiry tag; a schedule is not an absolute provider-completion deadline.
 Registration/permissions/provider failure can prevent arming after VM create,
 so UNKNOWN always requires recovery/reporting. [AzureRM schedule semantics](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/dev_test_global_vm_shutdown_schedule).
 
+Before apply, the private `apply-started` stamp is flushed to disk; only a
+zero-exit apply writes `apply-succeeded`. Missing/malformed success evidence
+stays `create_unresolved=true`, including old output folders lacking receipts.
+Recovery destroy and an empty list do not resolve a pending provider create:
+they return `CREATE_UNRESOLVED`, never COMPLETE/EMPTY. The operator must resolve
+the original operation with Azure and report it separately; this small slice
+adds no provider-operation resolver or override/marker-clear command. Keep the
+original evidence; do not remove it to force a clean verdict.
+
 Every apply attempt, including failure/UNKNOWN, is followed by destroy and full
 read-only RG list within the original hard deadline. No apply retry, state-rm,
 force-unlock or same-ID replacement fence. Dedicated RG exclusivity is assumed.
@@ -89,13 +101,19 @@ recovery has separate record numbers. Verifier lists all RG resources via CLI,
 independently of Terraform state, with no whitelist hiding leftovers. It never
 deletes the RG/RBAC. An empty JSON array is required; missing/invalid list is
 UNKNOWN. Run owners coordinate the single lease; this adds no lease framework.
+Standalone verify has a 30-second local read deadline (or an earlier caller
+deadline). Timeout is non-clean with `remaining_observed=false`. Command records
+currently retain argv/stdout/status and error stderr; UTC timing and successful
+stderr are not promised by this corrective slice.
 
 CLI always emits `seaweed.cloud-smoke/v1` JSON. Exit0: `PLAN_ONLY`, `COMPLETE`,
 `EMPTY`. Nonzero: `USAGE`, `INPUT_REFUSED`, `LINUX_REQUIRED`, `DEADLINE_REFUSED`,
 `RG_NOT_EMPTY`, `PLAN_FAILED`, `APPLY_FAILED_OR_UNKNOWN`, `INVENTORY_FAILED`,
 `EVIDENCE_FAILED`, `PACK_FAILED`, `CLEANUP_INCOMPLETE`, `RESOURCES_REMAIN`.
+`CREATE_UNRESOLVED` also exits nonzero, even with an observed empty list.
 Every result has `code`, `remedy`, `effects`, `remaining_resource_ids`,
-`remaining_observed`; false means absence was not observed. `bundle` is normal
+`remaining_observed` and `create_unresolved`; the first is only the current list
+snapshot, not proof that a pending create settled. `bundle` is normal
 pack evidence. Clean teardown never turns workload FAIL into PASS. Notify the
 owner on failures; the command does not send external messages automatically.
 

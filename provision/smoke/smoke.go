@@ -43,6 +43,7 @@ type Result struct {
 	Bundle            string         `json:"bundle,omitempty"`
 	Error             string         `json:"error,omitempty"`
 	RemainingObserved bool           `json:"remaining_observed"`
+	CreateUnresolved  bool           `json:"create_unresolved"`
 	Plan              map[string]any `json:"plan,omitempty"`
 }
 type Runner func(context.Context, string, string, ...string) ([]byte, error)
@@ -188,6 +189,28 @@ func result(code, remedy string) Result {
 	return Result{Schema: "seaweed.cloud-smoke/v1", Code: code, Remedy: remedy, Effects: []string{}, Remaining: []string{}}
 }
 
+// These are private evidence files, not a new operation resolver. A failed or
+// interrupted apply has no success receipt; empty state/list cannot settle it.
+func applyUnresolved(root string) bool {
+	started, e := os.ReadFile(filepath.Join(root, "apply-started"))
+	if e != nil || string(started) != "apply may have issued creates\n" {
+		return true
+	}
+	finished, e := os.ReadFile(filepath.Join(root, "apply-succeeded"))
+	return e != nil || string(finished) != "apply returned success\n"
+}
+func stamp(name, text string) error {
+	f, e := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if e != nil {
+		return e
+	}
+	_, e = f.WriteString(text)
+	if e == nil {
+		e = f.Sync()
+	}
+	return errors.Join(e, f.Close())
+}
+
 // Execute has no default mutation mode. plan reads local files only. run requires
 // a fresh private output path; recovery destroy reuses that path and fixed state.
 func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out Result) {
@@ -285,13 +308,19 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		seq = int(time.Now().UnixMilli())
 	}
 	if mode == "verify" {
-		ids, e := list(ctx)
+		read, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		ids, e := list(read)
 		out.Remaining = ids
 		out.RemainingObserved = e == nil
+		out.CreateUnresolved = applyUnresolved(c.Output)
 		if e != nil || len(ids) > 0 {
 			out.Code = "RESOURCES_REMAIN"
 			out.Error = fmt.Sprint(e)
 			out.Remedy = "retain IDs and run destroy; notify the run owner"
+		} else if out.CreateUnresolved {
+			out.Code = "CREATE_UNRESOLVED"
+			out.Remedy = "empty list is only a snapshot; retain apply evidence and ask the operator to resolve the pending create with the provider"
 		} else {
 			out.Code = "EMPTY"
 			out.Remedy = "RG is retained and contains zero resources"
@@ -312,10 +341,18 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		ids, ve := list(cx)
 		out.Remaining = ids
 		out.RemainingObserved = ve == nil
+		out.CreateUnresolved = applyUnresolved(c.Output)
 		if de != nil || ve != nil || len(ids) > 0 {
 			out.Code = "CLEANUP_INCOMPLETE"
 			out.Error = fmt.Sprint(errors.Join(de, ve))
 			out.Remedy = "notify run owner with remaining IDs; rerun destroy using this private output/state"
+			return
+		}
+		if out.CreateUnresolved {
+			if mode == "destroy" || out.Code == "OK" {
+				out.Code = "CREATE_UNRESOLVED"
+			}
+			out.Remedy = "destroy/empty list cannot settle an UNKNOWN create; retain evidence and request provider-operation resolution from the operator"
 			return
 		}
 		if out.Code == "OK" || mode == "destroy" {
@@ -347,10 +384,20 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	// From this boundary, always destroy and independently list, including a
 	// partial apply/UNKNOWN. No automatic apply retry or custom recovery engine.
+	if e = stamp(filepath.Join(c.Output, "apply-started"), "apply may have issued creates\n"); e != nil {
+		out.Code = "EVIDENCE_FAILED"
+		out.Error = e.Error()
+		return
+	}
 	out.Effects = append(out.Effects, "terraform apply")
 	defer cleanup()
 	if _, e = call(work, "terraform", "apply", "-input=false", "-lock-timeout=0s", "-no-color", "smoke.tfplan"); e != nil {
 		out.Code = "APPLY_FAILED_OR_UNKNOWN"
+		out.Error = e.Error()
+		return
+	}
+	if e = stamp(filepath.Join(c.Output, "apply-succeeded"), "apply returned success\n"); e != nil {
+		out.Code = "EVIDENCE_FAILED"
 		out.Error = e.Error()
 		return
 	}
