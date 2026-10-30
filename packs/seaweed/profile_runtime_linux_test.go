@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/infra"
@@ -155,5 +156,58 @@ func TestStrictEntryM01M02ProfileRefusesDriftBeforeJobs(t *testing.T) {
 				t.Fatalf("profile drift dispatched %d jobs", f.node.authorized)
 			}
 		})
+	}
+}
+
+func TestStrictEntryM01M02ProfileRefusesEarlyFutureWindow(t *testing.T) {
+	f := cpuProfile(t)
+	d, e := inventory.Decode([]byte(f.plan.Resolved))
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.binding.WorkDeadline = time.Now().Add(20 * time.Minute)
+	f.binding.HardDeadline = f.binding.WorkDeadline.Add(time.Minute)
+	d.Deadlines.Work = f.binding.WorkDeadline.UTC().Format(time.RFC3339Nano)
+	d.Deadlines.Hard = f.binding.HardDeadline.UTC().Format(time.RFC3339Nano)
+	var req inventory.Document
+	if e = json.Unmarshal([]byte(f.plan.Requested), &req); e != nil {
+		t.Fatal(e)
+	}
+	req.Deadlines = d.Deadlines
+	raw, _ := json.Marshal(req)
+	resolved, e := inventory.Resolve(raw, *d)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.plan.Requested, f.plan.Resolved = string(raw), string(resolved)
+	for _, group := range []struct {
+		steps  []Step
+		action string
+	}{{f.plan.Preflight, "preflight"}, {f.plan.Deploy, "deploy"}, {f.plan.Ready, "ready"}, {f.plan.Collect, "collect"}} {
+		for _, step := range group.steps {
+			files := map[string]string{}
+			for _, dep := range f.policy.Deployments {
+				if dep.NodeID == step.Host {
+					for _, file := range dep.Files {
+						files[file.Path] = file.SHA256
+					}
+				}
+			}
+			args, e := ProfileArgs(d, step.Host, group.action, step.Role, f.plan.Smoke, files)
+			if e != nil {
+				t.Fatal(e)
+			}
+			job := f.policy.Jobs[step.Job]
+			job.Argv = args
+			f.policy.Jobs[step.Job] = job
+		}
+	}
+	f.publish(t, nil)
+	result, _, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
+	if err == nil && result != nil && result.Status == tr.StatusPass {
+		t.Fatal("future window admitted more than ten minutes of remaining custody")
+	}
+	if f.node.authorized != 0 {
+		t.Fatalf("early window dispatched %d jobs", f.node.authorized)
 	}
 }

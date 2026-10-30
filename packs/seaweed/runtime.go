@@ -141,6 +141,9 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		}
 	}
 	b := in.Binding
+	if p.Profile == "m01-m02-v1" && b.HardDeadline.Sub(time.Now()) > 10*time.Minute {
+		return errors.New("M01/M02 profile requires original hard deadline within ten minutes; future windows cannot launch early")
+	}
 	if d.Target != "onprem" || (d.Transport != "rc" && d.Transport != "dc") || b.Workload != "kv" || b.Transport != "rdma" {
 		return errors.New("this slice requires on-prem KV with RC/DC and no HTTP fallback")
 	}

@@ -62,3 +62,7 @@ strict UID claim proof and the canonical lease-to-worker flock handoff exist.
 The current lease holder and worker both acquire the same exclusive flock; a
 separate running holder cannot be silently kept while starting that worker.
 Neither this profile nor a YAML field bypasses that unresolved handoff.
+
+The profile refuses before any job if more than ten minutes remain until the
+original hard deadline. A proposed future window therefore cannot be launched
+early and accidentally authorize hours of custody. It never resets that bound.
