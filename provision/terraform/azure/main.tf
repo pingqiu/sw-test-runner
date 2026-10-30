@@ -1,5 +1,5 @@
 locals {
-  tags          = { seaweed_run = var.run_id, managed_by = "sw-test-runner" }
+  tags          = { seaweed_run = var.run_id, managed_by = "sw-test-runner", expires_at = var.run_declaration.hard_deadline }
   disk_nodes    = { for id, n in var.nodes : id => n if n.cache_disk_gib > 0 }
   service_ports = sort(distinct(flatten([for n in values(var.nodes) : [for s in n.services : tostring(s.port)]])))
 }
