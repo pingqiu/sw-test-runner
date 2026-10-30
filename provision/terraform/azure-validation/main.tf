@@ -13,6 +13,15 @@ variable "operator_cidr" { type = string }
 variable "image_version" { type = string }
 variable "artifact_manifest_sha256" { type = string }
 variable "vm_size" { type = string }
+variable "run_declaration" {
+  type = object({
+    work_deadline                 = string
+    hard_deadline                 = string
+    cloud_cleanup_reserve_seconds = number
+    budget_usd                    = number
+    abort_estimate_usd            = number
+  })
+}
 provider "azurerm" {
   features {}
   subscription_id                 = var.subscription_id
@@ -27,6 +36,7 @@ module "run" {
   operator_cidr            = var.operator_cidr
   image_version            = var.image_version
   artifact_manifest_sha256 = var.artifact_manifest_sha256
+  run_declaration          = var.run_declaration
   nodes = {
     node1 = {
       roles          = ["master", "filer", "volume", "s3", "client"]
@@ -38,3 +48,6 @@ module "run" {
   }
 }
 output "inventory_json" { value = module.run.inventory_json }
+
+output "run_declaration" { value = module.run.run_declaration }
+output "managed_resource_ids" { value = module.run.managed_resource_ids }
