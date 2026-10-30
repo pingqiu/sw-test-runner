@@ -104,12 +104,13 @@ type ownedJob struct {
 }
 
 type restoration struct {
-	ready, gate chan struct{}
-	restore     func(context.Context) error
-	verify      func(context.Context) error
-	cleared     bool
-	applyErr    error
-	cleanupErr  error // First approved terminal failure; protected by gate.
+	ready, gate   chan struct{}
+	restore       func(context.Context) error
+	verify        func(context.Context) error
+	cleared       bool
+	finalVerified bool // Set only by Close after fresh restoration qualification; protected by gate.
+	applyErr      error
+	cleanupErr    error // First approved terminal failure; protected by gate.
 }
 
 type faultAuthority interface {
@@ -472,10 +473,10 @@ func (s *RunScope) cleanupContext(parent context.Context) (context.Context, cont
 }
 
 func (s *RunScope) ClearFault(ctx context.Context, key string) error {
-	return errors.Join(s.clearFault(ctx, key), s.failedOutcome())
+	return errors.Join(s.clearFault(ctx, key, false), s.failedOutcome())
 }
 
-func (s *RunScope) clearFault(ctx context.Context, key string) error {
+func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error {
 	ctx, cancel := s.cleanupContext(ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -488,6 +489,7 @@ func (s *RunScope) clearFault(ctx context.Context, key string) error {
 		return err
 	}
 	defer func() { <-r.gate }()
+	r.finalVerified = false
 	var restoreErr error
 	if !r.cleared {
 		restoreErr = cleanupCall(ctx, r.restore)
@@ -499,6 +501,7 @@ func (s *RunScope) clearFault(ctx context.Context, key string) error {
 		return err
 	}
 	r.cleared = true
+	r.finalVerified = final
 	return r.cleanupErr
 }
 
@@ -570,7 +573,7 @@ func (s *RunScope) Close() error {
 			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
 		}
 		for n := len(order) - 1; issuerErr == nil && n >= 0; n-- {
-			if err := s.clearFault(ctx, order[n]); err != nil {
+			if err := s.clearFault(ctx, order[n], true); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
 			}
 			s.mu.Lock()

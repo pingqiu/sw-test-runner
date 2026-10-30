@@ -43,7 +43,7 @@ func (b lostLeaseReceipt) Wait(ctx context.Context, id string) (ExitInfo, error)
 }
 
 func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
-	modes := []string{"valid", "cancel", "unknown", "missing-go", "wrong-go", "revoked-go", "foreign-request", "foreign-lease", "existing-id", "long-envelope", "missing-fd", "wrong-fd"}
+	modes := []string{"valid", "cancel", "unknown", "missing-go", "wrong-go", "revoked-go", "foreign-request", "foreign-lease", "existing-id", "long-envelope", "missing-fd", "wrong-fd", "quarantine-m01", "quarantine-m02", "quarantine-cleared", "quarantine-missing", "quarantine-not-directory", "quarantine-marker-symlink", "quarantine-marker-directory"}
 	if os.Getenv("S0B_RENEW_REAL_WAIT") == "1" {
 		modes = []string{"renew"}
 	}
@@ -211,6 +211,42 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			quarantine := strings.TrimSuffix(lock, ".lock") + ".quarantine"
+			if mode != "quarantine-missing" {
+				if err = os.Mkdir(quarantine, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasPrefix(mode, "quarantine-") && mode != "quarantine-missing" && mode != "quarantine-not-directory" {
+				host := "m02"
+				if mode == "quarantine-m01" {
+					host = "m01"
+				}
+				record := filepath.Join(quarantine, host+"-foreign.json")
+				if err = os.WriteFile(record, []byte(`{"status":"UNKNOWN"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				marker := strings.TrimSuffix(record, ".json") + ".cleared.json"
+				switch mode {
+				case "quarantine-cleared":
+					err = os.WriteFile(marker, []byte("{}"), 0600)
+				case "quarantine-marker-directory":
+					err = os.Mkdir(marker, 0700)
+				case "quarantine-marker-symlink":
+					err = os.Symlink(record, marker)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "quarantine-not-directory" {
+				if err = os.Remove(quarantine); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(quarantine, []byte("unknown"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var output bytes.Buffer
 			cmd.Stdout = &output
 			cmd.Stderr = &output
@@ -252,7 +288,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 			}
 			t.Logf("%s: %s", mode, logs)
 			wantAuthorized := "0"
-			if mode == "valid" || mode == "cancel" || mode == "renew" || mode == "unknown" {
+			if (mode == "valid" || mode == "quarantine-cleared") || mode == "cancel" || mode == "renew" || mode == "unknown" {
 				wantAuthorized = "1"
 			}
 			if !strings.Contains(string(logs), "CPU actual_custodian_authorized_jobs="+wantAuthorized+"\n") {
@@ -262,7 +298,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 			started := exists(acquire)
 			released := exists(filepath.Join(ledger, f.binding.LeaseID+"-release.json"))
 			switch mode {
-			case "valid", "cancel", "renew":
+			case "valid", "quarantine-cleared", "cancel", "renew":
 				if !started || !released {
 					t.Fatalf("no proven lease lifetime started=%t released=%t: %s", started, released, logs)
 				}
@@ -291,7 +327,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 			if mode == "renew" && !exists(filepath.Join(ledger, f.binding.LeaseID+"-renew.json")) {
 				t.Fatal("240-second actual renewal missing")
 			}
-			if mode == "valid" || mode == "cancel" || mode == "renew" {
+			if (mode == "valid" || mode == "quarantine-cleared") || mode == "cancel" || mode == "renew" {
 				at := strings.Index(string(logs), "bundle: ")
 				if at < 0 {
 					t.Fatal("no actual custody bundle")
@@ -312,7 +348,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					if j.Identity.PID <= 0 || j.Identity.BootID != dep.ExpectedBootID {
 						t.Fatalf("wrong native identity: %+v", j)
 					}
-					if mode == "valid" {
+					if mode == "valid" || mode == "quarantine-cleared" {
 						if j.State != "EXIT_SETTLED" || j.Exit == nil || !j.Exit.Settled {
 							t.Fatalf("missing native exit: %+v", j)
 						}
@@ -341,10 +377,10 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					t.Logf("%s record: %s", kind, raw)
 				}
 			}
-			if mode == "valid" && !exists(filepath.Join(f.dir, "done/r1.env")) {
+			if (mode == "valid" || mode == "quarantine-cleared") && !exists(filepath.Join(f.dir, "done/r1.env")) {
 				t.Fatalf("valid run refused: %s", logs)
 			}
-			if mode != "valid" && !exists(filepath.Join(f.dir, "failed/r1.env")) {
+			if mode != "valid" && mode != "quarantine-cleared" && !exists(filepath.Join(f.dir, "failed/r1.env")) {
 				t.Fatalf("refusal/cancellation reported pass: %s", logs)
 			}
 		})

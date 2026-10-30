@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,9 @@ func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*wo
 		return nil, ctx, errors.New("worker lease lock/ledger or ten-minute envelope mismatch")
 	}
 	if err = verifyWorkerFlock(lock); err != nil {
+		return nil, ctx, err
+	}
+	if err = checkWorkerQuarantine(ctx, lock); err != nil {
 		return nil, ctx, err
 	}
 	dir, err := os.Lstat(p.bootstrap.LedgerDir)
@@ -108,6 +112,52 @@ func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*wo
 	}()
 	return l, live, nil
 }
+
+// Preserve the existing m01/m02 quarantine gate while canonical FD9 is held.
+// Missing, unreadable, changed or non-regular state is UNKNOWN, never clearance.
+func checkWorkerQuarantine(ctx context.Context, lock string) error {
+	name := strings.TrimSuffix(lock, ".lock") + ".quarantine"
+	before, err := os.Lstat(name)
+	if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return errors.New("worker quarantine directory UNKNOWN")
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return errors.New("worker quarantine changed")
+	}
+	entries, err := f.ReadDir(16385)
+	if (err != nil && err != io.EOF) || len(entries) > 16384 {
+		return errors.New("worker quarantine scan UNKNOWN/bound exceeded")
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n := entry.Name()
+		if !(strings.HasPrefix(n, "m01-") || strings.HasPrefix(n, "m02-")) || !strings.HasSuffix(n, ".json") || strings.HasSuffix(n, ".cleared.json") {
+			continue
+		}
+		record, e := os.Lstat(filepath.Join(name, n))
+		if e != nil || !record.Mode().IsRegular() {
+			return fmt.Errorf("worker quarantine record UNKNOWN: %s", n)
+		}
+		marker, e := os.Lstat(filepath.Join(name, strings.TrimSuffix(n, ".json")+".cleared.json"))
+		if e != nil || !marker.Mode().IsRegular() {
+			return fmt.Errorf("worker quarantine uncleared/UNKNOWN: %s", n)
+		}
+	}
+	after, err := os.Lstat(name)
+	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		return errors.New("worker quarantine changed during scan")
+	}
+	return ctx.Err()
+}
+
 func (l *workerOwnedLease) row(clock string) map[string]any {
 	row := map[string]any{"lease_id": l.binding.LeaseID, "agent": l.binding.LeaseOwner, clock: float64(time.Now().UnixNano()) / 1e9, "pid": os.Getpid(), "host": "m01", "run_id": l.binding.RunID, "authority": l.authority, "hard_deadline": l.binding.HardDeadline}
 	label := map[string]string{"started": "start_time", "renewed": "renew_time", "released": "release_time"}[clock]
@@ -246,9 +296,9 @@ func (a *ApprovedRun) resourcesSettled() bool {
 		default:
 			return false
 		}
-		cleared := r.cleared
+		finalVerified := r.finalVerified
 		<-r.gate
-		if !cleared {
+		if !finalVerified {
 			return false
 		}
 	}
