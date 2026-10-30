@@ -73,12 +73,10 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error
 		return "", e
 	}
 	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
-	if e = n.Connect(); e != nil {
+	if e = n.ConnectContext(ctx); e != nil {
 		return "", e
 	}
 	defer n.Close()
-	stop := context.AfterFunc(ctx, n.Close)
-	defer stop()
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	run := func(cmd string) (string, error) {
 		out, stderr, rc, e := n.Run(ctx, "timeout -k 5 120 sh -ec "+q(cmd))
