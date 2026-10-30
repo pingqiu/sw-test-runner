@@ -176,3 +176,5 @@ hash if you need stability across the move.
 ## License
 
 Apache-2.0. See `LICENSE`.
+
+Azure provision-only module: [provision/terraform/azure](provision/terraform/azure/README.md). Static validation only; runtime admission remains gated on S0b.
