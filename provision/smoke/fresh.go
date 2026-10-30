@@ -2,11 +2,13 @@ package smoke
 
 // This file is a private, typed derivation, not an alternate S0b entry.
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,18 +29,12 @@ type freshApproval struct {
 	Executable tr.FilePin `json:"executable"`
 	Recipe     tr.FilePin `json:"recipe"`
 }
-type diskSlot struct {
-	ID         string `json:"id"`
-	ResourceID string `json:"resource_id"`
-	LUN        int    `json:"lun"`
-}
 type freshTemplate struct {
 	Version   string               `json:"version"`
 	Config    Config               `json:"config"`
 	Requested inventory.Document   `json:"requested"`
 	MinMTU    int                  `json:"min_mtu"`
 	MaxMTU    int                  `json:"max_mtu"`
-	Disks     []diskSlot           `json:"disks"`
 	Binding   tr.RunBinding        `json:"binding"`
 	Policy    tr.ApprovedRunPolicy `json:"policy"`
 	Plan      seaweed.Plan         `json:"plan"`
@@ -46,22 +42,15 @@ type freshTemplate struct {
 	GO        tr.ApprovedGO        `json:"go"`
 	Bootstrap tr.PolicyBootstrap   `json:"bootstrap"`
 }
-type diskFact struct {
-	ID         string `json:"id"`
-	ResourceID string `json:"resource_id"`
-	LUN        int    `json:"lun"`
-	DeviceID   string `json:"device_id"`
-}
 type freshFacts struct {
-	ExportSHA256 string     `json:"export_sha256"`
-	Boot         string     `json:"boot"`
-	BootAfter    string     `json:"boot_after"`
-	DataAddress  string     `json:"data_address"`
-	NIC          string     `json:"nic"`
-	MTU          int        `json:"mtu"`
-	Disks        []diskFact `json:"disks"`
-	Start        time.Time  `json:"start"`
-	End          time.Time  `json:"end"`
+	ExportSHA256 string    `json:"export_sha256"`
+	Boot         string    `json:"boot"`
+	BootAfter    string    `json:"boot_after"`
+	DataAddress  string    `json:"data_address"`
+	NIC          string    `json:"nic"`
+	MTU          int       `json:"mtu"`
+	Start        time.Time `json:"start"`
+	End          time.Time `json:"end"`
 }
 type freshAuthority struct {
 	approval freshApproval
@@ -77,22 +66,20 @@ func loadFresh(c Config) (*freshAuthority, error) {
 	if e != nil || StrictJSON(b, &a.approval) != nil || a.approval.Version != "seaweed.fresh-approval/v1" {
 		return nil, errors.New("missing protected approval")
 	}
+	var templateBytes []byte
 	for _, p := range []tr.FilePin{a.approval.Template, a.approval.Executable, a.approval.Recipe} {
 		b, e = protectedFresh(p.Path)
 		if e != nil || digest(b) != p.SHA256 {
 			return nil, errors.New("protected input pin mismatch")
 		}
+		if p == a.approval.Template {
+			templateBytes = b
+		}
 	}
-	exe, e := os.Executable()
-	if e != nil {
+	if e = verifyFreshImage(a.approval.Executable); e != nil {
 		return nil, e
 	}
-	installed, e := filepath.EvalSymlinks(exe)
-	if e != nil || installed != a.approval.Executable.Path {
-		return nil, errors.New("wrong materializer executable")
-	}
-	b, e = protectedFresh(a.approval.Template.Path)
-	if e != nil || strictFreshTemplate(b, &a.template) != nil {
+	if strictFreshTemplate(templateBytes, &a.template) != nil {
 		return nil, errors.New("invalid template")
 	}
 	a.setup = func(ctx context.Context, c Config, raw []byte) ([]byte, error) {
@@ -123,9 +110,9 @@ func loadFresh(c Config) (*freshAuthority, error) {
 		if StrictJSON(b, &current) != nil || !reflect.DeepEqual(current, a.approval) {
 			return errors.New("approval changed")
 		}
-		return nil
+		return verifyFreshImage(a.approval.Executable)
 	}
-	return a, a.check(c)
+	return a, nil
 }
 
 func (a *freshAuthority) check(c Config) error {
@@ -138,8 +125,13 @@ func (a *freshAuthority) check(c Config) error {
 	}
 	h, d := t.Binding.Hosts[0], t.Policy.Deployments[0]
 	_, _, decl, e := inputs(c)
-	if e != nil || h.Node != t.Requested.Hosts[0].ID || h.HostKey == "" || d.HostKey != h.HostKey || d.NodeID != h.Node || d.User != h.User || d.ExpectedBootID != "" || t.Bootstrap.Policy.Path != t.Binding.Policy.Path || t.Bootstrap.Approval.Path == "" || t.Binding.Workload != "kv" || t.Binding.Transport != "http" || !t.Binding.WorkDeadline.Equal(decl.Run.Work) || !t.Binding.HardDeadline.Equal(decl.Run.Hard) || t.Binding.LeaseResource != "azure-"+decl.Group || len(t.Disks) != len(t.Requested.Hosts[0].Disks) {
+	if e != nil || h.Node != t.Requested.Hosts[0].ID || h.HostKey == "" || d.HostKey != h.HostKey || d.NodeID != h.Node || d.User != h.User || d.ExpectedBootID != "" || t.Bootstrap.Policy.Path != t.Binding.Policy.Path || t.Bootstrap.Approval.Path == "" || t.Binding.Workload != "kv" || t.Binding.Transport != "http" || !t.Binding.WorkDeadline.Equal(decl.Run.Work) || !t.Binding.HardDeadline.Equal(decl.Run.Hard) || t.Binding.LeaseResource != "azure-"+decl.Group {
 		return errors.New("incomplete fixed binding")
+	}
+	for _, disk := range t.Requested.Hosts[0].Disks {
+		if disk.DeviceID == "" || disk.FormatAllowed == nil || *disk.FormatAllowed {
+			return errors.New("disk resolution/formatting unavailable")
+		}
 	}
 	if a.setup == nil || a.readback == nil {
 		return errors.New("qualified setup unavailable")
@@ -156,7 +148,41 @@ func (a *freshAuthority) check(c Config) error {
 	return nil
 }
 
-func (a *freshAuthority) derive(raw, probe []byte, start, now time.Time) (map[string][]byte, error) {
+type qualifiedFreshExport struct {
+	raw []byte
+	doc *inventory.Document
+}
+type freshDerivation struct {
+	files      map[string][]byte
+	facts      freshFacts
+	deployment infra.DeploymentPolicy
+}
+
+func (a *freshAuthority) qualifyExport(raw []byte) (*qualifiedFreshExport, error) {
+	d, e := inventory.Decode(raw)
+	if e != nil {
+		return nil, e
+	}
+	if len(d.Hosts) != 1 {
+		return nil, errors.New("foreign host set")
+	}
+	ip := d.Hosts[0].Management.Address
+	if ipaddr, e := netip.ParseAddr(ip); e != nil || ipaddr.Zone() != "" || ipaddr.String() != ip || !ipaddr.IsGlobalUnicast() {
+		return nil, errors.New("management slot requires canonical unicast IP literal")
+	}
+	// Only the export's IP is variable. Everything else, including the entire
+	// exact-name resource set, is independently fixed by the approved template.
+	comparison := *d
+	comparison.Hosts = append([]inventory.Host(nil), d.Hosts...)
+	comparison.Hosts[0].Management.Address = a.template.Requested.Hosts[0].Management.Address
+	if !reflect.DeepEqual(comparison, a.template.Requested) {
+		return nil, errors.New("unapproved Terraform shape/resource/field")
+	}
+	return &qualifiedFreshExport{raw: bytes.Clone(raw), doc: d}, nil
+}
+
+func (a *freshAuthority) derive(q *qualifiedFreshExport, probe []byte, start, now time.Time) (*freshDerivation, error) {
+	raw := q.raw
 	var t freshTemplate
 	b, _ := json.Marshal(a.template)
 	if e := json.Unmarshal(b, &t); e != nil {
@@ -166,51 +192,13 @@ func (a *freshAuthority) derive(raw, probe []byte, start, now time.Time) (map[st
 	if len(probe) > 16384 || StrictJSON(probe, &f) != nil || f.ExportSHA256 != digest(raw) || f.Boot == "" || f.Boot != f.BootAfter || f.Start.Before(start) || f.End.Before(f.Start) || f.End.After(now) || !now.Before(t.Binding.WorkDeadline) {
 		return nil, errors.New("unqualified capture/export/boot/time")
 	}
-	d, e := inventory.Decode(raw)
-	if e != nil {
-		return nil, e
-	}
-	if len(d.Hosts) != 1 {
-		return nil, errors.New("foreign host set")
-	}
+	d := q.doc
 	ip := d.Hosts[0].Management.Address
-	// Only the export's IP is variable. Everything else, including the entire
-	// exact-name resource set, is independently fixed by the approved template.
-	comparison := *d
-	comparison.Hosts = append([]inventory.Host(nil), d.Hosts...)
-	comparison.Hosts[0].Management.Address = t.Requested.Hosts[0].Management.Address
-	if !reflect.DeepEqual(comparison, t.Requested) {
-		return nil, errors.New("unapproved Terraform shape/resource/field")
-	}
 	h := &d.Hosts[0]
 	if f.DataAddress != h.Data.Address || f.NIC == "" || f.MTU < t.MinMTU || f.MTU > t.MaxMTU || h.Data.NIC != "" && h.Data.NIC != f.NIC || h.Data.MTU != 0 && h.Data.MTU != f.MTU {
 		return nil, errors.New("foreign NIC/data/MTU")
 	}
 	h.Data.NIC, h.Data.MTU = f.NIC, f.MTU
-	if len(f.Disks) != len(t.Disks) {
-		return nil, errors.New("foreign disk set")
-	}
-	for i := range h.Disks {
-		s, found := diskSlot{}, false
-		for _, slot := range t.Disks {
-			if slot.ID == h.Disks[i].ID {
-				if found {
-					return nil, errors.New("duplicate disk slot")
-				}
-				s, found = slot, true
-			}
-		}
-		matches := 0
-		for _, v := range f.Disks {
-			if v.ID == s.ID && v.ResourceID == s.ResourceID && v.LUN == s.LUN && v.DeviceID != "" && (h.Disks[i].DeviceID == "" || h.Disks[i].DeviceID == v.DeviceID) {
-				h.Disks[i].DeviceID = v.DeviceID
-				matches++
-			}
-		}
-		if !found || matches != 1 || h.Disks[i].FormatAllowed == nil || *h.Disks[i].FormatAllowed {
-			return nil, errors.New("unqualified disk/LUN/format")
-		}
-	}
 	key := t.Binding.Hosts[0].HostKey
 	if h.Management.HostKey == nil || *h.Management.HostKey != "" && *h.Management.HostKey != key {
 		return nil, errors.New("foreign key")
@@ -277,7 +265,7 @@ func (a *freshAuthority) derive(raw, probe []byte, start, now time.Time) (map[st
 	if e = put(&bootstrapPin, t.Bootstrap); e != nil {
 		return nil, e
 	}
-	return files, nil
+	return &freshDerivation{files: files, facts: f, deployment: t.Policy.Deployments[0]}, nil
 }
 
 func (a *freshAuthority) publish(ctx context.Context, c Config, raw []byte) error {
@@ -287,22 +275,20 @@ func (a *freshAuthority) publish(ctx context.Context, c Config, raw []byte) erro
 	if e := stamp(filepath.Join(c.Output, "materialization-started"), "one derivation only\n"); e != nil {
 		return e
 	}
+	q, e := a.qualifyExport(raw)
+	if e != nil {
+		return e
+	}
 	start := time.Now()
-	probe, e := a.setup(ctx, c, raw)
+	probe, e := a.setup(ctx, c, bytes.Clone(q.raw))
 	if e != nil {
 		return errors.New("setup failed; private stdout is not approval")
 	}
-	files, e := a.derive(raw, probe, start, time.Now())
+	derived, e := a.derive(q, probe, start, time.Now())
 	if e != nil {
 		return e
 	}
-	var f freshFacts
-	_ = StrictJSON(probe, &f)
-	var artifacts tr.ApprovedArtifacts
-	if e = json.Unmarshal(files[a.template.Binding.Artifacts.Path], &artifacts); e != nil {
-		return e
-	}
-	p := artifacts.Deployments[0]
+	files, f, p := derived.files, derived.facts, derived.deployment
 	qualifiedStart := time.Now()
 	r, e := a.readback(ctx, p, a.template.Bootstrap.KeyFiles[p.NodeID])
 	policyBytes, _ := json.Marshal(p)

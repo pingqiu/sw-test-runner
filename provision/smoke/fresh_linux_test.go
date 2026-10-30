@@ -75,6 +75,7 @@ func freshFixture(t *testing.T) (Config, *freshAuthority, []byte, *freshJobs) {
 	d.Deadlines = inventory.Deadlines{Work: decl.Run.Work.Format(time.RFC3339Nano), Hard: decl.Run.Hard.Format(time.RFC3339Nano), CleanupReserveMS: 5000}
 	h := &d.Hosts[0]
 	h.RunRoot = "/data/fresh-run"
+	h.Disks[0].DeviceID = "/dev/disk/by-id/fixed-cache"
 
 	h.ResourceID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/fresh-node1"
 	diskID := "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/disks/fresh-cache"
@@ -131,7 +132,7 @@ func freshFixture(t *testing.T) (Config, *freshAuthority, []byte, *freshJobs) {
 	lease := "0123456789abcdef0123456789abcdef"
 	binding := tr.RunBinding{RequestID: "fresh-request", RunID: d.RunID, Workload: "kv", Transport: "http", Inventory: pin("inventory.json"), Scenario: pin("scenario.yaml"), Policy: pin("policy.json"), Artifacts: pin("artifacts.json"), Hosts: []tr.ApprovedHost{host}, LeaseID: lease, LeaseOwner: "codex02", LeaseResource: "azure-dedicated-test", OutputDir: h.RunRoot, WorkDeadline: decl.Run.Work, HardDeadline: decl.Run.Hard, CleanupReserveMS: 5000}
 	bootstrap := tr.PolicyBootstrap{Version: "s0b-bootstrap-v1", Approval: pin("go.json"), Policy: binding.Policy, RunningDir: filepath.Join(dir, "running"), LedgerDir: filepath.Join(dir, "ledger"), CancelFile: filepath.Join(dir, "cancel"), KeyFiles: map[string]string{h.ID: "/root/private-key"}, ResultsDir: filepath.Join(dir, "results")}
-	template := freshTemplate{Version: "seaweed.fresh-template/v1", Config: c, Requested: *d, MinMTU: 1500, MaxMTU: 1500, Disks: []diskSlot{{ID: "cache", ResourceID: diskID, LUN: 0}}, Binding: binding, Policy: policy, Plan: plan, Scenario: s, GO: tr.ApprovedGO{Version: "s0b-go-v1", SourceID: "0123456789abcdef01234567", Binding: binding, AllowMutating: true}, Bootstrap: bootstrap}
+	template := freshTemplate{Version: "seaweed.fresh-template/v1", Config: c, Requested: *d, MinMTU: 1500, MaxMTU: 1500, Binding: binding, Policy: policy, Plan: plan, Scenario: s, GO: tr.ApprovedGO{Version: "s0b-go-v1", SourceID: "0123456789abcdef01234567", Binding: binding, AllowMutating: true}, Bootstrap: bootstrap}
 	j := &freshJobs{specs: map[string]tr.JobSpec{}, ids: map[string]tr.ProcessIdentity{}, stopped: map[string]bool{}, boot: "11111111-1111-1111-1111-111111111111"}
 	a := &freshAuthority{template: template}
 	approvedBytes, _ := json.Marshal(template)
@@ -143,7 +144,7 @@ func freshFixture(t *testing.T) (Config, *freshAuthority, []byte, *freshJobs) {
 		return nil
 	}
 	a.setup = func(_ context.Context, _ Config, raw []byte) ([]byte, error) {
-		f := freshFacts{ExportSHA256: digest(raw), Boot: j.boot, BootAfter: j.boot, DataAddress: h.Data.Address, NIC: "eth0", MTU: 1500, Disks: []diskFact{{ID: "cache", ResourceID: diskID, LUN: 0, DeviceID: "/dev/disk/by-id/fresh-cache"}}, Start: time.Now(), End: time.Now()}
+		f := freshFacts{ExportSHA256: digest(raw), Boot: j.boot, BootAfter: j.boot, DataAddress: h.Data.Address, NIC: "eth0", MTU: 1500, Start: time.Now(), End: time.Now()}
 		return json.Marshal(f)
 	}
 	a.readback = func(_ context.Context, p infra.DeploymentPolicy, _ string) (infra.DeploymentReceipt, error) {
@@ -261,7 +262,7 @@ func TestFreshRefusalsCrossControllerAndStrictEntry(t *testing.T) {
 				case "setup-failed":
 					return b, errors.New("failed probe with positive stdout")
 				case "disk":
-					v.Disks[0].ResourceID += "-foreign"
+					return []byte(`{"disks":[]}`), nil
 				case "reserialized":
 					v.ExportSHA256 = digest([]byte(strings.TrimSpace(string(raw))))
 				}

@@ -133,20 +133,27 @@ it does not imply these launch prerequisites exist.
 The template is the canonical exact JSON export of private `freshTemplate`
 (`seaweed.fresh-template/v1`), not a patch map or general string interpolator.
 Manager pre-approval fixes Config/module/variables, raw inventory shape and exact
-resource IDs, one node, public host key, MTU bounds/disk slots, Binding, full
+resource IDs, one node, public host key, MTU bounds, Binding, full
 policy/files/UID/jobs, P/Plan, scenario phases, GO source and bootstrap paths.
 Request/GO pins are recomputed; no authority field is learned from the guest.
 Canonical re-encoding must equal the approved template bytes, so aliases,
 duplicates, unknown fields and alternate legacy field spellings refuse.
 
-Only management IP from the exact Terraform export, fixed public key into the
-resolved empty slot, a stable boot, declared blank NIC/MTU/device-ID slots and
+Only a canonical unicast IP literal from the exact Terraform export, fixed public
+key into the resolved empty slot, a stable boot, declared blank NIC/MTU slots and
 bounded capture evidence are resolved. Fixed data IP, resource IDs, roles,
 ports, UID, files, argv, lease, deadlines and budget stay unchanged. The initial
 slice has no job-argv/config/topology substitution slots: use fixed private data
 endpoints and the ordinary approved host/deployment SSH endpoint/boot slots.
 Requested bytes remain exact. The ordinary strict pack performs independent
 readback and live lease checks again.
+Export shape/resource/node/role/IP qualification occurs BEFORE the mutating setup
+recipe. No DNS or post-setup-only qualification. Dynamic disk resolution is
+omitted: nonempty unresolved device IDs refuse. Any declared disk must already
+have its exact independently approved by-id path and format=false; an unused
+managed disk does not imply mounted-filesystem proof. The current Terraform
+producer's blank disk slot still needs a separately reviewed static-profile
+decision before live use; no device identity is invented here.
 
 The protected setup recipe is a separately pinned **launch prerequisite**, not
 supplied/implemented by this materializer. Its only argv is the private exact
@@ -154,7 +161,7 @@ requested-inventory path. It must complete bounded pre-generated host-key
 cloud-init installation, fixed artifact/UID setup and pinned-SSH fact collection,
 then emit <=16KiB exact `freshFacts` JSON, no free text/keys/private material:
 `export_sha256`, stable `boot`/`boot_after`, fixed `data_address`, `nic`, `mtu`,
-declared disk ID/resource-ID/LUN/device-ID facts, and actual `start`/`end` times.
+and actual `start`/`end` times. Disk facts and other unknown fields refuse.
 Failed exit with positive stdout refuses. The controller calls the existing
 `VerifyDeployment` against fixed expected files/key/boot/UID afterward.
 No installer service or automatic remote build is added.

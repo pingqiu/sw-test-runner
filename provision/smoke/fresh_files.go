@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func protectedFreshDir(name string) error {
@@ -23,20 +24,23 @@ func protectedFreshDir(name string) error {
 	}
 }
 func protectedFresh(name string) ([]byte, error) {
+	if !filepath.IsAbs(name) || filepath.Clean(name) != name || strings.ContainsRune(name, 0) {
+		return nil, errors.New("noncanonical protected input")
+	}
 	if e := protectedFreshDir(filepath.Dir(name)); e != nil {
 		return nil, e
 	}
 	i, e := os.Lstat(name)
-	if e != nil || !i.Mode().IsRegular() || i.Mode().Perm()&0022 != 0 || !freshOwner(i) || i.Size() > 512<<20 {
+	if e != nil || !i.Mode().IsRegular() || i.Mode().Perm()&0022 != 0 || !freshOwner(i) || i.Size() < 0 || i.Size() > 512<<20 {
 		return nil, errors.New("unprotected input")
 	}
-	f, e := os.Open(name)
+	f, e := openFreshFile(name)
 	if e != nil {
 		return nil, e
 	}
 	defer f.Close()
 	j, e := f.Stat()
-	if e != nil || !os.SameFile(i, j) {
+	if e != nil || !sameFreshRecord(i, j) {
 		return nil, errors.New("input replaced")
 	}
 	b, e := io.ReadAll(io.LimitReader(f, 512<<20+1))
@@ -44,8 +48,15 @@ func protectedFresh(name string) ([]byte, error) {
 		return nil, e
 	}
 	j, e = f.Stat()
-	if e != nil || j.Size() != i.Size() || j.ModTime() != i.ModTime() || int64(len(b)) != i.Size() {
+	if e != nil || !sameFreshRecord(i, j) || int64(len(b)) != i.Size() {
 		return nil, errors.New("input changed")
+	}
+	terminal, e := os.Lstat(name)
+	if e != nil || !sameFreshRecord(i, terminal) {
+		return nil, errors.New("input pathname changed")
+	}
+	if e = protectedFreshDir(filepath.Dir(name)); e != nil {
+		return nil, e
 	}
 	return b, nil
 }
