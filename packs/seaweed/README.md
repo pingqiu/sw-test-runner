@@ -170,3 +170,12 @@ connector boundary; import/discovery performs no native or remote work.
 go test ./inventory ./cmd/seaweed-inventory ./packs/seaweed ./cmd/seaweed-pack ./cli
 python3 packs/seaweed/worker/test_kv_smoke.py
 ```
+
+
+The fixed M01/M02 profile explicitly pins the filer Unix socket to
+`<owned-root>/filer.sock` and refuses a pre-existing object there. Its runtime
+hardware qualifier compares PCI VF/PF identity and parsed firmware with the
+sealed profile facts, as well as boot/GID/MTU/rate; historical DC evidence is
+never a substitute for the new required-DC smoke. The protected worker-owned
+lease option and its test-only remote-tail limit are in
+[the S0b authority contract](../../docs/s0b-authority.md).

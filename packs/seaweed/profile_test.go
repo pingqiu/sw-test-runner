@@ -35,6 +35,9 @@ func TestProfileArgsBindExactInventory(t *testing.T) {
 	if err = json.Unmarshal([]byte(args[3]), &c); err != nil {
 		t.Fatal(err)
 	}
+	if c.PCI != "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.1" || c.PhysicalPCI != "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.0" || c.Firmware != "16.33.1048" {
+		t.Fatal("missing pinned fabric identity")
+	}
 	if c.Host != "m01" || c.BootID != d.Observation.Hosts[0].BootID || c.GIDIndex != *d.Hosts[0].RDMA.GIDIndex || c.Root != d.Hosts[0].RunRoot || c.Deadline != d.Deadlines.Work {
 		t.Fatal("profile not derived from inventory")
 	}

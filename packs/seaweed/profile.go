@@ -11,6 +11,9 @@ import (
 )
 
 type ProfileConfig struct {
+	PCI            string            `json:"pci"`
+	PhysicalPCI    string            `json:"physical_pci"`
+	Firmware       string            `json:"firmware"`
 	Host           string            `json:"host"`
 	BootID         string            `json:"boot_id"`
 	Root           string            `json:"root"`
@@ -88,6 +91,12 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 		return nil, errors.New("profile host/role/device mismatch")
 	}
 	c := ProfileConfig{Host: host, Root: h.RunRoot, Deadline: d.Deadlines.Work, Device: h.RDMA.Device, Port: h.RDMA.Port, GIDIndex: *h.RDMA.GIDIndex, Address: h.Data.Address, NIC: h.Data.NIC, MTU: h.Data.MTU, ActiveMTU: h.RDMA.ActiveMTU, Roles: h.Roles, Services: map[string]int{}, ServerServices: map[string]int{}, ServerAddress: server.Data.Address, Release: release, Products: map[string]string{}}
+	// Fixed M01/M02 profile identity from the sealed bbb01f8 packet's
+	// observations/{m01,m02}-fabric-evidence.json, manifest 60f4f17f.
+	// A replacement requires a new reviewed profile, never historical credit.
+	c.PCI = "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.1"
+	c.PhysicalPCI = "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.0"
+	c.Firmware = "16.33.1048"
 	c.Disks = append([]inventory.Disk{}, h.Disks...)
 	for _, o := range d.Observation.Hosts {
 		if o.HostID == host {

@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import re
 import os
 import stat
 import argparse
@@ -35,6 +36,11 @@ def qualify_hardware(config, raw):
             and 0 <= end - start <= 45, 'hardware capture bracket')
     require(config['port'] == 1, 'profile supports port 1 only')
     device = raw['rdma_devices'][config['device']]
+    firmware = re.findall(r'^\s*fw_ver:\s*(\S+)\s*$',
+                          raw['devices_raw'][config['device']], re.MULTILINE)
+    require(device['pci'] == config['pci'] and
+            device['physical_pci'] == config['physical_pci'] and
+            firmware == [config['firmware']], 'PCI/PF/firmware identity changed')
     gid = device['chosen']
     require(device['state'] == '4: ACTIVE' and
             device['active_mtu'] == config['active_mtu'] and
@@ -109,6 +115,7 @@ def product_command(config, role):
                 '-ip=' + address, '-port=' + str(ports['filer_http']),
                 '-port.grpc=' + str(ports['filer_grpc']),
                 '-defaultStoreDir=' + str(root / 'filer'),
+                '-localSocket=' + str(root / 'filer.sock'),
                 '-options=' + str(root / 'filer.toml')]
     elif role == 'volume':
         argv = [str(binary / 'weed-volume'), '--port', str(ports['volume_http']),
@@ -191,6 +198,8 @@ def launch(config, role):
     remaining(config)
     root = private_root(config)
     argv, env = product_command(config, role)
+    if role == 'filer' and os.path.lexists(root / 'filer.sock'):
+        raise ValueError('private filer socket already exists')
     if role not in config['roles']:
         raise ValueError('role not assigned to this host')
     # Custody authorizes the pinned Python helper. It then execs the protected,

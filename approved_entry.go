@@ -14,16 +14,40 @@ import (
 // selects actual pinned SSH and protected deployment readback, never a fake.
 // Packs may register trusted typed handlers. The CLI registers the shared
 // Seaweed pack and approved_job, never the legacy raw-shell/build registry.
-func RunApprovedRequest(ctx context.Context, request, profile string, register func(*Registry), runtime *ApprovedRuntime, log func(string, ...interface{})) (*ScenarioResult, string, error) {
+func RunApprovedRequest(ctx context.Context, request, profile string, register func(*Registry), runtime *ApprovedRuntime, log func(string, ...interface{})) (result *ScenarioResult, bundleName string, retErr error) {
 	policy, err := ReadTrustedPolicy(profile, uint32(os.Geteuid()))
 	if err != nil {
 		return nil, "", err
 	}
-	run, err := OpenApprovedRun(ctx, request, policy, runtime)
+	lease, workCtx, err := beginWorkerLease(ctx, request, policy)
 	if err != nil {
 		return nil, "", err
 	}
-	defer run.Close()
+	var run *ApprovedRun
+	leaseFinished := false
+	finishLease := func() error {
+		if lease == nil || leaseFinished {
+			return nil
+		}
+		leaseFinished = true
+		return lease.finish(run == nil || run.resourcesSettled())
+	}
+	defer func() {
+		if run != nil {
+			_ = run.Close()
+		}
+		if e := finishLease(); e != nil {
+			retErr = errors.Join(retErr, e)
+			if result != nil {
+				result.Status = StatusFail
+				result.Error += "; " + e.Error()
+			}
+		}
+	}()
+	run, err = OpenApprovedRun(workCtx, request, policy, runtime)
+	if err != nil {
+		return nil, "", err
+	}
 	// Results are service-owned local evidence, not a queue-selected directory.
 	if err = protectedResults(policy.bootstrap.ResultsDir, policy.owner); err != nil {
 		return nil, "", err
@@ -68,7 +92,19 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 	if errs := ValidateAgainstRegistry(run.scenario, registry); len(errs) > 0 {
 		return nil, bundle.Dir, errors.Join(errs...)
 	}
-	result := run.Execute(ctx, NewEngine(registry, log), &ActionContext{Bundle: bundle})
+	result = run.Execute(workCtx, NewEngine(registry, log), &ActionContext{Bundle: bundle})
+	if e := finishLease(); e != nil {
+		result.Status = StatusFail
+		result.Error += "; " + e.Error()
+		err = errors.Join(err, e)
+	}
+	if lease != nil {
+		raw, _ := json.MarshalIndent(map[string]any{"lease_id": lease.binding.LeaseID, "lock_file": policy.bootstrap.WorkerLease.LockFile, "released": lease.released, "remote_tail_limit": "controller-death exclusion is not global settlement proof"}, "", "  ")
+		if e := os.WriteFile(filepath.Join(bundle.ArtifactsDir(), "worker-lease.json"), raw, 0600); e != nil {
+			result.Status = StatusFail
+			err = errors.Join(err, e)
+		}
+	}
 	run.mu.Lock()
 	readbacks := make(map[string]any, len(run.readbacks))
 	for node, receipt := range run.readbacks {
@@ -85,13 +121,14 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 		Lease     LeaseObservation
 		Jobs      map[string]ApprovedJobReceipt
 	}{run.request, run.approval, policy.file, policy.bootstrap.Approval, readbacks, run.scope.FaultReceipts(), run.lease, run.jobReceipts()}
-	raw, err := json.MarshalIndent(evidence, "", "  ")
-	if err == nil {
-		err = os.WriteFile(filepath.Join(bundle.ArtifactsDir(), "authority.json"), append(raw, '\n'), 0600)
+	raw, evidenceErr := json.MarshalIndent(evidence, "", "  ")
+	if evidenceErr == nil {
+		evidenceErr = os.WriteFile(filepath.Join(bundle.ArtifactsDir(), "authority.json"), append(raw, '\n'), 0600)
 	}
-	if err != nil {
+	if evidenceErr != nil {
 		result.Status = StatusFail
-		result.Error += "; authority evidence: " + err.Error()
+		result.Error += "; authority evidence: " + evidenceErr.Error()
+		err = errors.Join(err, evidenceErr)
 	}
 	if finish := bundle.Finalize(result); finish != nil {
 		err = errors.Join(err, finish)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pingqiu/sw-test-runner/infra"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,11 +33,77 @@ func init() {
 			}
 			return r, nil
 		}}
-		result, bundle, err := RunApprovedRequest(context.Background(), args[2], args[4], nil, &runtime, nil)
+		ctx := context.Background()
+		var actual *leaseCustodyCounter
+		var register func(*Registry)
+		if mode := os.Getenv("S0B_CPU_CUSTODY"); mode != "" {
+			if mode == "missing-fd" {
+				_ = unix.Close(9)
+			}
+			exe, _ := os.Executable()
+			local := &SSHJobs{Nodes: map[string]*infra.Node{"n1": {IsNative: true}}, Runner: exe}
+			actual = &leaseCustodyCounter{OwnedJobBackend: local}
+			runtime.Jobs = actual
+			if mode == "unknown" {
+				runtime.Jobs = lostLeaseReceipt{actual}
+			}
+			if mode == "cancel" || mode == "renew" {
+				// Public trusted pack hook: a held background job, not a
+				// cancelled status RPC. The separate receipt-loss case tests
+				// transport UNKNOWN and must never release.
+				p, e := ReadTrustedPolicy(args[4], uint32(os.Geteuid()))
+				if e != nil {
+					panic(e)
+				}
+				raw, e := pinnedBytes(p.bootstrap.Policy)
+				if e != nil {
+					panic(e)
+				}
+				var policy ApprovedRunPolicy
+				if e = json.Unmarshal(raw, &policy); e != nil {
+					panic(e)
+				}
+				pin := policy.Jobs["probe"]
+				register = func(r *Registry) {
+					r.RegisterFunc("lease_hold_job", TierCore, func(ctx context.Context, a *ActionContext, _ Action) (map[string]string, error) {
+						if _, e := a.Safety.Start(JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv}); e != nil {
+							return nil, e
+						}
+						<-ctx.Done()
+						return nil, ctx.Err()
+					})
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				go func() {
+					if mode == "renew" {
+						time.Sleep(242 * time.Second)
+					} else {
+						// Named five-second target bound: cancel only after
+						// the actual custodian authorized the long-lived child.
+						end := time.Now().Add(5 * time.Second)
+						for time.Now().Before(end) {
+							_, observed := os.Stat(os.Getenv("S0B_CPU_CANONICAL_OBSERVED"))
+							if actual.authorized.Load() > 0 && observed == nil {
+								break
+							}
+							time.Sleep(5 * time.Millisecond)
+						}
+					}
+					cancel()
+				}()
+			}
+		}
+		result, bundle, err := RunApprovedRequest(ctx, args[2], args[4], register, &runtime, nil)
 		if bundle != "" {
 			fmt.Println("bundle:", bundle)
 		}
-		fmt.Printf("CPU authorized_jobs=%d\n", fake.authorized)
+		if actual != nil {
+			fmt.Printf("CPU actual_custodian_authorized_jobs=%d\n", actual.authorized.Load())
+		} else {
+			fmt.Printf("CPU authorized_jobs=%d\n", fake.authorized)
+		}
 		if err != nil || result == nil || result.Status != StatusPass {
 			fmt.Fprintln(os.Stderr, "admission/result:", err, result)
 			os.Exit(1)

@@ -21,20 +21,36 @@ class HardwareChecks(unittest.TestCase):
     def setUp(self):
         self.config = dict(host='m01', boot_id='boot-a', device='mlx5_0',
                            port=1, gid_index=3, address='10.0.2.1',
-                           nic='enp2s0v0', mtu=9000, active_mtu=4096)
+                           nic='enp2s0v0', mtu=9000, active_mtu=4096,
+                           pci='/sys/devices/pci0000:00/0000:01:00.1',
+                           physical_pci='/sys/devices/pci0000:00/0000:01:00.0',
+                           firmware='16.33.1048')
         self.raw = dict(host='m01', boot_id='boot-a', capture_start=10,
                         capture_end=11, rdma_devices={'mlx5_0': dict(
                             state='4: ACTIVE', active_mtu=4096,
+                            pci=self.config['pci'], physical_pci=self.config['physical_pci'],
                             max_tx_rate_mbps=40000, chosen=dict(index=3,
                             gid='::ffff:10.0.2.1', type='RoCE v2',
                             netdev='enp2s0v0'))}, links=[dict(
                             ifname='enp2s0v0', mtu=9000,
-                            flags=['UP', 'LOWER_UP'])])
+                            flags=['UP', 'LOWER_UP'])],
+                        devices_raw={'mlx5_0':'fw_ver: 16.33.1048\n'})
 
     def test_exact_hardware_passes_without_claiming_dc_capability(self):
         row = profile.qualify_hardware(self.config, self.raw)
         self.assertEqual(row['status'], 'OBSERVED')
         self.assertEqual(row['dc_capability'], 'NOT_PROVEN')
+
+    def test_changed_pci_pf_or_firmware_refuses(self):
+        for field in ('pci', 'physical_pci', 'firmware'):
+            with self.subTest(field=field):
+                row = copy.deepcopy(self.raw)
+                if field == 'firmware':
+                    row['devices_raw']['mlx5_0'] = 'fw_ver: 99.0.0\n'
+                else:
+                    row['rdma_devices']['mlx5_0'][field] += '-changed'
+                with self.assertRaises(ValueError):
+                    profile.qualify_hardware(self.config, row)
 
     def test_wrong_boot_gid_nic_mtu_or_address_refuses(self):
         edits = [('boot', lambda r: r.update(boot_id='other')),
@@ -80,6 +96,57 @@ class LaunchContract(unittest.TestCase):
         self.assertIn('-port.grpc=29755', argv)
         self.assertEqual(argv[0], '/opt/protected/bin/weed')
         self.assertNotIn('SWFS_RDMA_DC_DEVICE', env)
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_filer_private_socket_preserves_outside_sentinel(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, release = base / 'run', base / 'release'
+            root.mkdir(mode=0o700)
+            (release / 'bin').mkdir(parents=True)
+            product = release / 'bin' / 'weed'
+            c = dict(self.config(), root=str(root), release=str(release),
+                     roles=['filer'], host='m02',
+                     boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                     deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                               datetime.timedelta(seconds=20)).isoformat())
+            with socket.socket() as selected:
+                selected.bind(('127.0.0.1', 0))
+                c['services']['filer_http'] = selected.getsockname()[1]
+            sentinel = Path('/tmp/seaweedfs-filer-' + str(c['services']['filer_http']) + '.sock')
+            # This ELF fixture reproduces af8c's default-path unlink boundary.
+            # Only its exec transport replaces the actual product binary.
+            source = ('#include <string.h>\n#include <unistd.h>\n#include <fcntl.h>\n'
+                      'int main(int n,char **v){const char *p=' + json.dumps(str(sentinel)) +
+                      ';for(int i=1;i<n;i++)if(!strncmp(v[i],"-localSocket=",13))p=v[i]+13;'
+                      'unlink(p);int f=open(p,O_WRONLY|O_CREAT|O_EXCL,0600);'
+                      'if(f<0)return 2;write(f,"BOUND",5);close(f);return 0;}')
+            built = subprocess.run(['cc','-x','c','-','-o',str(product)],
+                                   input=source.encode(),capture_output=True,timeout=10)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            product.chmod(0o755)
+            c['products'] = {'weed':hashlib.sha256(product.read_bytes()).hexdigest()}
+            with sentinel.open('xb') as stream:
+                stream.write(b'FOREIGN_DO_NOT_UNLINK')
+            try:
+                argv = [sys.executable, '-I', '-B', profile.__file__, '--config',
+                        json.dumps(c), '--action', 'deploy', '--role', 'filer']
+                child = subprocess.run(argv,capture_output=True,timeout=12)
+                self.assertEqual(child.returncode, 0, child.stderr)
+                row = json.loads(child.stdout)
+                self.assertEqual(sentinel.read_bytes(), b'FOREIGN_DO_NOT_UNLINK')
+                self.assertIn('-localSocket=' + str(root / 'filer.sock'), row['argv'])
+                self.assertEqual((root / 'filer.sock').read_bytes(), b'BOUND')
+                root2 = base / 'run2'
+                root2.mkdir(mode=0o700)
+                (root2 / 'filer.sock').write_bytes(b'EXISTING')
+                c['root'] = str(root2)
+                argv[argv.index('--config') + 1] = json.dumps(c)
+                refused = subprocess.run(argv,capture_output=True,timeout=12)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual((root2 / 'filer.sock').read_bytes(), b'EXISTING')
+            finally:
+                sentinel.unlink()  # only the exact exclusive-created local CPU fixture
 
     def test_dc_volume_uses_declared_ports_and_device(self):
         c = dict(self.config(), device='mlx5_0', gid_index=3)

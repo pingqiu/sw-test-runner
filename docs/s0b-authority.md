@@ -175,3 +175,14 @@ Approved terminal ClearFault failures remain on their restoration obligation.
 A retry still qualifies and verifies exact Before without another mutation,
 but successful state verification cannot erase the failure from final Close.
 Legacy non-approved clearing keeps its existing retry disposition.
+
+
+## Protected worker-owned lease mode (profile review correction)
+
+A service bootstrap may opt into `"worker_lease":{"lock_file":"/mnt/smb/work/share/testops/locks/rdma-lab.lock"}` with the existing matching `ledger_dir` (`lock_file + ".ledger"`). This field is protected service configuration, never queue data or a submitted held-lock bit. The default external-ledger mode is unchanged.
+
+The strict entry first validates the claimed UID/bytes and independent GO, complete policy/artifact/inventory/host/script binding and original deadlines. A worker-owned lifetime is at most ten minutes. It then verifies inherited FD9 against the canonical path's device/inode and establishes nonblocking exclusive ownership; a separate open description must observe exclusion. It never opens a new holder, recursively waits on flock, unlocks FD9, changes the worker script or mints GO. The unchanged worker retains canonical flock across claim, strict execution, evidence and exit. The ledger directory must already exist. Any unreleased acquire (including stale/unknown records), or any prior record for the exact GO lease ID, refuses; no takeover or overwrite.
+
+Acquire is exclusive-create for the exact GO ID/owner. The in-process writer renews every 240 seconds within the original hard deadline, rechecking exact own acquire and existing live-lease semantics. Ordinary OpenApprovedRun and watcher still require ReadLiveLease. On authority loss work cancels while the existing retained cleanup grant remains bounded. Release requires joined engine/watch/readers, every issuer/job settled and every restoration cleared. A failed test with proven settlement may release; lost proof retains UNKNOWN/unreleased acquire. `worker-lease.json` and existing authority/job receipts report the result. The UID-only missing-GO probe creates no lease and authorizes zero jobs.
+
+Controller death can still drop local canonical exclusion before a remote custodian observes EOF/settles. The owner accepted this narrowly as a disposable test-only remote-tail limit; it is not a distributed fence or global-absence proof. An uninterruptible task is not proven absent merely because its hard deadline passed. UNKNOWN cannot be labelled RELEASED; a later operator must resolve it, without rewriting the original GO or lease.

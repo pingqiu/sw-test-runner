@@ -22,15 +22,20 @@ import (
 // Bootstrap is service configuration. Its policy pin names separate run-policy
 // bytes; the GO binds that digest. Keeping the GO locator outside those bytes
 // avoids a circular policy-hash/GO-hash definition.
+type WorkerLeaseConfig struct {
+	LockFile string `json:"lock_file"`
+}
+
 type PolicyBootstrap struct {
-	Version    string            `json:"version"`
-	Approval   FilePin           `json:"approval"`
-	Policy     FilePin           `json:"policy"`
-	RunningDir string            `json:"running_dir"`
-	LedgerDir  string            `json:"ledger_dir"`
-	CancelFile string            `json:"cancel_file"`
-	KeyFiles   map[string]string `json:"key_files"`
-	ResultsDir string            `json:"results_dir"`
+	WorkerLease *WorkerLeaseConfig `json:"worker_lease,omitempty"`
+	Version     string             `json:"version"`
+	Approval    FilePin            `json:"approval"`
+	Policy      FilePin            `json:"policy"`
+	RunningDir  string             `json:"running_dir"`
+	LedgerDir   string             `json:"ledger_dir"`
+	CancelFile  string             `json:"cancel_file"`
+	KeyFiles    map[string]string  `json:"key_files"`
+	ResultsDir  string             `json:"results_dir"`
 }
 
 type TrustedPolicy struct {
@@ -63,27 +68,28 @@ type ApprovedRuntime struct {
 }
 
 type ApprovedRun struct {
-	policy        TrustedPolicy
-	requestPath   string
-	request       ClaimedRequest
-	approval      ApprovedGO
-	lease         LeaseObservation
-	runPolicy     ApprovedRunPolicy
-	scenario      *Scenario
-	inputs        S0bExecutionInputs
-	snapshots     map[string][]byte
-	runtime       ApprovedRuntime
-	readbacks     map[string]infra.DeploymentReceipt
-	scope         *RunScope
-	mu            sync.Mutex
-	workErr       error
-	closing       bool
-	readers       int
-	readerChanged chan struct{}
-	watchStop     context.CancelFunc
-	watchDone     chan struct{}
-	closeOnce     sync.Once
-	closeErr      error
+	policy                      TrustedPolicy
+	requestPath                 string
+	request                     ClaimedRequest
+	approval                    ApprovedGO
+	lease                       LeaseObservation
+	runPolicy                   ApprovedRunPolicy
+	scenario                    *Scenario
+	inputs                      S0bExecutionInputs
+	snapshots                   map[string][]byte
+	runtime                     ApprovedRuntime
+	readbacks                   map[string]infra.DeploymentReceipt
+	scope                       *RunScope
+	mu                          sync.Mutex
+	workErr                     error
+	closing                     bool
+	readers                     int
+	readerChanged               chan struct{}
+	watchStop                   context.CancelFunc
+	watchDone                   chan struct{}
+	closeOnce                   sync.Once
+	closeErr                    error
+	engineStarted, engineJoined bool
 }
 
 func ReadTrustedPolicy(name string, owner uint32) (TrustedPolicy, error) {
@@ -170,6 +176,19 @@ func OpenApprovedRun(ctx context.Context, requestPath string, p TrustedPolicy, p
 }
 
 func (a *ApprovedRun) capture() error {
+	if err := a.captureInputs(); err != nil {
+		return err
+	}
+	lease, err := ReadLiveLease(a.policy.bootstrap.LedgerDir, a.request.Binding.LeaseID, a.request.Binding.LeaseOwner)
+	if err == nil {
+		a.lease = lease
+	}
+	return err
+}
+
+// Pre-lease validation is private to protected worker bootstrap. Ordinary
+// admission/watch always use capture, including its unchanged ReadLiveLease.
+func (a *ApprovedRun) captureInputs() error {
 	p := a.policy
 	if p.file.Path == "" {
 		return errors.New("trusted policy was not loaded")
@@ -199,10 +218,6 @@ func (a *ApprovedRun) capture() error {
 	}
 	if !b.WorkDeadline.After(time.Now()) || b.CleanupReserveMS <= 0 || b.CleanupReserveMS > 60000 || b.WorkDeadline.Add(time.Duration(b.CleanupReserveMS)*time.Millisecond).After(b.HardDeadline) {
 		return errors.New("invalid original authority envelope")
-	}
-	lease, err := ReadLiveLease(p.bootstrap.LedgerDir, b.LeaseID, b.LeaseOwner)
-	if err != nil {
-		return err
 	}
 	policyRaw, err := pinnedBytes(b.Policy)
 	if err != nil {
@@ -324,7 +339,6 @@ func (a *ApprovedRun) capture() error {
 		inputs.Scripts[pin.Path] = body
 	}
 	a.request, a.approval, a.runPolicy, a.scenario, a.inputs = request, approval, runPolicy, scenario, inputs
-	a.lease = lease
 	a.snapshots = map[string][]byte{"claimed-request.json": request.Bytes, "approved-go.json": approval.Bytes, "inventory.json": invRaw, "run-policy.json": policyRaw, "artifacts.json": artRaw}
 	return nil
 }
@@ -451,6 +465,9 @@ func (a *ApprovedRun) Execute(ctx context.Context, engine *Engine, actx *ActionC
 	defer cancel()
 	stop := context.AfterFunc(a.scope.ctx, cancel)
 	defer stop()
+	a.mu.Lock()
+	a.engineStarted = true
+	a.mu.Unlock()
 	finished := make(chan *ScenarioResult, 1)
 	go func() {
 		var r *ScenarioResult
@@ -466,6 +483,9 @@ func (a *ApprovedRun) Execute(ctx context.Context, engine *Engine, actx *ActionC
 	defer joinCancel()
 	select {
 	case result = <-finished:
+		a.mu.Lock()
+		a.engineJoined = true
+		a.mu.Unlock()
 	case <-join.Done():
 		cancel()
 		result = &ScenarioResult{Status: StatusFail, Error: "approved engine join UNKNOWN at original hard deadline"}
