@@ -21,8 +21,9 @@ type Node struct {
 	Host     string
 	User     string
 	KeyFile  string
-	IsLocal  bool // WSL2 mode: use exec.CommandContext via wsl instead of SSH
-	IsNative bool // Native local mode: use bash -c directly (for Linux agents)
+	HostKey  string // Operator-approved OpenSSH public host key; required for remote SSH.
+	IsLocal  bool   // WSL2 mode: use exec.CommandContext via wsl instead of SSH
+	IsNative bool   // Native local mode: use bash -c directly (for Linux agents)
 
 	mu     sync.Mutex
 	client *ssh.Client
@@ -48,6 +49,11 @@ func (n *Node) Connect() error {
 }
 
 func (n *Node) sshConfig() (*ssh.ClientConfig, error) {
+	hostKey, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(n.HostKey))
+	if err != nil || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 || bytes.ContainsAny(bytes.TrimSpace([]byte(n.HostKey)), "\r\n") {
+		return nil, fmt.Errorf("SSH host %s requires one approved public host key (no options)", n.sshAddress())
+	}
+
 	key, err := os.ReadFile(n.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read SSH key %s: %w", n.KeyFile, err)
@@ -60,7 +66,7 @@ func (n *Node) sshConfig() (*ssh.ClientConfig, error) {
 	return &ssh.ClientConfig{
 		User:            n.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
 		Timeout:         10 * time.Second,
 	}, nil
 }

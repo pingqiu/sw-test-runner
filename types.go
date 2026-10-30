@@ -6,7 +6,7 @@ import (
 
 // Scenario is the top-level YAML structure for a test scenario.
 type Scenario struct {
-	Name      string                `yaml:"name"`
+	Name string `yaml:"name"`
 	// Metadata is free-form, dashboard-friendly identity for the TEST itself
 	// (e.g. test_id, team, owner, suite, labels). It flows into the run
 	// bundle's manifest.json so multiple agents/teams sharing one dashboard can
@@ -86,6 +86,7 @@ type NodeSpec struct {
 	AltIPs  []string `yaml:"alt_ips"` // additional IPs (e.g. RDMA) for node identification
 	User    string   `yaml:"user"`
 	KeyFile string   `yaml:"key"`
+	HostKey string   `yaml:"host_key"` // Approved OpenSSH public host key, never TOFU.
 	IsLocal bool     `yaml:"is_local"`
 	Agent   string   `yaml:"agent"` // maps node to an agent (coordinator mode)
 }

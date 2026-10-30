@@ -35,6 +35,10 @@ func (c *pausedSSHConn) Read(b []byte) (int, error) {
 
 // A real encrypted loopback SSH transport, without shell/host/lab execution.
 func commandSSHFixture(t *testing.T) *Node {
+	return commandSSHFixtureKeys(t, nil, nil)
+}
+
+func commandSSHFixtureKeys(t *testing.T, keys *atomic.Pointer[ssh.ServerConfig], execs *atomic.Int64) *Node {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -54,6 +58,9 @@ func commandSSHFixture(t *testing.T) *Node {
 	}
 	config := &ssh.ServerConfig{NoClientAuth: true}
 	config.AddHostKey(signer)
+	if keys != nil {
+		keys.Store(config)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +85,11 @@ func commandSSHFixture(t *testing.T) *Node {
 				defer wg.Done()
 				defer conn.Close()
 				wire := &pausedSSHConn{Conn: conn, release: unpause}
-				server, channels, requests, err := ssh.NewServerConn(wire, config)
+				selected := config
+				if keys != nil {
+					selected = keys.Load()
+				}
+				server, channels, requests, err := ssh.NewServerConn(wire, selected)
 				if err != nil {
 					return
 				}
@@ -100,6 +111,9 @@ func commandSSHFixture(t *testing.T) *Node {
 						defer wg.Done()
 						defer channel.Close()
 						for request := range incoming {
+							if request.Type == "exec" && execs != nil {
+								execs.Add(1)
+							}
 							var payload struct{ Command string }
 							if ssh.Unmarshal(request.Payload, &payload) != nil {
 								return
@@ -132,7 +146,7 @@ func commandSSHFixture(t *testing.T) *Node {
 		mu.Unlock()
 		wg.Wait()
 	})
-	node := &Node{Host: listener.Addr().String(), User: "fake", KeyFile: keyfile}
+	node := &Node{Host: listener.Addr().String(), User: "fake", KeyFile: keyfile, HostKey: string(ssh.MarshalAuthorizedKey(signer.PublicKey()))}
 	if err := node.Connect(); err != nil {
 		t.Fatal(err)
 	}

@@ -1773,6 +1773,7 @@ func setupActionContext(s *tr.Scenario, logFunc func(string, ...interface{})) (*
 			Host:    resolveTopologyValue(spec.Host, s.Env),
 			User:    resolveTopologyValue(spec.User, s.Env),
 			KeyFile: resolveTopologyValue(spec.KeyFile, s.Env),
+			HostKey: resolveTopologyValue(spec.HostKey, s.Env),
 			IsLocal: spec.IsLocal,
 		}
 		if err := node.Connect(); err != nil {
