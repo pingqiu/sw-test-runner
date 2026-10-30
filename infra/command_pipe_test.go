@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -197,8 +198,8 @@ func TestOwnedCommandDoesNotUseSharedMaxSessionsAndSettlesCancelledCreation(t *t
 	}
 	short, stop := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer stop()
-	if _, err := node.OpenCommand(short, "hang"); err == nil {
-		t.Fatal("unanswered exec was accepted")
+	if _, err := node.OpenCommand(short, "hang"); err == nil || errors.Is(err, ErrCommandNotStarted) {
+		t.Fatal("unanswered exec was accepted or falsely marked NOT_STARTED")
 	}
 	if _, err := pipes[0].Write([]byte("x")); err != nil {
 		t.Fatal(err)
@@ -206,6 +207,31 @@ func TestOwnedCommandDoesNotUseSharedMaxSessionsAndSettlesCancelledCreation(t *t
 	var got [1]byte
 	if _, err := io.ReadFull(pipes[0], got[:]); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOwnedCommandDialFailureIsProvablyNotStarted(t *testing.T) {
+	node := commandSSHFixture(t)
+	node.Host = "127.0.0.1:0"
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := node.OpenCommand(ctx, "never-dispatched"); !errors.Is(err, ErrCommandNotStarted) {
+		t.Fatalf("dial failure lost its pre-dispatch proof: %v", err)
+	}
+}
+
+func TestOwnedCommandCancelledHandshakeIsProvablyNotStarted(t *testing.T) {
+	node := commandSSHFixture(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	node.Host = listener.Addr().String()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := node.OpenCommand(ctx, "never-dispatched"); !errors.Is(err, ErrCommandNotStarted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled handshake lost its pre-dispatch proof: %v", err)
 	}
 }
 
@@ -229,9 +255,7 @@ func TestOwnedCommandCloseSettlesBlackholedSSHWriter(t *testing.T) {
 	select {
 	case <-closed:
 	case <-time.After(time.Second):
-		node.Close()
-		<-closed
-		t.Error("channel close required the shared connection to be killed")
+		t.Fatal("job transport close exceeded its own deadline")
 	}
 	select {
 	case err := <-done:
@@ -239,8 +263,6 @@ func TestOwnedCommandCloseSettlesBlackholedSSHWriter(t *testing.T) {
 			t.Error("blocked write returned success")
 		}
 	case <-time.After(time.Second):
-		node.Close()
-		<-done
-		t.Error("writer survived the job transport close")
+		t.Fatal("writer survived the job transport close")
 	}
 }

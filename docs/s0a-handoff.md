@@ -20,6 +20,13 @@ and capacity are released. UNKNOWN entries remain obligations, not fake exits.
 Closing an owned TCP connection unblocks channel writes even when the peer stops
 reading. It does not close unrelated jobs or the node's ordinary connection.
 
+`ErrJobNotStarted` retires only a proven pre-dispatch enrollment failure (unknown
+node, cancelled capacity wait, or command setup/dial/handshake/process-start failure).
+The failed Start still returns an error; it does not poison cleanup or consume
+another owner's slot. Arbitrary unknown IDs do not qualify as NOT_STARTED.
+Once SSH exec may have been dispatched, a lost creation/enrollment reply stays
+UNKNOWN, even if no pipe was returned. This is deliberately conservative.
+
 The decoder lives through HardDeadline, independent of work cancellation. The
 custodian refuses ordinary authorization after WorkDeadline and retains its
 last-resort timer through HardDeadline. Lost replies stay UNKNOWN. A fully sent
@@ -122,3 +129,11 @@ ordinary repeats nor loopback tests are reported as race or hardware coverage.
 L1's delayed writer makes the join control deterministic; L2 explicitly checks
 pre-cancelled calls write zero bytes and leave an unused channel usable. Original
 failed captures remain separate from final green captures in the evidence bundle.
+
+The 6e91b7b independent AMEND adds distinguishing controls for the reviewed live
+baseline, restore preflight values, both command-boot joins and Settled=false.
+The eight-owner/ninth-wait boundary is exercised through the real SSHJobs caller.
+The blackhole test has its own failure deadline rather than unbounded receives.
+Action-kind mismatches are refused before any resource observation. The review's
+LOW creation-cancellation join mutation coverage gap remains disclosed; it is
+not claimed closed by these controls.

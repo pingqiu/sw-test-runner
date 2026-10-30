@@ -24,11 +24,15 @@ func TestMain(m *testing.M) {
 	if nativeCustodyTestWorkload != nil && nativeCustodyTestWorkload(os.Args[1:]) {
 		os.Exit(0)
 	}
-	if len(os.Args) > 1 && os.Args[1] == "owned-custodian" && os.Getenv("S0A_TEST_CUSTODIAN") == "fake" {
+	mode := os.Getenv("S0A_TEST_CUSTODIAN")
+	if len(os.Args) > 1 && os.Args[1] == "owned-custodian" && (mode == "fake" || mode == "lost-enroll") {
 		d, e := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 		for {
 			var q custodyRequest
 			if d.Decode(&q) != nil {
+				os.Exit(0)
+			}
+			if mode == "lost-enroll" {
 				os.Exit(0)
 			}
 			r := custodyReply{Sequence: q.Sequence}
@@ -184,5 +188,110 @@ func TestCustodyTimedOutWriteSettlesAndPoisonsChannel(t *testing.T) {
 	}
 	if p.writes.Load() != 1 {
 		t.Fatal("another writer reached a poisoned channel")
+	}
+}
+
+func TestCustodyEnrollmentBeforeDispatchDoesNotPoisonCleanup(t *testing.T) {
+	for _, which := range []string{"unknown-node", "setup", "slot-wait"} {
+		t.Run(which, func(t *testing.T) {
+			b := &SSHJobs{Nodes: map[string]*infra.Node{}, Runner: "/not-used"}
+			if which != "unknown-node" {
+				b.Nodes["fake"] = &infra.Node{KeyFile: filepath.Join(t.TempDir(), "missing-key")}
+			}
+			if which == "slot-wait" {
+				b.jobs, b.slots = map[string]*custodyChannel{}, make(chan struct{}, 8)
+				for i := 0; i < 8; i++ {
+					b.slots <- struct{}{}
+				}
+			}
+			s, err := NewRunScope(t.Context(), testAdmission(), b, func(context.Context, RunAdmission) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+			defer cancel()
+			if _, err := s.start(ctx, testJob(), false); err == nil {
+				t.Fatal("failed enrollment was accepted")
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("never-dispatched job poisoned cleanup: %v", err)
+			}
+			if len(s.jobs) != 0 || len(b.jobs) != 0 {
+				t.Fatal("never-dispatched entry retained")
+			}
+			wantSlots := 0
+			if which == "slot-wait" {
+				wantSlots = 8
+			}
+			if len(b.slots) != wantSlots {
+				t.Fatal("unowned slot released or owned slot leaked")
+			}
+			if err := b.Settle(t.Context(), "not-a-known-job"); err == nil {
+				t.Fatal("arbitrary unknown ID treated as not started")
+			}
+		})
+	}
+}
+
+func TestCustodySettlementRequiresPositiveProofBeforePruning(t *testing.T) {
+	p := &acceptingCustodyPipe{}
+	released := 0
+	c := &custodyChannel{pipe: p, replies: make(chan custodyReply, 1), release: func() { released++ }}
+	b := &SSHJobs{jobs: map[string]*custodyChannel{"job": c}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	c.replies <- custodyReply{Sequence: 1, Exit: ExitInfo{Settled: false}}
+	if err := b.Settle(ctx, "job"); err == nil || b.jobs["job"] != c || released != 0 {
+		t.Fatal("negative settlement discarded custody")
+	}
+	c.replies <- custodyReply{Sequence: 2, Exit: ExitInfo{Settled: true}}
+	if err := b.Settle(ctx, "job"); err != nil || len(b.jobs) != 0 || released != 1 {
+		t.Fatalf("positive settlement did not retire custody: %v", err)
+	}
+}
+
+func TestCustodyNinthJobWaitsWithoutLeakingOrDisturbingEightOwners(t *testing.T) {
+	t.Setenv("S0A_TEST_CUSTODIAN", "fake")
+	b := &SSHJobs{Nodes: map[string]*infra.Node{"fake": {IsNative: true}}, Runner: custodyFixtureRunner(t)}
+	s, err := NewRunScope(t.Context(), testAdmission(), b, func(context.Context, RunAdmission) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for i := 0; i < 8; i++ {
+		if _, err := s.Start(testJob()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := s.start(ctx, testJob(), false); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ninth job did not wait for capacity: %v", err)
+	}
+	if len(b.jobs) != 8 || len(s.jobs) != 8 || len(b.slots) != 8 {
+		t.Fatal("waiting job leaked or disturbed admitted owners")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.jobs) != 0 || len(b.slots) != 0 {
+		t.Fatal("owners or slots survived cleanup")
+	}
+}
+
+func TestCustodyLostEnrollmentReplyRemainsAnUnknownObligation(t *testing.T) {
+	t.Setenv("S0A_TEST_CUSTODIAN", "lost-enroll")
+	b := &SSHJobs{Nodes: map[string]*infra.Node{"fake": {IsNative: true}}, Runner: custodyFixtureRunner(t)}
+	s, err := NewRunScope(t.Context(), testAdmission(), b, func(context.Context, RunAdmission) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Start(testJob()); err == nil || !strings.Contains(err.Error(), "UNKNOWN") {
+		t.Fatalf("lost enrollment reply discarded uncertainty: %v", err)
+	}
+	if err := s.Close(); err == nil || len(s.jobs) != 1 || len(b.jobs) != 1 {
+		t.Fatal("unproven enrollment was retired as NOT_STARTED")
 	}
 }

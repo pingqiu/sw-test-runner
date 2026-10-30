@@ -62,6 +62,10 @@ type OwnedJobBackend interface {
 	Kill(context.Context, string) (KillWitness, error)
 }
 
+// ErrJobNotStarted is only for a proven pre-dispatch failure. All other
+// enrollment errors retain POSSIBLE custody until settlement is proven.
+var ErrJobNotStarted = errors.New("job NOT_STARTED")
+
 type JobHandle struct {
 	scope *RunScope
 	id    string
@@ -183,6 +187,10 @@ func (s *RunScope) start(ctx context.Context, spec JobSpec, restoration bool) (J
 	h := JobHandle{s, id, j}
 	i, err := s.backend.Enroll(ctx, id, s.admission, spec)
 	if err != nil {
+		if errors.Is(err, ErrJobNotStarted) {
+			s.retired(h)
+			return h, err
+		}
 		return h, fmt.Errorf("enrollment UNKNOWN: %w", err)
 	}
 	if i.Node != spec.Node || i.RunID != s.admission.RunID || i.BootID == "" || i.PID <= 0 || i.PGID <= 0 || i.StartTime == 0 || i.ExecutableSHA256 != spec.SHA256 {

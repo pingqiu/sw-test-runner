@@ -47,7 +47,7 @@ type SSHJobs struct {
 	slots  chan struct{}
 }
 
-func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (ProcessIdentity, error) {
+func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (_ ProcessIdentity, err error) {
 	c := &custodyChannel{replies: make(chan custodyReply, 1)}
 	b.mu.Lock()
 	if b.jobs == nil {
@@ -60,20 +60,30 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 	}
 	b.jobs[id] = c
 	b.mu.Unlock()
+	defer func() {
+		if errors.Is(err, ErrJobNotStarted) {
+			b.mu.Lock()
+			delete(b.jobs, id)
+			b.mu.Unlock()
+		}
+	}()
 	n := b.Nodes[s.Node]
 	if n == nil {
-		return ProcessIdentity{}, errors.New("unknown custody node")
+		return ProcessIdentity{}, fmt.Errorf("%w: unknown custody node", ErrJobNotStarted)
 	}
 	select {
 	case b.slots <- struct{}{}:
 	case <-ctx.Done():
-		return ProcessIdentity{}, ctx.Err()
+		return ProcessIdentity{}, errors.Join(ErrJobNotStarted, ctx.Err())
 	}
 	release := sync.OnceFunc(func() { <-b.slots })
 	c.release = release
 	p, err := n.OpenCommand(ctx, b.Runner, "owned-custodian")
 	if err != nil {
 		release()
+		if errors.Is(err, infra.ErrCommandNotStarted) {
+			err = errors.Join(ErrJobNotStarted, err)
+		}
 		return ProcessIdentity{}, err
 	}
 	c.pipe = p

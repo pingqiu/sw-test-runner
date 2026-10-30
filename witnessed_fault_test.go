@@ -13,7 +13,19 @@ type faultFake struct {
 	state                                                  string
 	noApply, noRestore, badBoot, probeError, unknownIssuer bool
 	applyFailure                                           bool
+	jobBoot                                                string
 	restores                                               int
+}
+
+func (n *faultFake) Enroll(ctx context.Context, id string, a RunAdmission, spec JobSpec) (ProcessIdentity, error) {
+	i, err := n.fakeOwnedNode.Enroll(ctx, id, a, spec)
+	if spec.Argv[0] == n.jobBoot {
+		i.BootID = "other-boot"
+		n.mu.Lock()
+		n.ids[id] = i
+		n.mu.Unlock()
+	}
+	return i, err
 }
 
 func (n *faultFake) Authorize(ctx context.Context, id string, i ProcessIdentity) error {
@@ -190,5 +202,46 @@ func TestWitnessedFaultCancelledActionNeverAuthorizes(t *testing.T) {
 	}
 	if n.authorized != 0 {
 		t.Fatal("cancelled fault sent a mutation")
+	}
+}
+
+func TestWitnessedFaultRefusesUnreviewedBaselineBeforeDispatch(t *testing.T) {
+	s, n, p := faultFixture(t)
+	n.state = "on"
+	if err := s.ApplyWitnessedFault(t.Context(), p.Key(), p); err == nil || n.authorized != 0 {
+		t.Fatal("pre-faulted resource admitted a mutation")
+	}
+	if err := s.Close(); err == nil || n.restores != 0 {
+		t.Fatal("unreviewed baseline qualified or caused a restore")
+	}
+}
+
+func TestWitnessedFaultRefusesUnreviewedRestoreValueBeforeDispatch(t *testing.T) {
+	s, n, p := faultFixture(t)
+	if err := s.ApplyWitnessedFault(t.Context(), p.Key(), p); err != nil {
+		t.Fatal(err)
+	}
+	n.state = "unreviewed"
+	if err := s.Close(); err == nil || n.restores != 0 {
+		t.Fatal("restore dispatched against an unreviewed value")
+	}
+	if s.FaultReceipts()[p.Key()].Restored.State["rule"] != "unreviewed" {
+		t.Fatal("refused restore lacked a final observation")
+	}
+}
+
+func TestWitnessedFaultJoinsEachCommandBootToTheObservation(t *testing.T) {
+	for _, command := range []string{"apply", "restore"} {
+		t.Run(command, func(t *testing.T) {
+			s, n, p := faultFixture(t)
+			n.jobBoot = command
+			err := s.ApplyWitnessedFault(t.Context(), p.Key(), p)
+			if (command == "apply") != (err != nil) {
+				t.Fatalf("apply boot join: %v", err)
+			}
+			if err := s.Close(); err == nil {
+				t.Fatal("a command from another boot qualified restoration")
+			}
+		})
 	}
 }
