@@ -39,7 +39,7 @@ func TestRequestedRDMAOptionalNullAgreement(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			d := fixture(t)
 			d["transport"] = "dc"
-			firstHost(d)["services"] = append(firstHost(d)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
+			firstHost(d)["services"] = append(firstHost(d)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)}, map[string]any{"name": "rdma_control", "port": float64(18517)}, map[string]any{"name": "dc_control", "port": float64(18518)})
 			r := map[string]any{"status": "requested", "capabilities": []any{"dc"}}
 			firstHost(d)["rdma"] = r
 			if _, err := inventory.Decode(bytesOf(t, d)); err != nil {
@@ -58,7 +58,7 @@ func TestRequestedRDMAOptionalNullAgreement(t *testing.T) {
 		t.Fatal(err)
 	}
 	d["transport"] = "dc"
-	firstHost(d)["services"] = append(firstHost(d)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)})
+	firstHost(d)["services"] = append(firstHost(d)["services"].([]any), map[string]any{"name": "rdma", "port": float64(18516)}, map[string]any{"name": "rdma_control", "port": float64(18517)}, map[string]any{"name": "dc_control", "port": float64(18518)})
 	firstHost(d)["rdma"] = map[string]any{"status": "requested", "capabilities": []any{"dc"}, "gid_index": nil}
 	if _, err := inventory.Decode(bytesOf(t, d)); err != nil {
 		t.Fatal(err)

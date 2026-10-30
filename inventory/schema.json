@@ -614,7 +614,7 @@
         },
         "services": {
           "type": "array",
-          "maxItems": 9,
+          "maxItems": 11,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -633,7 +633,9 @@
                   "volume_grpc",
                   "s3_http",
                   "rdma",
-                  "kv_coordinator"
+                  "kv_coordinator",
+                  "rdma_control",
+                  "dc_control"
                 ]
               },
               "port": {

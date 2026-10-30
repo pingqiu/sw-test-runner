@@ -82,6 +82,14 @@
         {
           "name": "rdma",
           "port": 18516
+        },
+        {
+          "name": "rdma_control",
+          "port": 18517
+        },
+        {
+          "name": "dc_control",
+          "port": 18518
         }
       ]
     }

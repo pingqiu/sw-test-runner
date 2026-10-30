@@ -83,12 +83,20 @@
         {
           "name": "rdma",
           "port": 18516
+        },
+        {
+          "name": "rdma_control",
+          "port": 18517
+        },
+        {
+          "name": "dc_control",
+          "port": 18518
         }
       ]
     }
   ],
   "observation": {
-    "requested_sha256": "22fea0a2046a6223dc54f1e4aca7b4a025c60f017714257c0441a3101ba16e31",
+    "requested_sha256": "b86ba681f58be24aefc3793f1c353efdaaf44ba0c431ef37fb9adf163f30707a",
     "hosts": [
       {
         "host_id": "node1",
