@@ -6,20 +6,22 @@ from urllib.request import urlopen
 
 def witness(before, after, config):
     a, b = before['loader'], after['loader']
-    if a['transport'] != 'rdma' or b['transport'] != 'rdma' or a['http_fallback_allowed'] is not False or b['http_fallback_allowed'] is not False:
-        raise AssertionError('RDMA required; HTTP fallback refused')
+    route = config['transport']
+    if route not in ('http','rc','dc'):
+        raise AssertionError('unsupported transport')
+    transport = 'http' if route=='http' else 'rdma'
+    if a['transport'] != transport or b['transport'] != transport or a['http_fallback_allowed'] is not False or b['http_fallback_allowed'] is not False:
+        raise AssertionError('explicit transport required; HTTP fallback refused')
     expected = config['keys'] * config['length']
     def delta(name):
         x, y = a[name], b[name]
         if type(x) is not int or type(y) is not int or x < 0 or y < x:
             raise AssertionError('invalid/missing transport counter')
         return y-x
-    route = config['transport']
-    other = 'rc' if route == 'dc' else 'dc'
     for field, value in {'read_bytes': expected, 'read_objects': config['keys'],
-                         'direct_'+route+'_bytes': expected, 'direct_'+route+'_reads': config['keys'],
-                         'direct_'+other+'_bytes': 0, 'direct_'+other+'_reads': 0,
-                         'copied_bytes': 0, 'copied_reads': 0,
+                         'direct_rc_bytes': expected if route=='rc' else 0, 'direct_rc_reads': config['keys'] if route=='rc' else 0,
+                         'direct_dc_bytes': expected if route=='dc' else 0, 'direct_dc_reads': config['keys'] if route=='dc' else 0,
+                         'copied_bytes': expected if route=='http' else 0, 'copied_reads': config['keys'] if route=='http' else 0,
                          'write_bytes': expected, 'write_objects': config['keys']}.items():
         if delta(field) != value:
             raise AssertionError('transport witness differs: '+field)
@@ -71,11 +73,15 @@ def run(conn, c, metadata, emit):
 
 
 def configure(c):
-    if c['transport'] not in ('rc', 'dc') or not 1 <= c['keys'] <= 16 or not 1 <= c['length'] <= 4*1024*1024:
+    if c['transport'] not in ('http', 'rc', 'dc') or not 1 <= c['keys'] <= 16 or not 1 <= c['length'] <= 4*1024*1024:
         raise ValueError('unsupported transport or smoke bound')
     for key in list(os.environ):
         if key.startswith('SW_RDMA_'):
             del os.environ[key]
+    if c['transport']=='http':
+        if any(key in c for key in ('rdma_address','rdma_control','dc_control','device','device_port','gid_index')):
+            raise ValueError('HTTP profile cannot carry RDMA selectors')
+        return 'loader-http'
     os.environ.update(SW_RDMA_KVCACHE_PUSH_DC='1' if c['transport']=='dc' else '0',
         SW_RDMA_KVCACHE_PUSH_RDMA_ADDR=c['rdma_address'],
         SW_RDMA_KVCACHE_PUSH_CONTROL_ADDR=c['rdma_control'],
@@ -85,6 +91,7 @@ def configure(c):
             SW_RDMA_KVCACHE_PUSH_DC_DEVICE=c['device'],
             SW_RDMA_KVCACHE_PUSH_DC_PORT=str(c['device_port']),
             SW_RDMA_KVCACHE_PUSH_DC_GID_INDEX=str(c['gid_index']))
+    return 'loader-rdma'
 
 
 def main():
@@ -96,14 +103,14 @@ def main():
     conn = None
     try:
         c = json.loads(args.config)
-        configure(c)
+        backing = configure(c)
         if args.dry_run:
-            emit(dict(status='PLAN', code='OK', remedy='obtain independent S0b admission', effects=[], backing='loader-rdma', fallback=False, operations=2*c['keys']))
+            emit(dict(status='PLAN', code='OK', remedy='obtain independent S0b admission', effects=[], backing=backing, fallback=False, operations=2*c['keys']))
             return 0
         sys.path[:0] = [c['helper_dir'], c['native_dir']]
         from seaweedkv_native._native import SeaweedKVConnector
         options = dict(capacity_bytes=1, root=c['root'], collection='lmcache', replication='000')
-        conn = SeaweedKVConnector(c['filer_grpc'], 'loader-rdma', 4, json.dumps(options))
+        conn = SeaweedKVConnector(c['filer_grpc'], backing, 4, json.dumps(options))
         def metadata(key):
             with urlopen(c['filer_http']+quote(key,safe='/')+'?metadata=true&resolveManifest=true', timeout=8) as r:
                 return json.load(r)

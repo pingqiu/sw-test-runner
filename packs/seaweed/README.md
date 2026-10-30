@@ -24,8 +24,8 @@ Every dispatch/authorization repeats S0b live authority and deployment readback.
 No caller variable, YAML boolean, permissive custom scope, inventory digest or
 plan result is an authorization token.
 
-The initial runtime slice is on-prem, required RC/DC KV, one filer and one volume
-with a bounded ACK/exact-read smoke. HTTP and transport fallback refuse. This is
+The runtime profiles below use one filer and one volume with a bounded
+ACK/exact-read smoke; transport fallback always refuses. This is
 not the Gate 0a Docker adapter, cloud provisioning, multi-server routing, a soak,
 or privileged disk setup. It does not change VFs, PFC/ECN, mount/format disks,
 install protected files or replace their reviewed bootstrap process.
@@ -72,6 +72,15 @@ and generation evidence. Approval of this code does not qualify those facts.
 
 ## KV operation adapter and proof
 
+Two explicit runtime profiles share this same five-phase pack and S0b custody:
+on-prem RC/DC requires an independently approved `rdma` binding and retains
+required RDMA/no HTTP fallback; Azure HTTP requires both inventory and approved
+binding to say `http`, with RDMA `not_applicable`. No profile is inferred from
+a missing device or failed RDMA operation. Other target/transport pairs refuse
+in this slice, including cloud RDMA and on-prem HTTP. This enables no cloud
+provisioning or launch. HTTP uses the same bounded ACK/latest-byte oracle and
+owned deployment/readiness/collector jobs, not another cloud deploy path.
+
 `worker/kv_smoke.py` is a thin external-stack CLI around unchanged accepted
 `soak_native_worker.work`, `payload`, `validate_ack_metadata`, and `Oracle`.
 The worker copy is SHA256
@@ -88,8 +97,10 @@ Missing clients, empty workloads or missing smoke server roles refuse before
 any job starts. The helpers execute by compiling the exact sibling `.py`
 sources; same-name packages/bytecode cannot override them and competing
 protected helper candidates are refused.
-The script uses isolated Python, the pinned helper/native directories, clears
-inherited RDMA selectors and constructs `loader-rdma` with fallback disabled.
+The script uses isolated Python and pinned helper/native directories. It clears
+inherited RDMA selectors and constructs the explicitly selected `loader-rdma`
+or `loader-http`, both with no fallback claim. HTTP argv carries no RDMA
+address/control/device/port/GID selectors; contradictory fields refuse.
 
 Bounds are 1..16 keys of 1 byte..4 MiB, one operation at a time. Each SET is
 ACKed only after successful completion and fresh metadata/FIDs; its GET must
@@ -98,9 +109,12 @@ there is no rotation exception or mutation retry. The accepted worker retains
 unknown DMA buffers through process teardown. Native close and all jobs remain
 bounded by the original S0b work/hard envelope and owned settlement.
 
-Success additionally requires exact direct RC/DC byte/object deltas, zero other
-transport/copied deltas and no read-error delta. Correct bytes via HTTP still
-fail. Loader write-byte counts are emitted, but are **not** called a server-side
+RC/DC success additionally requires exact direct RC/DC byte/object deltas, zero
+other transport/copied deltas and no read-error delta. Correct bytes via HTTP
+still fail that required-RDMA profile. Explicit HTTP success requires the loader
+to report HTTP, exact copied byte/object deltas, zero direct RC/DC deltas and no
+read errors. HTTP is labelled HTTP, never RDMA. Loader write-byte counts are
+emitted, but are **not** called a server-side
 write-transport witness: `server_write_join=NOT_OBSERVED` until an isolated
 volume counter/log join is collected. No RC/DC hardware claim comes from CPU
 fakes. The pinned loader-rdma product path is required mode, not fallback mode.
