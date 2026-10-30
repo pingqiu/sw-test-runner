@@ -13,6 +13,7 @@ variable "operator_cidr" { type = string }
 variable "image_version" { type = string }
 variable "artifact_manifest_sha256" { type = string }
 variable "vm_size" { type = string }
+variable "process_cleanup_reserve_ms" { type = number }
 variable "run_declaration" {
   type = object({
     work_deadline                 = string
@@ -28,15 +29,16 @@ provider "azurerm" {
   resource_provider_registrations = "none"
 }
 module "run" {
-  source                   = "../azure"
-  resource_group_name      = var.resource_group_name
-  location                 = var.location
-  run_id                   = "single-http-gate"
-  ssh_public_key           = var.ssh_public_key
-  operator_cidr            = var.operator_cidr
-  image_version            = var.image_version
-  artifact_manifest_sha256 = var.artifact_manifest_sha256
-  run_declaration          = var.run_declaration
+  source                     = "../azure"
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  run_id                     = "single-http-gate"
+  ssh_public_key             = var.ssh_public_key
+  operator_cidr              = var.operator_cidr
+  image_version              = var.image_version
+  artifact_manifest_sha256   = var.artifact_manifest_sha256
+  run_declaration            = var.run_declaration
+  process_cleanup_reserve_ms = var.process_cleanup_reserve_ms
   nodes = {
     node1 = {
       roles          = ["master", "filer", "volume", "s3", "client"]
@@ -44,6 +46,12 @@ module "run" {
       private_ip     = "10.84.1.10"
       cache_disk_gib = 4
       format_allowed = false
+      services = [
+        { name = "master_http", port = 9333 }, { name = "master_grpc", port = 19333 },
+        { name = "filer_http", port = 8888 }, { name = "filer_grpc", port = 18888 },
+        { name = "volume_http", port = 8080 }, { name = "volume_grpc", port = 18080 },
+        { name = "s3_http", port = 8333 }
+      ]
     }
   }
 }

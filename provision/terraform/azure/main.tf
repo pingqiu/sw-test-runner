@@ -1,6 +1,7 @@
 locals {
-  tags       = { seaweed_run = var.run_id, managed_by = "sw-test-runner" }
-  disk_nodes = { for id, n in var.nodes : id => n if n.cache_disk_gib > 0 }
+  tags          = { seaweed_run = var.run_id, managed_by = "sw-test-runner" }
+  disk_nodes    = { for id, n in var.nodes : id => n if n.cache_disk_gib > 0 }
+  service_ports = sort(distinct(flatten([for n in values(var.nodes) : [for s in n.services : tostring(s.port)]])))
 }
 resource "azurerm_virtual_network" "run" {
   name                = "${var.run_id}-vnet"
@@ -31,16 +32,19 @@ resource "azurerm_network_security_group" "run" {
     source_address_prefix      = var.operator_cidr
     destination_address_prefix = var.subnet_cidr
   }
-  security_rule {
-    name                       = "internal-services"
-    priority                   = 110
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_ranges    = ["3306", "7333", "8080", "8333", "8888", "9333", "18080", "18888", "19333"]
-    source_address_prefix      = var.subnet_cidr
-    destination_address_prefix = var.subnet_cidr
+  dynamic "security_rule" {
+    for_each = length(local.service_ports) == 0 ? [] : [1]
+    content {
+      name                       = "internal-services"
+      priority                   = 110
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_ranges    = local.service_ports
+      source_address_prefix      = var.subnet_cidr
+      destination_address_prefix = var.subnet_cidr
+    }
   }
   security_rule {
     name                       = "deny-other-inbound"

@@ -68,6 +68,7 @@ variable "nodes" {
     private_ip     = string
     cache_disk_gib = number
     format_allowed = bool
+    services       = list(object({ name = string, port = number }))
   }))
   validation {
     condition = length(var.nodes) > 0 && length(var.nodes) <= 32 && alltrue([for id, n in var.nodes :
@@ -79,6 +80,24 @@ variable "nodes" {
       (n.cache_disk_gib > 0 || !n.format_allowed)
     ]) && length(distinct([for n in values(var.nodes) : n.private_ip])) == length(var.nodes)
     error_message = "Require 1..32 unique IPv4 nodes, supported roles, explicit integer disk sizes, and a disk for each volume."
+  }
+  validation {
+    condition = alltrue([for n in values(var.nodes) : try(
+      length(distinct([for s in n.services : s.name])) == length(n.services) &&
+      length(distinct([for s in n.services : s.port])) == length(n.services) &&
+      alltrue([for s in n.services : contains(["master_http", "master_grpc", "filer_http", "filer_grpc", "volume_http", "volume_grpc", "s3_http"], s.name) && s.port >= 1 && s.port <= 65535 && s.port == floor(s.port)]) &&
+      alltrue(flatten([for role in n.roles : [for name in lookup({ master = ["master_http", "master_grpc"], filer = ["filer_http", "filer_grpc"], volume = ["volume_http", "volume_grpc"], s3 = ["s3_http"], client = [] }, role, []) : contains([for s in n.services : s.name], name)]])), false)
+    ])
+    error_message = "Require explicit HTTP module service names, distinct integer ports 1..65535, and every declared role's HTTP/gRPC listeners; clients may declare []."
+  }
+}
+
+variable "process_cleanup_reserve_ms" {
+  description = "Original S0b process reserve; distinct from cloud resource cleanup seconds. No authority is granted."
+  type        = number
+  validation {
+    condition     = var.process_cleanup_reserve_ms > 0 && var.process_cleanup_reserve_ms <= 60000 && var.process_cleanup_reserve_ms == floor(var.process_cleanup_reserve_ms) && try(timecmp(timeadd(var.run_declaration.work_deadline, format("%dms", var.process_cleanup_reserve_ms)), var.run_declaration.hard_deadline) <= 0, false)
+    error_message = "Process cleanup reserve must be an integer 1..60000 ms within the original work/hard envelope."
   }
 }
 
@@ -92,8 +111,8 @@ variable "run_declaration" {
     abort_estimate_usd            = number
   })
   validation {
-    condition     = can(formatdate("YYYY", var.run_declaration.work_deadline)) && endswith(var.run_declaration.work_deadline, "Z") && can(formatdate("YYYY", var.run_declaration.hard_deadline)) && endswith(var.run_declaration.hard_deadline, "Z")
-    error_message = "Declare RFC3339 UTC work/hard deadlines ending Z. Data is not admission."
+    condition     = alltrue([for t in [var.run_declaration.work_deadline, var.run_declaration.hard_deadline] : can(formatdate("YYYY", t)) && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]*[1-9])?Z$", t))])
+    error_message = "Declare canonical RFC3339 UTC Z deadlines (no offset alias or trailing fractional zero). Data is not admission."
   }
   validation {
     condition     = var.run_declaration.cloud_cleanup_reserve_seconds > 0 && var.run_declaration.cloud_cleanup_reserve_seconds == floor(var.run_declaration.cloud_cleanup_reserve_seconds) && try(timecmp(timeadd(var.run_declaration.work_deadline, format("%ds", var.run_declaration.cloud_cleanup_reserve_seconds)), var.run_declaration.hard_deadline) <= 0, false)
