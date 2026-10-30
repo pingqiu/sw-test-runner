@@ -207,11 +207,38 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 	cleanupCtx := context.Background()
 	cleanupCtx, cleanupCancel := context.WithTimeout(cleanupCtx, 60*time.Second)
 	defer cleanupCancel()
+	// Admitted runs retain their original cleanup envelope. Always phases may
+	// assess evidence, but cannot reopen ordinary execution after settlement.
+	if actx.Safety != nil && actx.Safety.authority != nil {
+		if ctx.Err() != nil {
+			failed, result.Status = true, StatusFail
+			result.Error = strings.TrimSpace(result.Error + " work envelope: " + ctx.Err().Error())
+		}
+		if err := actx.Safety.Close(); err != nil {
+			failed, result.Status = true, StatusFail
+			result.Error = strings.TrimSpace(result.Error + " owned cleanup: " + err.Error())
+		}
+		cleanupCancel()
+		cleanupCtx, cleanupCancel = actx.Safety.cleanupContext(context.Background())
+		defer cleanupCancel()
+	}
 	for _, phase := range alwaysPhases {
 		e.callPhaseHook("before", phase.Name, "", "")
 		pr := e.runPhase(cleanupCtx, actx, phase)
 		result.Phases = append(result.Phases, pr)
 		e.callPhaseHook("after", phase.Name, string(pr.Status), pr.Error)
+		if pr.Status == StatusFail {
+			failed = true
+			result.Status = StatusFail
+			result.Error = strings.TrimSpace(result.Error + " cleanup " + phase.Name + ": " + pr.Error)
+		}
+	}
+	if actx.Safety != nil {
+		if err := actx.Safety.Close(); err != nil {
+			failed = true
+			result.Status = StatusFail
+			result.Error = strings.TrimSpace(result.Error + " owned cleanup: " + err.Error())
+		}
 	}
 
 	result.Duration = time.Since(start)
@@ -257,12 +284,18 @@ func (e *Engine) runPhaseSequential(ctx context.Context, actx *ActionContext, ph
 	}
 
 	for i, act := range phase.Actions {
+		// Cleanup is settle-all, and an ignored cleanup error cannot qualify a run.
+		if phase.Always {
+			act.IgnoreError = false
+		}
 		ar := e.runAction(ctx, actx, act)
 		pr.Actions = append(pr.Actions, ar)
 		if ar.Status == StatusFail && !act.IgnoreError {
 			pr.Status = StatusFail
-			pr.Error = fmt.Sprintf("action %d (%s) failed: %s", i, act.Action, ar.Error)
-			return pr
+			pr.Error += fmt.Sprintf("action %d (%s) failed: %s; ", i, act.Action, ar.Error)
+			if !phase.Always {
+				return pr
+			}
 		}
 	}
 	return pr
@@ -275,12 +308,18 @@ func (e *Engine) runPhaseParallel(ctx context.Context, actx *ActionContext, phas
 	}
 
 	results := make([]ActionResult, len(phase.Actions))
+	contexts := make([]ActionContext, len(phase.Actions))
 	var wg sync.WaitGroup
 	for i, act := range phase.Actions {
+		contexts[i] = *actx
+		contexts[i].Vars = copyVars(actx.Vars)
+		if phase.Always {
+			act.IgnoreError = false
+		}
 		wg.Add(1)
 		go func(idx int, a Action) {
 			defer wg.Done()
-			results[idx] = e.runAction(ctx, actx, a)
+			results[idx] = e.runAction(ctx, &contexts[idx], a)
 		}(i, act)
 	}
 	wg.Wait()
@@ -288,11 +327,36 @@ func (e *Engine) runPhaseParallel(ctx context.Context, actx *ActionContext, phas
 	var errors []string
 	for i, ar := range results {
 		pr.Actions = append(pr.Actions, ar)
-		if ar.Status == StatusFail && !phase.Actions[i].IgnoreError {
+		if ar.Status == StatusFail && (phase.Always || !phase.Actions[i].IgnoreError) {
 			pr.Status = StatusFail
 			errors = append(errors, fmt.Sprintf("action %d (%s): %s", i, phase.Actions[i].Action, ar.Error))
 		}
 	}
+	// Publish only after settlement. Conflicting writes never depend on goroutine order.
+	outputs := make(map[string]string)
+	conflicts := make(map[string]bool)
+	for _, local := range contexts {
+		for k, v := range local.Vars {
+			if old, ok := actx.Vars[k]; ok && old == v {
+				continue
+			}
+			if old, ok := outputs[k]; ok && old != v {
+				errors = append(errors, fmt.Sprintf("conflicting parallel output %q", k))
+				conflicts[k] = true
+			}
+			outputs[k] = v
+		}
+	}
+	// Preserve non-conflicting partial outputs for always-cleanup after an error.
+	for k, v := range outputs {
+		if !conflicts[k] {
+			actx.Vars[k] = v
+		}
+	}
+	if len(errors) != 0 {
+		pr.Status = StatusFail
+	}
+	sort.Strings(errors)
 	if len(errors) == 1 {
 		pr.Error = errors[0]
 	} else if len(errors) > 1 {
@@ -302,8 +366,16 @@ func (e *Engine) runPhaseParallel(ctx context.Context, actx *ActionContext, phas
 }
 
 // runAction resolves variables and executes a single action.
-func (e *Engine) runAction(ctx context.Context, actx *ActionContext, act Action) ActionResult {
+func (e *Engine) runAction(ctx context.Context, actx *ActionContext, act Action) (ar ActionResult) {
 	start := time.Now()
+	defer func() {
+		if p := recover(); p != nil {
+			ar = ActionResult{Action: act.Action, Status: StatusFail, Duration: time.Since(start), Error: fmt.Sprintf("action panic: %v", p)}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return ActionResult{Action: act.Action, Status: StatusFail, Error: err.Error()}
+	}
 
 	// Resolve variables in the action.
 	resolved := resolveAction(act, actx.Vars)
@@ -367,7 +439,7 @@ func (e *Engine) runAction(ctx context.Context, actx *ActionContext, act Action)
 		err = fmt.Errorf("action %q timed out after %s: %w", resolved.Action, actionTimeout, err)
 	}
 
-	ar := ActionResult{
+	ar = ActionResult{
 		Action:   resolved.Action,
 		Duration: elapsed,
 		YAML:     yamlDef,
@@ -414,6 +486,14 @@ func (e *Engine) runAction(ctx context.Context, actx *ActionContext, act Action)
 	}
 
 	return ar
+}
+
+func copyVars(vars map[string]string) map[string]string {
+	out := make(map[string]string, len(vars))
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
 }
 
 // resolveAction substitutes {{ var }} references in the action's fields.

@@ -9,6 +9,7 @@ inject faults, collect artifacts, emit JUnit XML.
 ## What it is for
 
 - end-to-end smoke tests for block-storage products (V2 weed-block, V3 seaweed-block)
+- S3 gateway and RDMA lab gates for object/VFS data paths
 - iSCSI / NVMe-oF target integration scenarios
 - multi-node failover and rebuild scenarios
 - chaos / fault injection (`netem`, `iptables`, disk-fill, kill-loop)
@@ -39,6 +40,63 @@ sw-test-runner run scenario.yaml           # execute
 sw-test-runner validate-bundle results/RUN # offline result/status check
 ```
 
+## Docs and wiki
+
+Full documentation is a MkDocs wiki under `docs/` (mirrors the seaweed-block
+wiki). Serve it locally:
+
+```bash
+pip install -r requirements-docs.txt
+mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
+```
+
+- **Start here:** `docs/testops-handbook.md`, `docs/cross-product-testops-standard.md`, `docs/scenario-spec.md`, `docs/tutorial.md`
+- **For development agents:** `docs/agent-testops-runbook.md` — the short
+  guide for Block, S3, VFS, and RDMA agents running shared lab tests and
+  reporting evidence.
+- **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
+- **Live run dashboard/controller:** http://192.168.1.181:9099/ (global run view; M01 can enable RDMA queue submit)
+
+## Agent quick start
+
+For RDMA PR/lab validation, submit to the M01 queue so the lab lock, shared
+results, and dashboard metadata are handled consistently:
+
+```bash
+ssh testdev@192.168.1.181
+cd /opt/rdma-lab-ci/sw-test-runner
+TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
+```
+
+For Block/S3/VFS scenarios, run the product binary with shared results and
+metadata:
+
+```bash
+swblock run <scenario.yaml> -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -meta project=block-qa -meta team=block -meta run_by=<agent> \
+  -meta test_id=<test-id> -meta branch=<branch-or-sha> -meta commit=<sha>
+```
+
+Watch runs at http://192.168.1.181:9099/. Report the `project/run_id`, bundle
+path, branch/commit, pass/fail, and key metrics.
+
+If the dashboard is started with controller flags, the same page can submit the
+RDMA queue:
+
+```bash
+curl -X POST http://m01:9099/api/rdma/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"mono_ref":"main","run_by":"dev-agent"}'
+```
+
+## Build
+
+```bash
+make build               # all cmd/ binaries into ./bin
+make test                # unit tests
+make wiki                # serve the wiki locally
+```
+
 ## Repository layout
 
 ```
@@ -64,9 +122,12 @@ sw-test-runner validate-bundle results/RUN # offline result/status check
 ├── packs/                        product-specific action sets
 │   ├── block/                    V2 seaweedfs weed-block
 │   ├── kv/                       V2 seaweedfs kv/object
+│   ├── s3/                       SeaweedFS S3 gateway
+│   ├── rdma/                     M01/M02 RDMA lab gates
 │   └── v3block/                  V3 seaweed-block
 ├── scenarios/                    bundled scenario YAMLs (V2 baselines + V3)
 ├── cmd/sw-test-runner/           CLI entry
+├── cmd/testops-controller/       safe RDMA queue submit/status web API
 └── internal/blockapi/            internal HTTP client (V2 master REST)
 ```
 
@@ -144,6 +205,10 @@ swblock validate-bundle \
 See `packs/v3block/` for a worked example (~600 LOC, 7 actions: spawn three
 V3 daemon types, apply cluster spec, wait for primary, parse status, assert
 no-V2-authority-leak in logs).
+
+For cross-product storage gates, start with
+`docs/storage-testops-platform.md`. It maps the current block, S3, VFS, and
+RDMA surfaces and points at the RDMA unified lab scenario.
 
 ## Tiers (action categories)
 

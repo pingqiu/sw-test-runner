@@ -57,6 +57,13 @@ var pkgRegister func(*tr.Registry)
 // Run dispatches a sw-test-runner subcommand against the supplied
 // product-pack registration callback. Returns a process exit code.
 func Run(register func(*tr.Registry), args []string) int {
+	if handled, err := tr.OwnedEntrypoint(args); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if register == nil {
 		fmt.Fprintln(os.Stderr, "cli.Run: register callback is required")
 		return 2
@@ -69,6 +76,8 @@ func Run(register func(*tr.Registry), args []string) int {
 	}
 
 	switch args[0] {
+	case "approved-run":
+		return approvedRunCmd(args[1:])
 	case "run":
 		runCmd(args[1:])
 	case "suite":
@@ -105,6 +114,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `sw-test-runner — YAML-driven test platform for SeaweedFS BlockVol
 
 Usage:
+	  sw-test-runner approved-run --request <claimed> --policy <bootstrap>  Approved worker entry
   sw-test-runner run [flags] <scenario.yaml>           Run a test scenario (SSH mode)
   sw-test-runner suite [flags] <suite.yaml>            Deploy once, run N scenarios
   sw-test-runner coordinator [flags] <scenario.yaml>   Run as coordinator (multi-node)
@@ -166,6 +176,8 @@ func runCmd(args []string) {
 	allowMutating := fs.Bool("allow-mutating", false, "Permit actions registered as mutating (docker_push, infra-affecting chaos, etc.)")
 	envOverrides := newKVFlag()
 	fs.Var(envOverrides, "env", "Set scenario.env entry (repeatable). Format: KEY=VALUE. Overrides any same-named entry from the YAML.")
+	metaOverrides := newKVFlag()
+	fs.Var(metaOverrides, "meta", "Set run metadata (repeatable). Format: KEY=VALUE. Recorded in manifest.json for the dashboard (e.g. project, run_by, team, test_id).")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -202,6 +214,14 @@ func runCmd(args []string) {
 			logger.Printf("warning: failed to create run bundle: %v (continuing without)", err)
 		} else {
 			logger.Printf("run bundle: %s", bundle.Dir)
+			// Merge run-context metadata (project, run_by, team, ...) into the
+			// manifest so a shared dashboard can group/filter runs by who/which
+			// project ran them. The scenario's own metadata block is already in.
+			if len(metaOverrides.values) > 0 {
+				if mErr := bundle.MergeMetadata(metaOverrides.values); mErr != nil {
+					logger.Printf("warning: failed to record -meta: %v", mErr)
+				}
+			}
 			// Inject run_id / bundle_dir / artifacts_dir into scenario env so
 			// phases can route their per-step artifacts under the bundle. The
 			// scenario references these as {{ run_id }} / {{ bundle_dir }} /
@@ -1706,6 +1726,20 @@ func listCmd() {
 
 	byTier := registry.ListByTier()
 	tierOrder := []string{tr.TierCore, tr.TierBlock, tr.TierDevOps, tr.TierChaos, actions.TierK8s}
+	// Append any product-pack tiers not in the fixed order (e.g. s3, vfs) so a
+	// new pack's actions are visible in `list` without editing this slice.
+	known := make(map[string]bool, len(tierOrder))
+	for _, t := range tierOrder {
+		known[t] = true
+	}
+	extra := make([]string, 0)
+	for t := range byTier {
+		if !known[t] {
+			extra = append(extra, t)
+		}
+	}
+	sort.Strings(extra)
+	tierOrder = append(tierOrder, extra...)
 
 	fmt.Println("Registered actions:")
 	for _, tier := range tierOrder {
@@ -1742,6 +1776,7 @@ func setupActionContext(s *tr.Scenario, logFunc func(string, ...interface{})) (*
 			Host:    resolveTopologyValue(spec.Host, s.Env),
 			User:    resolveTopologyValue(spec.User, s.Env),
 			KeyFile: resolveTopologyValue(spec.KeyFile, s.Env),
+			HostKey: resolveTopologyValue(spec.HostKey, s.Env),
 			IsLocal: spec.IsLocal,
 		}
 		if err := node.Connect(); err != nil {

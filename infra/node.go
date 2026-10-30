@@ -21,8 +21,9 @@ type Node struct {
 	Host     string
 	User     string
 	KeyFile  string
-	IsLocal  bool // WSL2 mode: use exec.CommandContext via wsl instead of SSH
-	IsNative bool // Native local mode: use bash -c directly (for Linux agents)
+	HostKey  string // Operator-approved OpenSSH public host key; required for remote SSH.
+	IsLocal  bool   // WSL2 mode: use exec.CommandContext via wsl instead of SSH
+	IsNative bool   // Native local mode: use bash -c directly (for Linux agents)
 
 	mu     sync.Mutex
 	client *ssh.Client
@@ -33,28 +34,11 @@ func (n *Node) Connect() error {
 	if n.IsLocal || n.IsNative {
 		return nil
 	}
-
-	key, err := os.ReadFile(n.KeyFile)
+	config, err := n.sshConfig()
 	if err != nil {
-		return fmt.Errorf("read SSH key %s: %w", n.KeyFile, err)
+		return err
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return fmt.Errorf("parse SSH key: %w", err)
-	}
-
-	config := &ssh.ClientConfig{
-		User:            n.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-
-	addr := n.Host
-	if !strings.Contains(addr, ":") {
-		addr += ":22"
-	}
-
+	addr := n.sshAddress()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.client, err = ssh.Dial("tcp", addr, config)
@@ -62,6 +46,36 @@ func (n *Node) Connect() error {
 		return fmt.Errorf("SSH dial %s: %w", addr, err)
 	}
 	return nil
+}
+
+func (n *Node) sshConfig() (*ssh.ClientConfig, error) {
+	hostKey, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(n.HostKey))
+	if err != nil || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 || bytes.ContainsAny(bytes.TrimSpace([]byte(n.HostKey)), "\r\n") {
+		return nil, fmt.Errorf("SSH host %s requires one approved public host key (no options)", n.sshAddress())
+	}
+
+	key, err := os.ReadFile(n.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read SSH key %s: %w", n.KeyFile, err)
+	}
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("parse SSH key: %w", err)
+	}
+
+	return &ssh.ClientConfig{
+		User:            n.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+		Timeout:         10 * time.Second,
+	}, nil
+}
+
+func (n *Node) sshAddress() string {
+	if _, _, err := net.SplitHostPort(n.Host); err == nil {
+		return n.Host
+	}
+	return net.JoinHostPort(strings.Trim(n.Host, "[]"), "22")
 }
 
 // Run executes a command and returns stdout, stderr, exit code.

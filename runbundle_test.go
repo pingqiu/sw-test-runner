@@ -95,8 +95,29 @@ func TestRunBundle_Finalize_WritesAllOutputs(t *testing.T) {
 	}
 
 	// result.json exists.
-	if _, err := os.Stat(filepath.Join(bundle.Dir, "result.json")); err != nil {
+	resultPath := filepath.Join(bundle.Dir, "result.json")
+	if _, err := os.Stat(resultPath); err != nil {
 		t.Error("result.json missing")
+	}
+	resultData, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read result.json: %v", err)
+	}
+	var written ScenarioResult
+	if err := json.Unmarshal(resultData, &written); err != nil {
+		t.Fatalf("parse result.json: %v", err)
+	}
+	if written.RunID != bundle.Manifest.RunID {
+		t.Errorf("result run_id = %q, want %q", written.RunID, bundle.Manifest.RunID)
+	}
+	if written.StartedAt == "" {
+		t.Error("result started_at not set")
+	}
+	if written.EndedAt == "" {
+		t.Error("result ended_at not set")
+	}
+	if written.WallClockS <= 0 {
+		t.Errorf("result wall_clock_s = %v, want > 0", written.WallClockS)
 	}
 	// result.xml exists.
 	if _, err := os.Stat(filepath.Join(bundle.Dir, "result.xml")); err != nil {

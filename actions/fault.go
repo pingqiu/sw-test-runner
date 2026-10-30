@@ -18,78 +18,23 @@ func RegisterFaultActions(r *tr.Registry) {
 }
 
 func injectNetemAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, err := GetNode(actx, act.Node)
-	if err != nil {
-		return nil, fmt.Errorf("inject_netem: %w", err)
-	}
-
-	targetIP := act.Params["target_ip"]
-	if targetIP == "" {
-		return nil, fmt.Errorf("inject_netem: target_ip param required")
-	}
-	delayMs := ParseInt(act.Params["delay_ms"], 200)
-
-	cleanupCmd, err := infra.InjectNetem(ctx, node, targetIP, delayMs)
-	if err != nil {
-		return nil, err
-	}
-
-	// Store cleanup cmd for later clear_fault.
-	varKey := "__cleanup_netem"
-	if act.Node != "" {
-		varKey += "_" + act.Node
-	}
-	return map[string]string{varKey: cleanupCmd}, nil
+	return applyWitnessedFault(ctx, actx, act, "netem")
 }
 
 func injectPartitionAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, err := GetNode(actx, act.Node)
-	if err != nil {
-		return nil, fmt.Errorf("inject_partition: %w", err)
-	}
-
-	targetIP := act.Params["target_ip"]
-	if targetIP == "" {
-		return nil, fmt.Errorf("inject_partition: target_ip param required")
-	}
-	ports := ParseIntSlice(act.Params["ports"])
-	if len(ports) == 0 {
-		return nil, fmt.Errorf("inject_partition: ports param required")
-	}
-
-	cleanupCmd, err := infra.InjectIptablesDrop(ctx, node, targetIP, ports)
-	if err != nil {
-		return nil, err
-	}
-
-	varKey := "__cleanup_partition"
-	if act.Node != "" {
-		varKey += "_" + act.Node
-	}
-	return map[string]string{varKey: cleanupCmd}, nil
+	return applyWitnessedFault(ctx, actx, act, "partition")
 }
 
 func fillDiskAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, err := GetNode(actx, act.Node)
-	if err != nil {
-		return nil, fmt.Errorf("fill_disk: %w", err)
-	}
+	return applyWitnessedFault(ctx, actx, act, "fill_disk")
+}
 
-	dir := act.Params["dir"]
-	if dir == "" {
-		dir = "/tmp"
+func applyWitnessedFault(ctx context.Context, actx *tr.ActionContext, act tr.Action, kind string) (map[string]string, error) {
+	p, ok := actx.FaultPlans[act.Params["plan"]]
+	if actx.Safety == nil || !ok || p.Kind != kind || p.Node != act.Node {
+		return nil, fmt.Errorf("%s requires an owned scope and matching witnessed fault plan", kind)
 	}
-
-	cleanupCmd, err := infra.FillDisk(ctx, node, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	varKey := "__cleanup_fill_disk"
-	if act.Node != "" {
-		varKey += "_" + act.Node
-	}
-	return map[string]string{varKey: cleanupCmd}, nil
+	return map[string]string{"fault_key": p.Key()}, actx.Safety.ApplyWitnessedFault(ctx, p.Key(), p)
 }
 
 func corruptWALAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
@@ -109,26 +54,9 @@ func corruptWALAction(ctx context.Context, actx *tr.ActionContext, act tr.Action
 }
 
 func clearFaultAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	faultType := act.Params["type"]
-	if faultType == "" {
-		return nil, fmt.Errorf("clear_fault: type param required (netem, partition, fill_disk)")
+	p, ok := actx.FaultPlans[act.Params["plan"]]
+	if actx.Safety == nil || !ok || p.Node != act.Node {
+		return nil, fmt.Errorf("clear_fault requires its witnessed plan")
 	}
-
-	node, err := GetNode(actx, act.Node)
-	if err != nil {
-		return nil, fmt.Errorf("clear_fault: %w", err)
-	}
-
-	varKey := "__cleanup_" + faultType
-	if act.Node != "" {
-		varKey += "_" + act.Node
-	}
-
-	cleanupCmd := actx.Vars[varKey]
-	if cleanupCmd == "" {
-		// Try without node suffix.
-		cleanupCmd = actx.Vars["__cleanup_"+faultType]
-	}
-
-	return nil, infra.ClearFault(ctx, node, cleanupCmd)
+	return nil, actx.Safety.ClearFault(ctx, p.Key())
 }
