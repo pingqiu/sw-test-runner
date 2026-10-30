@@ -440,6 +440,7 @@ func (a *ApprovedRun) Execute(ctx context.Context, engine *Engine, actx *ActionC
 	for id := range actx.Nodes {
 		actx.Nodes[id] = refusedApprovedNode{}
 	}
+	actx.approved = a
 	actx.Safety, actx.TempRoot = a.scope, a.request.Binding.OutputDir
 	actx.Scenario = a.scenario
 	registry := *engine.registry

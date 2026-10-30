@@ -82,7 +82,7 @@ injection seam for CPU controls; no JSON, CLI flag or queue field enables it.
 Execute uses the already parsed pinned scenario, installs the same Safety in
 every phase, sets mutating consent from independent GO, propagates
 watch cancellation, and refuses raw NodeRunner/automatic target/coordinator
-execution. The standalone approved CLI registers only `approved_job` (one
+execution. The approved CLI registers the shared Seaweed pack plus `approved_job` (one
 approved job label, exact argv); it does not register legacy build/shell packs.
 Future packs supply trusted typed handlers to RunApprovedRequest. They must
 honor context and use Safety for effects, not start alternate executors.

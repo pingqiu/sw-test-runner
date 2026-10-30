@@ -1,6 +1,7 @@
 package seaweed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -152,4 +153,33 @@ func TestEnginePreservesJSONOnRuntimeRefusal(t *testing.T) {
 		t.Fatal("runtime refusal lost")
 	}
 	checkResult(t, map[string]string{"value": action.Output}, "S0B_UNAVAILABLE")
+}
+
+func TestTypedPlanIsLocalAndPreservesEveryPhase(t *testing.T) {
+	raw, err := os.ReadFile("../../examples/inventory/dc.requested.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := os.ReadFile("../../examples/inventory/dc.resolved.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Plan{Version: "seaweed.pack-plan/v1", Requested: string(raw), Resolved: string(resolved), Preflight: []Step{{Host: "node1", Job: "preflight"}}, Deploy: []Step{{Host: "node1", Role: "master", Job: "master"}}, Ready: []Step{{Host: "node1", Job: "ready"}}, Workload: []Step{{Host: "node1", Role: "client", Job: "smoke"}}, Collect: []Step{{Host: "node1", Job: "collect"}}}
+	b, err := MarshalPlan(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range phases {
+		t.Run(name, func(t *testing.T) {
+			r, err := PlanPhase(string(b), name)
+			if err != nil || r.Code != "S0B_REQUIRED" || r.ExecutionAuthorized || len(r.Effects) != 0 || r.Deadlines == nil || r.Cleanup == "" {
+				t.Fatalf("plan=%+v err=%v", r, err)
+			}
+		})
+	}
+	for _, bad := range []string{string(b) + " {}", string(bytes.Replace(b, []byte(`"version":`), []byte(`"Version":`), 1)), string(bytes.Replace(b, []byte(`"version":`), []byte(`"version":"x","version":`), 1))} {
+		if _, err := PlanPhase(bad, phases[0]); err == nil {
+			t.Fatal("malformed/aliased plan accepted")
+		}
+	}
 }

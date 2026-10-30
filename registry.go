@@ -8,6 +8,7 @@ import (
 // ActionContext provides action handlers with access to the scenario's
 // infrastructure (nodes, targets) and variable store.
 type ActionContext struct {
+	approved    *ApprovedRun // populated only by ApprovedRun.Execute
 	Scenario    *Scenario
 	Nodes       map[string]NodeRunner
 	Targets     map[string]TargetRunner

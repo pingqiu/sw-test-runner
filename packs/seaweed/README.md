@@ -1,51 +1,139 @@
-# Shared Seaweed deployment pack skeleton
+# Shared Seaweed pack over S0b
 
-One pack will consume the same `seaweed.inventory/v1` seam for Azure, AWS, GCP and on-prem. Provisioning is outside this pack. This Draft deliberately stops at the S0b-min boundary: there is **no deploy, preflight, workload, collection or cleanup implementation**, and no compatibility path through ordinary `NodeRunner.Run`.
+This Draft now integrates the accepted S0b runtime at `1d88dca1`. It remains
+local/fake-qualified only: no M01/M02, container, lab, cloud or provider launch
+is authorized by this PR. Protected installation, service bootstrap, independent
+GO export, original live lease and actual per-host readback are prerequisites,
+not fabricated by this pack. See `docs/s0b-authority.md`.
 
-## Current behavior
+```
+worker claim -> RunApprovedRequest -> exact GO/lease/deployment admission
+  -> seaweed_preflight -> seaweed_deploy (+ readiness)
+  -> seaweed_workload -> seaweed_collect
+  -> RunScope.Close -> seaweed_cleanup (always) -> retained result
+```
 
-`RegisterPack(registry)` explicitly registers these names; the CLI does not enable this skeleton automatically:
+The CLI's strict `approved-run` entry registers this pack, without the legacy
+raw-shell/build/provider registry. Each job is resolved by its independently
+approved label and exact executable/SHA/argv. The same RunScope owns foreground
+and background processes, including POSSIBLE enrollment before a lost reply.
+Every dispatch/authorization repeats S0b live authority and deployment readback.
+No caller variable, YAML boolean, permissive custom scope, inventory digest or
+plan result is an authorization token.
 
-| Action | Current outcome |
-| --- | --- |
-| `seaweed_inventory_validate` | Pure in-memory Decode of `inventory_json`; returns JSON `valid_data_only`, `execution_authorized=false`, state and transport. No file, network or credential access. |
-| `seaweed_plan` | Read-only plan for `for_action` plus `inventory_json`; returns `blocked_plan`, `S0B_UNAVAILABLE`, zero executable effects and no remote calls. |
-| `seaweed_preflight` | `ErrS0bUnavailable`, structured refusal and no remote calls |
-| `seaweed_deploy` | Same refusal |
-| `seaweed_workload` | Same refusal |
-| `seaweed_collect` | Same refusal |
-| `seaweed_cleanup` | Same refusal |
+The initial runtime slice is on-prem, required RC/DC KV, one filer and one volume
+with a bounded ACK/exact-read smoke. HTTP and transport fallback refuse. This is
+not the Gate 0a Docker adapter, cloud provisioning, multi-server routing, a soak,
+or privileged disk setup. It does not change VFs, PFC/ECN, mount/format disks,
+install protected files or replace their reviewed bootstrap process.
 
-The five runtime actions are conservatively registered as mutating. Even with all tiers and mutating enabled, nil context, supplied nodes, a valid inventory or caller-provided `go`/`s0b_admitted` variables, they refuse. Neither YAML nor a passing inventory validator can enable them. Refused cleanup cannot be relied on to remove resources from an independently launched run: no such run is launched by this skeleton.
+## Inventory seam and independent bindings
 
-## Interface to be bound after S0b-min lands
+`seaweed.inventory/v1` now requires typed work/hard deadlines, cleanup reserve
+and explicit per-host service names/ports. It preserves them through Join.
+`Plan` carries exact requested/resolved JSON bytes. `MarshalPlan` is the common
+producer seam; `inventory.Resolve` binds an observed data document to the exact
+request; `inventory.Bind` is the consumer check. At runtime the pack binds to:
 
-The accepted S0a/S0b implementation owns authoritative admission and job/process settlement. This pack does not define an alternative token, boolean enable switch or executor. After that API lands, a separately reviewed adapter must bind:
+- S0b's original run/workload/transport, artifact manifest digest, deadlines and
+  cleanup reserve; no restarted timeout or inferred service port;
+- the exact admitted host/SSH/user/key/root set and read-back boot generations;
+- no formatting permission in this slice, and S0b's exact shared per-host output
+  root, pre-created privately by the independent bootstrap;
+- complete preflight/readiness/collector host coverage, one approved owned
+  deployment job per declared service role and one workload job per client;
+- the complete five-phase scenario, cleanup `always`, no skipping, parallelism,
+  repeats, retries, ignored errors or caller node/target redirection.
 
-1. Requested/resolved inventory byte hashes and scope-preserving join; trusted host keys, boot generations, data NIC/MTU, exact disks and formatting authorization.
-2. Authoritative GO and policy, host-scoped lease, exact scenario/config/artifact/interpreter/runner bytes, work/hard deadlines and cleanup reserve; revoked/expired/mismatched evidence refuses before any job or upload.
-3. Pinned master/volume/filer/S3 deployment under the declared run root. Reuse existing workload/oracle/resource collectors; do not invent per-cloud deployments or new lifecycle machinery.
-4. Required RC/DC device, port, GID, MTU and fabric evidence. HTTP is explicit. Missing required transport refuses; there is no automatic RC/DC-to-HTTP fallback. Azure HB/ND InfiniBand, EFA SRD and selected GCP RoCE are distinct capabilities, not interchangeable claims.
-5. Existing bounded restart/fault helpers, process generation enrollments and closures, ACK-before-overwrite checks and evidence exports. Filer uses accepted r6r3 warm-RSS timing; master preserves r5. Missing members/generations/terminal evidence fail; no fake resource PASS.
-6. Cleanup limited to admitted run ownership, identity checked before effects, settlement followed by independent absence proof. Cloud resource destroy remains the provision/controller responsibility, never an arbitrary shell action derived from inventory.
+The plan is in `scenario.metadata.seaweed_plan`, therefore inside the exact
+independently approved scenario digest. Runtime actions accept no parameters;
+Engine Vars cannot rewrite the plan. A pack refusal also revokes/records failure
+in the original ApprovedRun, so `ignore_error` cannot turn it into a PASS.
 
-The phase names reserve the seam, not a promise that a specific S0b API shape already exists. No placeholder evidence authorizes execution.
+`preflight`, service startup, readiness and collector labels refer to programs
+whose exact bytes/argv must be independently reviewed and installed in S0b's
+protected deployment policy. The pack does not infer the semantics of an
+arbitrary program from a label, nor install/start an unapproved program. The
+M01/M02 readiness packet's missing protected profile/GO/receipts are still real
+runtime prerequisites; the synthetic example is not their replacement. These
+programs must check actual device/GID/MTU/fabric, owned listeners, directories
+and generation evidence. Approval of this code does not qualify those facts.
 
-## Delivery sequence and CPU proof
+## KV operation adapter and proof
 
-Inventory is Draft #11; this Draft is stacked on its branch and changes only this pack. Azure provisioning is independent Draft #13. Local Docker Gate 0a and later VF Gate 0b are design-r2 follow-ups, not implemented here. Gate 0a has HTTP first and DC N/A; its container identity bindings and Gate 0b actual CX5 evidence must be reviewed after S0b-min. No Docker, VF, cloud or lab activity accompanies this Draft.
+`worker/kv_smoke.py` is a thin external-stack CLI around unchanged accepted
+`soak_native_worker.work`, `payload`, `validate_ack_metadata`, and `Oracle`.
+The worker copy is SHA256
+`05c077d05a6af5ec4decebf18c3e0be1b4df1f7dc17265ff1b2c709cf94e577e`
+from `codex02-chaos-input-head-a-20261028/input`; its old `child()` is not used.
+All copied helper bytes are preserved across Windows/Linux by `.gitattributes`.
 
-`go test ./packs/seaweed ./inventory ./cmd/seaweed-inventory` and `go vet` exercise the public Registry boundary. Ten phase/context cases require the sentinel refusal even with permissive registry flags; a node implementation panics on any Run/RunRoot/Upload/Close. Data-only decode has a positive and malformed-input controls. The pre-fix no-refusal stub is RED; the refusal implementation is GREEN. Removing the sentinel refusal reproduces the RED. These are CPU boundary controls, not deployment qualification.
+`SmokeArgs` derives filer endpoints, declared RDMA data/control/DC listeners,
+client device/port/GID, transport and run/client namespace from joined inventory.
+The approved job argv must match exactly, including the canonical JSON config.
+The pack requires the compiled-in smoke/helper hashes in both scanned script
+inputs and the client's protected read-back set, plus its native extension.
+The script uses isolated Python, the pinned helper/native directories, clears
+inherited RDMA selectors and constructs `loader-rdma` with fallback disabled.
 
-## Machine output and plan contract
+Bounds are 1..16 keys of 1 byte..4 MiB, one operation at a time. Each SET is
+ACKed only after successful completion and fresh metadata/FIDs; its GET must
+match the reserved latest ACK SHA256/length. A miss is a failure in this smoke;
+there is no rotation exception or mutation retry. The accepted worker retains
+unknown DMA buffers through process teardown. Native close and all jobs remain
+bounded by the original S0b work/hard envelope and owned settlement.
 
-Every handler returns `seaweed.pack-result/v1` JSON in the Registry `value` key, which the existing engine retains in `ActionResult.Output` even on failure. Stable fields are `schema`, `status`, `code`, `remedy`, `action`, `execution_authorized` and `effects`; data/plan success adds `state` and `transport`. Runtime errors also begin with their stable code for human logs. No raw inventory, secret or endpoint is echoed in this envelope.
+Success additionally requires exact direct RC/DC byte/object deltas, zero other
+transport/copied deltas and no read-error delta. Correct bytes via HTTP still
+fail. Loader write-byte counts are emitted, but are **not** called a server-side
+write-transport witness: `server_write_join=NOT_OBSERVED` until an isolated
+volume counter/log join is collected. No RC/DC hardware claim comes from CPU
+fakes. The pinned loader-rdma product path is required mode, not fallback mode.
 
-| Code | Remedy |
-| --- | --- |
-| `OK` | Data is valid only; wait for reviewed S0b admission before execution. |
-| `INVENTORY_INVALID` | Correct input against the schema and preserve requested scope. |
-| `ACTION_UNSUPPORTED` | Choose a registered Seaweed runtime phase for planning. |
-| `S0B_UNAVAILABLE` | Wait for the reviewed adapter; do not retry or bypass admission. |
+ACK/EXACT/summary records are JSON lines in the owned job stdout. S0b authority
+receipts retain process generation, exact spec, stdout/stderr paths and exit
+settlement. Collect runs approved owned collectors before settlement; this
+slice does not introduce an out-of-band SSH/SCP reader or pretend remote logs
+were locally exported. Operators must retain/export owned evidence through the
+reviewed collector/bootstrap contract before a hardware qualification result.
 
-Call the read-only `seaweed_plan` with `for_action` equal to any runtime phase and the exact `inventory_json`. It needs no mutating registry permission. Because no phase implementation exists, the accurate current plan is `blocked_plan`, `effects: []`, `execution_authorized: false`; it is not a deploy preview or approval. The separately reviewed runtime implementation must replace this blocked plan with exact fenced changes before any effect is enabled. CPU controls exercise every phase's plan and malformed/unsupported refusals; all use the same panic-on-remote-access node.
+## Planning, JSON and recovery
+
+```sh
+go run ./cmd/seaweed-pack --json plan seaweed_deploy examples/seaweed-onprem-plan.json
+# Local only: S0B_REQUIRED, execution_authorized=false, effects=[];
+# planned_steps, original deadlines and owned-cleanup procedure are included.
+sw-test-runner approved-run --json --request /service/running/REQUEST.env --policy /service/bootstrap.json
+```
+
+The plan example has TEST-NET IPs, fabricated boot/fabric observations, fake
+artifact digests and future deadlines. It is data only, not a live lab profile.
+The plan CLI has no run/apply/upload/SSH command. The native adapter also exposes
+`--config JSON --dry-run`, which imports no native module and has no remote
+operation. JSON results carry stable codes and remedy hints. `approved-run
+--json` emits `seaweed.approved-result/v1`; phase/plan results use
+`seaweed.pack-result/v1`. `execution_authorized:true` reports a completed phase
+inside an admitted scope; it is never reusable authority for another action.
+
+Cleanup settles only issuers enrolled by this exact scope. It cannot signal a
+foreign process, launch new work after close, delete arbitrary roots/cloud
+resources or manufacture absence. An UNKNOWN or cleanup error remains FAIL
+through repeated Close and finalization, even if work itself succeeded. A
+failed workload remains failed even when cleanup can prove settlement. Keep the
+original S0b evidence/receipts; resolve UNKNOWN through the approved independent
+procedure, not an unowned kill or retry.
+
+## CPU verification
+
+Run the portable inventory/CLI/pack tests on Windows or Linux. Strict ownership
+admission tests are Linux-only; cross-compiling them and executing locally in
+WSL is sufficient. `runtime_linux_test.go` uses actual strict record readers,
+GO/lease admission, RunApprovedRequest/Engine and phase registration, replacing
+only transport jobs/readback with compiled CPU fakes. It never contacts hosts.
+Python controls use the accepted work/oracle completion path with an in-process
+connector boundary; import/discovery performs no native or remote work.
+
+```sh
+go test ./inventory ./cmd/seaweed-inventory ./packs/seaweed ./cmd/seaweed-pack ./cli
+python3 packs/seaweed/worker/test_kv_smoke.py
+```

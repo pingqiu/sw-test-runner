@@ -12,8 +12,8 @@ import (
 
 // RunApprovedRequest is the service adapter's strict-data entry. A nil runtime
 // selects actual pinned SSH and protected deployment readback, never a fake.
-// Packs may register trusted typed handlers; the CLI uses only approved_job,
-// not the legacy raw-shell/build/automatic-cluster action registry.
+// Packs may register trusted typed handlers. The CLI registers the shared
+// Seaweed pack and approved_job, never the legacy raw-shell/build registry.
 func RunApprovedRequest(ctx context.Context, request, profile string, register func(*Registry), runtime *ApprovedRuntime, log func(string, ...interface{})) (*ScenarioResult, string, error) {
 	policy, err := ReadTrustedPolicy(profile, uint32(os.Geteuid()))
 	if err != nil {
