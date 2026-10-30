@@ -87,6 +87,7 @@ type ownedJob struct {
 	spec        JobSpec
 	settled     bool
 	exit        *ExitInfo
+	outcomeErr  error // Validated terminal failure, not unsettled custody.
 }
 
 type restoration struct {
@@ -125,6 +126,7 @@ type RunScope struct {
 	once            sync.Once
 	done            chan struct{}
 	err             error
+	outcomeErr      error // Sticky even after a proven-failed job is retired; mu.
 	faultReceipts   map[string]FaultReceipt
 	cleanupDeadline time.Time
 	authority       faultAuthority
@@ -298,42 +300,45 @@ func (s *RunScope) retired(h JobHandle) {
 }
 
 func (s *RunScope) Stop(ctx context.Context, h JobHandle) error {
+	custody, outcome := s.stop(ctx, h)
+	return errors.Join(custody, outcome)
+}
+
+// Keep settlement uncertainty separate from an unacceptable proven outcome.
+// Restoration barriers consume only custody; callers/final Close retain both.
+func (s *RunScope) stop(ctx context.Context, h JobHandle) (custody, outcome error) {
 	ctx, cancel := s.cleanupContext(ctx)
 	defer cancel()
 	j, unlock, err := s.lockJob(ctx, h)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	defer unlock()
 	if j.settled {
-		return nil
+		return nil, j.outcomeErr
 	}
 	if j.spec.retainExit {
 		b, ok := s.backend.(interface {
 			settleExit(context.Context, string) (ExitInfo, error)
 		})
 		if !ok {
-			return errors.New("background terminal receipt unavailable")
+			return errors.New("background terminal receipt unavailable"), nil
 		}
 		i, err := b.settleExit(ctx, h.id)
 		if err != nil {
-			return err
+			return err, nil
 		}
 		if !validJobExit(i, j) {
-			return errors.New("unproven background exit receipt")
+			return errors.New("unproven background exit receipt"), nil
 		}
-		j.exit = &i
-		s.retired(h)
-		if !i.CleanupStopped || i.Code != -1 || i.Signal != 9 {
-			return errors.New("background service exited before intentional cleanup")
-		}
-		return nil
+		s.recordExit(h, j, i)
+		return nil, j.outcomeErr
 	}
 	if err := s.backend.Settle(ctx, h.id); err != nil {
-		return err
+		return err, nil
 	}
 	s.retired(h)
-	return nil
+	return nil, nil
 }
 
 func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
@@ -347,7 +352,7 @@ func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
 	}
 	defer unlock()
 	if j.exit != nil {
-		return *j.exit, nil
+		return *j.exit, j.outcomeErr
 	}
 	if j.settled {
 		return ExitInfo{}, errors.New("settled without exit receipt")
@@ -359,9 +364,27 @@ func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
 	if !validJobExit(i, j) {
 		return i, errors.New("unproven exit receipt")
 	}
+	s.recordExit(h, j, i)
+	return i, j.outcomeErr
+}
+
+// Called under this job's gate. Persist the failed outcome before retirement,
+// so a concurrent Close cannot miss it after taking its live-job snapshot.
+func (s *RunScope) recordExit(h JobHandle, j *ownedJob, i ExitInfo) {
 	j.exit = &i
+	if j.spec.retainExit && (!i.CleanupStopped || i.Code != -1 || i.Signal != 9) {
+		j.outcomeErr = errors.New("background service exited before intentional cleanup")
+		s.mu.Lock()
+		s.outcomeErr = errors.Join(s.outcomeErr, j.outcomeErr)
+		s.mu.Unlock()
+	}
 	s.retired(h)
-	return i, nil
+}
+
+func (s *RunScope) failedOutcome() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outcomeErr
 }
 
 func validJobExit(i ExitInfo, j *ownedJob) bool {
@@ -436,6 +459,10 @@ func (s *RunScope) cleanupContext(parent context.Context) (context.Context, cont
 }
 
 func (s *RunScope) ClearFault(ctx context.Context, key string) error {
+	return errors.Join(s.clearFault(ctx, key), s.failedOutcome())
+}
+
+func (s *RunScope) clearFault(ctx context.Context, key string) error {
 	ctx, cancel := s.cleanupContext(ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -476,7 +503,7 @@ func (s *RunScope) settleWork(ctx context.Context) error {
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].id < jobs[j].id })
 	var errs []error
 	for _, h := range jobs {
-		if err := s.Stop(ctx, h); err != nil {
+		if err, _ := s.stop(ctx, h); err != nil {
 			errs = append(errs, fmt.Errorf("settle issuer %s: %w", h.id, err))
 		}
 	}
@@ -530,7 +557,7 @@ func (s *RunScope) Close() error {
 			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
 		}
 		for n := len(order) - 1; issuerErr == nil && n >= 0; n-- {
-			if err := s.ClearFault(ctx, order[n]); err != nil {
+			if err := s.clearFault(ctx, order[n]); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
 			}
 			s.mu.Lock()
@@ -546,11 +573,14 @@ func (s *RunScope) Close() error {
 		}
 		sort.Slice(jobs, func(i, j int) bool { return jobs[i].id < jobs[j].id })
 		for _, h := range jobs {
-			if err := cleanupCall(ctx, func(ctx context.Context) error { return s.Stop(ctx, h) }); err != nil {
+			if err := cleanupCall(ctx, func(ctx context.Context) error {
+				custody, _ := s.stop(ctx, h)
+				return custody
+			}); err != nil {
 				errs = append(errs, fmt.Errorf("settle %s: %w", h.id, err))
 			}
 		}
-		s.err = errors.Join(errs...)
+		s.err = errors.Join(errors.Join(errs...), s.failedOutcome())
 	})
 	<-s.done
 	return s.err

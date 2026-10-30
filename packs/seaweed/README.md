@@ -110,6 +110,11 @@ leader killed by explicit cleanup is distinguished from a service that exited
 earlier (even exit 0); unexpected or unproven exits fail. Older custodians that
 do not supply that distinction cannot qualify background cleanup. Protected
 runner/helper deployment hashes therefore need updating before any runtime use.
+Proven terminal failures remain sticky after retirement and repeated Stop,
+Wait, ClearFault or Close. They fail the result but do not count as a possible
+live issuer: existing approved obligations are restored after settlement is
+proven. Unproven/UNKNOWN custody still withholds restoration under the original
+authority/deadline checks; an empty live-job map alone grants no restoration.
 
 RC direct-byte counters qualify transport, **not the declared local device or
 GID**. Actual RC-device qualification remains NOT_PROVEN until the independently
