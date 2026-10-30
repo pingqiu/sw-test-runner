@@ -1,7 +1,7 @@
 # SSH host-key pins (S0b-min, PR1)
 
 Every remote `infra.Node` requires `HostKey`: one operator-approved OpenSSH
-public host key (`ssh-ed25519 AAAA…`, for example). Empty/malformed pins,
+public host key (`ssh-ed25519 AAAAâ€¦`, for example). Empty/malformed pins,
 multiple lines/keys and authorized-key options refuse. The private client key
 remains `KeyFile`. Local/native test execution does not establish SSH identity.
 
@@ -26,3 +26,27 @@ malformed and changed-key refusal before exec; independent command refusal
 while an older shared connection remains open; reconnect refusal; and actual
 YAML/CLI field propagation. The fixture counts server exec requests so refusal
 cannot pass merely because a later command failed.
+
+## Scope and legacy admission refusal
+
+The pin enforcement claim covers `Node.Connect` and independent `OpenCommand`
+only. It is not a repository-wide removal of insecure shell SSH. The existing
+`scripts/run-block-ci.sh:44` and nested SSH in
+`scenarios/internal/rdma-rust-volume-rc.yaml:254,282,349` remain unchanged.
+Migration follow-up: pin those transports or retire those paths when their
+scenarios move to the approved runner path.
+
+`NewS0bRunScope` refuses scenario/script bytes containing
+`StrictHostKeyChecking=no` or standalone/nested `ssh` commands before calling
+the authority verifier or creating custody. This is a conservative text gate
+(including comments), not a general shell interpreter or proof that arbitrary
+scripts are safe. OpenSSH public-key labels such as `ssh-ed25519` remain allowed.
+It wraps the existing `NewRunScope`, leaving S0a local/test use unchanged.
+
+PR3's approved worker adapter must use this S0b entrance with the complete,
+hash-bound, snapshotted scenario and script bodies it will actually execute;
+omitted/unlisted/dynamically substituted inputs cannot qualify. There is no
+existing S0b worker activation in this PR and no promise that legacy CLI runs
+already construct this scope. A pinned outer connection alone never qualifies
+a nested SSH destination. The legacy paths above cannot qualify through this
+S0b entrance until separately migrated.
