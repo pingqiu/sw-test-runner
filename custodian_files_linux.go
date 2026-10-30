@@ -84,7 +84,7 @@ func custodyLog(root *os.File, dirname, filename string) (*os.File, error) {
 		return nil, errors.New("log outside output root")
 	}
 	rel := strings.TrimPrefix(filename, dirname+"/")
-	fd, err := unix.Openat2(int(root.Fd()), rel, &unix.OpenHow{Flags: unix.O_CREAT | unix.O_EXCL | unix.O_WRONLY | unix.O_CLOEXEC, Mode: 0600, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
+	fd, err := unix.Openat2(int(root.Fd()), rel, &unix.OpenHow{Flags: unix.O_CREAT | unix.O_EXCL | unix.O_RDWR | unix.O_CLOEXEC, Mode: 0600, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
 	if err != nil {
 		return nil, err
 	}

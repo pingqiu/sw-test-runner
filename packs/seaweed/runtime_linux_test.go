@@ -32,6 +32,7 @@ type cpuNode struct {
 	unknown        bool
 	lostReply      bool
 	onAuthorize    func()
+	dropOutput     bool
 }
 
 func (n *cpuNode) Enroll(_ context.Context, id string, a tr.RunAdmission, s tr.JobSpec) (tr.ProcessIdentity, error) {
@@ -77,6 +78,9 @@ func (n *cpuNode) Wait(_ context.Context, id string) (tr.ExitInfo, error) {
 	s := n.specs[id]
 	delete(n.live, id)
 	exit := tr.ExitInfo{Identity: n.ids[id], Code: 0, Settled: true, StdoutPath: s.StdoutPath, StderrPath: s.StderrPath}
+	if s.CaptureOutput && !n.dropOutput {
+		exit.Output = tr.CapturedOutput{Complete: true, StdoutBase64: "e30K", StderrBase64: "", StdoutSHA256: hash([]byte("{}\n")), StderrSHA256: hash(nil), ReadStart: time.Now(), ReadEnd: time.Now()}
+	}
 	if n.cleanupStopped[id] {
 		exit.Code, exit.Signal, exit.CleanupStopped = -1, 9, true
 	}
@@ -291,6 +295,15 @@ func TestStrictEntryRunsAllFiveSeaweedPhases(t *testing.T) {
 	}
 	if background != 4 {
 		t.Fatalf("background receipts=%d", background)
+	}
+}
+
+func TestStrictEntryMissingOwnedOutputCannotPass(t *testing.T) {
+	f := newCPUFixture(t)
+	f.node.dropOutput = true
+	result, _, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
+	if err == nil && result != nil && result.Status == tr.StatusPass {
+		t.Fatal("missing hardware/collector export still passed actual strict entry")
 	}
 }
 

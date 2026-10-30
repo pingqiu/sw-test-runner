@@ -14,7 +14,7 @@ func validateEnvelope(d *Document) error {
 	for _, host := range d.Hosts {
 		names, ports := map[string]bool{}, map[int]bool{}
 		for _, s := range host.Services {
-			if !oneOf(s.Name, "master_http", "master_grpc", "filer_http", "filer_grpc", "volume_http", "volume_grpc", "s3_http", "rdma", "rdma_control", "dc_control", "kv_coordinator") || names[s.Name] || ports[s.Port] || s.Port < 1 || s.Port > 65535 {
+			if !oneOf(s.Name, "master_http", "master_grpc", "filer_http", "filer_grpc", "volume_http", "volume_grpc", "s3_http", "rdma", "rdma_push", "rdma_control", "dc_control", "kv_coordinator") || names[s.Name] || ports[s.Port] || s.Port < 1 || s.Port > 65535 {
 				return fmt.Errorf("invalid or colliding service port on %s", host.ID)
 			}
 			names[s.Name], ports[s.Port] = true, true

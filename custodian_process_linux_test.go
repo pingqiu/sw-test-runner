@@ -21,6 +21,15 @@ import (
 
 func init() {
 	nativeCustodyTestWorkload = func(args []string) bool {
+		if len(args) == 1 && args[0] == "s0a-profile-large-output" {
+			_, _ = os.Stdout.Write(make([]byte, 131073))
+			return true
+		}
+		if len(args) == 1 && args[0] == "s0a-profile-output" {
+			fmt.Fprint(os.Stdout, "profile-record\n")
+			fmt.Fprint(os.Stderr, "diagnostic\n")
+			return true
+		}
 		if len(args) != 2 {
 			return false
 		}

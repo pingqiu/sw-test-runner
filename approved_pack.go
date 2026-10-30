@@ -66,13 +66,19 @@ func (c *ActionContext) RunApprovedPackJob(ctx context.Context, label string, ba
 	if err := work.Err(); err != nil {
 		return JobHandle{}, ExitInfo{}, err
 	}
-	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background}, false)
+	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background, CaptureOutput: !background}, false)
 	if err != nil || background {
 		return h, ExitInfo{}, err
 	}
 	e, err := c.Safety.Wait(ctx, h)
 	if err == nil && (e.Code != 0 || e.Signal != 0) {
 		err = errors.New("approved pack job failed")
+	}
+	if err == nil {
+		_, _, err = e.Output.Decode()
+		if err == nil && e.Output.ReadEnd.After(c.Safety.admission.HardDeadline) {
+			err = errors.New("owned output captured outside original envelope")
+		}
 	}
 	return h, e, err
 }

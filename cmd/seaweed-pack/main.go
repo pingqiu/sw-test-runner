@@ -12,10 +12,42 @@ import (
 
 func main() { os.Exit(run(os.Args[1:])) }
 func run(args []string) int {
-	out := seaweed.Result{Schema: "seaweed.pack-result/v1", Status: "refused", Code: "USAGE", Remedy: "use [--json] plan PHASE FILE; no execution command exists", Effects: []string{}}
+	out := seaweed.Result{Schema: "seaweed.pack-result/v1", Status: "refused", Code: "USAGE", Remedy: "use [--json] plan PHASE FILE or profile INPUT.json; no execution command exists", Effects: []string{}}
 	code := 2
 	if len(args) > 0 && args[0] == "--json" {
 		args = args[1:]
+	}
+	if len(args) == 2 && args[0] == "profile" {
+		f, err := os.Open(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "PROFILE_INPUT_UNREADABLE")
+			return 2
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			fmt.Fprintln(os.Stderr, "PROFILE_INPUT_UNREADABLE")
+			return 2
+		}
+		raw, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "PROFILE_INPUT_UNREADABLE")
+			return 2
+		}
+		input, err := seaweed.DecodeProfileInput(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		bundle, err := seaweed.BuildProfile(input)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(bundle); err != nil {
+			return 1
+		}
+		return 0
 	}
 	if len(args) == 3 && args[0] == "plan" {
 		f, err := os.Open(args[2])

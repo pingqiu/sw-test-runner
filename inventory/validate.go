@@ -155,7 +155,10 @@ func validate(d *Document) error {
 		}
 		disks, mounts, devices := map[string]bool{}, map[string]bool{}, map[string]bool{}
 		for _, disk := range h.Disks {
-			if !slug.MatchString(disk.ID) || disks[disk.ID] || !cleanPath(disk.Mount) || mounts[disk.Mount] || disk.FormatAllowed == nil {
+			// A pre-existing root filesystem is an observable storage fact, never
+			// a run root or formatting grant. Keep those separate path checks strict.
+			mountOK := cleanPath(disk.Mount) || disk.Mount == "/" && disk.FormatAllowed != nil && !*disk.FormatAllowed
+			if !slug.MatchString(disk.ID) || disks[disk.ID] || !mountOK || mounts[disk.Mount] || disk.FormatAllowed == nil {
 				return fmt.Errorf("invalid/duplicate disk or missing format declaration")
 			}
 			disks[disk.ID] = true

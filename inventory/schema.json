@@ -633,6 +633,7 @@
                   "volume_grpc",
                   "s3_http",
                   "rdma",
+                  "rdma_push",
                   "kv_coordinator",
                   "rdma_control",
                   "dc_control"
@@ -693,7 +694,7 @@
         },
         "mount": {
           "type": "string",
-          "pattern": "^/[A-Za-z0-9_./-]+$"
+          "pattern": "^/(?:[A-Za-z0-9_./-]+)?$"
         },
         "format_allowed": {
           "type": "boolean"
@@ -704,6 +705,12 @@
         "device_id",
         "mount",
         "format_allowed"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "mount": { "const": "/" } } },
+          "then": { "properties": { "format_allowed": { "const": false } } }
+        }
       ]
     },
     "rdma_na": {

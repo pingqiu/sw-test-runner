@@ -308,6 +308,9 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 						if status.Signaled() {
 							r.Exit.Signal = int(status.Signal())
 						}
+						if s.CaptureOutput {
+							r.Exit.Output = captureOwnedOutput(out, errout, a.HardDeadline)
+						}
 					}
 				}
 			default:

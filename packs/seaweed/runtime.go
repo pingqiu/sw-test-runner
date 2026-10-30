@@ -24,6 +24,7 @@ import (
 // Protected installation is a separate prerequisite; deploy starts owned jobs.
 type Plan struct {
 	Version   string        `json:"version"`
+	Profile   string        `json:"profile,omitempty"`
 	Requested string        `json:"requested_inventory"`
 	Resolved  string        `json:"resolved_inventory"`
 	Preflight []Step        `json:"preflight"`
@@ -74,6 +75,9 @@ func decodePlan(raw string) (Plan, *inventory.Document, error) {
 	}
 	if p.Version != "seaweed.pack-plan/v1" {
 		return p, nil, errors.New("unsupported plan")
+	}
+	if p.Profile != "" && p.Profile != "m01-m02-v1" {
+		return p, nil, errors.New("unsupported host profile")
 	}
 	d, err := inventory.Join([]byte(p.Requested), []byte(p.Resolved))
 	return p, d, err
@@ -202,6 +206,11 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 				}
 			} else if s.Role != "" {
 				return errors.New("probe role must be empty")
+			}
+			if p.Profile == "m01-m02-v1" && kind != "workload" {
+				if err := checkProfile(j, in, d, s.Host, kind, s.Role, p.Smoke); err != nil {
+					return err
+				}
 			}
 			if coverage[key] {
 				return errors.New("duplicate step coverage")

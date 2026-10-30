@@ -37,6 +37,7 @@ type JobSpec struct {
 	StdoutPath, StderrPath   string
 	Argv                     []string
 	Restoration              bool // Set only by the scope's cleanup path.
+	CaptureOutput            bool // Bounded owned-log export; never execution authority.
 	retainExit               bool // Private pack background ownership, never caller authority.
 }
 
@@ -46,10 +47,22 @@ type ExitInfo struct {
 	Signal                 int
 	StdoutPath, StderrPath string
 	Settled                bool
+	Output                 CapturedOutput
 	// True only when the custodian observed the authorized leader still alive
 	// at explicit cleanup and stopped it. Absence/SETTLED alone is not an exit.
 	CleanupStopped bool
 }
+
+// CapturedOutput is immutable receipt data. An error is evidence loss, not a
+// claim that a proven-settled process is still live. Base64 preserves all bytes.
+type CapturedOutput struct {
+	Complete                                               bool
+	StdoutBase64, StderrBase64, StdoutSHA256, StderrSHA256 string
+	Error                                                  string
+	ReadStart, ReadEnd                                     time.Time
+}
+
+const MaxCapturedOutputBytes = 128 << 10 // Per stream, explicit opt-in only.
 
 type KillWitness struct {
 	Identity    ProcessIdentity

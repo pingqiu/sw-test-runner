@@ -27,6 +27,14 @@ not the Gate 0a Docker adapter, cloud provisioning, multi-server routing, a soak
 or privileged disk setup. It does not change VFs, PFC/ECN, mount/format disks,
 install protected files or replace their reviewed bootstrap process.
 
+The optional `m01-m02-v1` profile now supplies the missing preflight, service
+argv, readiness and collector programs. It is data selection, never consent.
+`seaweed-pack profile INPUT.json` emits canonical job pins and a five-phase
+scenario using joined inventory; `execution_authorized` remains false. Runtime
+checks the same derived argv and compiled helper hashes against independently
+scanned/protected deployment bytes. See `docs/m01-m02-profile.md` for the actual
+operator prerequisites and evidence limits.
+
 ## Inventory seam and independent bindings
 
 `seaweed.inventory/v1` now requires typed work/hard deadlines, cleanup reserve
@@ -94,12 +102,13 @@ write-transport witness: `server_write_join=NOT_OBSERVED` until an isolated
 volume counter/log join is collected. No RC/DC hardware claim comes from CPU
 fakes. The pinned loader-rdma product path is required mode, not fallback mode.
 
-ACK/EXACT/summary records are JSON lines in the owned job stdout. S0b authority
-receipts retain process generation, exact spec, stdout/stderr paths and exit
-settlement. Collect runs approved owned collectors before settlement; this
-slice does not introduce an out-of-band SSH/SCP reader or pretend remote logs
-were locally exported. Operators must retain/export owned evidence through the
-reviewed collector/bootstrap contract before a hardware qualification result.
+ACK/EXACT/summary records are JSON lines in the owned job stdout. Foreground
+pack jobs request bounded stdout/stderr export in their settled custody receipt
+(128 KiB per stream, exact base64 bytes and SHA256). The custodian reads only its
+already-owned descriptors after child settlement. Missing, unstable or oversized
+output fails evidence qualification; it never changes proven settlement into a
+live issuer. Legacy jobs do not request capture. There is no additional SSH/SCP
+reader. Authority bundles retain these receipts and the exact process/spec pins.
 
 Action deadlines fence enrollment and authorization, including a delayed
 enrollment reply. The custodian also receives the absolute authorization bound;
