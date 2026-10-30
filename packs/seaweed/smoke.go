@@ -32,12 +32,12 @@ type SmokeConfig struct {
 	FilerGRPC   string `json:"filer_grpc"`
 	FilerHTTP   string `json:"filer_http"`
 	Root        string `json:"root"`
-	RDMAAddress string `json:"rdma_address"`
-	RDMAControl string `json:"rdma_control"`
-	DCControl   string `json:"dc_control"`
-	Device      string `json:"device"`
-	DevicePort  int    `json:"device_port"`
-	GIDIndex    int    `json:"gid_index"`
+	RDMAAddress string `json:"rdma_address,omitempty"`
+	RDMAControl string `json:"rdma_control,omitempty"`
+	DCControl   string `json:"dc_control,omitempty"`
+	Device      string `json:"device,omitempty"`
+	DevicePort  int    `json:"device_port,omitempty"`
+	GIDIndex    *int   `json:"gid_index,omitempty"`
 	NativeDir   string `json:"native_dir"`
 	HelperDir   string `json:"helper_dir"`
 	Keys        int    `json:"keys"`
@@ -56,7 +56,7 @@ func endpoint(h inventory.Host, name string) string {
 // SmokeArgs produces the exact bounded smoke argv from the joined inventory.
 // It does not execute, import a native module or grant admission.
 func SmokeArgs(d *inventory.Document, client string, s SmokeSettings) ([]string, error) {
-	if d == nil || d.State != "resolved" || (d.Transport != "dc" && d.Transport != "rc") || s.Keys < 1 || s.Keys > 16 || s.Length < 1 || s.Length > 4*1024*1024 || s.NativeDir == "/" || !path.IsAbs(s.NativeDir) || path.Clean(s.NativeDir) != s.NativeDir || s.HelperDir == "/" || !path.IsAbs(s.HelperDir) || path.Clean(s.HelperDir) != s.HelperDir {
+	if d == nil || d.State != "resolved" || (d.Transport != "dc" && d.Transport != "rc" && d.Transport != "http") || s.Keys < 1 || s.Keys > 16 || s.Length < 1 || s.Length > 4*1024*1024 || s.NativeDir == "/" || !path.IsAbs(s.NativeDir) || path.Clean(s.NativeDir) != s.NativeDir || s.HelperDir == "/" || !path.IsAbs(s.HelperDir) || path.Clean(s.HelperDir) != s.HelperDir {
 		return nil, errors.New("invalid bounded smoke settings")
 	}
 	var filer, volume, worker *inventory.Host
@@ -78,10 +78,14 @@ func SmokeArgs(d *inventory.Document, client string, s SmokeSettings) ([]string,
 			worker = h
 		}
 	}
-	if filer == nil || volume == nil || worker == nil || worker.RDMA.GIDIndex == nil {
+	if filer == nil || volume == nil || worker == nil || (d.Transport != "http" && worker.RDMA.GIDIndex == nil) {
 		return nil, errors.New("missing filer/volume/client or GID")
 	}
-	c := SmokeConfig{RunID: d.RunID, Client: client, Transport: d.Transport, FilerGRPC: endpoint(*filer, "filer_grpc"), FilerHTTP: "http://" + endpoint(*filer, "filer_http"), Root: "/testops/" + d.RunID + "/" + client, RDMAAddress: endpoint(*volume, "rdma"), RDMAControl: endpoint(*volume, "rdma_control"), DCControl: endpoint(*volume, "dc_control"), Device: worker.RDMA.Device, DevicePort: worker.RDMA.Port, GIDIndex: *worker.RDMA.GIDIndex, NativeDir: s.NativeDir, HelperDir: s.HelperDir, Keys: s.Keys, Length: s.Length}
+	c := SmokeConfig{RunID: d.RunID, Client: client, Transport: d.Transport, FilerGRPC: endpoint(*filer, "filer_grpc"), FilerHTTP: "http://" + endpoint(*filer, "filer_http"), Root: "/testops/" + d.RunID + "/" + client, NativeDir: s.NativeDir, HelperDir: s.HelperDir, Keys: s.Keys, Length: s.Length}
+	if d.Transport != "http" {
+		c.RDMAAddress, c.RDMAControl, c.DCControl = endpoint(*volume, "rdma"), endpoint(*volume, "rdma_control"), endpoint(*volume, "dc_control")
+		c.Device, c.DevicePort, c.GIDIndex = worker.RDMA.Device, worker.RDMA.Port, worker.RDMA.GIDIndex
+	}
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return nil, err

@@ -137,8 +137,10 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		}
 	}
 	b := in.Binding
-	if d.Target != "onprem" || (d.Transport != "rc" && d.Transport != "dc") || b.Workload != "kv" || b.Transport != "rdma" {
-		return errors.New("this slice requires on-prem KV with RC/DC and no HTTP fallback")
+	rdma := d.Target == "onprem" && (d.Transport == "rc" || d.Transport == "dc") && b.Transport == "rdma"
+	http := d.Target == "azure" && d.Transport == "http" && b.Transport == "http"
+	if b.Workload != "kv" || (!rdma && !http) {
+		return errors.New("require explicit on-prem RC/DC or Azure HTTP KV profile; no transport fallback")
 	}
 	cb := inventory.ConsumerBinding{RequestedSHA256: hash([]byte(p.Requested)), ResolvedSHA256: hash([]byte(p.Resolved)), RunID: b.RunID, Transport: d.Transport, ArtifactManifestSHA256: b.Artifacts.SHA256, Deadlines: inventory.Deadlines{Work: b.WorkDeadline.UTC().Format(time.RFC3339Nano), Hard: b.HardDeadline.UTC().Format(time.RFC3339Nano), CleanupReserveMS: b.CleanupReserveMS}}
 	for _, h := range b.Hosts {
