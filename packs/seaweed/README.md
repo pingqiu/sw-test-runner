@@ -8,8 +8,9 @@ One pack will consume the same `seaweed.inventory/v1` seam for Azure, AWS, GCP a
 
 | Action | Current outcome |
 | --- | --- |
-| `seaweed_inventory_validate` | Pure in-memory Decode of `inventory_json`; returns `valid_data_only`, `execution_authorized=false`, state and transport. No file, network or credential access. |
-| `seaweed_preflight` | `ErrS0bUnavailable`, no outputs or remote calls |
+| `seaweed_inventory_validate` | Pure in-memory Decode of `inventory_json`; returns JSON `valid_data_only`, `execution_authorized=false`, state and transport. No file, network or credential access. |
+| `seaweed_plan` | Read-only plan for `for_action` plus `inventory_json`; returns `blocked_plan`, `S0B_UNAVAILABLE`, zero executable effects and no remote calls. |
+| `seaweed_preflight` | `ErrS0bUnavailable`, structured refusal and no remote calls |
 | `seaweed_deploy` | Same refusal |
 | `seaweed_workload` | Same refusal |
 | `seaweed_collect` | Same refusal |
@@ -35,3 +36,16 @@ The phase names reserve the seam, not a promise that a specific S0b API shape al
 Inventory is Draft #11; this Draft is stacked on its branch and changes only this pack. Azure provisioning is independent Draft #13. Local Docker Gate 0a and later VF Gate 0b are design-r2 follow-ups, not implemented here. Gate 0a has HTTP first and DC N/A; its container identity bindings and Gate 0b actual CX5 evidence must be reviewed after S0b-min. No Docker, VF, cloud or lab activity accompanies this Draft.
 
 `go test ./packs/seaweed ./inventory ./cmd/seaweed-inventory` and `go vet` exercise the public Registry boundary. Ten phase/context cases require the sentinel refusal even with permissive registry flags; a node implementation panics on any Run/RunRoot/Upload/Close. Data-only decode has a positive and malformed-input controls. The pre-fix no-refusal stub is RED; the refusal implementation is GREEN. Removing the sentinel refusal reproduces the RED. These are CPU boundary controls, not deployment qualification.
+
+## Machine output and plan contract
+
+Every handler returns `seaweed.pack-result/v1` JSON in the Registry `value` key, which the existing engine retains in `ActionResult.Output` even on failure. Stable fields are `schema`, `status`, `code`, `remedy`, `action`, `execution_authorized` and `effects`; data/plan success adds `state` and `transport`. Runtime errors also begin with their stable code for human logs. No raw inventory, secret or endpoint is echoed in this envelope.
+
+| Code | Remedy |
+| --- | --- |
+| `OK` | Data is valid only; wait for reviewed S0b admission before execution. |
+| `INVENTORY_INVALID` | Correct input against the schema and preserve requested scope. |
+| `ACTION_UNSUPPORTED` | Choose a registered Seaweed runtime phase for planning. |
+| `S0B_UNAVAILABLE` | Wait for the reviewed adapter; do not retry or bypass admission. |
+
+Call the read-only `seaweed_plan` with `for_action` equal to any runtime phase and the exact `inventory_json`. It needs no mutating registry permission. Because no phase implementation exists, the accurate current plan is `blocked_plan`, `effects: []`, `execution_authorized: false`; it is not a deploy preview or approval. The separately reviewed runtime implementation must replace this blocked plan with exact fenced changes before any effect is enabled. CPU controls exercise every phase's plan and malformed/unsupported refusals; all use the same panic-on-remote-access node.
