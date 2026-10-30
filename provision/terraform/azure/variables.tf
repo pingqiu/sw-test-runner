@@ -81,3 +81,26 @@ variable "nodes" {
     error_message = "Require 1..32 unique IPv4 nodes, supported roles, explicit integer disk sizes, and a disk for each volume."
   }
 }
+
+variable "run_declaration" {
+  description = "Declared UTC deadlines and USD budget only. No authority, watchdog or provider deadline is installed by this module."
+  type = object({
+    work_deadline                 = string
+    hard_deadline                 = string
+    cloud_cleanup_reserve_seconds = number
+    budget_usd                    = number
+    abort_estimate_usd            = number
+  })
+  validation {
+    condition     = can(formatdate("YYYY", var.run_declaration.work_deadline)) && endswith(var.run_declaration.work_deadline, "Z") && can(formatdate("YYYY", var.run_declaration.hard_deadline)) && endswith(var.run_declaration.hard_deadline, "Z")
+    error_message = "Declare RFC3339 UTC work/hard deadlines ending Z. Data is not admission."
+  }
+  validation {
+    condition     = var.run_declaration.cloud_cleanup_reserve_seconds > 0 && var.run_declaration.cloud_cleanup_reserve_seconds == floor(var.run_declaration.cloud_cleanup_reserve_seconds) && try(timecmp(timeadd(var.run_declaration.work_deadline, format("%ds", var.run_declaration.cloud_cleanup_reserve_seconds)), var.run_declaration.hard_deadline) <= 0, false)
+    error_message = "Hard deadline must include the explicit positive integer cloud-cleanup reserve after work deadline."
+  }
+  validation {
+    condition     = var.run_declaration.budget_usd > 0 && var.run_declaration.abort_estimate_usd > 0 && var.run_declaration.abort_estimate_usd <= var.run_declaration.budget_usd
+    error_message = "Declare positive USD budget and abort estimate no greater than that budget."
+  }
+}
