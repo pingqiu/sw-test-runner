@@ -34,6 +34,25 @@ def main():
    bad=copy.deepcopy(obs);bad['hosts'][0]['disks'][0]['format_allowed']=True
    assert validator.is_valid(bad);badpath=tmp/'changed-format.json';badpath.write_text(json.dumps(bad))
    p=subprocess.run([str(binary),'join',str(reqpath),str(badpath)],capture_output=True,text=True,timeout=5);assert p.returncode==2;checks+=1
+  # Review cases: schema and the real compiled CLI must reject the same bytes.
+  base=json.loads((root/'examples/inventory/http.requested.json').read_text())
+  for name in ('envelope_alias','format_alias'):
+   bad=copy.deepcopy(base)
+   if name=='envelope_alias':bad['transport']='typo';bad['Transport']='http'
+   else:bad['hosts'][0]['disks'][0]['Format_Allowed']=True
+   validate(bad,False)
+   # Valid request/resolution except the same alias on the observed input.
+   observed=json.loads((root/'examples/inventory/http.resolved.json').read_text())
+   if name=='envelope_alias':observed['transport']='typo';observed['Transport']='http'
+   else:observed['hosts'][0]['disks'][0]['Format_Allowed']=True
+   badpath=tmp/'alias-observed.json';badpath.write_text(json.dumps(observed))
+   p=subprocess.run([str(binary),'--json','join',str(root/'examples/inventory/http.requested.json'),str(badpath)],capture_output=True,text=True,timeout=5)
+   assert p.returncode==2 and json.loads(p.stdout)['code']=='INVENTORY_JOIN_REFUSED';checks+=1
+  dc=json.loads((root/'examples/inventory/dc.requested.json').read_text())
+  for field in ('device','port','gid','link_layer','active_mtu','fabric_evidence_sha256'):
+   bad=copy.deepcopy(dc);bad['hosts'][0]['rdma'][field]=None;validate(bad,False)
+  # Schema explicitly permits a requested nullable GID index; do not tighten it accidentally.
+  bad=copy.deepcopy(dc);bad['hosts'][0]['rdma']['gid_index']=None;validate(bad,True)
   p=subprocess.run([str(binary),'run'],capture_output=True,text=True,timeout=5);assert p.returncode==2;checks+=1
  print(json.dumps(dict(status='PASS',checks=checks,network_calls=0,authority_granted=False)))
 if __name__=='__main__':main()

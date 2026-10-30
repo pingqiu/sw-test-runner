@@ -87,3 +87,11 @@ JSON is the default; `seaweed-inventory --json validate FILE` (or `join REQUESTE
 | `INVENTORY_JOIN_REFUSED` | Validate both documents, preserve scope and bind the exact request digest. |
 
 This CLI has no mutating steps. Executable plans belong to the reviewed shared pack, not to inventory validation.
+
+### Explicit r1 scope deferral (review R3)
+
+This Draft does **not** yet declare envelope deadlines or per-host service ports from design r1. Both are explicitly deferred to the reviewed S0b/shared-pack integration before v1 is frozen for runtime consumption. The current validator cannot validate or preserve either field; supplying them remains an unknown-field refusal. No consumer may infer default service ports or a deadline from their absence. The Azure Draft's provisioning NSG rules are not an inventory service-port declaration.
+
+Before runtime activation, add typed deadline and role/service-port declarations to the same inventory schema, exact request-preserving Join controls and producer/consumer bindings. A declared deadline remains data only; authoritative S0b deadlines and admission are separately enforced. This deferral does not waive those requirements or authorize a deployment. The pack stays unconditionally refused until the reviewed adapter and these bindings land. It is separate from the accepted design-r2 container/VF extension, which also awaits review before runtime use.
+
+Decoding uses exact JSON tag spellings recursively, before Go struct decoding; unknown, noncanonical and duplicate-by-case keys are refused. Optional primitive fields may be omitted, but supplied null is rejected where the published schema requires a string/integer. Published nullable observation/GID-index/N/A-capabilities declarations remain subject to their existing state-specific validation.
