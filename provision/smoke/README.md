@@ -1,44 +1,12 @@
 # Azure one-VM smoke controller
 
-One Linux command: pinned Terraform init/plan/apply → shared HTTP pack under
-normal S0b admission → Terraform destroy → independent Azure resource list.
-This replaces #20's outer-run/identity-fence design. No cloud call is made by
-`pins` or `plan`. The Draft has local/fake evidence only; **no launch token**.
+One Linux command: local dry-run -> Terraform init/plan/apply -> shared pack direct HTTP phases -> finally destroy -> independent resource-group list. No S0b admission, GO, materializer or authorization receipts on this cloud path. M01/M02 strict entry is unchanged.
 
-## Inputs and prerequisites
+Only run with the manager launch token, current price/cap check, an empty dedicated RG and one run at a time. This Draft has local/loopback evidence only; no account calls or launch qualification.
 
-- One dedicated existing RG, one existing lease/run at a time. RG/RBAC stay.
-- Linux controller with Terraform 1.17.1 and Azure CLI already authenticated;
-  credentials never on tp01, VMs or shared evidence. Public SSH key only to VM.
-- Reviewed source includes `provision/terraform/azure` and `azure-validation`.
-  Exact module/wiring/lock/cloud-init hashes are frozen below. Init uses
-  `-backend=false -lockfile=readonly`; no provider repair/update or new backend.
-- JSON tfvars matching the wiring root: explicit subscription/RG, westus2,
-  Standard_D2s_v5, pinned image/artifacts, public key/controller /32 and all
-  existing required declarations. `run_declaration` contains fixed work/hard UTC
-  deadlines, 600–1800 s cloud cleanup reserve, budget ≤3 USD, abort estimate ≤
-  budget. Hard deadline is minute-aligned and ≤60 min from run entry.
-- The existing S0b service must observe/resolve the export, install the pinned
-  artifacts through its normal procedure and provide an authentic claimed
-  request/protected policy at the configured paths. These are normal pack
-  prerequisites, not a second admission. The command neither self-signs them nor
-  learns guest keys by TOFU. If they are not ready when apply/export finishes,
-  admission fails and teardown runs; no arbitrary bootstrap hook is executed.
-- The work/hard gap declares a best-effort cloud cleanup window; normal S0b
-  process settlement can consume part of it. This is not a guaranteed minimum
-  provider settlement duration; the original hard end is never extended.
-  Exact module export
-  must match scenario `seaweed_plan.requested_inventory`, resolved Join and the
-  normal approved bindings. Only one Azure/HTTP host is accepted.
+## Private controller configuration
 
-Build `go build -o /private/bin/seaweed-cloud ./cmd/seaweed-cloud`. Keep config,
-tfvars, output/state and results private. Plans/state must not go to shared V:.
-
-```sh
-seaweed-cloud pins --source /private/repo --variables /private/run.tfvars.json --json
-```
-
-Put returned hashes into this config (absolute paths):
+Terraform 1.17.1, Azure CLI and credentials stay on the Linux controller. Use the existing `provision/terraform/azure-validation` tfvars: explicit subscription/RG, westus2 D2s_v5, pinned image, login **public** key and controller /32. Work/hard UTC deadlines include cloud cleanup reserve; hard end must be minute-aligned and <=60 minutes away; cap <=$3. All paths below are absolute.
 
 ```json
 {
@@ -46,83 +14,44 @@ Put returned hashes into this config (absolute paths):
   "module_sha256": "<pins result>",
   "variables": "/private/run.tfvars.json",
   "variables_sha256": "<pins result>",
-  "output": "/private/new-smoke-run",
-  "request": "/protected/service/running/request.env",
-  "policy": "/protected/service/bootstrap.json",
-  "estimated_usd": 0.12
+  "output": "/private/new-run",
+  "estimated_usd": 0.12,
+  "cloud": {
+    "ssh_key": "/private/client-key",
+    "files": {
+      "weed": {"path": "/private/artifacts/weed", "sha256": "<approved hash>"},
+      "weed-volume": {"path": "/private/artifacts/weed-volume", "sha256": "<approved hash>"},
+      "native.tar": {"path": "/private/artifacts/native.tar", "sha256": "<approved hash>"}
+    }
+  }
 }
 ```
 
-Price is a reviewed input, not a price-service lookup/billing guarantee. Reprice
-before the token. Output must be fresh for run, with parent already present.
-Snapshots/state/command intent-output-status stay there (0700 dirs/0600 files).
-Module pin hashes a sorted list of `relative-path NUL file-sha256 LF` for
-top-level `.tf`, lock and cloud-init files in the two fixed module directories.
-Tests, credentials and `.terraform` are not copied. TF_VAR/TF_CLI_ARGS/workspace/
-data-dir/CLI-config overrides are dropped.
+The native archive must contain `native/seaweedkv_native`. The cloud HTTP smoke uses the OS filesystem under the inventory run_root, with no disk formatting. The declared cache disk stays unformatted. This is an infrastructure smoke, not cache-disk performance or rotation qualification.
 
-## Plan, run and recovery
+The controller generates a fresh **server** ed25519 key before Terraform plan/apply, writes it in mode-0600 `host.auto.tfvars.json`, and uses its public half through infra.Node FixedHostKey for the first SSH. Cloud-init installs the private half only on that VM; it is also present in private Terraform plan/state. The client authentication private key never goes to the VM. Keep config/output/state/plan private, never V:/shared evidence. Do not print them. Terraform command output is withheld from command logs.
+
+## Commands
 
 ```sh
-seaweed-cloud plan --config /private/config.json --json  # local only, effects=[]
-# Only after manager token, normal prerequisites, current price and lease checks:
+go build -o /private/bin/seaweed-cloud ./cmd/seaweed-cloud
+seaweed-cloud pins --source /private/repo --variables /private/run.tfvars.json --json
+seaweed-cloud plan --config /private/config.json --json # local checks, effects=[]
+# Manager token required:
 seaweed-cloud run --config /private/config.json --json
-```
-
-The daily native shutdown schedule uses the hard deadline's UTC HHmm, enabled
-with expiry tag. It deallocates compute; disks/IPs bill until destroy. Date is in
-the expiry tag; a schedule is not an absolute provider-completion deadline.
-Registration/permissions/provider failure can prevent arming after VM create,
-so UNKNOWN always requires recovery/reporting. [AzureRM schedule semantics](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/dev_test_global_vm_shutdown_schedule).
-
-Before apply, the private `apply-started` stamp is flushed to disk; only a
-zero-exit apply writes `apply-succeeded`. Missing/malformed success evidence
-stays `create_unresolved=true`, including old output folders lacking receipts.
-Recovery destroy and an empty list do not resolve a pending provider create:
-they return `CREATE_UNRESOLVED`, never COMPLETE/EMPTY. The operator must resolve
-the original operation with Azure and report it separately; this small slice
-adds no provider-operation resolver or override/marker-clear command. Keep the
-original evidence; do not remove it to force a clean verdict.
-
-Every apply attempt, including failure/UNKNOWN, is followed by destroy and full
-read-only RG list within the original hard deadline. No apply retry, state-rm,
-force-unlock or same-ID replacement fence. Dedicated RG exclusivity is assumed.
-On session death/cleanup failure, keep output/state, tell the manager and use:
-
-```sh
-seaweed-cloud plan --config /private/config.json --json  # shows destroy step too
+# Recovery, including after controller/session death:
 seaweed-cloud destroy --config /private/config.json --json
 seaweed-cloud verify --config /private/config.json --json
 ```
 
-Recovery destroy is an explicit new operator action bounded to 15 min, with no
-provision/reapply. Changed source/vars snapshots refuse. Original journal stays;
-recovery has separate record numbers. Verifier lists all RG resources via CLI,
-independently of Terraform state, with no whitelist hiding leftovers. It never
-deletes the RG/RBAC. An empty JSON array is required; missing/invalid list is
-UNKNOWN. Run owners coordinate the single lease; this adds no lease framework.
-Standalone verify has a 30-second local read deadline (or an earlier caller
-deadline). Timeout is non-clean with `remaining_observed=false`. Command records
-currently retain argv/stdout/status and error stderr; UTC timing and successful
-stderr are not promised by this corrective slice.
+Run requires a fresh private output directory. Init uses the committed provider version/lock, no repair. The locks retain every previous hash and add the Linux unpacked h1 obtained from the existing verified Linux zip (same azurerm 5.12.0). No credentials are transferred; no environment TF_VAR/TF_CLI_ARGS override is accepted.
 
-CLI always emits `seaweed.cloud-smoke/v1` JSON. Exit0: `PLAN_ONLY`, `COMPLETE`,
-`EMPTY`. Nonzero: `USAGE`, `INPUT_REFUSED`, `LINUX_REQUIRED`, `DEADLINE_REFUSED`,
-`RG_NOT_EMPTY`, `PLAN_FAILED`, `APPLY_FAILED_OR_UNKNOWN`, `INVENTORY_FAILED`,
-`EVIDENCE_FAILED`, `PACK_FAILED`, `CLEANUP_INCOMPLETE`, `RESOURCES_REMAIN`.
-`CREATE_UNRESOLVED` also exits nonzero, even with an observed empty list.
-Every result has `code`, `remedy`, `effects`, `remaining_resource_ids`,
-`remaining_observed` and `create_unresolved`; the first is only the current list
-snapshot, not proof that a pending create settled. `bundle` is normal
-pack evidence. Clean teardown never turns workload FAIL into PASS. Notify the
-owner on failures; the command does not send external messages automatically.
+The pack waits for cloud-init, uploads and checks the three artifact hashes, installs embedded #19 worker files, starts master/volume/filer/S3, waits for HTTP readiness, runs 16 x 1 MiB SET+immediate exact GET, and saves worker output and service logs. Every command has a deadline; nonzero/missing summary/wrong bytes fails. No workload retries or HTTP fallback. The VM is destroyed even if setup/workload fails. Normal teardown does not turn workload failure into PASS.
 
-## Local verification scope
+The existing native shutdown schedule/expiry tag remains a compute backstop, not disk/IP cleanup. Provider errors may prevent arming. Hard-deadline teardown is best effort; run destroy again after session death and inspect remaining IDs.
 
-`go test ./provision/smoke ./cmd/seaweed-cloud`: pinned inputs, no-effect dry-run,
-single apply, failure/UNKNOWN, cancellation, residual/unknown list, sticky
-workload failure and explicit recovery. Linux controls execute fake CLIs and
-reach real missing-S0b refusal; #19 retains the pack's strict positive/negative
-controls. Neither proves cloud deployment, artifact installation or live KV.
-Terraform wiring tests mock the provider and check enabled UTC schedule, exact
-exported VM ID and expiry. No account authentication/API is used by these tests.
+UNKNOWN apply stays sticky: destroy + an empty list cannot prove that an unresolved create will not finish later. `CREATE_UNRESOLVED` never becomes `COMPLETE` without resolving that pending create; remaining IDs and nonzero status must be reported to the owner. `verify` is locally bounded to 30 seconds. The RG/RBAC stay.
+
+## Verification limits
+
+CPU tests drive the actual native command boundary with fake Terraform/az, including a late asynchronous create after recovery's empty list. Loopback SSH tests use a real handshake to prove pinned-key success/mismatch refusal and exercise transfers/phase calls. Their server simulates service/worker output: they do not execute weed/cloud-init/the native connector or prove Azure service compatibility. Existing M01/M02 strict tests remain unchanged. Cloud qualification still needs the manager token.

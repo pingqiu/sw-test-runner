@@ -9,6 +9,11 @@ variable "subscription_id" { type = string }
 variable "resource_group_name" { type = string }
 variable "location" { type = string }
 variable "ssh_public_key" { type = string }
+variable "host_keys" {
+  type      = object({ ed25519_private = string, ed25519_public = string })
+  sensitive = true
+  default   = null
+}
 variable "operator_cidr" { type = string }
 variable "image_version" { type = string }
 variable "artifact_manifest_sha256" { type = string }
@@ -34,6 +39,7 @@ module "run" {
   location                   = var.location
   run_id                     = "single-http-gate"
   ssh_public_key             = var.ssh_public_key
+  host_keys                  = var.host_keys
   operator_cidr              = var.operator_cidr
   image_version              = var.image_version
   artifact_manifest_sha256   = var.artifact_manifest_sha256

@@ -1,12 +1,15 @@
 // Package smoke is a small, single-VM Azure lifecycle controller. The shared
-// pack retains its own normal S0b admission; Terraform is not an S0b job.
+// cloud HTTP entry trusts the just-created VM; on-prem S0b is unchanged.
 package smoke
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -18,21 +21,18 @@ import (
 	"strings"
 	"time"
 
-	tr "github.com/pingqiu/sw-test-runner"
-	"github.com/pingqiu/sw-test-runner/inventory"
 	"github.com/pingqiu/sw-test-runner/packs/seaweed"
-	"gopkg.in/yaml.v3"
+	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
-	Source          string  `json:"source"`
-	ModuleSHA256    string  `json:"module_sha256"`
-	Variables       string  `json:"variables"`
-	VariablesSHA256 string  `json:"variables_sha256"`
-	Output          string  `json:"output"`
-	Request         string  `json:"request"`
-	Policy          string  `json:"policy"`
-	EstimatedUSD    float64 `json:"estimated_usd"`
+	Source          string              `json:"source"`
+	ModuleSHA256    string              `json:"module_sha256"`
+	Variables       string              `json:"variables"`
+	VariablesSHA256 string              `json:"variables_sha256"`
+	Output          string              `json:"output"`
+	Cloud           seaweed.CloudConfig `json:"cloud"`
+	EstimatedUSD    float64             `json:"estimated_usd"`
 }
 type Result struct {
 	Schema            string         `json:"schema"`
@@ -47,7 +47,7 @@ type Result struct {
 	Plan              map[string]any `json:"plan,omitempty"`
 }
 type Runner func(context.Context, string, string, ...string) ([]byte, error)
-type Pack func(context.Context, string, string, []byte) (string, error)
+type Pack func(context.Context, []byte, seaweed.CloudConfig) (string, error)
 type Controller struct {
 	Command Runner
 	Pack    Pack
@@ -178,9 +178,9 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
 		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG, <=$3 and minute-aligned cleanup envelope")
 	}
-	for _, p := range []string{c.Source, c.Variables, c.Output, c.Request, c.Policy} {
+	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
 		if !filepath.IsAbs(p) {
-			return nil, nil, d, errors.New("source/variables/output/request/policy must be absolute controller paths")
+			return nil, nil, d, errors.New("source/variables/output/SSH key must be absolute controller paths")
 		}
 	}
 	return files, b, d, nil
@@ -230,17 +230,23 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Code = "USAGE"
 		return
 	}
+	if ctl.Pack == nil && (mode == "run" || mode == "plan") {
+		if err = c.Cloud.CheckFiles(); err != nil {
+			out.Error = err.Error()
+			return
+		}
+	}
 	if mode == "plan" {
 		out.Code = "PLAN_ONLY"
-		out.Remedy = "review estimate, module/lock/vars pins and normal pack admission; obtain launch token before run"
-		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": 1, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack normal S0b admission", "terraform destroy", "independent read-only RG list"}}
+		out.Remedy = "review estimate, module/lock/vars and artifacts; obtain launch token before run"
+		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": 1, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
 	if ctl.Command == nil {
 		ctl.Command = Native
 	}
 	if ctl.Pack == nil {
-		ctl.Pack = ApprovedPack
+		ctl.Pack = seaweed.RunCloudHTTP
 	}
 	terraformRoot := filepath.Join(c.Output, "provision", "terraform")
 	root := filepath.Join(terraformRoot, "azure-validation")
@@ -300,6 +306,11 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			}
 		}
 		if err = os.WriteFile(filepath.Join(root, "run.auto.tfvars.json"), vars, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
+		c.Cloud.Output = c.Output
+		if c.Cloud.HostKey, err = hostKey(root); err != nil {
 			out.Error = err.Error()
 			return
 		}
@@ -412,8 +423,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Error = e.Error()
 		return
 	}
-	out.Effects = append(out.Effects, "normal S0b pack")
-	if out.Bundle, e = ctl.Pack(work, c.Request, c.Policy, b); e != nil {
+	out.Effects = append(out.Effects, "direct cloud HTTP pack")
+	if out.Bundle, e = ctl.Pack(work, b, c.Cloud); e != nil {
 		out.Code = "PACK_FAILED"
 		out.Error = e.Error()
 		return
@@ -444,36 +455,25 @@ func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, erro
 	return b, nil
 }
 
-func ApprovedPack(ctx context.Context, request, policy string, requested []byte) (string, error) {
-	// These reads only join the provision output to the normal admission input.
-	// RunApprovedRequest subsequently performs all trusted reads/admission itself.
-	b, e := os.ReadFile(request)
+// Only the VM's server key enters private cloud-init/state. The controller's
+// client authentication key never leaves the controller.
+func hostKey(root string) (string, error) {
+	_, private, e := ed25519.GenerateKey(rand.Reader)
 	if e != nil {
 		return "", e
 	}
-	var r tr.ClaimedRequest
-	if e = StrictJSON(b, &r); e != nil {
+	signer, e := ssh.NewSignerFromKey(private)
+	if e != nil {
 		return "", e
 	}
-	b, e = os.ReadFile(r.Binding.Scenario.Path)
-	if e != nil || digest(b) != r.Binding.Scenario.SHA256 {
-		return "", errors.New("scenario pin mismatch")
-	}
-	var s tr.Scenario
-	if e = yaml.Unmarshal(b, &s); e != nil {
+	block, e := ssh.MarshalPrivateKey(private, "single-cloud-smoke")
+	if e != nil {
 		return "", e
 	}
-	var p seaweed.Plan
-	if e = StrictJSON([]byte(s.Metadata["seaweed_plan"]), &p); e != nil {
+	public := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	b, e := json.Marshal(map[string]any{"host_keys": map[string]string{"ed25519_private": string(pem.EncodeToMemory(block)), "ed25519_public": public}})
+	if e != nil {
 		return "", e
 	}
-	d, e := inventory.Join(requested, []byte(p.Resolved))
-	if e != nil || p.Requested != string(requested) || d.Target != "azure" || d.Transport != "http" || len(d.Hosts) != 1 {
-		return "", errors.New("pack does not bind the exact one-VM HTTP export")
-	}
-	res, bundle, e := tr.RunApprovedRequest(ctx, request, policy, seaweed.RegisterPack, nil, nil)
-	if e == nil && (res == nil || res.Status != tr.StatusPass) {
-		e = errors.New("pack returned FAIL")
-	}
-	return bundle, e
+	return public, os.WriteFile(filepath.Join(root, "host.auto.tfvars.json"), b, 0600)
 }

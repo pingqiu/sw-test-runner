@@ -1,5 +1,5 @@
 // seaweed-cloud is a Linux-only, one-VM smoke lifecycle command, never an
-// alternate workload runner. It calls the shared pack's normal S0b admission.
+// alternate workload runner. It calls the shared pack's direct cloud HTTP entry.
 package main
 
 import (

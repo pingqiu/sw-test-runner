@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/pingqiu/sw-test-runner/packs/seaweed"
+	"golang.org/x/crypto/ssh"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +30,13 @@ func fixture(t *testing.T) Config {
 	if e = os.WriteFile(p, vars, 0600); e != nil {
 		t.Fatal(e)
 	}
-	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Request: filepath.Join(root, "request.json"), Policy: filepath.Join(root, "policy.json"), EstimatedUSD: .12}
+	cloud := seaweed.CloudConfig{SSHKey: filepath.Join(root, "key"), Files: map[string]seaweed.CloudFile{}}
+	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
+		p := filepath.Join(root, name)
+		os.WriteFile(p, []byte(name), 0600)
+		cloud.Files[name] = seaweed.CloudFile{Path: p, SHA256: digest([]byte(name))}
+	}
+	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Cloud: cloud, EstimatedUSD: .12}
 }
 
 type fake struct {
@@ -64,7 +72,7 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 	}
 	return []byte("ok"), nil
 }
-func (f *fake) pack(ctx context.Context, req, policy string, b []byte) (string, error) {
+func (f *fake) pack(ctx context.Context, b []byte, cloud seaweed.CloudConfig) (string, error) {
 	f.events = append(f.events, "pack")
 	if string(b) != `{"exact":"module export"}` {
 		return "", errors.New("export drift")
@@ -97,6 +105,56 @@ func TestCompleteLifecycle(t *testing.T) {
 	want := "az resource,terraform init,terraform plan,terraform apply,terraform output,pack,terraform destroy,az resource"
 	if r.Code != "COMPLETE" || !r.RemainingObserved || strings.Join(f.events, ",") != want {
 		t.Fatalf("%+v %+v", r, f.events)
+	}
+}
+
+func TestGeneratedServerKeyIsInPrivateCloudInitBeforeApply(t *testing.T) {
+	c := fixture(t)
+	f := &fake{}
+	checked := false
+	ctl := controller(f)
+	ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+		if tool == "terraform" && args[0] == "plan" {
+			b, e := os.ReadFile(filepath.Join(dir, "host.auto.tfvars.json"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var v struct {
+				HostKeys map[string]string `json:"host_keys"`
+			}
+			if json.Unmarshal(b, &v) != nil {
+				t.Fatal("bad key JSON")
+			}
+			signer, e := ssh.ParsePrivateKey([]byte(v.HostKeys["ed25519_private"]))
+			if e != nil {
+				t.Fatal(e)
+			}
+			if strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))) != v.HostKeys["ed25519_public"] {
+				t.Fatal("server key mismatch")
+			}
+			checked = true
+		}
+		return f.command(ctx, dir, tool, args...)
+	}
+	ctl.Pack = func(ctx context.Context, b []byte, cloud seaweed.CloudConfig) (string, error) {
+		if !checked || cloud.HostKey == "" || cloud.Output != c.Output {
+			t.Fatal("key or output missing before pack")
+		}
+		return f.pack(ctx, b, cloud)
+	}
+	r := ctl.Execute(context.Background(), "run", c)
+	if r.Code != "COMPLETE" || !checked {
+		t.Fatal(r)
+	}
+}
+
+func TestMissingArtifactsRefuseBeforeCloudCalls(t *testing.T) {
+	c := fixture(t)
+	c.Cloud.Files = nil
+	f := &fake{}
+	r := (Controller{Command: f.command}).Execute(context.Background(), "run", c)
+	if r.Code != "INPUT_REFUSED" || len(f.events) != 0 {
+		t.Fatalf("%+v %v", r, f.events)
 	}
 }
 func TestFailuresAlwaysCleanupAndStayFailed(t *testing.T) {
@@ -201,11 +259,11 @@ func TestRecoveryUsesSameSnapshotAndDoesNotCreate(t *testing.T) {
 		t.Fatal("changed recovery accepted")
 	}
 }
-func TestApprovedPackCannotRunWithoutNormalAdmission(t *testing.T) {
+func TestCloudPackRefusesInvalidInventory(t *testing.T) {
 	c := fixture(t)
-	_, e := ApprovedPack(context.Background(), c.Request, c.Policy, []byte(`{}`))
+	_, e := seaweed.RunCloudHTTP(context.Background(), []byte(`{}`), c.Cloud)
 	if e == nil {
-		t.Fatal("missing normal admission accepted")
+		t.Fatal("malformed cloud inventory accepted")
 	}
 }
 func TestStrictJSONRefusesAliasesDuplicatesAndTrailing(t *testing.T) {
