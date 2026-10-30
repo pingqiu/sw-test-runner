@@ -95,7 +95,8 @@ RFC3339Nano `work` and `hard`, plus positive `cleanup_reserve_ms` <=60000.
 `work + reserve <= hard`. Validation does not check the current clock: saved
 historical evidence remains decodable; live S0b admission enforces freshness.
 Every host declares `services` as exact name/port pairs. Master/filer/volume
-HTTP and gRPC listeners, S3 HTTP and an RDMA volume listener are mandatory for
+HTTP and gRPC listeners, S3 HTTP, RDMA push data plus RC control (and DC
+control for DC) listeners are mandatory for
 the corresponding role/transport. Names and ports are unique on a host; there
 is no implicit +10000 arithmetic or transport fallback. Empty client services
 are explicit. Optional `kv_coordinator` declares that listener when installed.
