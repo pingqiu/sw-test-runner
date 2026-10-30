@@ -170,3 +170,8 @@ key is copied. A failed cleanup or evidence write cannot produce PASS.
 
 No lab hosts, devices, leases, deployed worker configuration or cloud resources
 are changed by these CPU controls. Passing them is not provider qualification.
+
+Approved terminal ClearFault failures remain on their restoration obligation.
+A retry still qualifies and verifies exact Before without another mutation,
+but successful state verification cannot erase the failure from final Close.
+Legacy non-approved clearing keeps its existing retry disposition.

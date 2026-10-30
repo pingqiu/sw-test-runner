@@ -88,6 +88,7 @@ type restoration struct {
 	verify      func(context.Context) error
 	cleared     bool
 	applyErr    error
+	cleanupErr  error // First approved terminal failure; protected by gate.
 }
 
 type faultAuthority interface {
@@ -417,10 +418,13 @@ func (s *RunScope) ClearFault(ctx context.Context, key string) error {
 		restoreErr = cleanupCall(ctx, r.restore)
 	}
 	if err := errors.Join(restoreErr, cleanupCall(ctx, r.verify)); err != nil {
+		if s.authority != nil && r.cleanupErr == nil {
+			r.cleanupErr = err
+		}
 		return err
 	}
 	r.cleared = true
-	return nil
+	return r.cleanupErr
 }
 
 // Closing fences admission before this snapshot. A failed settlement prevents
