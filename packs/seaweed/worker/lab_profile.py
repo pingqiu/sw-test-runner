@@ -198,7 +198,18 @@ def filer_config(root):
     return '[leveldb2]\nenabled = true\ndir = ' + json.dumps(str(root / 'filer' / 'ldb2')) + '\n'
 
 
-def prepare_filer_replacement(root):
+def filer_metadata(root, original=None):
+    info = (root / 'filer' / 'ldb2').lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError('filer metadata identity not private')
+    identity = dict(device=info.st_dev, inode=info.st_ino)
+    if original is not None and identity != original.get('metadata_directory'):
+        raise ValueError('original filer metadata directory changed')
+    return identity
+
+
+def prepare_filer_replacement(root, original):
+    filer_metadata(root, original)
     metadata = root / 'filer' / 'ldb2'
     for item in (metadata, root / 'filer.toml'):
         info = item.lstat()
@@ -222,6 +233,7 @@ def prepare_filer_replacement(root):
         if any(line.split(None,7)[7:] == [str(sock)] for line in Path('/proc/net/unix').read_text().splitlines()):
             raise ValueError('replacement filer socket still active')
         if sock.lstat() != info:raise ValueError('replacement filer socket changed')
+        filer_metadata(root, original)
         sock.unlink()
 
 
@@ -257,9 +269,10 @@ def launch(config, role, replacement=False):
             info=(root / role).lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o022:
                 raise ValueError('replacement data dir not private')
-            if role == 'filer':prepare_filer_replacement(root)
+            if role == 'filer':prepare_filer_replacement(root, old)
         else:
             (root / role).mkdir(mode=0o700, exist_ok=False)
+            if role == 'filer':(root / role / 'ldb2').mkdir(mode=0o700)
         for sub in ('home', 'cache', 'tmp'):
             (root / sub).mkdir(mode=0o700, exist_ok=True)
         if role == 'master':
@@ -270,6 +283,7 @@ def launch(config, role, replacement=False):
             with (root / 'filer.toml').open('x') as stream:
                 stream.write(filer_config(root))
         identity = process(os.getpid())
+        if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
         with (root / (role + ('-replacement' if replacement else '') + '-generation.json')).open('x') as stream:
@@ -277,6 +291,7 @@ def launch(config, role, replacement=False):
         print(json.dumps(dict(event='PRODUCT_EXEC', **identity)), flush=True)
         os.chdir(root)
         remaining(config)
+        if replacement and role == 'filer':filer_metadata(root, old)
         os.execve(fd, argv, env)
     finally:
         os.close(fd)
