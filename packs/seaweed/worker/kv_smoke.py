@@ -106,13 +106,16 @@ def read_only(conn, c, stage, route):
     helper=exact_helper('soak_native_worker')
     helper.validate_api(type(conn))
     before=json.loads(conn.stats_json());started=time.monotonic();epoch=time.time()
-    exact=attempts=0;faults=[];first=last=None
+    exact=attempts=0;faults=[];outcomes=[];first=last=None
     # One operation at a time, small reusable allocations, bounded rate/output.
     while (stage=='load' and time.monotonic()-started<120) or (stage=='recovery' and attempts<c['keys']):
         key=c['client']+'-'+str(attempts%c['keys'])
         command=dict(action='get',key=key,seed=c['run_id']+'/'+key,length=c['length'],operation_id=attempts)
         row=helper.work(conn,command)  # Unknown completion/timeout is fatal; never retried.
         end=time.time();attempts+=1
+        if attempts>1024:raise AssertionError('bounded GET evidence exceeded')
+        outcomes.append(dict(operation_id=row['operation_id'],key=key,started=row['submitted'],ended=row['completed'],
+            exact=row['ok'] and row['results'] in (None,[True])))
         if not row['ok'] or row['results'] not in (None,[True]):
             if stage!='load':raise AssertionError('recovery GET miss/error')
             if len(faults)>=256:raise AssertionError('bounded completed-failure evidence exceeded')
@@ -141,7 +144,7 @@ def read_only(conn, c, stage, route):
     errors=after['read_errors']-before['read_errors']
     if errors<0 or errors>len(faults):raise AssertionError('unattributed read error counter')
     return dict(status='OBSERVED',stage=stage,transport=route,exact=exact,attempts=attempts,faults=faults,
-        first_exact=first,last_exact=last,started=epoch,ended=time.time(),elapsed=time.monotonic()-started,
+        outcomes=outcomes,first_exact=first,last_exact=last,started=epoch,ended=time.time(),elapsed=time.monotonic()-started,
         before=before,after=after,run_id=c['run_id'],client=c['client'],root=c['root'])
 
 

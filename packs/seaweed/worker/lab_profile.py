@@ -194,7 +194,7 @@ def free_service_ports(config):
     return dict(declared_ports=sorted(declared), listening_conflicts=[])
 
 
-def launch(config, role):
+def launch(config, role, replacement=False):
     remaining(config)
     root = private_root(config)
     argv, env = product_command(config, role)
@@ -215,7 +215,19 @@ def launch(config, role):
             raise ValueError('protected product hash/stability mismatch')
         if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022:
             raise ValueError('product must not be group/other writable')
-        (root / role).mkdir(mode=0o700, exist_ok=False)
+        if replacement:
+            if role != 'volume':raise ValueError('only volume replacement is supported')
+            old=json.loads((root / 'volume-generation.json').read_text())
+            if old['boot_id'] != config['boot_id']:raise ValueError('replacement boot differs')
+            try:current=process(old['pid'])
+            except FileNotFoundError:current=None
+            if current and current['starttime']==old['starttime'] and current['state'] not in ('Z','X','x'):
+                raise ValueError('old volume is still live')
+            info=(root / role).lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o022:
+                raise ValueError('replacement data dir not private')
+        else:
+            (root / role).mkdir(mode=0o700, exist_ok=False)
         for sub in ('home', 'cache', 'tmp'):
             (root / sub).mkdir(mode=0o700, exist_ok=True)
         if role == 'master':
@@ -229,7 +241,7 @@ def launch(config, role):
         identity = process(os.getpid())
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
-        with (root / (role + '-generation.json')).open('x') as stream:
+        with (root / (role + ('-replacement' if replacement else '') + '-generation.json')).open('x') as stream:
             json.dump(identity, stream, sort_keys=True)
         print(json.dumps(dict(event='PRODUCT_EXEC', **identity)), flush=True)
         os.chdir(root)
@@ -326,7 +338,10 @@ def services(config):
     for role in config['roles']:
         if role == 'client':
             continue
-        expected = json.loads((root / (role + '-generation.json')).read_text())
+        generation = root / (role + '-generation.json')
+        if role=='volume' and (root / 'volume-replacement-generation.json').exists():
+            generation=root / 'volume-replacement-generation.json'
+        expected = json.loads(generation.read_text())
         # Do not accept a live foreign executable named in an editable PID file.
         binary = 'weed-volume' if role == 'volume' else 'weed'
         if expected['executable_sha256'] != config['products'][binary] or expected['role'] != role:
@@ -336,7 +351,9 @@ def services(config):
         ports = owned_listeners(expected['pid'])
         if not {config['services'][p] for p in required[role]} <= ports:
             raise ValueError('service listeners not owned by exact generation: ' + role)
-        facts[role] = dict(identity=current, listening_ports=sorted(ports))
+        facts[role] = dict(identity=current, listening_ports=sorted(ports),
+            scope_identity=dict(PID=current['pid'],StartTime=current['starttime'],BootID=current['boot_id'],
+                                ExecutableSHA256=current['executable_sha256']))
         if role == 'volume':
             logs = log_evidence(root, expected)
             if not any('RDMA DC push-read writer active' in line
@@ -384,6 +401,7 @@ def topology_contains(value, endpoint):
 
 
 def ready(config):
+    client_ack = time.monotonic()  # Probe entry is causally after the runner Kill acknowledgement.
     last = None
     # Read-only readiness retries only, under one named 45 s/original-work bound.
     original = datetime.datetime.fromisoformat(config['deadline'].replace('Z', '+00:00')).timestamp()
@@ -404,7 +422,7 @@ def ready(config):
             if not topology_contains(topology, volume):
                 raise ValueError('volume missing from master topology')
             http_json('http://' + address + ':' + str(ports['filer_http']) + '/', config, False)
-            return dict(status='READY', processes=facts, topology=topology,
+            return dict(status='READY', processes=facts, topology=topology, client_mono=client_ack,
                         server_write_join='NOT_OBSERVED')
         except (OSError, ValueError, KeyError) as error:
             last = repr(error)
@@ -434,9 +452,12 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'collect'), required=True)
     parser.add_argument('--role', default='')
+    parser.add_argument('--replacement-volume', action='store_true')
     args = parser.parse_args()
     config = json.loads(args.config)
     remaining(config)
+    if args.replacement_volume and (args.action,args.role)!=('deploy','volume'):
+        raise ValueError('replacement flag requires volume deploy')
     if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != config['boot_id']:
         raise ValueError('host rebooted since inventory')
     if args.action == 'preflight':
@@ -446,7 +467,7 @@ def main():
         row['ports'] = free_service_ports(config)
         row['process_limits'] = Path('/proc/self/limits').read_text()
     elif args.action == 'deploy':
-        launch(config, args.role)
+        launch(config, args.role, args.replacement_volume)
         raise AssertionError('exec returned')
     elif args.action == 'ready':
         row = ready(config)

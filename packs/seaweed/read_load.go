@@ -107,7 +107,7 @@ func checkReadTask(j tr.JobPin, in tr.PackInputs, d *inventory.Document, client 
 // CheckReadTaskOutput checks the captured owned stdout, not an external receipt
 // or self-reported file. Completed outage observations earn NO error credit
 // here: the scenario must join each one to the exact witnessed outage.
-func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (map[string]any, error) {
+func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, window ...ReadWindow) (map[string]any, error) {
 	if c.Keys < 1 || c.Keys > 16 || c.Length < 1 || c.Length > 4*1024*1024 || c.Transport != "dc" {
 		return nil, errors.New("invalid read-only bounds")
 	}
@@ -167,6 +167,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 		LastExact                *float64 `json:"last_exact"`
 		Faults                   []map[string]json.RawMessage
 		Before, After            json.RawMessage
+		Outcomes                 []GETOutcome
 	}
 	body, _ := json.Marshal(rows[0])
 	if err = json.Unmarshal(body, &r); err != nil {
@@ -208,6 +209,11 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 	}
 	if err = checkReadCounters(r.Before, r.After, route, r.Exact, c.Length, len(r.Faults), 0); err != nil {
 		return nil, err
+	}
+	if len(window) > 0 {
+		if err = checkWindow(r.Outcomes, seen, r.Attempts, r.Elapsed, c, window[0]); err != nil {
+			return nil, err
+		}
 	}
 	var observed map[string]any
 	err = json.Unmarshal(body, &observed)

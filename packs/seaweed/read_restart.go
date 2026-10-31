@@ -1,0 +1,170 @@
+package seaweed
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/inventory"
+	"path"
+	"slices"
+	"strconv"
+	"time"
+)
+
+type GETOutcome struct {
+	ID             *int `json:"operation_id"`
+	Key            string
+	Started, Ended float64
+	Exact          *bool
+}
+type ReadWindow struct{ KillACK float64 }
+
+// Only client-local ordered outcomes earn credit. M02 timestamps are not used.
+func checkWindow(rows []GETOutcome, faults map[int]bool, attempts int, elapsed float64, c SmokeConfig, w ReadWindow) error {
+	if len(rows) != attempts || w.KillACK <= 0 {
+		return errors.New("outage outcomes/ack missing")
+	}
+	prior, begin, end := 0., 0., 0.
+	for i, r := range rows {
+		if r.ID == nil || *r.ID != i || r.Key != c.Client+"-"+strconv.Itoa(i%c.Keys) || r.Exact == nil || *r.Exact == faults[i] || r.Started <= 0 || r.Started < prior || r.Ended < r.Started {
+			return errors.New("outage outcome binding/order differs")
+		}
+		if faults[i] {
+			if i == 0 || end != 0 {
+				return errors.New("unbounded or second outage window")
+			}
+			if begin == 0 {
+				begin = prior
+			}
+		} else if begin != 0 && end == 0 {
+			end = r.Ended
+		}
+		prior = r.Ended
+	}
+	if begin != 0 && (begin < w.KillACK || end <= begin || end-begin > 60) {
+		return errors.New("outage outside acknowledged 60s window")
+	}
+	if rows[len(rows)-1].Ended-rows[0].Started > elapsed || rows[0].Ended >= w.KillACK || rows[len(rows)-1].Started <= w.KillACK {
+		return errors.New("load did not span restart")
+	}
+	return nil
+}
+
+func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]bool) error {
+	x := p.Restart
+	ep, ok := in.Restarts[x.Episode]
+	if p.Profile != "m01-m02-v1" || d.Transport != "dc" || len(p.Workload) != 1 || p.Workload[0].Host != "m01" || !ok {
+		return errors.New("restart needs exact local M01 DC profile/episode")
+	}
+	victim := false
+	for _, s := range p.Deploy {
+		victim = victim || s.Job == ep.Victim && s.Role == "volume" && s.Host == "m02"
+	}
+	j := in.Jobs[ep.Replacement]
+	want, e := ProfileArgs(d, "m02", "deploy", "volume", p.Smoke, in.Files["m02"])
+	if !victim || used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-volume")) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256 {
+		return errors.New("replacement not exact private volume helper")
+	}
+	used[ep.Replacement] = true
+	for _, v := range []struct{ label, stage, route string }{{x.DC, "load", "dc"}, {x.RecoverDC, "recovery", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
+		if used[v.label] {
+			return errors.New("reused read job")
+		}
+		used[v.label] = true
+		if e = checkReadTask(in.Jobs[v.label], in, d, "m01", p.Smoke, v.stage, v.route); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func readTask(ctx context.Context, a *tr.ActionContext, in tr.PackInputs, label, stage, route string) (map[string]any, error) {
+	var c SmokeConfig
+	if err := json.Unmarshal([]byte(in.Jobs[label].Argv[3]), &c); err != nil {
+		return nil, err
+	}
+	_, e, err := a.RunApprovedPackJob(ctx, label, false)
+	if err != nil {
+		return nil, err
+	}
+	return CheckReadTaskOutput(e, c, stage, route)
+}
+
+func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+	x := p.Restart
+	for _, v := range []struct{ label, stage, route string }{{p.Workload[0].Job, "seed", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
+		if _, err := readTask(ctx, a, in, v.label, v.stage, v.route); err != nil {
+			return nil, err
+		}
+	}
+	load, err := a.StartApprovedPackTask(ctx, x.DC)
+	if err != nil {
+		return nil, err
+	}
+	pause := time.After(30 * time.Second)
+	if r.pause != nil {
+		pause = r.pause()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-pause:
+	}
+	started := time.Now()
+	_, receipt, err := a.RestartApprovedPackGeneration(ctx, x.Episode, s.jobs[in.Restarts[x.Episode].Victim])
+	if err != nil {
+		return nil, err
+	}
+	ack := 0.
+	for _, step := range p.Ready {
+		_, e, err := a.RunApprovedPackJob(ctx, step.Job, false)
+		if err != nil {
+			return nil, err
+		}
+		raw, _, err := e.Output.Decode()
+		if err != nil {
+			return nil, err
+		}
+		var ready struct {
+			Status     string
+			ClientMono float64 `json:"client_mono"`
+			Processes  map[string]struct {
+				Identity tr.ProcessIdentity `json:"scope_identity"`
+			}
+		}
+		if err = json.Unmarshal(raw, &ready); err != nil || ready.Status != "READY" {
+			return nil, errors.New("replacement probe not READY")
+		}
+		if step.Host == "m01" {
+			ack = ready.ClientMono
+		}
+		if step.Host == "m02" {
+			i := ready.Processes["volume"].Identity
+			if i.PID != receipt.Replacement.PID || i.StartTime != receipt.Replacement.StartTime || i.BootID != receipt.Replacement.BootID || i.ExecutableSHA256 != in.Files["m02"][path.Join(p.Smoke.HelperDir, "../bin/weed-volume")] {
+				return nil, errors.New("replacement readiness identity differs")
+			}
+		}
+	}
+	if ack <= 0 || time.Since(started) > 60*time.Second {
+		return nil, errors.New("replacement recovery exceeds 60s or lacks client ack")
+	}
+
+	// Load remains active until its fixed duration; no Wait watcher touches victim.
+	e, err := a.WaitApprovedPackTask(ctx, load)
+	if err != nil {
+		return nil, err
+	}
+
+	var c SmokeConfig
+	_ = json.Unmarshal([]byte(in.Jobs[x.DC].Argv[3]), &c)
+	if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{ack}); err != nil {
+		return nil, err
+	}
+	for _, v := range []struct{ label, route string }{{x.RecoverDC, "dc"}, {x.RecoverHTTP, "http"}} {
+		if _, err = readTask(ctx, a, in, v.label, "recovery", v.route); err != nil {
+			return nil, err
+		}
+	}
+	return admittedResult("completed", "OK", "inspect DC window and exact DC/HTTP recovery receipts; HTTP outage DEFERRED", "seaweed_read_restart", d), nil
+}

@@ -20,6 +20,8 @@ class ReadControls(unittest.TestCase):
         self.assertEqual((row['status'],row['exact'],conn.sets),('OBSERVED',2,0))
         self.assertEqual(row['transport'],'dc')
         self.assertEqual(row['faults'],[])
+        self.assertEqual([o['operation_id'] for o in row['outcomes']],[0,1])
+        self.assertTrue(all(o['exact'] and o['ended']>=o['started'] for o in row['outcomes']))
     def test_http_control_is_copied_not_dc(self):
         row,conn=self.run_case('http','http')
         self.assertEqual((row['exact'],conn.sets),(2,0))
@@ -44,6 +46,8 @@ class ReadControls(unittest.TestCase):
             self.assertNotIn('expected_errors',row)
             self.assertTrue(all(f['action']=='get' and f['target']=='10.0.2.3:20980' for f in row['faults']))
         finally:kv_smoke.time.monotonic,kv_smoke.time.sleep=original_now,original_sleep
+    def test_wrong_bytes_never_become_an_outage_observation(self):
+        with self.assertRaises(AssertionError):self.run_case('wrong',stage='load')
     def test_seed_stage_is_the_existing_smoke_path(self):
         self.assertEqual(kv_smoke.read_stage_args('seed','dc'),('seed','dc'))
         for stage,route in [('seed','http'),('load','rc'),('arbitrary','dc')]:
