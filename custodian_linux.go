@@ -238,6 +238,7 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 		effectExpired = effectTimer.C
 	}
 	authorized := false
+	pause := custodyPause{}
 	for {
 		select {
 		case <-effectExpired:
@@ -258,6 +259,8 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 			r := custodyReply{Sequence: q.Sequence}
 			var callErr error
 			switch q.Operation {
+			case "pause-bind", "pause-stop", "pause-resume", "pause-observe":
+				r.Pause, callErr = pause.command(q, identity, a, authorized, pidfd)
 			case "authorize":
 				deadline := a.WorkDeadline
 				if s.Restoration {

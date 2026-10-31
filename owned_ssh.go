@@ -13,11 +13,12 @@ import (
 )
 
 type custodyRequest struct {
-	Sequence  uint64
-	Operation string
-	Admission RunAdmission
-	Spec      JobSpec
-	Identity  ProcessIdentity
+	Sequence      uint64
+	Operation     string
+	Admission     RunAdmission
+	Spec          JobSpec
+	Identity      ProcessIdentity
+	PauseDeadline time.Time
 }
 
 type custodyReply struct {
@@ -27,6 +28,7 @@ type custodyReply struct {
 	Identity       ProcessIdentity
 	Exit           ExitInfo
 	Kill           KillWitness
+	Pause          ProcessPauseWitness
 }
 
 type custodyChannel struct {

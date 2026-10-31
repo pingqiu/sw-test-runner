@@ -112,6 +112,7 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 	}
 	run.mu.Unlock()
 	evidence := struct {
+		Pauses      map[string]ProcessPauseReceipt
 		Generations map[string]GenerationRestartReceipt
 		Request     ClaimedRequest
 		GO          ApprovedGO
@@ -121,7 +122,7 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 		Faults      map[string]FaultReceipt
 		Lease       LeaseObservation
 		Jobs        map[string]ApprovedJobReceipt
-	}{run.GenerationRestartReceipts(), run.request, run.approval, policy.file, policy.bootstrap.Approval, readbacks, run.scope.FaultReceipts(), run.lease, run.jobReceipts()}
+	}{run.ProcessPauseReceipts(), run.GenerationRestartReceipts(), run.request, run.approval, policy.file, policy.bootstrap.Approval, readbacks, run.scope.FaultReceipts(), run.lease, run.jobReceipts()}
 	raw, evidenceErr := json.MarshalIndent(evidence, "", "  ")
 	if evidenceErr == nil {
 		evidenceErr = os.WriteFile(filepath.Join(bundle.ArtifactsDir(), "authority.json"), append(raw, '\n'), 0600)

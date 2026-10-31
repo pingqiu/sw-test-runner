@@ -113,6 +113,14 @@ func validateApprovedPolicy(p ApprovedRunPolicy, b RunBinding, grants []CleanupG
 		replacements[g.Replacement] = true
 	}
 	seen := map[string]bool{}
+	if len(p.ProcessPauses) > 1 {
+		return errors.New("only one process pause is supported")
+	}
+	for name, pause := range p.ProcessPauses {
+		if _, ok := p.Jobs[pause.Victim]; !ok || !authorityID.MatchString(name) || victims[pause.Victim] || replacements[pause.Victim] || !pause.Deadline.After(time.Now()) || pause.Deadline.After(b.HardDeadline) {
+			return errors.New("invalid exact process pause plan")
+		}
+	}
 	for _, g := range grants {
 		key := g.Node + "/" + g.Resource
 		if seen[key] || g.Resource == "" || strings.ContainsRune(g.Resource, 0) || (g.Kind != "partition" && g.Kind != "netem" && g.Kind != "fill_disk") || g.Apply.Node != g.Node || g.Restore.Node != g.Node || len(g.Before) == 0 || len(g.Before) != len(g.During) || maps.Equal(g.Before, g.During) || !g.Deadline.After(time.Now()) || g.Deadline.After(b.HardDeadline) {

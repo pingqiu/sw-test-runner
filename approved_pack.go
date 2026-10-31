@@ -13,6 +13,7 @@ type PackInputs struct {
 	Binding  RunBinding
 	Jobs     map[string]JobPin
 	Restarts map[string]GenerationRestartPlan
+	Pauses   map[string]ProcessPausePlan
 	Boots    map[string]string
 	Scripts  map[string][]byte
 	Files    map[string]map[string]string
@@ -34,7 +35,7 @@ func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
 	a := c.approved
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	p := PackInputs{Binding: a.request.Binding, Jobs: maps.Clone(a.runPolicy.Jobs), Restarts: maps.Clone(a.runPolicy.GenerationRestarts), Boots: map[string]string{}, Scripts: map[string][]byte{}}
+	p := PackInputs{Binding: a.request.Binding, Jobs: maps.Clone(a.runPolicy.Jobs), Restarts: maps.Clone(a.runPolicy.GenerationRestarts), Pauses: maps.Clone(a.runPolicy.ProcessPauses), Boots: map[string]string{}, Scripts: map[string][]byte{}}
 	p.Scenario = append([]byte(nil), a.inputs.Scenario...)
 	p.Files = map[string]map[string]string{}
 	for node, r := range a.readbacks {

@@ -150,6 +150,7 @@ type RunScope struct {
 	faultReceipts   map[string]FaultReceipt
 	cleanupDeadline time.Time
 	authority       faultAuthority
+	pauses          map[string]*ownedPause // Only independently admitted pause victims.
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -480,6 +481,10 @@ func (s *RunScope) kill(ctx context.Context, h JobHandle, intent *GenerationExit
 
 // Callbacks may Start/Stop other entries, but must not clear their own apply.
 func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Context) error) error {
+	return s.applyFault(key, apply, restore, verify, nil)
+}
+
+func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Context) error, pause *ownedPause) error {
 	s.mu.Lock()
 	if s.closed || s.ctx.Err() != nil {
 		s.mu.Unlock()
@@ -494,6 +499,14 @@ func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Co
 		return errors.New("conflicting fault resource")
 	}
 	r := &restoration{restore: restore, verify: verify, ready: make(chan struct{}), gate: make(chan struct{}, 1)}
+	if pause != nil {
+		if len(s.pauses) != 0 {
+			s.mu.Unlock()
+			return errors.New("pause episode already consumed")
+		}
+		pause.ready = r.ready
+		s.pauses = map[string]*ownedPause{pause.victim.id: pause}
+	}
 	s.restores[key] = r
 	s.order = append(s.order, key)
 	s.mu.Unlock()
@@ -557,7 +570,7 @@ func (s *RunScope) settleWork(ctx context.Context) error {
 	s.mu.Lock()
 	var jobs []JobHandle
 	for id, j := range s.jobs {
-		if !j.spec.Restoration {
+		if !j.spec.Restoration && s.pauses[id] == nil {
 			jobs = append(jobs, JobHandle{s, id, j})
 		}
 	}
@@ -613,7 +626,10 @@ func (s *RunScope) Close() error {
 		var errs []error
 		var issuerErr error
 		if s.authority != nil {
-			issuerErr = s.settleWork(ctx)
+			issuerErr = s.joinPauseDispatches(ctx)
+			if issuerErr == nil {
+				issuerErr = s.settleWork(ctx)
+			}
 		}
 		if issuerErr != nil {
 			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
