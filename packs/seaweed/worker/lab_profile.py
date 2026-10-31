@@ -194,11 +194,54 @@ def free_service_ports(config):
     return dict(declared_ports=sorted(declared), listening_conflicts=[])
 
 
+def filer_config(root):
+    return '[leveldb2]\nenabled = true\ndir = ' + json.dumps(str(root / 'filer' / 'ldb2')) + '\n'
+
+
+def filer_metadata(root, original=None):
+    info = (root / 'filer' / 'ldb2').lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError('filer metadata identity not private')
+    identity = dict(device=info.st_dev, inode=info.st_ino)
+    if original is not None and identity != original.get('metadata_directory'):
+        raise ValueError('original filer metadata directory changed')
+    return identity
+
+
+def prepare_filer_replacement(root, original):
+    filer_metadata(root, original)
+    metadata = root / 'filer' / 'ldb2'
+    for item in (metadata, root / 'filer.toml'):
+        info = item.lstat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+            raise ValueError('replacement filer state not private')
+    if not metadata.is_dir() or not any(metadata.iterdir()):
+        raise ValueError('replacement metadata missing or empty')
+    config = root / 'filer.toml'
+    before = config.lstat()
+    if not stat.S_ISREG(before.st_mode) or config.read_bytes() != filer_config(root).encode():
+        raise ValueError('replacement filer config changed')
+    after = config.lstat()
+    fields = ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
+    if any(getattr(before,k) != getattr(after,k) for k in fields):
+        raise ValueError('replacement filer config unstable')
+    sock = root / 'filer.sock'
+    if os.path.lexists(sock):
+        info = sock.lstat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError('replacement filer socket not owned')
+        if any(line.split(None,7)[7:] == [str(sock)] for line in Path('/proc/net/unix').read_text().splitlines()):
+            raise ValueError('replacement filer socket still active')
+        if sock.lstat() != info:raise ValueError('replacement filer socket changed')
+        filer_metadata(root, original)
+        sock.unlink()
+
+
 def launch(config, role, replacement=False):
     remaining(config)
     root = private_root(config)
     argv, env = product_command(config, role)
-    if role == 'filer' and os.path.lexists(root / 'filer.sock'):
+    if role == 'filer' and not replacement and os.path.lexists(root / 'filer.sock'):
         raise ValueError('private filer socket already exists')
     if role not in config['roles']:
         raise ValueError('role not assigned to this host')
@@ -216,29 +259,31 @@ def launch(config, role, replacement=False):
         if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022:
             raise ValueError('product must not be group/other writable')
         if replacement:
-            if role != 'volume':raise ValueError('only volume replacement is supported')
-            old=json.loads((root / 'volume-generation.json').read_text())
+            if role not in ('volume','filer'):raise ValueError('unsupported replacement role')
+            old=json.loads((root / (role+'-generation.json')).read_text())
             if old['boot_id'] != config['boot_id']:raise ValueError('replacement boot differs')
             try:current=process(old['pid'])
             except FileNotFoundError:current=None
             if current and current['starttime']==old['starttime'] and current['state'] not in ('Z','X','x'):
-                raise ValueError('old volume is still live')
+                raise ValueError('old '+role+' is still live')
             info=(root / role).lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o022:
                 raise ValueError('replacement data dir not private')
+            if role == 'filer':prepare_filer_replacement(root, old)
         else:
             (root / role).mkdir(mode=0o700, exist_ok=False)
+            if role == 'filer':(root / role / 'ldb2').mkdir(mode=0o700)
         for sub in ('home', 'cache', 'tmp'):
             (root / sub).mkdir(mode=0o700, exist_ok=True)
         if role == 'master':
             # Select a private config instead of an unrelated /etc master.toml.
             with (root / 'master.toml').open('x') as stream:
                 stream.write('[master.cache_volume_rotation]\nenabled = false\n')
-        if role == 'filer':
+        if role == 'filer' and not replacement:
             with (root / 'filer.toml').open('x') as stream:
-                stream.write('[leveldb2]\nenabled = true\ndir = ' +
-                             json.dumps(str(root / 'filer' / 'ldb2')) + '\n')
+                stream.write(filer_config(root))
         identity = process(os.getpid())
+        if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
         with (root / (role + ('-replacement' if replacement else '') + '-generation.json')).open('x') as stream:
@@ -246,6 +291,7 @@ def launch(config, role, replacement=False):
         print(json.dumps(dict(event='PRODUCT_EXEC', **identity)), flush=True)
         os.chdir(root)
         remaining(config)
+        if replacement and role == 'filer':filer_metadata(root, old)
         os.execve(fd, argv, env)
     finally:
         os.close(fd)
@@ -339,8 +385,8 @@ def services(config):
         if role == 'client':
             continue
         generation = root / (role + '-generation.json')
-        if role=='volume' and (root / 'volume-replacement-generation.json').exists():
-            generation=root / 'volume-replacement-generation.json'
+        if role in ('volume','filer') and (root / (role+'-replacement-generation.json')).exists():
+            generation=root / (role+'-replacement-generation.json')
         expected = json.loads(generation.read_text())
         # Do not accept a live foreign executable named in an editable PID file.
         binary = 'weed-volume' if role == 'volume' else 'weed'
@@ -453,11 +499,14 @@ def main():
     parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'collect'), required=True)
     parser.add_argument('--role', default='')
     parser.add_argument('--replacement-volume', action='store_true')
+    parser.add_argument('--replacement-filer', action='store_true')
     args = parser.parse_args()
     config = json.loads(args.config)
     remaining(config)
     if args.replacement_volume and (args.action,args.role)!=('deploy','volume'):
         raise ValueError('replacement flag requires volume deploy')
+    if args.replacement_filer and ((args.action,args.role)!=('deploy','filer') or args.replacement_volume):
+        raise ValueError('replacement flag requires filer deploy only')
     if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != config['boot_id']:
         raise ValueError('host rebooted since inventory')
     if args.action == 'preflight':
@@ -467,7 +516,7 @@ def main():
         row['ports'] = free_service_ports(config)
         row['process_limits'] = Path('/proc/self/limits').read_text()
     elif args.action == 'deploy':
-        launch(config, args.role, args.replacement_volume)
+        launch(config, args.role, args.replacement_volume or args.replacement_filer)
         raise AssertionError('exec returned')
     elif args.action == 'ready':
         row = ready(config)

@@ -20,6 +20,7 @@ type restartCPU struct {
 	*cpuNode
 	t                              *testing.T
 	mode                           string
+	role                           string
 	killMono                       float64
 	killed                         map[string]bool
 	events                         []string
@@ -77,6 +78,17 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 		if stage == "load" {
 			n.events = append(n.events, "load-wait")
 			row := windowBody(n.t, c)
+			if n.mode == "zero-errors" {
+				row["faults"], row["exact"] = []any{}, 6
+				for _, v := range row["outcomes"].([]any) {
+					v.(map[string]any)["exact"] = true
+				}
+				after := row["after"].(map[string]any)
+				after["read_errors"] = 0
+				counters := after["loader"].(map[string]any)
+				counters["read_objects"], counters["direct_dc_reads"] = 6, 6
+				counters["read_bytes"], counters["direct_dc_bytes"] = 6*c.Length, 6*c.Length
+			}
 			if n.mode == "second-window" {
 				o := row["outcomes"].([]any)
 				o[3].(map[string]any)["exact"] = true
@@ -101,15 +113,19 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 				n.events = append(n.events, "http-control")
 			}
 			raw = n.nativeOutput(c, stage, route)
-			if n.mode == "wrong-recovery" && stage == "recovery" && route == "dc" {
+			if (n.mode == "wrong-recovery" && stage == "recovery" && route == "dc") || (n.mode == "lost-metadata" && route == "http" && n.anyKilled()) {
 				raw = []byte(`{"status":"FAIL"}`)
 			}
 		}
 	} else if n.anyKilled() && s.Argv[5] == "ready" {
 		var i tr.ProcessIdentity
+		role := n.role
+		if role == "" {
+			role = "volume"
+		}
 		n.mu.Lock()
 		for job, spec := range n.specs {
-			if len(spec.Argv) > 0 && spec.Argv[len(spec.Argv)-1] == "--replacement-volume" {
+			if len(spec.Argv) > 0 && spec.Argv[len(spec.Argv)-1] == "--replacement-"+role {
 				i = n.ids[job]
 			}
 		}
@@ -128,7 +144,7 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 		if n.mode == "before-prekill" {
 			ack = n.killMono + 50
 		}
-		row := map[string]any{"status": "READY", "client_mono": ack, "processes": map[string]any{"volume": map[string]any{"scope_identity": i}}}
+		row := map[string]any{"status": "READY", "client_mono": ack, "processes": map[string]any{role: map[string]any{"scope_identity": i}}}
 		if n.mode == "missing-ready" {
 			delete(row, "processes")
 		}

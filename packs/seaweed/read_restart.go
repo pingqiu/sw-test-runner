@@ -55,19 +55,30 @@ func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loa
 	return nil
 }
 
+func (x ReadRestart) targetRole() string {
+	if x.Role == "" {
+		return "volume"
+	}
+	return x.Role
+}
+
 func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]bool) error {
 	x := p.Restart
+	role := x.targetRole()
+	if role != "volume" && role != "filer" {
+		return errors.New("unsupported restart role")
+	}
 	ep, ok := in.Restarts[x.Episode]
 	if p.Profile != "m01-m02-v1" || d.Transport != "dc" || len(p.Workload) != 1 || p.Workload[0].Host != "m01" || !ok {
 		return errors.New("restart needs exact local M01 DC profile/episode")
 	}
 	victim := false
 	for _, s := range p.Deploy {
-		victim = victim || s.Job == ep.Victim && s.Role == "volume" && s.Host == "m02"
+		victim = victim || s.Job == ep.Victim && s.Role == role && s.Host == "m02"
 	}
 	j := in.Jobs[ep.Replacement]
-	want, e := ProfileArgs(d, "m02", "deploy", "volume", p.Smoke, in.Files["m02"])
-	if !victim || used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-volume")) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256 {
+	want, e := ProfileArgs(d, "m02", "deploy", role, p.Smoke, in.Files["m02"])
+	if !victim || used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256 {
 		return errors.New("replacement not exact private volume helper")
 	}
 	used[ep.Replacement] = true
@@ -149,8 +160,13 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 			readyMono = ready.ClientMono
 		}
 		if step.Host == "m02" {
-			i := ready.Processes["volume"].Identity
-			if i.PID != receipt.Replacement.PID || i.StartTime != receipt.Replacement.StartTime || i.BootID != receipt.Replacement.BootID || i.ExecutableSHA256 != in.Files["m02"][path.Join(p.Smoke.HelperDir, "../bin/weed-volume")] {
+			role := x.targetRole()
+			i := ready.Processes[role].Identity
+			binary := "weed"
+			if role == "volume" {
+				binary = "weed-volume"
+			}
+			if i.PID != receipt.Replacement.PID || i.StartTime != receipt.Replacement.StartTime || i.BootID != receipt.Replacement.BootID || i.ExecutableSHA256 != in.Files["m02"][path.Join(p.Smoke.HelperDir, "../bin/"+binary)] {
 				return nil, errors.New("replacement readiness identity differs")
 			}
 		}
