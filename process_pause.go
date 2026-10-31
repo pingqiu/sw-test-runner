@@ -7,9 +7,10 @@ import (
 )
 
 type ProcessPausePlan struct {
-	Name     string    `json:"name"`
-	Victim   string    `json:"victim"`
-	Deadline time.Time `json:"deadline"`
+	Name            string    `json:"name"`
+	Victim          string    `json:"victim"`
+	Deadline        time.Time `json:"deadline"`
+	AllowWorkResume bool      `json:"allow_work_resume,omitempty"`
 }
 type ProcessPauseWitness struct {
 	Identity      ProcessIdentity
@@ -17,12 +18,13 @@ type ProcessPauseWitness struct {
 	ObservedAt    time.Time
 }
 type ProcessPauseReceipt struct {
-	Key, VictimJobID        string
-	Plan                    ProcessPausePlan
-	Identity                ProcessIdentity
-	PreStopMono             float64
-	Stopped, Resumed, Final ProcessPauseWitness
-	Error                   string
+	Key, VictimJobID         string
+	Plan                     ProcessPausePlan
+	Identity                 ProcessIdentity
+	PreStopMono              float64
+	StoppedMono, PreContMono float64
+	Stopped, Resumed, Final  ProcessPauseWitness
+	Error                    string
 }
 
 // Controller and custodian retain separate instances: a lost reply cannot merge
@@ -73,17 +75,72 @@ func (c *ActionContext) PauseApprovedPackGeneration(ctx context.Context, name st
 		if err := c.Safety.settlePauseIssuers(cleanup); err != nil {
 			return err
 		}
-		if err := p.signal(cleanup, "pause-resume", &p.Resumed); err != nil {
-			return err
-		}
-		p.resumeErr = nil
-		return p.resumeErr
+		return p.resume(cleanup)
 	}, func(cleanup context.Context) error {
 		if p.resumeErr != nil {
 			return p.resumeErr
 		}
 		return p.signal(cleanup, "pause-observe", &p.Final)
 	}, p)
+	return c.approved.ProcessPauseReceipt(), err
+}
+
+// Caller owns the restoration gate. Both paths consume the same one-shot latch.
+func (p *processPause) resume(ctx context.Context) error {
+	p.resumeErr = errors.New("CONT pending or failed")
+	if err := p.signal(ctx, "pause-resume", &p.Resumed); err != nil {
+		return err
+	}
+	p.resumeErr = nil
+	return nil
+}
+
+func (c *ActionContext) ResumeApprovedPackGeneration(ctx context.Context, name string, victim JobHandle) (receipt *ProcessPauseReceipt, err error) {
+	if err = c.boundPackContext(); err != nil {
+		return
+	}
+	defer func() { c.FailApprovedPack(err) }()
+	s := c.Safety
+	s.mu.Lock()
+	p := s.pause
+	if p == nil || p.Plan.Name != name || !p.Plan.AllowWorkResume || p.victim != victim || len(s.restores) != 1 {
+		s.mu.Unlock()
+		return nil, errors.New("normal resume not independently bound")
+	}
+	r := s.restores[p.Key]
+	s.mu.Unlock()
+	ctx, cancel := context.WithDeadline(ctx, s.admission.WorkDeadline)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer cancel()
+	defer stop()
+	if err = take(ctx, r.ready, r.gate); err != nil {
+		return
+	}
+	defer func() { <-r.gate }()
+	if r.applyErr != nil || r.cleared || p.resumeErr != nil {
+		return nil, errors.New("STOP unproven or CONT already attempted")
+	}
+	// Fresh WORK admission follows every blocking STOP/gate join.
+	if err = s.backend.(*approvedJobs).work(ctx, victim.id, victim.job.spec); err != nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, errors.New("WORK closed before CONT arm")
+	}
+	p.resumeErr = errors.New("CONT armed")
+	s.mu.Unlock()
+	err = cleanupCall(ctx, p.resume)
+	if err == nil {
+		r.cleared = true
+	} // Physical success survives WORK closure; never a second CONT.
+	if err == nil {
+		err = s.backend.(*approvedJobs).work(ctx, victim.id, victim.job.spec)
+	}
+	if err == nil {
+		err = errors.Join(ctx.Err(), s.ctx.Err())
+	}
 	return c.approved.ProcessPauseReceipt(), err
 }
 
@@ -121,6 +178,14 @@ func (p *processPause) signal(ctx context.Context, op string, dst *ProcessPauseW
 	if !ok {
 		return errors.New("pause custody unsupported")
 	}
+	if op == "pause-resume" {
+		p.run.mu.Lock()
+		p.PreContMono, err = generationMonotonic()
+		p.run.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	reply, err := backend.command(ctx, p.victim.id, op, j.identity, p.Plan.Deadline)
 	w := reply.Pause
 	want := "LIVE"
@@ -134,6 +199,9 @@ func (p *processPause) signal(ctx context.Context, op string, dst *ProcessPauseW
 	*dst = w
 	if err != nil {
 		p.Error = err.Error()
+	}
+	if err == nil && op == "pause-stop" {
+		p.StoppedMono, err = generationMonotonic()
 	}
 	p.run.mu.Unlock()
 	return err
