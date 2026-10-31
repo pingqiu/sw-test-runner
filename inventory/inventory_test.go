@@ -12,7 +12,9 @@ import (
 )
 
 func TestUnknownTransportNeverSelectsHTTP(t *testing.T) {
-	_, err := inventory.Decode([]byte(`{"schema":"seaweed.inventory/v1","state":"requested","run_id":"trial","target":"onprem","transport":"rdma"}`))
+	d := fixture(t)
+	d["transport"] = "rdma"
+	_, err := inventory.Decode(bytesOf(t, d))
 	if err == nil || !strings.Contains(err.Error(), "transport") {
 		t.Fatalf("want explicit transport refusal, got %v", err)
 	}

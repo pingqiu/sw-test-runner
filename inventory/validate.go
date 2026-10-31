@@ -78,7 +78,7 @@ func validKey(value string) bool {
 	return err == nil && len(options) == 0 && len(rest) == 0 && fields[0] == key.Type() && fields[1] == base64.StdEncoding.EncodeToString(key.Marshal())
 }
 func validate(d *Document) error {
-	if d.Schema != Version || !oneOf(d.State, "requested", "resolved") || !slug.MatchString(d.RunID) || !oneOf(d.Target, "azure", "aws", "gcp", "onprem") {
+	if d.Schema != Version || !oneOf(d.State, "requested", "resolved") || !slug.MatchString(d.RunID) || !oneOf(d.Target, "azure", "aws", "gcp", "onprem", "docker") {
 		return fmt.Errorf("invalid schema, state, run_id or target")
 	}
 	if err := validateEnvelope(d); err != nil {
@@ -128,7 +128,9 @@ func validate(d *Document) error {
 			}
 			hostResources[key] = true
 		}
-		if len(h.Roles) < 1 || len(h.Roles) > 5 || !distinct(h.Roles, func(s string) bool { return oneOf(s, "master", "filer", "volume", "s3", "client") }) {
+		if len(h.Roles) < 1 || len(h.Roles) > 5 || !distinct(h.Roles, func(s string) bool {
+			return oneOf(s, "master", "filer", "volume", "s3", "client") || d.Target == "docker" && s == "metadata"
+		}) {
 			return fmt.Errorf("invalid or duplicate roles")
 		}
 		m := h.Management
@@ -169,7 +171,7 @@ func validate(d *Document) error {
 			if disk.DeviceID != "" {
 				devices[disk.DeviceID] = true
 			}
-			if disk.DeviceID != "" && (!strings.HasPrefix(disk.DeviceID, "/dev/disk/by-id/") || !cleanPath(disk.DeviceID)) || d.State == "resolved" && disk.DeviceID == "" {
+			if disk.DeviceID != "" && (!strings.HasPrefix(disk.DeviceID, "/dev/disk/by-id/") || !cleanPath(disk.DeviceID)) || d.State == "resolved" && d.Target != "docker" && disk.DeviceID == "" {
 				return fmt.Errorf("disk needs an exact by-id device, never a wildcard")
 			}
 		}
@@ -177,6 +179,9 @@ func validate(d *Document) error {
 		if err := validateRDMA(h.RDMA, d.State, d.Transport, required); err != nil {
 			return fmt.Errorf("host %s: %w", h.ID, err)
 		}
+	}
+	if err := validateDocker(d); err != nil {
+		return err
 	}
 	if d.State == "requested" {
 		if d.Observation != nil {
@@ -190,7 +195,7 @@ func validate(d *Document) error {
 	observed := map[string]bool{}
 	for _, o := range d.Observation.Hosts {
 		_, err := time.Parse(time.RFC3339Nano, o.CapturedAt)
-		if !ids[o.HostID] || observed[o.HostID] || !bootID.MatchString(o.BootID) || err != nil || !sha.MatchString(o.EvidenceSHA256) {
+		if !ids[o.HostID] || observed[o.HostID] || !bootID.MatchString(o.BootID) || err != nil || !sha.MatchString(o.EvidenceSHA256) || d.Target == "docker" && o.BootID != d.Docker.Parent.BootID {
 			return fmt.Errorf("invalid, duplicate or foreign host observation")
 		}
 		observed[o.HostID] = true
