@@ -85,7 +85,7 @@ func TestTenNodePlanDoesNotCreate(t *testing.T) {
 	}
 }
 
-func TestTenNodeExecutionRefusesUntilPackLands(t *testing.T) {
+func TestTenNodeExecutionRefusesUntilReviewAcceptance(t *testing.T) {
 	f := &fake{}
 	r := (Controller{Command: f.command}).Execute(context.Background(), "run", clusterFixture(t))
 	if r.Code != "CLUSTER_PACK_UNAVAILABLE" || len(f.events) != 0 {

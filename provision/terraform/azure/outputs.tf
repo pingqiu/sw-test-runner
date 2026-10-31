@@ -68,3 +68,4 @@ output "run_declaration" {
     abort_estimate_usd            = var.run_declaration.abort_estimate_usd
   }
 }
+output "os_disk_ids" { value = [for n in azurerm_linux_virtual_machine.node : n.os_disk[0].id] }

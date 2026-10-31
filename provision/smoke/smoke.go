@@ -33,6 +33,7 @@ type Config struct {
 	Output          string              `json:"output"`
 	Cloud           seaweed.CloudConfig `json:"cloud"`
 	EstimatedUSD    float64             `json:"estimated_usd"`
+	PriorUSD        float64             `json:"prior_estimated_usd"`
 }
 type Result struct {
 	Schema            string         `json:"schema"`
@@ -44,6 +45,10 @@ type Result struct {
 	Error             string         `json:"error,omitempty"`
 	RemainingObserved bool           `json:"remaining_observed"`
 	CreateUnresolved  bool           `json:"create_unresolved"`
+	RemainingSummary  string         `json:"billable_resources"`
+	EstimatedUSD      float64        `json:"estimated_usd"`
+	CumulativeUSD     float64        `json:"cumulative_estimated_usd"`
+	ActualCostUSD     *float64       `json:"actual_cost_usd"`
 	Plan              map[string]any `json:"plan,omitempty"`
 }
 type Runner func(context.Context, string, string, ...string) ([]byte, error)
@@ -179,13 +184,13 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	if err = json.Unmarshal(b, &vars); err != nil {
 		return nil, nil, d, err
 	}
-	for _, key := range []string{"host_keys", "node_host_keys"} {
+	for _, key := range []string{"host_keys", "node_host_keys", "run_id"} {
 		if _, present := vars[key]; present {
 			return nil, nil, d, fmt.Errorf("%s is reserved for controller-generated host keys", key)
 		}
 	}
 	uuid := regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
-	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
+	if c.PriorUSD < 0 || c.PriorUSD+c.EstimatedUSD > 10 || !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
 		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG, <=$3 and minute-aligned cleanup envelope")
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
@@ -196,7 +201,7 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	return files, b, d, nil
 }
 func result(code, remedy string) Result {
-	return Result{Schema: "seaweed.cloud-smoke/v1", Code: code, Remedy: remedy, Effects: []string{}, Remaining: []string{}}
+	return Result{Schema: "seaweed.cloud-smoke/v1", Code: code, Remedy: remedy, Effects: []string{}, Remaining: []string{}, RemainingSummary: "billable resources remaining: UNKNOWN (not checked)"}
 }
 
 // These are private evidence files, not a new operation resolver. A failed or
@@ -225,6 +230,7 @@ func stamp(name, text string) error {
 // a fresh private output path; recovery destroy reuses that path and fixed state.
 func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out Result) {
 	out = result("INPUT_REFUSED", "correct pinned inputs; no cloud operation was authorized")
+	out.EstimatedUSD, out.CumulativeUSD = c.EstimatedUSD, c.PriorUSD+c.EstimatedUSD
 	if mode == "destroy" || mode == "verify" {
 		// Recovery needs only the retained private snapshot/state, even if the
 		// original checkout or input file was subsequently moved or changed.
@@ -256,13 +262,12 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
-	if mode == "run" && d.Cluster && ctl.Pack == nil {
-		out.Code = "CLUSTER_PACK_UNAVAILABLE"
-		out.Remedy = "install the reviewed multi-node pack successor before a cluster run"
-		return
-	}
 	if ctl.Command == nil {
 		ctl.Command = Native
+	}
+	if mode == "run" && d.Cluster && ctl.Pack == nil {
+		out.Code, out.Remedy = "CLUSTER_PACK_UNAVAILABLE", "wait for cluster review acceptance before enabling execution"
+		return
 	}
 	if ctl.Pack == nil {
 		ctl.Pack = seaweed.RunCloudHTTP
@@ -302,6 +307,25 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		if ids == nil {
 			ids = []string{}
 		}
+		if d.Cluster {
+			query := fmt.Sprintf("[?tags.seaweed_run=='%s' || type=='Microsoft.Compute/virtualMachines' || type=='Microsoft.Compute/disks' || type=='Microsoft.Network/publicIPAddresses'].id", filepath.Base(c.Output))
+			b, se := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--query", query, "--output", "json", "--only-show-errors")
+			var subscription []string
+			if se == nil {
+				se = json.Unmarshal(b, &subscription)
+				if se == nil && subscription == nil {
+					se = errors.New("subscription list must be an array")
+				}
+			}
+			ids, e = append(ids, subscription...), errors.Join(e, se)
+		}
+		out.RemainingSummary = "billable resources remaining: UNKNOWN (list failed)"
+		if e == nil {
+			out.RemainingSummary = fmt.Sprintf("billable resources remaining: %v (checked %s)", ids, time.Now().UTC().Format("15:04Z"))
+			if len(ids) == 0 {
+				out.RemainingSummary = "billable resources remaining: 0 (checked " + time.Now().UTC().Format("15:04Z") + ")"
+			}
+		}
 		return ids, e
 	}
 	if mode == "run" {
@@ -327,6 +351,17 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		if err = os.WriteFile(filepath.Join(root, "run.auto.tfvars.json"), vars, 0600); err != nil {
 			out.Error = err.Error()
 			return
+		}
+		if d.Cluster {
+			if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`).MatchString(filepath.Base(c.Output)) {
+				out.Error = "cluster output basename must be a safe unique run ID"
+				return
+			}
+			b, _ := json.Marshal(c)
+			if err = os.WriteFile(filepath.Join(c.Output, "recovery.json"), b, 0600); err != nil {
+				out.Error = err.Error()
+				return
+			}
 		}
 		c.Cloud.Output = c.Output
 		if d.Cluster {
@@ -442,6 +477,30 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Error = e.Error()
 		return
 	}
+	if d.Cluster {
+		disks, de := call(work, "terraform", "output", "-json", "os_disk_ids")
+		var ids []string
+		if de == nil {
+			de = json.Unmarshal(disks, &ids)
+			if de == nil && len(ids) != 10 {
+				de = errors.New("require ten explicit OS disk IDs")
+			}
+		}
+		for _, id := range ids {
+			if de != nil {
+				break
+			}
+			if !strings.HasPrefix(strings.ToLower(id), strings.ToLower("/subscriptions/"+d.Subscription+"/resourceGroups/"+d.Group+"/providers/Microsoft.Compute/disks/")) {
+				de = errors.New("OS disk outside test RG")
+				break
+			}
+			_, de = call(work, "az", "tag", "update", "--resource-id", id, "--operation", "Merge", "--tags", "seaweed_run="+filepath.Base(c.Output), "expires_at="+d.Run.Hard.Format(time.RFC3339), "--only-show-errors")
+		}
+		if de != nil {
+			out.Code, out.Error = "DISK_TAG_FAILED", de.Error()
+			return
+		}
+	}
 	if e = os.WriteFile(filepath.Join(c.Output, "requested-inventory.json"), b, 0600); e != nil {
 		out.Code = "EVIDENCE_FAILED"
 		out.Error = e.Error()
@@ -477,7 +536,7 @@ func clusterHostKeys(root string) (map[string]string, error) {
 		}
 		keys[id] = v.Key
 	}
-	b, e := json.Marshal(map[string]any{"node_host_keys": keys})
+	b, e := json.Marshal(map[string]any{"node_host_keys": keys, "run_id": filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(root))))})
 	if e != nil {
 		return nil, e
 	}

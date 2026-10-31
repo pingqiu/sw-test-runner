@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/pingqiu/sw-test-runner/packs/seaweed"
 	"golang.org/x/crypto/ssh"
 	"os"
@@ -52,6 +53,12 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 	label := tool + " " + args[0]
 	f.events = append(f.events, label)
 	if tool == "az" {
+		if args[0] == "tag" {
+			return []byte(`{}`), nil
+		}
+		if strings.Contains(strings.Join(args, " "), "tags.seaweed_run") {
+			return []byte(`[]`), nil
+		}
 		f.lists++
 		if f.fail == "list" && f.lists > 1 {
 			return nil, errors.New("list unknown")
@@ -68,6 +75,13 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 		return nil, errors.New("failed/unknown " + f.fail)
 	}
 	if args[0] == "output" {
+		if args[len(args)-1] == "os_disk_ids" {
+			ids := []string{}
+			for i := 0; i < 10; i++ {
+				ids = append(ids, "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/disks/os"+fmt.Sprint(i))
+			}
+			return json.Marshal(ids)
+		}
 		return []byte(`{"exact":"module export"}`), nil
 	}
 	return []byte("ok"), nil

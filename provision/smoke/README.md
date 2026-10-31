@@ -86,12 +86,59 @@ SEAWEED_CLOUD_ARTIFACT_DIR=/private/af8c-artifacts /private/cloud-pack-preflight
 The opt-in preflight drives RunCloudHTTP over loopback pinned SSH, using the production command strings and upload path. It executes real local uploads, all artifact hash checks, unchanged tar extraction/configuration, and the production worker argv with --dry-run. Every remote command gets a real shell syntax check. Service startup argv is parsed by the pinned binaries with help, via a local systemd substitute that never starts a service. The worker native_dir must bind the actual extracted package parent. Discovery without the env flag skips the preflight and performs no artifact work or host contact.
 
 Cloud-init status/ownership, actual systemd startup, HTTP readiness, service journals, native Python3.12 import and live KV are explicitly NOT_RUN offline. An older local glibc may also prevent the pinned volume CLI from loading (current WSL lacks GLIBC_2.38); that is NOT_RUN, not an argv/runtime PASS. The test deliberately returns from the production pack at the live-workload boundary with exit77; it never fabricates an ACK/exact PASS summary. These limitations still need the reviewed cloud smoke; the local setup preflight does not qualify service/native runtime compatibility.
-# Ten-node preparation (not executable yet)
+# Ten-node HTTP execution (Draft; launch token required)
 
 Set `cluster:true` in the pinned tfvars for one meta D4s_v5, six volume D2s_v5
 and three client D2s_v5 hosts. `plan` describes ten VMs without cloud calls.
 The wiring uses the existing module's `for_each`, inventory and per-role ports.
 Per-node server keys are generated before apply and stay in private cloud-init
 and state; the controller client key is never transferred. The default remains
-the qualified one-VM layout. This slice refuses real cluster execution with
-`CLUSTER_PACK_UNAVAILABLE` until the reviewed fan-out pack successor lands.
+the qualified one-VM layout. Ten-node execution uses the shared pack's bounded
+fan-out/barriers: prepare, meta, six volumes, three clients, grow, baseline,
+concurrent KV+S3 batches, storage snapshots and collection. Any node failure fails
+the run and reaches same-state destroy. Client ACK/exact FID/owner joins prove
+that every owner is exercised. Size/FileCount are storage deltas, not server
+request/transfer counters; those counters are not measured. This is the narrowed
+functional evidence contract, with no throughput or server-request-rate claim.
+The default cluster command remains refused until review acceptance; injected
+local pack controls can exercise it. This code is not cloud-qualified yet.
+
+For a cluster run, choose a unique lowercase run ID (letters/digits/hyphens,
+maximum 50 characters) and set output to
+`~/.local/state/seaweed-cloud/runs/<id>` expanded to an absolute path. The output
+basename becomes the generated Terraform run ID and `seaweed_run` tag. Caller
+`host_keys`, `node_host_keys` and `run_id` variables are reserved and refused.
+Every taggable resource is tagged explicitly; the ten VM-created OS disks are
+tagged using exact Terraform-exported IDs before deploy. Untaggable subnets,
+NIC IP configurations and associations/attachments are covered by full-RG absence.
+
+The finally path always destroys through the saved private state, then checks
+both the whole test RG and the subscription. The latter reports every resource
+tagged for this run plus every VM, managed disk and public IP regardless of tag.
+Unrelated resources are reported, never deleted. A failed/malformed list or
+any matching ID prevents clean completion. The JSON `billable_resources` field
+includes the check time or UNKNOWN; an empty snapshot never settles UNKNOWN apply.
+`estimated_usd` and `cumulative_estimated_usd` use the frozen per-run estimate
+and `prior_estimated_usd` from config; the cumulative limit is $10 and per-run
+limit $3. `actual_cost_usd:null` means billing has not settled, not zero cost.
+
+If the controller dies after apply, use the same Linux user and saved directory:
+
+```sh
+seaweed-cloud cleanup --run <id> --dry-run --json
+seaweed-cloud cleanup --run <id> --json
+```
+
+`run --dry-run` and `verify --dry-run` use the existing local `plan` path;
+they issue no Terraform, Azure or SSH commands. Ordinary `run` has no dry-run
+default and intentionally applies. Saved-state `cleanup --run` requires an
+absolute, resolvable controller HOME; unset/relative HOME refuses before reading
+any recovery file. It never searches the current directory for state.
+
+This reads `recovery.json`, the exact module/vars snapshot and Terraform state;
+the original checkout, input config, artifacts and guest client key are not
+required. No re-apply occurs. Preserve the private run directory until absence
+is confirmed; it includes sensitive host keys/state. Existing `destroy --config`
+and one-VM behavior remain available. A killed local controller after settled
+fake apply is covered by an actual CLI/subprocess recovery control. UNKNOWN
+apply stays non-clean even if destroy/list are empty; notify the run owner.

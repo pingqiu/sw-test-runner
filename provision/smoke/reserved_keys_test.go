@@ -8,7 +8,7 @@ import (
 )
 
 func TestGeneratedHostKeyInputsAreReserved(t *testing.T) {
-	for _, key := range []string{"host_keys", "node_host_keys"} {
+	for _, key := range []string{"host_keys", "node_host_keys", "run_id"} {
 		for _, value := range []any{nil, map[string]any{}, map[string]any{"meta": "caller"}} {
 			t.Run(key, func(t *testing.T) {
 				c := clusterFixture(t)

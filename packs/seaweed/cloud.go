@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -58,8 +59,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if d.Target != "azure" || d.Transport != "http" || d.State != "requested" || len(d.Hosts) != 1 || len(c.Files) != 3 {
+	if d.Target != "azure" || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
 		return "", errors.New("one newly created Azure HTTP host and three artifacts required")
+	}
+	if len(d.Hosts) != 1 {
+		return runCloudCluster(ctx, *d, c)
 	}
 	h := d.Hosts[0]
 	for _, role := range []string{"master", "filer", "volume", "s3", "client"} {
@@ -67,13 +71,27 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 			return "", fmt.Errorf("missing role %s", role)
 		}
 	}
+	return runCloudNode(ctx, *d, h, c, "")
+}
+
+func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c CloudConfig, phase string) (bundle string, failure error) {
+	var e error
+	meta := h
+	for _, candidate := range d.Hosts {
+		if contains(candidate.Roles, "master") {
+			meta = candidate
+		}
+	}
 	if h.RunRoot != "/data/seaweed-runs/"+d.RunID {
 		return "", errors.New("unexpected cloud run root")
 	}
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
+	if phase == "collect" {
+		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
+	}
 	defer func() {
-		if failure != nil {
+		if failure != nil && phase == "" {
 			if e := collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q); e != nil {
 				failure = errors.Join(failure, fmt.Errorf("save failure-log fetch: %w", e))
 			}
@@ -88,8 +106,21 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	defer n.Close()
 	sequence := 0
 	run := func(name, cmd string) (string, error) {
+		if phase != "" && !cloudStepEnabled(h, phase, name) {
+			return "", nil
+		}
 		sequence++
-		command := "timeout -k 5 120 sh -ec " + q(cmd)
+		seconds := 120
+		if phase == "load" {
+			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.
+			if deadline, ok := ctx.Deadline(); ok {
+				seconds = min(seconds, int(time.Until(deadline).Seconds())-5)
+			}
+			if seconds <= 0 {
+				return "", context.DeadlineExceeded
+			}
+		}
+		command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + q(cmd)
 		out, stderr, rc, e := n.Run(ctx, command)
 		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, command, out, stderr, rc, e)
 		if e != nil || rc != 0 || w != nil {
@@ -98,6 +129,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return out, nil
 	}
 	upload := func(name, local, remote string) error {
+		if phase != "" && (phase != "prepare" || !cloudArtifact(h, name)) {
+			return nil
+		}
 		sequence++
 		command := "upload " + local + " -> " + remote
 		e := n.Upload(local, remote)
@@ -112,6 +146,24 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return nil
 	}
 	root := h.RunRoot
+	if phase == "before" || phase == "after" {
+		url := "http://" + endpoint(h, "volume_http") + "/status"
+		if contains(h.Roles, "master") {
+			url = "http://" + endpoint(h, "master_http") + "/dir/status"
+		}
+		raw, e := run("snapshot", "curl -fsS --max-time 10 "+q(url))
+		return "", errors.Join(e, os.WriteFile(filepath.Join(c.Output, "status.json"), []byte(raw), 0600))
+	}
+	if phase == "grow" {
+		for _, v := range d.Hosts {
+			if contains(v.Roles, "volume") {
+				if _, e = run("grow-"+v.ID, "curl -fsS --max-time 15 "+q("http://"+endpoint(meta, "master_http")+"/vol/grow?count=1&collection=lmcache&dataNode="+endpoint(v, "volume_http"))); e != nil {
+					return "", e
+				}
+			}
+		}
+		return "", nil
+	}
 	if _, e = run("prepare", "cloud-init status --wait; sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
 		return "", e
 	}
@@ -128,7 +180,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", e
 	}
 	defer os.RemoveAll(scratch)
-	for _, name := range []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"} {
+	helpers := []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"}
+	if phase != "" {
+		helpers = append(helpers, "cloud_batch.py")
+	}
+	for _, name := range helpers {
 		b, e := workerFiles.ReadFile("worker/" + name)
 		if e != nil {
 			return "", e
@@ -141,7 +197,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 			return "", e
 		}
 	}
-	if _, e = run("configure", "cd "+q(root)+"; tar -xf native.tar; test -d seaweedkv_native; printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
+	native := "tar -xf native.tar; test -d seaweedkv_native; "
+	if phase != "" && !contains(h.Roles, "client") {
+		native = ""
+	}
+	if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
 	}
 	ip := h.Data.Address
@@ -149,12 +209,16 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		_, e := run("start-"+role, "sudo systemd-run --unit="+q("sw-cloud-"+d.RunID+"-"+role)+" --property=WorkingDirectory="+q(root)+" "+cmd)
 		return e
 	}
-	master := endpoint(h, "master_http")
+	master := endpoint(meta, "master_http")
+	volumeMB, maxVolumes := "32", "8"
+	if phase != "" {
+		volumeMB, maxVolumes = "256", "16"
+	}
 	for _, s := range []struct{ role, cmd string }{
-		{"master", q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=32 -defaultReplication=000 -peers=none"},
-		{"volume", q(root+"/weed-volume") + " --master=" + master + " --ip=" + ip + " --port=" + strconv.Itoa(servicePort(h, "volume_http")) + " --port.grpc=" + strconv.Itoa(servicePort(h, "volume_grpc")) + " --dir=" + q(root+"/volume") + " --max=8"},
+		{"master", q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=" + volumeMB + " -defaultReplication=000 -peers=none"},
+		{"volume", q(root+"/weed-volume") + " --master=" + master + " --ip=" + ip + " --port=" + strconv.Itoa(servicePort(h, "volume_http")) + " --port.grpc=" + strconv.Itoa(servicePort(h, "volume_grpc")) + " --dir=" + q(root+"/volume") + " --max=" + maxVolumes},
 		{"filer", q(root+"/weed") + " -config_dir=" + q(root) + " filer -master=" + master + " -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "filer_http")) + " -port.grpc=" + strconv.Itoa(servicePort(h, "filer_grpc"))},
-		{"s3", q(root+"/weed") + " s3 -filer=" + endpoint(h, "filer_http") + " -port=" + strconv.Itoa(servicePort(h, "s3_http"))},
+		{"s3", q(root+"/weed") + " s3 -filer=" + endpoint(meta, "filer_http") + " -port=" + strconv.Itoa(servicePort(h, "s3_http"))},
 	} {
 		if e = service(s.role, s.cmd); e != nil {
 			return "", e
@@ -169,12 +233,27 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 			return "", e
 		}
 	}
+	if phase != "" && phase != "load" {
+		return "", nil
+	}
 	// SmokeArgs only needs endpoints. This local execution view is not published
 	// as an observed inventory and is not S0b admission.
 	d.State = "resolved"
-	args, e := SmokeArgs(d, h.ID, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20})
+	if phase == "load" {
+		for _, v := range d.Hosts {
+			if contains(v.Roles, "volume") {
+				d.Hosts = []inventory.Host{meta, v, h}
+				break
+			}
+		}
+	}
+	args, e := SmokeArgs(&d, h.ID, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20})
 	if e != nil {
 		return "", e
+	}
+	if phase == "load" {
+		args[1] = root + "/worker/cloud_batch.py"
+		args = append(args, "--s3", "http://"+endpoint(meta, "s3_http"), "--master", "http://"+endpoint(meta, "master_http"))
 	}
 	cmd := "python3"
 	for _, arg := range args {
@@ -192,8 +271,14 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	var summary struct {
 		Status            string
 		Ack, Exact, Wrong int
+		S3Ack             int `json:"s3_ack"`
+		S3Exact           int `json:"s3_exact"`
 	}
-	if len(lines) == 0 || json.Unmarshal([]byte(lines[len(lines)-1]), &summary) != nil || summary.Status != "PASS" || summary.Ack != 16 || summary.Exact != 16 || summary.Wrong != 0 {
+	want := 16
+	if phase == "load" {
+		want = 512
+	}
+	if len(lines) == 0 || json.Unmarshal([]byte(lines[len(lines)-1]), &summary) != nil || summary.Status != "PASS" || summary.Ack != want || summary.Exact != want || summary.Wrong != 0 || phase == "load" && (summary.S3Ack != 32 || summary.S3Exact != 32) {
 		return output, errors.New("missing or failed KV smoke")
 	}
 	return output, nil
