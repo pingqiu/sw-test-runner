@@ -54,7 +54,9 @@ UNKNOWN apply stays sticky: destroy + an empty list cannot prove that an unresol
 
 Transport retries are deliberately narrow: up to two more attempts after 10/30
 seconds, inside the existing deadline, for apply/destroy/resource-list only.
-Every complete Error block must match a known transport form. The supported
+The entire output must be a known standalone transport form or complete Error
+blocks separated only by whitespace. Unknown text before, between or after
+those blocks refuses retry; no prefix is discarded. The supported
 provider envelope is the observed no-color Public I P Address update/delete
 reset, with its exact optional Terraform source context; standalone reset/EOF/TLS
 forms are explicit alternatives. Unknown provider wrappers, extra details or
