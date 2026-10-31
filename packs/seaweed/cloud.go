@@ -160,8 +160,8 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		}
 	}
 	defer func() {
-		logs, _ := run("collect-services", "sudo journalctl --no-pager -u "+q("sw-cloud-"+d.RunID+"-*")+" -n 300")
-		os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600)
+		logs, collectErr := run("collect-services", "sudo journalctl --no-pager -u "+q("sw-cloud-"+d.RunID+"-*")+" -n 300")
+		failure = errors.Join(failure, collectErr, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
 	}()
 	for _, url := range []string{"http://" + master + "/dir/status", "http://" + endpoint(h, "volume_http") + "/status", "http://" + endpoint(h, "filer_http") + "/", "http://" + endpoint(h, "s3_http") + "/"} {
 		if _, e = run("ready-"+url, "until curl -fsS --max-time 3 "+q(url)+" >/dev/null; do sleep 1; done"); e != nil {
