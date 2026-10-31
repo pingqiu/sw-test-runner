@@ -93,5 +93,6 @@ and three client D2s_v5 hosts. `plan` describes ten VMs without cloud calls.
 The wiring uses the existing module's `for_each`, inventory and per-role ports.
 Per-node server keys are generated before apply and stay in private cloud-init
 and state; the controller client key is never transferred. The default remains
-the qualified one-VM layout. This slice refuses real cluster execution with
-`CLUSTER_PACK_UNAVAILABLE` until the reviewed fan-out pack successor lands.
+the qualified one-VM layout. Real cluster execution remains refused with
+`CLUSTER_PACK_UNAVAILABLE` until fan-out and subscription-wide zero-residue
+recovery are complete. The guard never intercepts standalone destroy/verify.
