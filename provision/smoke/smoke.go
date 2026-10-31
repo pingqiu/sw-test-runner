@@ -200,6 +200,26 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	}
 	return files, b, d, nil
 }
+func resourceIDs(raw []byte, run string, all bool) ([]string, error) {
+	var rows []struct {
+		ID, Type string
+		Tags     map[string]string
+	}
+	if e := json.Unmarshal(raw, &rows); e != nil || rows == nil {
+		return nil, errors.New("resource list must be an object array")
+	}
+	ids := []string{}
+	for _, r := range rows {
+		if r.ID == "" || r.Type == "" {
+			return nil, errors.New("resource missing id/type")
+		}
+		typ := strings.ToLower(r.Type)
+		if all || r.Tags["seaweed_run"] == run || typ == "microsoft.compute/virtualmachines" || typ == "microsoft.compute/disks" || typ == "microsoft.network/publicipaddresses" {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
+}
 func result(code, remedy string) Result {
 	return Result{Schema: "seaweed.cloud-smoke/v1", Code: code, Remedy: remedy, Effects: []string{}, Remaining: []string{}, RemainingSummary: "billable resources remaining: UNKNOWN (not checked)"}
 }
@@ -292,26 +312,16 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		return b, e
 	}
 	list := func(cx context.Context) ([]string, error) {
-		b, e := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--resource-group", d.Group, "--query", "[].id", "--output", "json", "--only-show-errors")
-		var ids []string
+		b, e := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--resource-group", d.Group, "--output", "json", "--only-show-errors")
+		ids := []string{}
 		if e == nil {
-			e = json.Unmarshal(b, &ids)
-			if e == nil && ids == nil {
-				e = errors.New("resource list must be a JSON array")
-			}
-		}
-		if ids == nil {
-			ids = []string{}
+			ids, e = resourceIDs(b, filepath.Base(c.Output), true)
 		}
 		if d.Cluster {
-			query := fmt.Sprintf("[?tags.seaweed_run=='%s' || type=='Microsoft.Compute/virtualMachines' || type=='Microsoft.Compute/disks' || type=='Microsoft.Network/publicIPAddresses'].id", filepath.Base(c.Output))
-			b, se := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--query", query, "--output", "json", "--only-show-errors")
+			b, se := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--output", "json", "--only-show-errors")
 			var subscription []string
 			if se == nil {
-				se = json.Unmarshal(b, &subscription)
-				if se == nil && subscription == nil {
-					se = errors.New("subscription list must be an array")
-				}
+				subscription, se = resourceIDs(b, filepath.Base(c.Output), false)
 			}
 			ids, e = append(ids, subscription...), errors.Join(e, se)
 		}

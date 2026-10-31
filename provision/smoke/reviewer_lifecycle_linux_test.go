@@ -22,7 +22,7 @@ func TestReviewerRecoveryMustNotDeclareUnknownCreateClean(t *testing.T) {
 	// and completes only after the independent recovery-empty observation.
 	scripts := map[string]string{
 		"terraform": "#!/bin/sh\ncase \"$1\" in\ninit|plan|destroy) exit 0;;\napply) (while [ ! -f '" + release + "' ]; do sleep 0.01; done; touch '" + created + "') </dev/null >/dev/null 2>&1 &\nexit 9;;\n*) exit 2;;\nesac\n",
-		"az":        "#!/bin/sh\nif [ -f '" + created + "' ]; then printf '[\"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/late\"]'; else printf '[]'; fi\n",
+		"az":        "#!/bin/sh\nif [ -f '" + created + "' ]; then printf '[{\"id\":\"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/late\",\"type\":\"Microsoft.Compute/virtualMachines\"}]'; else printf '[]'; fi\n",
 	}
 	for name, body := range scripts {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0700); err != nil {
