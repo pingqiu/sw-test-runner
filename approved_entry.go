@@ -112,7 +112,7 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 	}
 	run.mu.Unlock()
 	evidence := struct {
-		Pauses      map[string]ProcessPauseReceipt
+		Pauses      map[string]ProcessPauseReceipt `json:",omitempty"`
 		Generations map[string]GenerationRestartReceipt
 		Request     ClaimedRequest
 		GO          ApprovedGO

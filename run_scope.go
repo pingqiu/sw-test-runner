@@ -150,7 +150,7 @@ type RunScope struct {
 	faultReceipts   map[string]FaultReceipt
 	cleanupDeadline time.Time
 	authority       faultAuthority
-	pauses          map[string]*ownedPause // Only independently admitted pause victims.
+	pause           *ownedPause // Only the independently admitted pause victim.
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -500,12 +500,12 @@ func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Co
 	}
 	r := &restoration{restore: restore, verify: verify, ready: make(chan struct{}), gate: make(chan struct{}, 1)}
 	if pause != nil {
-		if len(s.pauses) != 0 {
+		if s.pause != nil {
 			s.mu.Unlock()
 			return errors.New("pause episode already consumed")
 		}
 		pause.ready = r.ready
-		s.pauses = map[string]*ownedPause{pause.victim.id: pause}
+		s.pause = pause
 	}
 	s.restores[key] = r
 	s.order = append(s.order, key)
@@ -570,7 +570,7 @@ func (s *RunScope) settleWork(ctx context.Context) error {
 	s.mu.Lock()
 	var jobs []JobHandle
 	for id, j := range s.jobs {
-		if !j.spec.Restoration && s.pauses[id] == nil {
+		if !j.spec.Restoration && (s.pause == nil || s.pause.victim.id != id) {
 			jobs = append(jobs, JobHandle{s, id, j})
 		}
 	}

@@ -108,12 +108,8 @@ func (b *approvedJobs) work(ctx context.Context, id string, s JobSpec) error {
 	if err := b.run.authority(ctx, 2*time.Second); err != nil {
 		return err
 	}
-	for _, p := range b.run.runPolicy.Deployments {
-		if p.NodeID == s.Node {
-			return b.run.readback(ctx, p)
-		}
-	}
-	return errors.New("job node is not approved")
+	return b.run.readbackNode(ctx, s.Node)
+
 }
 
 func (b *approvedJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (ProcessIdentity, error) {
@@ -248,4 +244,12 @@ func (b *approvedJobs) Kill(ctx context.Context, id string) (KillWitness, error)
 		return KillWitness{}, err
 	}
 	return b.run.runtime.Jobs.Kill(ctx, id)
+}
+func (a *ApprovedRun) readbackNode(ctx context.Context, node string) error {
+	for _, p := range a.runPolicy.Deployments {
+		if p.NodeID == node {
+			return a.readback(ctx, p)
+		}
+	}
+	return errors.New("node no longer bound")
 }

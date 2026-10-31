@@ -3,46 +3,37 @@
 package testrunner
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"os"
-	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type custodyPause struct {
-	deadline         time.Time
-	stopped, resumed bool
-	resumeErr        error
+	deadline  time.Time
+	resumed   bool
+	resumeErr error
 }
 
-// A stable task enumeration is required; mixed/unknown states earn no witness.
+// Complete task enumeration: mixed, traced, dead or changing sets are UNKNOWN.
 func pauseTaskState(pid int) (string, error) {
-	root := fmt.Sprintf("/proc/%d/task", pid)
+	return pauseTaskStateAt(fmt.Sprintf("/proc/%d/task", pid))
+}
+
+func pauseTaskStateAt(root string) (string, error) {
 	before, err := os.ReadDir(root)
-	if err != nil {
-		return "", err
-	}
-	if len(before) == 0 || len(before) > 2048 {
+	if err != nil || len(before) == 0 || len(before) > 2048 {
 		return "", errors.New("task enumeration UNKNOWN")
 	}
 	stopped := 0
 	for _, task := range before {
-		raw, err := os.ReadFile(root + "/" + task.Name() + "/stat")
-		if err != nil {
-			return "", err
+		f, e := procFieldsAt(root + "/" + task.Name() + "/stat")
+		if e != nil {
+			return "", e
 		}
-		end := strings.LastIndexByte(string(raw), ')')
-		if end < 0 {
-			return "", errors.New("task stat malformed")
-		}
-		fields := strings.Fields(string(raw[end+1:]))
-		if len(fields) < 20 {
-			return "", errors.New("task stat short")
-		}
-		switch fields[0] {
+		switch f[0] {
 		case "T":
 			stopped++
 		case "R", "S", "D", "I":
@@ -70,57 +61,40 @@ func pauseTaskState(pid int) (string, error) {
 
 func (p *custodyPause) command(q custodyRequest, i ProcessIdentity, a RunAdmission, authorized bool, fd int) (w ProcessPauseWitness, err error) {
 	w.Identity = i
-	if !authorized || q.Identity != i || !q.PauseDeadline.After(time.Now()) || q.PauseDeadline.After(a.HardDeadline) {
+	limit := q.Admission.EffectDeadline
+	if !authorized || q.Identity != i || !limit.After(time.Now()) || limit.After(q.PauseDeadline) || q.PauseDeadline.After(a.HardDeadline) {
 		return w, errors.New("pause identity/deadline refused")
 	}
-	if q.Operation == "pause-bind" {
-		if !p.deadline.IsZero() || !a.WorkDeadline.After(time.Now()) {
-			return w, errors.New("pause already bound/work expired")
-		}
-	} else if p.deadline.IsZero() || !q.PauseDeadline.Equal(p.deadline) {
-		return w, errors.New("pause grant not retained")
-	}
-	limit := q.PauseDeadline
-	if until := time.Now().Add(5 * time.Second); limit.After(until) {
-		limit = until
-	}
-	ctx, cancel := context.WithDeadline(context.Background(), limit)
-	defer cancel()
 	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	if n, e := unix.Poll(poll, 0); e != nil || n != 0 {
 		return w, errors.New("pause victim no longer live")
 	}
-	want := ""
+	want := "LIVE"
 	switch q.Operation {
-	case "pause-bind":
-		state, e := pauseTaskState(i.PID)
-		if e != nil || state != "LIVE" {
-			return w, errors.New("pause baseline not live")
-		}
-		p.deadline = q.PauseDeadline
-		want = "LIVE"
 	case "pause-stop":
-		if p.stopped || p.resumed || !a.WorkDeadline.After(time.Now()) {
+		if !p.deadline.IsZero() || !a.WorkDeadline.After(time.Now()) {
 			return w, errors.New("STOP replay/work expired")
 		}
-		p.stopped = true
+		if state, e := pauseTaskState(i.PID); e != nil || state != "LIVE" || !limit.After(time.Now()) || !a.WorkDeadline.After(time.Now()) {
+			return w, errors.New("pause baseline not live")
+		}
+		// Retain the exact resume grant BEFORE the first possible STOP effect.
+		p.deadline = q.PauseDeadline
 		err = unix.PidfdSendSignal(fd, unix.SIGSTOP, nil, 0)
 		want = "STOPPED"
-	case "pause-resume":
-		if p.resumed {
-			return w, errors.New("CONT replay")
+	case "pause-resume", "pause-observe":
+		if p.deadline.IsZero() || !q.PauseDeadline.Equal(p.deadline) || p.resumeErr != nil {
+			return w, errors.New("missing/failed retained resume grant")
 		}
-		p.resumed = true
-		defer func() {
-			if err != nil {
-				p.resumeErr = err
+		if q.Operation == "pause-resume" {
+			if p.resumed || !limit.After(time.Now()) {
+				return w, errors.New("CONT replay")
 			}
-		}()
-		err = unix.PidfdSendSignal(fd, unix.SIGCONT, nil, 0)
-		want = "LIVE"
-	case "pause-observe":
-		if p.resumeErr != nil {
-			return w, p.resumeErr
+			p.resumed = true
+			defer func() { p.resumeErr = err }()
+			err = unix.PidfdSendSignal(fd, unix.SIGCONT, nil, 0)
+		} else if !p.resumed {
+			return w, errors.New("CONT not proven")
 		}
 	default:
 		return w, errors.New("unknown pause operation")
@@ -128,17 +102,16 @@ func (p *custodyPause) command(q custodyRequest, i ProcessIdentity, a RunAdmissi
 	if err != nil {
 		return w, err
 	}
-	for {
+	if pollBound := time.Now().Add(5 * time.Second); pollBound.Before(limit) {
+		limit = pollBound
+	}
+	for time.Now().Before(limit) {
 		state, e := pauseTaskState(i.PID)
-		if e == nil && (want == "" || state == want) {
-			w.State = state
-			w.ObservedAt = time.Now()
+		if e == nil && state == want {
+			w.State, w.ObservedAt = state, time.Now()
 			return w, nil
 		}
-		select {
-		case <-ctx.Done():
-			return w, errors.Join(e, ctx.Err())
-		case <-time.After(5 * time.Millisecond):
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	return w, errors.New("pause state witness deadline")
 }

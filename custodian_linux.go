@@ -41,7 +41,11 @@ func OwnedEntrypoint(args []string) (bool, error) {
 }
 
 func procFields(pid int) ([]string, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	return procFieldsAt(fmt.Sprintf("/proc/%d/stat", pid))
+}
+
+func procFieldsAt(name string) ([]string, error) {
+	b, err := os.ReadFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +263,7 @@ func serveCustody(input io.Reader, output io.Writer) (result error) {
 			r := custodyReply{Sequence: q.Sequence}
 			var callErr error
 			switch q.Operation {
-			case "pause-bind", "pause-stop", "pause-resume", "pause-observe":
+			case "pause-stop", "pause-resume", "pause-observe":
 				r.Pause, callErr = pause.command(q, identity, a, authorized, pidfd)
 			case "authorize":
 				deadline := a.WorkDeadline

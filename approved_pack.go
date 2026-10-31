@@ -13,7 +13,7 @@ type PackInputs struct {
 	Binding  RunBinding
 	Jobs     map[string]JobPin
 	Restarts map[string]GenerationRestartPlan
-	Pauses   map[string]ProcessPausePlan
+	Pauses   map[string]ProcessPausePlan `json:",omitempty"`
 	Boots    map[string]string
 	Scripts  map[string][]byte
 	Files    map[string]map[string]string
