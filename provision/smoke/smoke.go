@@ -265,6 +265,10 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	if ctl.Command == nil {
 		ctl.Command = Native
 	}
+	if mode == "run" && d.Cluster && ctl.Pack == nil {
+		out.Code, out.Remedy = "CLUSTER_PACK_UNAVAILABLE", "wait for cluster review acceptance before enabling execution"
+		return
+	}
 	if ctl.Pack == nil {
 		ctl.Pack = seaweed.RunCloudHTTP
 	}

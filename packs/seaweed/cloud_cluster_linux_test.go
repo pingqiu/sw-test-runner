@@ -49,7 +49,8 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 				fmt.Fprint(ch.Stderr(), "volume failed")
 				return 9
 			}
-			if variant == "collect-timeout" && strings.Contains(cmd, "sudo journalctl") {
+			if (variant == "collect-timeout" || variant == "collect-starvation") && strings.Contains(cmd, "sudo journalctl") {
+				os.WriteFile(filepath.Join(cfg.Output, "observed-collect-"+id), []byte("started"), 0600)
 				for {
 					time.Sleep(200 * time.Millisecond)
 					if _, e := ch.Write([]byte(".")); e != nil {
@@ -83,8 +84,12 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 			}
 			if strings.Contains(cmd, "curl -fsS --max-time 10") {
 				if id == "meta" {
+					metaSnapshot := snap.Add(1)
 					nodes := []map[string]string{}
 					for v := 1; v <= 6; v++ {
+						if variant == "missing-before-owner" && metaSnapshot == 1 && v == 6 {
+							continue
+						}
 						nodes = append(nodes, map[string]string{"Url": fmt.Sprintf("10.84.1.%d:8080", v+10)})
 					}
 					b, _ := json.Marshal(map[string]any{"Topology": map[string]any{"DataCenters": []any{map[string]any{"Racks": []any{map[string]any{"DataNodes": nodes}}}}}})
@@ -94,7 +99,7 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 					if variant == "idle-owner" && id == "vol6" {
 						n = 1
 					}
-					fmt.Fprintf(ch, `{"Volumes":[{"Id":%d,"Size":%d,"FileCount":%d,"ReadOnly":false}]}`, i, (n-1)*1048576, (n-1)*512)
+					fmt.Fprintf(ch, `{"Volumes":[{"Id":%d,"Size":%d,"FileCount":%d,"ReadOnly":%t}]}`, i, (n-1)*1048576, (n-1)*512, variant == "readonly-before" && id == "vol6" && n == 1)
 				}
 			}
 			return 0

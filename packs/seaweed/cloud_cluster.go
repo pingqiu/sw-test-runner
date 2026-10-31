@@ -85,6 +85,9 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		var mu sync.Mutex
 		var result error
 		slots := make(chan struct{}, 3)
+		if label == "collect" {
+			slots = make(chan struct{}, len(hosts))
+		}
 		for _, h := range hosts {
 			wg.Add(1)
 			go func(h inventory.Host) {
@@ -129,6 +132,11 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		name  string
 		hosts []inventory.Host
 	}{{"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}, {"before", servers}, {"load", groups["client"]}, {"after", servers}} {
+		if s.name == "load" {
+			if _, e := assessCloudCluster(ctx, d, c.Output, "--before"); e != nil {
+				return "", e
+			}
+		}
 		if e := phase(s.name, s.hosts); e != nil {
 			return "", e
 		}
@@ -137,10 +145,10 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 	if e := phase("collect", d.Hosts); e != nil {
 		return "", e
 	}
-	return assessCloudCluster(ctx, d, c.Output)
+	return assessCloudCluster(ctx, d, c.Output, "--assess")
 }
 
-func assessCloudCluster(ctx context.Context, d inventory.Document, root string) (string, error) {
+func assessCloudCluster(ctx context.Context, d inventory.Document, root, mode string) (string, error) {
 	owners := map[string]string{}
 	for _, h := range d.Hosts {
 		if contains(h.Roles, "volume") {
@@ -156,7 +164,7 @@ func assessCloudCluster(ctx context.Context, d inventory.Document, root string) 
 		return "", e
 	}
 	args, _ := json.Marshal(owners)
-	out, e := exec.CommandContext(ctx, "python3", "-I", script, "--assess", root, string(args)).CombinedOutput()
+	out, e := exec.CommandContext(ctx, "python3", "-I", script, mode, root, string(args)).CombinedOutput()
 	result := filepath.Join(root, "cluster-result.json")
 	return result, errors.Join(e, os.WriteFile(result, out, 0600))
 }

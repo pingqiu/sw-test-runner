@@ -3,6 +3,7 @@ package seaweed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,5 +46,5 @@ func collectCloudFailure(ctx context.Context, original *infra.Node, dir, root, r
 		err = fmt.Errorf("diagnostic command exit %d", rc)
 	}
 	// A fetch failure stays evidence, not a reason to skip or defer destruction.
-	return writeCloudStep(dir, "cloud-failure-fetch.json", "failure-log-fetch", command, stdout, stderr, rc, err)
+	return errors.Join(err, writeCloudStep(dir, "cloud-failure-fetch.json", "failure-log-fetch", command, stdout, stderr, rc, err), os.WriteFile(filepath.Join(dir, "cloud-services.log"), []byte(stdout), 0600))
 }

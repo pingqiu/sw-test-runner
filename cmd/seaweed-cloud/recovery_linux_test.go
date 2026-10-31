@@ -17,11 +17,18 @@ import (
 	"github.com/pingqiu/sw-test-runner/provision/smoke"
 )
 
-// The child uses the actual CLI and Native subprocess boundary; only Terraform
-// and az are local shell fixtures on PATH. No cloud account or SSH is contacted.
+// The child uses Controller.Execute with an injected pack and Native processes;
+// recovery uses the actual CLI. Terraform/az are local PATH fixtures, no account/SSH.
 func TestKilledControllerSavedStateCleanup(t *testing.T) {
 	if os.Getenv("CLOUD_KILL_CHILD") == "1" {
-		os.Exit(run([]string{"run", "--config", os.Getenv("CLOUD_CONFIG")}, os.Stdout))
+		b, e := os.ReadFile(os.Getenv("CLOUD_CONFIG"))
+		var c smoke.Config
+		if e != nil || smoke.StrictJSON(b, &c) != nil {
+			os.Exit(2)
+		}
+		r := (smoke.Controller{Command: smoke.Native, Pack: func(context.Context, []byte, seaweed.CloudConfig) (string, error) { return "", nil }}).Execute(context.Background(), "run", c)
+		_ = json.NewEncoder(os.Stdout).Encode(r)
+		os.Exit(0)
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)

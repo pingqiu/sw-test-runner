@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -86,8 +87,11 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
+	if phase == "collect" {
+		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
+	}
 	defer func() {
-		if failure != nil {
+		if failure != nil && phase == "" {
 			if e := collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q); e != nil {
 				failure = errors.Join(failure, fmt.Errorf("save failure-log fetch: %w", e))
 			}
@@ -106,7 +110,17 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			return "", nil
 		}
 		sequence++
-		command := "timeout -k 5 120 sh -ec " + q(cmd)
+		seconds := 120
+		if phase == "load" {
+			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.
+			if deadline, ok := ctx.Deadline(); ok {
+				seconds = min(seconds, int(time.Until(deadline).Seconds())-5)
+			}
+			if seconds <= 0 {
+				return "", context.DeadlineExceeded
+			}
+		}
+		command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + q(cmd)
 		out, stderr, rc, e := n.Run(ctx, command)
 		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, command, out, stderr, rc, e)
 		if e != nil || rc != 0 || w != nil {

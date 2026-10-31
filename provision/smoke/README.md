@@ -95,8 +95,13 @@ Per-node server keys are generated before apply and stay in private cloud-init
 and state; the controller client key is never transferred. The default remains
 the qualified one-VM layout. Ten-node execution uses the shared pack's bounded
 fan-out/barriers: prepare, meta, six volumes, three clients, grow, baseline,
-concurrent KV+S3 batches, server counters and collection. Any node failure fails
-the run and reaches same-state destroy. This code is not cloud-qualified yet.
+concurrent KV+S3 batches, storage snapshots and collection. Any node failure fails
+the run and reaches same-state destroy. Client ACK/exact FID/owner joins prove
+that every owner is exercised. Size/FileCount are storage deltas, not server
+request/transfer counters; those counters are not measured. This is the narrowed
+functional evidence contract, with no throughput or server-request-rate claim.
+The default cluster command remains refused until review acceptance; injected
+local pack controls can exercise it. This code is not cloud-qualified yet.
 
 For a cluster run, choose a unique lowercase run ID (letters/digits/hyphens,
 maximum 50 characters) and set output to

@@ -45,6 +45,14 @@ def main():
         time.sleep(max(0, started+(i+1)*27-time.monotonic()))
     emit(dict(status='PASS',ack=512,exact=512,wrong=0,s3_ack=32,s3_exact=32))
 
+def before(root, hosts):
+    root = pathlib.Path(root)
+    topology = json.loads((root/'before/meta/status.json').read_text())['Topology']
+    assert {n['Url'] for dc in topology['DataCenters'] for rack in dc['Racks'] for n in rack['DataNodes']} == set(hosts.values())
+    for host in hosts:
+        volumes = json.loads((root/'before'/host/'status.json').read_text())['Volumes']
+        assert volumes and any(v['ReadOnly'] is False for v in volumes), 'no writable owner '+host
+
 def assess(root, hosts):
     root = pathlib.Path(root)
     read = lambda p: json.loads((root/p).read_text())
@@ -81,11 +89,13 @@ def assess(root, hosts):
                         assert lookups[vid]==owners[vid]
                         used.add(owners[vid])
     assert used==expected, 'owner not exercised'
-    print(json.dumps(dict(status='PASS',ack=1536,exact=1536,wrong=0,s3_ack=96,s3_exact=96,owners=sorted(used),server_storage_deltas=counters)))
+    print(json.dumps(dict(status='PASS',ack=1536,exact=1536,wrong=0,s3_ack=96,s3_exact=96,owners=sorted(used),server_storage_deltas=counters,evidence_scope='client_ack_exact_owner_join_and_server_storage_deltas')))
 
 if __name__ == '__main__':
     try:
-        if sys.argv[1:2]==['--assess']:
+        if sys.argv[1:2]==['--before']:
+            before(sys.argv[2],json.loads(sys.argv[3]))
+        elif sys.argv[1:2]==['--assess']:
             assess(sys.argv[2],json.loads(sys.argv[3]))
         else:
             main()
