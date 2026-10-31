@@ -3,6 +3,7 @@ package smoke
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/pingqiu/sw-test-runner/packs/seaweed"
 	"golang.org/x/crypto/ssh"
 	"os"
@@ -89,5 +90,38 @@ func TestTenNodeExecutionRefusesUntilPackLands(t *testing.T) {
 	r := (Controller{Command: f.command}).Execute(context.Background(), "run", clusterFixture(t))
 	if r.Code != "CLUSTER_PACK_UNAVAILABLE" || len(f.events) != 0 {
 		t.Fatalf("%+v %v", r, f.events)
+	}
+}
+
+func TestFailedClusterStandaloneRecoveryDoesNotNeedPack(t *testing.T) {
+	c := clusterFixture(t)
+	f := &fake{fail: "pack", live: true}
+	firstDestroy := true
+	command := func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+		if tool == "terraform" && args[0] == "destroy" {
+			if firstDestroy {
+				firstDestroy = false
+				return nil, errors.New("interrupted cleanup")
+			}
+			f.live = false
+		}
+		return f.command(ctx, dir, tool, args...)
+	}
+	broken := (Controller{Command: command, Pack: f.pack}).Execute(context.Background(), "run", c)
+	if broken.Code != "CLEANUP_INCOMPLETE" || len(broken.Remaining) != 1 {
+		t.Fatalf("failed run did not leave the simulated VM: %+v", broken)
+	}
+	c.Source = "/original-checkout-gone"
+	c.Cloud.Files = nil
+	recovery := Controller{Command: command}
+	for _, mode := range []string{"destroy", "verify"} {
+		result := recovery.Execute(context.Background(), mode, c)
+		want := "COMPLETE"
+		if mode == "verify" {
+			want = "EMPTY"
+		}
+		if result.Code != want || !result.RemainingObserved || len(result.Remaining) != 0 {
+			t.Fatalf("pack-free %s failed: %+v", mode, result)
+		}
 	}
 }

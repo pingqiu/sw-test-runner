@@ -247,7 +247,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
-	if d.Cluster && ctl.Pack == nil {
+	if mode == "run" && d.Cluster && ctl.Pack == nil {
 		out.Code = "CLUSTER_PACK_UNAVAILABLE"
 		out.Remedy = "install the reviewed multi-node pack successor before a cluster run"
 		return
