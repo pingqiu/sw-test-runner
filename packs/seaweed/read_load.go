@@ -107,7 +107,7 @@ func checkReadTask(j tr.JobPin, in tr.PackInputs, d *inventory.Document, client 
 // CheckReadTaskOutput checks the captured owned stdout, not an external receipt
 // or self-reported file. Completed outage observations earn NO error credit
 // here: the scenario must join each one to the exact witnessed outage.
-func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (map[string]any, error) {
+func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, window ...ReadWindow) (map[string]any, error) {
 	if c.Keys < 1 || c.Keys > 16 || c.Length < 1 || c.Length > 4*1024*1024 || c.Transport != "dc" {
 		return nil, errors.New("invalid read-only bounds")
 	}
@@ -167,6 +167,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 		LastExact                *float64 `json:"last_exact"`
 		Faults                   []map[string]json.RawMessage
 		Before, After            json.RawMessage
+		Outcomes                 []GETOutcome
 	}
 	body, _ := json.Marshal(rows[0])
 	if err = json.Unmarshal(body, &r); err != nil {
@@ -184,7 +185,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 	if r.Exact > 0 && (r.FirstExact == nil || r.LastExact == nil || *r.FirstExact < r.Started || *r.LastExact < *r.FirstExact || *r.LastExact > r.Ended) {
 		return nil, errors.New("exact GET boundaries missing")
 	}
-	seen := map[int]bool{}
+	seen := map[int]GETOutcome{}
 	for _, fault := range r.Faults {
 		var f struct {
 			Action, Key, Target, Transport string
@@ -201,13 +202,19 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 			return nil, errors.New("missing/out-of-range operation ID")
 		}
 		id := *f.OperationID
-		if f.Action != "get" || f.Key != fmt.Sprintf("%s-%d", c.Client, id%c.Keys) || f.Target != c.RDMAAddress || f.Transport != route || seen[id] || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
+		_, duplicate := seen[id]
+		if f.Action != "get" || f.Key != fmt.Sprintf("%s-%d", c.Client, id%c.Keys) || f.Target != c.RDMAAddress || f.Transport != route || duplicate || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
 			return nil, errors.New("unbound completed GET failure")
 		}
-		seen[id] = true
+		seen[id] = GETOutcome{ID: f.OperationID, Key: f.Key, Started: f.Started, Ended: f.Ended}
 	}
 	if err = checkReadCounters(r.Before, r.After, route, r.Exact, c.Length, len(r.Faults), 0); err != nil {
 		return nil, err
+	}
+	if len(window) > 0 {
+		if err = checkWindow(r.Outcomes, seen, r.Attempts, r.Started, r.Ended, c, window[0]); err != nil {
+			return nil, err
+		}
 	}
 	var observed map[string]any
 	err = json.Unmarshal(body, &observed)

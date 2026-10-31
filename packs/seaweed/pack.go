@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -42,17 +43,18 @@ func result(status, code, remedy, action string, d *inventory.Document) map[stri
 	b, _ := json.Marshal(r)
 	return map[string]string{"value": string(b), "execution_authorized": "false"}
 }
-func phase(name string) bool { return contains(phases, name) }
+func phase(name string) bool { return contains(phases, name) || name == "seaweed_read_restart" }
 
 // RegisterPack uses owned S0b jobs only; it exposes no raw shell/provider route.
 // It is opt-in registration and is not wired into the CLI.
 func RegisterPack(r *tr.Registry) {
-	runtime := &runtimePack{sessions: map[*tr.RunScope]*session{}}
+	runtime := &runtimePack{sessions: map[*tr.RunScope]*session{}, pause: func() <-chan time.Time { return time.After(30 * time.Second) }}
 	r.RegisterFunc("seaweed_inventory_validate", tr.TierDevOps, validateInventory)
 	r.RegisterFunc("seaweed_plan", tr.TierDevOps, plan)
 	for _, name := range []string{"seaweed_preflight", "seaweed_deploy", "seaweed_workload", "seaweed_collect", "seaweed_cleanup"} {
 		r.RegisterMutatingFunc(name, tr.TierDevOps, runtime.run)
 	}
+	r.RegisterMutatingFunc("seaweed_read_restart", tr.TierChaos, runtime.run)
 }
 func invalid(action string, err error) (map[string]string, error) {
 	const hint = "correct inventory against seaweed.inventory/v1 and preserve requested scope"

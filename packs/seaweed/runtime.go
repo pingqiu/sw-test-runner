@@ -33,6 +33,13 @@ type Plan struct {
 	Workload  []Step        `json:"workload"`
 	Collect   []Step        `json:"collect"`
 	Smoke     SmokeSettings `json:"smoke"`
+	Restart   *ReadRestart  `json:"restart,omitempty"`
+}
+type ReadRestart struct {
+	Episode     string `json:"episode"`
+	DC          string `json:"dc"`
+	RecoverDC   string `json:"recover_dc"`
+	RecoverHTTP string `json:"recover_http"`
 }
 type Step struct {
 	Host string `json:"host"`
@@ -48,7 +55,7 @@ func (p Plan) steps(phase string) []Step {
 		return p.Preflight
 	case phases[1]:
 		return append(append([]Step{}, p.Deploy...), p.Ready...)
-	case phases[2]:
+	case phases[2], "seaweed_read_restart":
 		return p.Workload
 	case phases[3]:
 		return p.Collect
@@ -131,12 +138,16 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 	if len(scenario.Phases) != len(phases) {
 		return errors.New("complete five-phase scenario required")
 	}
-	for i, p := range scenario.Phases {
-		if p.Always != (i == 4) || p.Parallel || p.Repeat > 1 || len(p.Actions) != 1 {
+	for i, phase := range scenario.Phases {
+		if phase.Always != (i == 4) || phase.Parallel || phase.Repeat > 1 || len(phase.Actions) != 1 {
 			return errors.New("phase shape changed")
 		}
-		a := p.Actions[0]
-		if a.Action != phases[i] || a.IgnoreError || a.Retry != 0 || a.Node != "" || a.Target != "" || a.Replica != "" || len(a.Params) != 0 {
+		a := phase.Actions[0]
+		want := phases[i]
+		if i == 2 && p.Restart != nil {
+			want = "seaweed_read_restart"
+		}
+		if a.Action != want || a.IgnoreError || a.Retry != 0 || a.Node != "" || a.Target != "" || a.Replica != "" || len(a.Params) != 0 {
 			return errors.New("phase skipped/reordered/retried/ignored or redirected")
 		}
 	}
@@ -206,7 +217,13 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 				if s.Role != "client" || !contains(h.Roles, "client") {
 					return errors.New("workload requires a declared client")
 				}
-				if err := checkSmoke(j, in, d, s.Host, p.Smoke); err != nil {
+				var err error
+				if p.Restart != nil {
+					err = checkReadTask(j, in, d, s.Host, p.Smoke, "seed", "dc")
+				} else {
+					err = checkSmoke(j, in, d, s.Host, p.Smoke)
+				}
+				if err != nil {
 					return err
 				}
 			} else if s.Role != "" {
@@ -243,6 +260,9 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 			return err
 		}
 	}
+	if p.Restart != nil {
+		return bindRestart(p, d, in, used)
+	}
 	return nil
 }
 func contains(a []string, s string) bool {
@@ -260,10 +280,12 @@ type session struct {
 	next       int
 	terminal   error
 	cleanupErr error
+	jobs       map[string]tr.JobHandle
 }
 type runtimePack struct {
 	mu       sync.Mutex
 	sessions map[*tr.RunScope]*session
+	pause    func() <-chan time.Time // Production uses 30 s; CPU controls replace time only.
 }
 
 func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Action) (out map[string]string, returned error) {
@@ -294,7 +316,7 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 	r.mu.Lock()
 	s := r.sessions[a.Safety]
 	if s == nil {
-		s = &session{planHash: hash([]byte(raw))}
+		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}}
 		r.sessions[a.Safety] = s
 	}
 	r.mu.Unlock()
@@ -309,8 +331,16 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		s.next = 5
 		return admittedResult("settled", "OK", "owned issuers settled; no cloud or disk deletion performed", act.Action, d), nil
 	}
-	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || phases[s.next] != act.Action {
+	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || sealed.Phases[s.next].Actions[0].Action != act.Action {
 		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
+	}
+	if act.Action == "seaweed_read_restart" {
+		out, err = r.restart(ctx, a, p, d, in, s)
+		s.terminal = err
+		if err == nil {
+			s.next++
+		}
+		return out, err
 	}
 	for _, step := range p.steps(act.Action) {
 		if err = ctx.Err(); err != nil {
@@ -318,9 +348,13 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 			return refusal(act.Action, "OWNED_JOB_FAILED", err)
 		}
 		background := act.Action == phases[1] && containsStep(p.Deploy, step.Job)
-		if _, _, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
+		var h tr.JobHandle
+		if h, _, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
 			s.terminal = err
 			return refusal(act.Action, "OWNED_JOB_FAILED", err)
+		}
+		if background {
+			s.jobs[step.Job] = h
 		}
 	}
 	s.next++

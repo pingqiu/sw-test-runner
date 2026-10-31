@@ -20,13 +20,21 @@ class ReadControls(unittest.TestCase):
         self.assertEqual((row['status'],row['exact'],conn.sets),('OBSERVED',2,0))
         self.assertEqual(row['transport'],'dc')
         self.assertEqual(row['faults'],[])
+        self.assertEqual([o['operation_id'] for o in row['outcomes']],[0,1])
+        self.assertTrue(all(o['exact'] and o['ended']>=o['started'] for o in row['outcomes']))
     def test_http_control_is_copied_not_dc(self):
         row,conn=self.run_case('http','http')
         self.assertEqual((row['exact'],conn.sets),(2,0))
     def test_first_exact_is_completion_not_submission(self):
-        with patch.object(kv_smoke.time,'time',side_effect=[100.,101.,102.,103.,104.,105.]):
+        import itertools
+        clock=itertools.count(100.)
+        with patch.object(kv_smoke.time,'monotonic',side_effect=lambda:next(clock)):
             row,_=self.run_case()
-        self.assertEqual((row['first_exact'],row['last_exact']),(102.,104.))
+        self.assertEqual(row['first_exact'],row['outcomes'][0]['ended'])
+        self.assertGreater(row['first_exact'],row['outcomes'][0]['started'])
+        self.assertEqual(row['last_exact'],row['outcomes'][-1]['ended'])
+        self.assertEqual(row['elapsed'],row['ended']-row['started'])
+        self.assertTrue(all(row['started']<=o['started']<=o['ended']<=row['ended'] for o in row['outcomes']))
     def test_wrong_bytes_miss_and_wrong_route_refuse_recovery(self):
         for mode in ('wrong','miss','http'):
             with self.subTest(mode=mode),self.assertRaises(AssertionError):self.run_case(mode)
@@ -44,6 +52,8 @@ class ReadControls(unittest.TestCase):
             self.assertNotIn('expected_errors',row)
             self.assertTrue(all(f['action']=='get' and f['target']=='10.0.2.3:20980' for f in row['faults']))
         finally:kv_smoke.time.monotonic,kv_smoke.time.sleep=original_now,original_sleep
+    def test_wrong_bytes_never_become_an_outage_observation(self):
+        with self.assertRaises(AssertionError):self.run_case('wrong',stage='load')
     def test_seed_stage_is_the_existing_smoke_path(self):
         self.assertEqual(kv_smoke.read_stage_args('seed','dc'),('seed','dc'))
         for stage,route in [('seed','http'),('load','rc'),('arbitrary','dc')]:
