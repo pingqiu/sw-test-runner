@@ -129,6 +129,12 @@ seaweed-cloud cleanup --run <id> --dry-run --json
 seaweed-cloud cleanup --run <id> --json
 ```
 
+`run --dry-run` and `verify --dry-run` use the existing local `plan` path;
+they issue no Terraform, Azure or SSH commands. Ordinary `run` has no dry-run
+default and intentionally applies. Saved-state `cleanup --run` requires an
+absolute, resolvable controller HOME; unset/relative HOME refuses before reading
+any recovery file. It never searches the current directory for state.
+
 This reads `recovery.json`, the exact module/vars snapshot and Terraform state;
 the original checkout, input config, artifacts and guest client key are not
 required. No re-apply occurs. Preserve the private run directory until absence

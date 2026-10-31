@@ -48,8 +48,16 @@ func run(args []string, w io.Writer) int {
 		return 1
 	}
 	if len(args) > 0 && fs.Parse(args[1:]) == nil && fs.NArg() == 0 {
+		if *dry && (args[0] == "run" || args[0] == "verify") {
+			args[0] = "plan"
+		}
 		if args[0] == "cleanup" && regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`).MatchString(*runID) {
-			home, _ := os.UserHomeDir()
+			home, err := os.UserHomeDir()
+			if err != nil || !filepath.IsAbs(home) {
+				out.Code, out.Remedy = "INPUT_REFUSED", "resolve an absolute controller HOME before cleanup --run"
+				_ = json.NewEncoder(w).Encode(out)
+				return 1
+			}
 			*config = filepath.Join(home, ".local", "state", "seaweed-cloud", "runs", *runID, "recovery.json")
 			args[0] = "destroy"
 		}
