@@ -201,6 +201,7 @@ func TestApprovedWorkerDispatchesStrictDataThroughActualAdapter(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
+				assertParentAuthorityBytes(t, raw)
 				var evidence struct {
 					Jobs    map[string]ApprovedJobReceipt
 					Request ClaimedRequest

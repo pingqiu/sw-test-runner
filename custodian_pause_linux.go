@@ -57,7 +57,7 @@ func (p *processPause) custodyCommand(q custodyRequest, i ProcessIdentity, a Run
 	}
 	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	if n, e := unix.Poll(poll, 0); e != nil || n != 0 {
-		return w, errors.New("pause victim no longer live")
+		return w, fmt.Errorf("pause victim liveness UNKNOWN: ready_fds=%d poll_error=%v", n, e)
 	}
 	want := "LIVE"
 	switch q.Operation {

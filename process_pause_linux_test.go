@@ -57,7 +57,12 @@ func TestProcessPauseCustody(t *testing.T) {
 				return
 			}
 			if err != nil || stopped.State != "STOPPED" || stopped.Before != "LIVE" || stopped.Identity != i {
-				t.Fatalf("STOP: %+v %v", stopped, err)
+				diagnostic, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				exit, waitErr := b.Wait(diagnostic, h.id)
+				out, _ := os.ReadFile(h.job.spec.StdoutPath)
+				stderr, _ := os.ReadFile(h.job.spec.StderrPath)
+				t.Fatalf("STOP: %+v %v terminal=%+v wait=%v stdout=%q stderr=%q", stopped, err, exit, waitErr, out, stderr)
 			}
 			if state, err := processTaskState(fmt.Sprintf("/proc/%d/task", i.PID)); err != nil || state != "STOPPED" {
 				t.Fatalf("not all tasks stopped: %s %v", state, err)

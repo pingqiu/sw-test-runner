@@ -68,7 +68,15 @@ func (c *ActionContext) PauseApprovedPackGeneration(ctx context.Context, name st
 		if p.resumeErr != nil {
 			return p.resumeErr
 		}
-		p.resumeErr = p.signal(cleanup, "pause-resume", &p.Resumed)
+		p.resumeErr = errors.New("CONT pending or failed") // Panic must leave proof ineligible.
+		c.Safety.beginCleanup()
+		if err := c.Safety.settlePauseIssuers(cleanup); err != nil {
+			return err
+		}
+		if err := p.signal(cleanup, "pause-resume", &p.Resumed); err != nil {
+			return err
+		}
+		p.resumeErr = nil
 		return p.resumeErr
 	}, func(cleanup context.Context) error {
 		if p.resumeErr != nil {
