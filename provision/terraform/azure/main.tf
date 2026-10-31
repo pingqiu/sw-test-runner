@@ -111,7 +111,7 @@ resource "azurerm_linux_virtual_machine" "node" {
     sku       = "server"
     version   = var.image_version
   }
-  custom_data = base64encode(var.host_keys == null ? file("${path.module}/cloud-init.yaml") : "#cloud-config\n${yamlencode(merge(yamldecode(file("${path.module}/cloud-init.yaml")), { ssh_keys = var.host_keys }))}")
+  custom_data = base64encode(try(var.node_host_keys[each.key], var.host_keys) == null ? file("${path.module}/cloud-init.yaml") : "#cloud-config\n${yamlencode(merge(yamldecode(file("${path.module}/cloud-init.yaml")), { ssh_keys = try(var.node_host_keys[each.key], var.host_keys) }))}")
   depends_on  = [azurerm_subnet_network_security_group_association.run]
 }
 resource "azurerm_managed_disk" "cache" {

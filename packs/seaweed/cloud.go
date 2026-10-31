@@ -19,10 +19,11 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
-	SSHKey  string               `json:"ssh_key"`
-	HostKey string               `json:"-"`
-	Output  string               `json:"-"`
-	Files   map[string]CloudFile `json:"files"`
+	SSHKey   string               `json:"ssh_key"`
+	HostKey  string               `json:"-"`
+	HostKeys map[string]string    `json:"-"`
+	Output   string               `json:"-"`
+	Files    map[string]CloudFile `json:"files"`
 }
 type CloudFile struct {
 	Path   string `json:"path"`

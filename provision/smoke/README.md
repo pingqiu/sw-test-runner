@@ -86,3 +86,12 @@ SEAWEED_CLOUD_ARTIFACT_DIR=/private/af8c-artifacts /private/cloud-pack-preflight
 The opt-in preflight drives RunCloudHTTP over loopback pinned SSH, using the production command strings and upload path. It executes real local uploads, all artifact hash checks, unchanged tar extraction/configuration, and the production worker argv with --dry-run. Every remote command gets a real shell syntax check. Service startup argv is parsed by the pinned binaries with help, via a local systemd substitute that never starts a service. The worker native_dir must bind the actual extracted package parent. Discovery without the env flag skips the preflight and performs no artifact work or host contact.
 
 Cloud-init status/ownership, actual systemd startup, HTTP readiness, service journals, native Python3.12 import and live KV are explicitly NOT_RUN offline. An older local glibc may also prevent the pinned volume CLI from loading (current WSL lacks GLIBC_2.38); that is NOT_RUN, not an argv/runtime PASS. The test deliberately returns from the production pack at the live-workload boundary with exit77; it never fabricates an ACK/exact PASS summary. These limitations still need the reviewed cloud smoke; the local setup preflight does not qualify service/native runtime compatibility.
+# Ten-node preparation (not executable yet)
+
+Set `cluster:true` in the pinned tfvars for one meta D4s_v5, six volume D2s_v5
+and three client D2s_v5 hosts. `plan` describes ten VMs without cloud calls.
+The wiring uses the existing module's `for_each`, inventory and per-role ports.
+Per-node server keys are generated before apply and stay in private cloud-init
+and state; the controller client key is never transferred. The default remains
+the qualified one-VM layout. This slice refuses real cluster execution with
+`CLUSTER_PACK_UNAVAILABLE` until the reviewed fan-out pack successor lands.
