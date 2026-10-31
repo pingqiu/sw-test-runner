@@ -51,7 +51,7 @@ type GenerationRestartPlan struct {
 }
 
 type ApprovedRunPolicy struct {
-	ProcessPauses      map[string]ProcessPausePlan      `json:"process_pauses,omitempty"`
+	ProcessPause       *ProcessPausePlan                `json:"process_pause,omitempty"`
 	GenerationRestarts map[string]GenerationRestartPlan `json:"generation_restarts,omitempty"`
 	Version            string                           `json:"version"`
 	Runner             string                           `json:"runner"`
@@ -91,6 +91,7 @@ type ApprovedRun struct {
 	scope                       *RunScope
 	mu                          sync.Mutex
 	generationRestarts          map[string]GenerationRestartReceipt
+	pauseReceipt                *ProcessPauseReceipt // mu; one receipt, exported by value.
 	workErr                     error
 	closing                     bool
 	readers                     int

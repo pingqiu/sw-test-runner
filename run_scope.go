@@ -150,7 +150,7 @@ type RunScope struct {
 	faultReceipts   map[string]FaultReceipt
 	cleanupDeadline time.Time
 	authority       faultAuthority
-	pause           *ownedPause // Only the independently admitted pause victim.
+	pause           *processPause // Only the independently admitted pause victim.
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -484,7 +484,7 @@ func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Co
 	return s.applyFault(key, apply, restore, verify, nil)
 }
 
-func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Context) error, pause *ownedPause) error {
+func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Context) error, pause *processPause) error {
 	s.mu.Lock()
 	if s.closed || s.ctx.Err() != nil {
 		s.mu.Unlock()
@@ -504,7 +504,9 @@ func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Co
 			s.mu.Unlock()
 			return errors.New("pause episode already consumed")
 		}
-		pause.ready = r.ready
+		pause.run.mu.Lock()
+		pause.run.pauseReceipt = &pause.ProcessPauseReceipt
+		pause.run.mu.Unlock()
 		s.pause = pause
 	}
 	s.restores[key] = r
@@ -616,6 +618,10 @@ func (s *RunScope) Close() error {
 		s.beginCleanup()
 		s.mu.Lock()
 		order := append([]string(nil), s.order...)
+		var pauseReady <-chan struct{}
+		if s.pause != nil {
+			pauseReady = s.restores[s.pause.Key].ready
+		}
 		jobs := make([]JobHandle, 0, len(s.jobs))
 		for id, j := range s.jobs {
 			jobs = append(jobs, JobHandle{s, id, j})
@@ -626,7 +632,13 @@ func (s *RunScope) Close() error {
 		var errs []error
 		var issuerErr error
 		if s.authority != nil {
-			issuerErr = s.joinPauseDispatches(ctx)
+			if pauseReady != nil {
+				select {
+				case <-pauseReady:
+				case <-ctx.Done():
+					issuerErr = ctx.Err()
+				}
+			}
 			if issuerErr == nil {
 				issuerErr = s.settleWork(ctx)
 			}

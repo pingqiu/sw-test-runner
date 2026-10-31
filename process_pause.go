@@ -7,116 +7,93 @@ import (
 )
 
 type ProcessPausePlan struct {
+	Name     string    `json:"name"`
 	Victim   string    `json:"victim"`
 	Deadline time.Time `json:"deadline"`
 }
 type ProcessPauseWitness struct {
-	Identity   ProcessIdentity
-	State      string
-	ObservedAt time.Time
+	Identity      ProcessIdentity
+	Before, State string
+	ObservedAt    time.Time
 }
 type ProcessPauseReceipt struct {
-	VictimJobID             string
+	Key, VictimJobID        string
 	Plan                    ProcessPausePlan
 	Identity                ProcessIdentity
 	PreStopMono             float64
 	Stopped, Resumed, Final ProcessPauseWitness
 	Error                   string
 }
-type pauseBackend interface {
-	pauseCommand(context.Context, string, string, ProcessIdentity, time.Time) (ProcessPauseWitness, error)
-}
-type ownedPause struct {
+
+// Controller and custodian retain separate instances: a lost reply cannot merge
+// their failure domains. The custodian uses only the exact grant and CONT latch.
+type processPause struct {
+	ProcessPauseReceipt
 	run       *ApprovedRun
 	victim    JobHandle
-	name, key string
-	ready     chan struct{}
-	receipt   ProcessPauseReceipt // RunScope.mu; execution uses the existing job/restoration gates.
-	resumeErr error               // Existing restoration gate, after apply.ready.
+	resumeErr error
 }
 
-func (a *ApprovedRun) ProcessPauseReceipts() map[string]ProcessPauseReceipt {
-	a.scope.mu.Lock()
-	defer a.scope.mu.Unlock()
-	if a.scope.pause == nil {
+func (a *ApprovedRun) ProcessPauseReceipt() *ProcessPauseReceipt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pauseReceipt == nil {
 		return nil
 	}
-	p := a.scope.pause
-	return map[string]ProcessPauseReceipt{p.name: p.receipt}
+	r := *a.pauseReceipt
+	return &r
 }
 
-func (c *ActionContext) PauseApprovedPackGeneration(ctx context.Context, name string, victim JobHandle) (receipt ProcessPauseReceipt, err error) {
+func (c *ActionContext) PauseApprovedPackGeneration(ctx context.Context, name string, victim JobHandle) (receipt *ProcessPauseReceipt, err error) {
 	if err = c.boundPackContext(); err != nil {
 		return
 	}
 	defer func() { c.FailApprovedPack(err) }()
-	plan, ok := c.approved.runPolicy.ProcessPauses[name]
-	if !ok || !c.approved.approval.AllowMutating {
-		return receipt, errors.New("pause lacks independent episode/consent")
+	plan := c.approved.runPolicy.ProcessPause
+	if plan == nil || plan.Name != name || !c.approved.approval.AllowMutating {
+		return nil, errors.New("pause lacks independent episode/consent")
 	}
-	j, unlock, e := c.Safety.lockJob(ctx, victim)
+	identity, e := c.liveApprovedService(ctx, plan.Victim, victim)
 	if e != nil {
-		return receipt, e
+		return nil, e
 	}
-	valid := j.spec.retainExit && !j.settled && j.spec.packLabel == plan.Victim && sameJob(c.approved.runPolicy.Jobs[plan.Victim], j.spec)
-	identity := j.identity
-	unlock()
-	if !valid {
-		return receipt, errors.New("pause victim is not exact owned service")
-	}
-	p := &ownedPause{run: c.approved, victim: victim, name: name, key: "process-pause/" + victim.id, receipt: ProcessPauseReceipt{VictimJobID: victim.id, Plan: plan, Identity: identity}}
-	err = c.Safety.applyFault(p.key, func(work context.Context) error {
+	p := &processPause{run: c.approved, victim: victim, ProcessPauseReceipt: ProcessPauseReceipt{Key: "process-pause/" + victim.id, VictimJobID: victim.id, Plan: *plan, Identity: identity}}
+	err = c.Safety.applyFault(p.Key, func(work context.Context) error {
 		work, cancel := context.WithCancel(work)
 		stop := context.AfterFunc(ctx, cancel)
 		defer stop()
 		defer cancel()
-		return p.command(work, "pause-stop", &p.receipt.Stopped)
+		return p.signal(work, "pause-stop", &p.Stopped)
 	}, func(cleanup context.Context) error {
 		if p.resumeErr != nil {
 			return p.resumeErr
 		}
-		p.resumeErr = p.command(cleanup, "pause-resume", &p.receipt.Resumed)
+		p.resumeErr = p.signal(cleanup, "pause-resume", &p.Resumed)
 		return p.resumeErr
 	}, func(cleanup context.Context) error {
 		if p.resumeErr != nil {
 			return p.resumeErr
 		}
-		return p.command(cleanup, "pause-observe", &p.receipt.Final)
+		return p.signal(cleanup, "pause-observe", &p.Final)
 	}, p)
-	return c.approved.ProcessPauseReceipts()[name], err
-}
-func (c *ActionContext) ResumeApprovedPackGeneration(ctx context.Context, name string) (ProcessPauseReceipt, error) {
-	if err := c.boundPackContext(); err != nil {
-		return ProcessPauseReceipt{}, err
-	}
-	c.Safety.mu.Lock()
-	p := c.Safety.pause
-	c.Safety.mu.Unlock()
-	if p == nil || p.name != name {
-		return ProcessPauseReceipt{}, errors.New("no registered pause")
-	}
-	err := c.Safety.ClearFault(ctx, p.key)
-	c.FailApprovedPack(err)
-	return c.approved.ProcessPauseReceipts()[name], err
+	return c.approved.ProcessPauseReceipt(), err
 }
 
-func (p *ownedPause) command(ctx context.Context, op string, dst *ProcessPauseWitness) (err error) {
-	s := p.run.scope
-	ctx, cancel := context.WithDeadline(ctx, p.receipt.Plan.Deadline)
+func (p *processPause) signal(ctx context.Context, op string, dst *ProcessPauseWitness) (err error) {
+	ctx, cancel := context.WithDeadline(ctx, p.Plan.Deadline)
 	defer cancel()
 	ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	j, unlock, err := s.lockJob(ctx, p.victim)
+	j, unlock, err := p.run.scope.lockJob(ctx, p.victim)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if j.settled || j.identity != p.receipt.Identity {
+	if j.settled || j.identity != p.Identity {
 		return errors.New("pause generation no longer live")
 	}
-	b := s.backend.(*approvedJobs)
 	if op == "pause-stop" {
-		if err = b.work(ctx, p.victim.id, j.spec); err != nil {
+		if err = p.run.scope.backend.(*approvedJobs).work(ctx, p.victim.id, j.spec); err != nil {
 			p.run.revoke(err)
 			return err
 		}
@@ -124,47 +101,32 @@ func (p *ownedPause) command(ctx context.Context, op string, dst *ProcessPauseWi
 		if e != nil {
 			return e
 		}
-		s.mu.Lock()
-		p.receipt.PreStopMono = P
-		s.mu.Unlock()
-	} else if err = p.run.readbackNode(ctx, j.identity.Node); err != nil {
+		p.run.mu.Lock()
+		p.PreStopMono = P
+		p.run.mu.Unlock()
+	} else if err = p.run.readbackNode(ctx, j.identity.Node, "pause node no longer bound"); err != nil {
 		return err
 	}
-	backend, ok := p.run.runtime.Jobs.(pauseBackend)
+	backend, ok := p.run.runtime.Jobs.(interface {
+		command(context.Context, string, string, ProcessIdentity, ...time.Time) (custodyReply, error)
+	})
 	if !ok {
-		return errors.New("pause backend unsupported")
+		return errors.New("pause custody unsupported")
 	}
-	w, err := backend.pauseCommand(ctx, p.victim.id, op, j.identity, p.receipt.Plan.Deadline)
+	reply, err := backend.command(ctx, p.victim.id, op, j.identity, p.Plan.Deadline)
+	w := reply.Pause
 	want := "LIVE"
 	if op == "pause-stop" {
 		want = "STOPPED"
 	}
-	if err == nil && (w.Identity != j.identity || w.State != want || w.ObservedAt.IsZero()) {
+	if err == nil && (ctx.Err() != nil || w.Identity != j.identity || w.State != want || w.ObservedAt.IsZero() || (op == "pause-stop" && w.Before != "LIVE")) {
 		err = errors.New("pause identity/state UNKNOWN")
 	}
-	s.mu.Lock()
+	p.run.mu.Lock()
 	*dst = w
 	if err != nil {
-		p.receipt.Error = err.Error()
+		p.Error = err.Error()
 	}
-	s.mu.Unlock()
+	p.run.mu.Unlock()
 	return err
-}
-func (s *RunScope) joinPauseDispatches(ctx context.Context) error {
-	s.mu.Lock()
-	p := s.pause
-	s.mu.Unlock()
-	if p == nil {
-		return nil
-	}
-	select {
-	case <-p.ready:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-func (b *SSHJobs) pauseCommand(ctx context.Context, id, op string, i ProcessIdentity, deadline time.Time) (ProcessPauseWitness, error) {
-	r, err := b.command(ctx, id, op, i, deadline)
-	return r.Pause, err
 }

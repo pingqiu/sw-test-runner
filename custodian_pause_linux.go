@@ -11,18 +11,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type custodyPause struct {
-	deadline  time.Time
-	resumed   bool
-	resumeErr error
-}
-
 // Complete task enumeration: mixed, traced, dead or changing sets are UNKNOWN.
-func pauseTaskState(pid int) (string, error) {
-	return pauseTaskStateAt(fmt.Sprintf("/proc/%d/task", pid))
-}
-
-func pauseTaskStateAt(root string) (string, error) {
+func processTaskState(root string) (string, error) {
 	before, err := os.ReadDir(root)
 	if err != nil || len(before) == 0 || len(before) > 2048 {
 		return "", errors.New("task enumeration UNKNOWN")
@@ -59,7 +49,7 @@ func pauseTaskStateAt(root string) (string, error) {
 	return "", errors.New("mixed task stop state")
 }
 
-func (p *custodyPause) command(q custodyRequest, i ProcessIdentity, a RunAdmission, authorized bool, fd int) (w ProcessPauseWitness, err error) {
+func (p *processPause) custodyCommand(q custodyRequest, i ProcessIdentity, a RunAdmission, authorized bool, fd int) (w ProcessPauseWitness, err error) {
 	w.Identity = i
 	limit := q.Admission.EffectDeadline
 	if !authorized || q.Identity != i || !limit.After(time.Now()) || limit.After(q.PauseDeadline) || q.PauseDeadline.After(a.HardDeadline) {
@@ -72,28 +62,29 @@ func (p *custodyPause) command(q custodyRequest, i ProcessIdentity, a RunAdmissi
 	want := "LIVE"
 	switch q.Operation {
 	case "pause-stop":
-		if !p.deadline.IsZero() || !a.WorkDeadline.After(time.Now()) {
+		if !p.Plan.Deadline.IsZero() || !a.WorkDeadline.After(time.Now()) {
 			return w, errors.New("STOP replay/work expired")
 		}
-		if state, e := pauseTaskState(i.PID); e != nil || state != "LIVE" || !limit.After(time.Now()) || !a.WorkDeadline.After(time.Now()) {
+		if state, e := processTaskState(fmt.Sprintf("/proc/%d/task", i.PID)); e != nil || state != "LIVE" || !limit.After(time.Now()) || !a.WorkDeadline.After(time.Now()) {
 			return w, errors.New("pause baseline not live")
 		}
 		// Retain the exact resume grant BEFORE the first possible STOP effect.
-		p.deadline = q.PauseDeadline
+		p.Plan.Deadline, p.Identity = q.PauseDeadline, i
+		w.Before = "LIVE"
 		err = unix.PidfdSendSignal(fd, unix.SIGSTOP, nil, 0)
 		want = "STOPPED"
 	case "pause-resume", "pause-observe":
-		if p.deadline.IsZero() || !q.PauseDeadline.Equal(p.deadline) || p.resumeErr != nil {
+		if p.Plan.Deadline.IsZero() || p.Identity != i || !q.PauseDeadline.Equal(p.Plan.Deadline) || p.resumeErr != nil {
 			return w, errors.New("missing/failed retained resume grant")
 		}
 		if q.Operation == "pause-resume" {
-			if p.resumed || !limit.After(time.Now()) {
+			if !p.Resumed.ObservedAt.IsZero() || !limit.After(time.Now()) {
 				return w, errors.New("CONT replay")
 			}
-			p.resumed = true
+			p.Resumed.ObservedAt = time.Now()
 			defer func() { p.resumeErr = err }()
 			err = unix.PidfdSendSignal(fd, unix.SIGCONT, nil, 0)
-		} else if !p.resumed {
+		} else if p.Resumed.ObservedAt.IsZero() {
 			return w, errors.New("CONT not proven")
 		}
 	default:
@@ -106,8 +97,8 @@ func (p *custodyPause) command(q custodyRequest, i ProcessIdentity, a RunAdmissi
 		limit = pollBound
 	}
 	for time.Now().Before(limit) {
-		state, e := pauseTaskState(i.PID)
-		if e == nil && state == want {
+		state, e := processTaskState(fmt.Sprintf("/proc/%d/task", i.PID))
+		if e == nil && state == want && limit.After(time.Now()) {
 			w.State, w.ObservedAt = state, time.Now()
 			return w, nil
 		}

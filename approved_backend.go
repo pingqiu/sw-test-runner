@@ -108,7 +108,7 @@ func (b *approvedJobs) work(ctx context.Context, id string, s JobSpec) error {
 	if err := b.run.authority(ctx, 2*time.Second); err != nil {
 		return err
 	}
-	return b.run.readbackNode(ctx, s.Node)
+	return b.run.readbackNode(ctx, s.Node, "job node is not approved")
 
 }
 
@@ -245,11 +245,11 @@ func (b *approvedJobs) Kill(ctx context.Context, id string) (KillWitness, error)
 	}
 	return b.run.runtime.Jobs.Kill(ctx, id)
 }
-func (a *ApprovedRun) readbackNode(ctx context.Context, node string) error {
+func (a *ApprovedRun) readbackNode(ctx context.Context, node, missing string) error {
 	for _, p := range a.runPolicy.Deployments {
 		if p.NodeID == node {
 			return a.readback(ctx, p)
 		}
 	}
-	return errors.New("node no longer bound")
+	return errors.New(missing)
 }

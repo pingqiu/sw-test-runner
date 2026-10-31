@@ -5,7 +5,9 @@ package testrunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,33 +49,33 @@ func TestProcessPauseCustody(t *testing.T) {
 			}
 			// STOP must bind its exact retained resume obligation before the signal;
 			// no separate preparation round trip or arbitrary signal is accepted.
-			stopped, err := b.pauseCommand(t.Context(), h.id, "pause-stop", i, deadline)
+			stopped, err := testPauseCommand(b, t.Context(), h.id, "pause-stop", i, deadline)
 			if mode != "roundtrip" && mode != "replay" {
 				if err == nil {
 					t.Fatalf("%s accepted: %+v", mode, stopped)
 				}
 				return
 			}
-			if err != nil || stopped.State != "STOPPED" || stopped.Identity != i {
+			if err != nil || stopped.State != "STOPPED" || stopped.Before != "LIVE" || stopped.Identity != i {
 				t.Fatalf("STOP: %+v %v", stopped, err)
 			}
-			if state, err := pauseTaskState(i.PID); err != nil || state != "STOPPED" {
+			if state, err := processTaskState(fmt.Sprintf("/proc/%d/task", i.PID)); err != nil || state != "STOPPED" {
 				t.Fatalf("not all tasks stopped: %s %v", state, err)
 			}
 			if mode == "replay" {
-				if _, err = b.pauseCommand(t.Context(), h.id, "pause-stop", i, deadline); err == nil {
+				if _, err = testPauseCommand(b, t.Context(), h.id, "pause-stop", i, deadline); err == nil {
 					t.Fatal("replayed STOP accepted")
 				}
 			}
-			resumed, err := b.pauseCommand(t.Context(), h.id, "pause-resume", i, deadline)
+			resumed, err := testPauseCommand(b, t.Context(), h.id, "pause-resume", i, deadline)
 			if err != nil || resumed.State != "LIVE" || resumed.Identity != i {
 				t.Fatalf("CONT: %+v %v", resumed, err)
 			}
 			time.Sleep(100 * time.Millisecond)
-			if state, err := pauseTaskState(i.PID); err != nil || state != "LIVE" {
+			if state, err := processTaskState(fmt.Sprintf("/proc/%d/task", i.PID)); err != nil || state != "LIVE" {
 				t.Fatalf("not all tasks resumed: %s %v", state, err)
 			}
-			if _, err = b.pauseCommand(t.Context(), h.id, "pause-resume", i, deadline); err == nil {
+			if _, err = testPauseCommand(b, t.Context(), h.id, "pause-resume", i, deadline); err == nil {
 				t.Fatal("replayed CONT accepted")
 			}
 		})
@@ -161,6 +163,10 @@ func (n *pauseNode) pauseCommand(ctx context.Context, id, op string, i ProcessId
 	switch op {
 	case "pause-stop":
 		n.state = "STOPPED"
+		w.Before = "LIVE"
+		if n.mode == "baseline" {
+			w.Before = ""
+		}
 		w.State = "STOPPED"
 		if n.mode == "lost-stop" {
 			return w, fmt.Errorf("lost STOP response")
@@ -201,7 +207,7 @@ func (n *pauseNode) pauseCommand(ctx context.Context, id, op string, i ProcessId
 func pauseFixture(t *testing.T) (*approvedFixture, *pauseNode) {
 	f, g := generationFixture(t)
 	f.policy.GenerationRestarts = nil
-	f.policy.ProcessPauses = map[string]ProcessPausePlan{"freeze": {Victim: "volume0", Deadline: f.binding.HardDeadline}}
+	f.policy.ProcessPause = &ProcessPausePlan{Name: "freeze", Victim: "volume0", Deadline: f.binding.HardDeadline}
 	f.publish(t, nil)
 	setGenerationConsent(t, f)
 	n := &pauseNode{generationNode: g, state: "LIVE"}
@@ -210,7 +216,7 @@ func pauseFixture(t *testing.T) (*approvedFixture, *pauseNode) {
 }
 
 func TestApprovedPauseCustodyAndRetainedCleanup(t *testing.T) {
-	for _, mode := range []string{"pass", "barrier", "lost-stop", "mixed", "missing", "pid", "start", "revoked", "unreadable", "cont-failure", "final-foreign", "expired", "foreign-label", "no-consent"} {
+	for _, mode := range []string{"pass", "barrier", "lost-stop", "late-proof", "baseline", "mixed", "missing", "pid", "start", "revoked", "unreadable", "cont-failure", "final-foreign", "expired", "foreign-label", "no-consent"} {
 		t.Run(mode, func(t *testing.T) {
 			f, n := pauseFixture(t)
 			n.mode = mode
@@ -231,22 +237,28 @@ func TestApprovedPauseCustodyAndRetainedCleanup(t *testing.T) {
 						return err
 					}
 				}
-				n.stopCheck = func() {
-					a.Safety.mu.Lock()
-					p := a.Safety.pause
-					registered := p != nil && a.Safety.restores[p.key] != nil && p.receipt.Identity == old.job.identity
-					a.Safety.mu.Unlock()
-					if !registered {
-						t.Error("resume obligation missing before STOP")
-					}
-				}
 				if mode == "expired" {
-					a.approved.runPolicy.ProcessPauses["freeze"] = ProcessPausePlan{Victim: "volume0", Deadline: time.Now().Add(-time.Second)}
+					a.approved.runPolicy.ProcessPause = &ProcessPausePlan{Name: "freeze", Victim: "volume0", Deadline: time.Now().Add(-time.Second)}
 				}
 				if mode == "no-consent" {
 					a.approved.approval.AllowMutating = false
 				}
-				_, pauseErr = a.PauseApprovedPackGeneration(ctx, "freeze", old)
+				step, cancelStep := context.WithCancel(ctx)
+				n.stopCheck = func() {
+					priorCheck := true
+					a.Safety.mu.Lock()
+					priorCheck = a.Safety.pause != nil && a.Safety.restores[a.Safety.pause.Key] != nil && a.Safety.pause.Identity == old.job.identity
+					a.Safety.mu.Unlock()
+					if !priorCheck {
+						t.Error("resume obligation missing before STOP")
+					}
+					if mode == "late-proof" {
+						cancelStep()
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+				_, pauseErr = a.PauseApprovedPackGeneration(step, "freeze", old)
+				cancelStep()
 				if mode == "revoked" {
 					if err = os.WriteFile(filepath.Join(f.dir, "go.json"), []byte("{}"), 0600); err != nil {
 						return err
@@ -258,7 +270,7 @@ func TestApprovedPauseCustodyAndRetainedCleanup(t *testing.T) {
 					}
 				}
 				if mode == "cont-failure" {
-					if _, err = a.ResumeApprovedPackGeneration(ctx, "freeze"); err == nil {
+					if err = a.Safety.ClearFault(ctx, "process-pause/"+old.id); err == nil {
 						return fmt.Errorf("CONT failure hidden")
 					}
 				}
@@ -278,8 +290,8 @@ func TestApprovedPauseCustodyAndRetainedCleanup(t *testing.T) {
 			} else if result.Status != StatusFail {
 				t.Fatalf("%s produced %s", mode, result.Status)
 			}
-			receipt := run.ProcessPauseReceipts()["freeze"]
-			if mode == "pass" || mode == "barrier" || mode == "lost-stop" || mode == "mixed" || mode == "missing" || mode == "pid" || mode == "start" || mode == "revoked" || mode == "unreadable" {
+			receipt := run.ProcessPauseReceipt()
+			if mode == "pass" || mode == "barrier" || mode == "lost-stop" || mode == "late-proof" || mode == "baseline" || mode == "mixed" || mode == "missing" || mode == "pid" || mode == "start" || mode == "revoked" || mode == "unreadable" {
 				if receipt.Final.Identity != old.job.identity || receipt.Final.State != "LIVE" || n.resumeCalls != 1 {
 					t.Fatalf("no exact retained cleanup after %s: %+v calls=%d", mode, receipt, n.resumeCalls)
 				}
@@ -321,7 +333,7 @@ func TestPauseWitnessTaskSets(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			state, err := pauseTaskStateAt(root)
+			state, err := processTaskState(root)
 			if states == "TTT" {
 				if err != nil || state != "STOPPED" {
 					t.Fatalf("%s %v", state, err)
@@ -410,7 +422,7 @@ func TestPauseCustodianRejectsExpiredEffectEnvelope(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 			if op == "pause-resume" {
-				if _, err = b.pauseCommand(t.Context(), h.id, "pause-stop", h.job.identity, s.admission.HardDeadline); err != nil {
+				if _, err = testPauseCommand(b, t.Context(), h.id, "pause-stop", h.job.identity, s.admission.HardDeadline); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -425,10 +437,76 @@ func TestPauseCustodianRejectsExpiredEffectEnvelope(t *testing.T) {
 			if op == "pause-resume" {
 				want = "STOPPED"
 			}
-			state, err := pauseTaskState(h.job.identity.PID)
+			state, err := processTaskState(fmt.Sprintf("/proc/%d/task", h.job.identity.PID))
 			if err != nil || state != want {
 				t.Fatalf("expired request changed victim: state=%s want=%s err=%v", state, want, err)
 			}
 		})
+	}
+}
+
+func testPauseCommand(b *SSHJobs, ctx context.Context, id, op string, i ProcessIdentity, deadline time.Time) (ProcessPauseWitness, error) {
+	r, e := b.command(ctx, id, op, i, deadline)
+	return r.Pause, e
+}
+func (n *pauseNode) command(ctx context.Context, id, op string, i ProcessIdentity, deadline ...time.Time) (custodyReply, error) {
+	if len(deadline) != 1 {
+		return custodyReply{}, fmt.Errorf("missing exact pause deadline")
+	}
+	w, e := n.pauseCommand(ctx, id, op, i, deadline[0])
+	return custodyReply{Pause: w}, e
+}
+
+// The subprocess runs the real custodian; only STOP's already-produced reply
+// is delayed. Enrollment, signaling, retained grant, sequencing and CONT are real.
+type delayedPauseReply struct{ io.Writer }
+
+func (w delayedPauseReply) Write(raw []byte) (int, error) {
+	var r custodyReply
+	if json.Unmarshal(raw, &r) == nil && r.Pause.State == "STOPPED" {
+		time.Sleep(time.Second)
+	}
+	return w.Writer.Write(raw)
+}
+func init() {
+	pauseCustodyTestEntrypoint = func(args []string) bool {
+		if len(args) != 1 || args[0] != "owned-custodian" || os.Getenv("S0A_TEST_CUSTODIAN") != "delay-pause-reply" {
+			return false
+		}
+		if err := serveCustody(os.Stdin, delayedPauseReply{os.Stdout}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return true
+	}
+}
+func TestPauseRealCustodyLostStopReplyJoinsBeforeCont(t *testing.T) {
+	s, b, spec := nativeCustodyScope(t, 4*time.Second)
+	t.Setenv("S0A_TEST_CUSTODIAN", "delay-pause-reply")
+	spec.Argv = []string{"s0a-empty-workload"}
+	h, err := s.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	limited, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	_, err = testPauseCommand(b, limited, h.id, "pause-stop", h.job.identity, s.admission.HardDeadline)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected lost STOP reply, got %v", err)
+	}
+	state, err := processTaskState(fmt.Sprintf("/proc/%d/task", h.job.identity.PID))
+	if err != nil || state != "STOPPED" {
+		t.Fatalf("fault was not active after lost reply: %s %v", state, err)
+	}
+	cleanup, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	resumed, err := testPauseCommand(b, cleanup, h.id, "pause-resume", h.job.identity, s.admission.HardDeadline)
+	if err != nil || resumed.State != "LIVE" || resumed.Identity != h.job.identity {
+		t.Fatalf("no exact CONT after old reply joined: %+v %v", resumed, err)
+	}
+	final, err := testPauseCommand(b, cleanup, h.id, "pause-observe", h.job.identity, s.admission.HardDeadline)
+	if err != nil || final.State != "LIVE" || final.Identity != resumed.Identity {
+		t.Fatalf("late STOP or missing final proof: %+v %v", final, err)
 	}
 }
