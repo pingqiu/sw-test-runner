@@ -8,6 +8,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,10 +86,10 @@ func TestTenNodePlanDoesNotCreate(t *testing.T) {
 	}
 }
 
-func TestTenNodeExecutionRefusesUntilReviewAcceptance(t *testing.T) {
+func TestTenNodeExecutionReachesDefaultPackAndStillCleansUp(t *testing.T) {
 	f := &fake{}
 	r := (Controller{Command: f.command}).Execute(context.Background(), "run", clusterFixture(t))
-	if r.Code != "CLUSTER_PACK_UNAVAILABLE" || len(f.events) != 0 {
+	if r.Code != "PACK_FAILED" || !strings.Contains(r.Error, "exact") || !r.RemainingObserved || !f.cleanContext || !strings.Contains(strings.Join(f.events, ","), "terraform apply") {
 		t.Fatalf("%+v %v", r, f.events)
 	}
 }
