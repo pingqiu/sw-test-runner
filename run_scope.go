@@ -541,21 +541,34 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 	r, ok := s.restores[key]
 	pause := s.pause != nil && s.pause.Key == key
 	s.mu.Unlock()
-	if pause && ctx.Err() == nil {
-		// Terminal pause clear cancels WORK itself; keep its original cleanup bound.
+	if !ok {
+		return fmt.Errorf("unknown fault resource %q", key)
+	}
+	if pause && !final && ctx.Err() == nil {
+		// Own this stage before cancelling WORK and waking automatic Close.
+		// The original deadline bounds both STOP join and restoration.
 		deadline, _ := ctx.Deadline()
 		var detach context.CancelFunc
 		ctx, detach = context.WithDeadline(context.WithoutCancel(ctx), deadline)
 		defer detach()
+		select {
+		case r.gate <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-r.gate }()
 		s.beginCleanup()
+		select {
+		case <-r.ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else {
+		if err := take(ctx, r.ready, r.gate); err != nil {
+			return err
+		}
+		defer func() { <-r.gate }()
 	}
-	if !ok {
-		return fmt.Errorf("unknown fault resource %q", key)
-	}
-	if err := take(ctx, r.ready, r.gate); err != nil {
-		return err
-	}
-	defer func() { <-r.gate }()
 	priorFinal := r.finalVerified
 	r.finalVerified = false
 	var restoreErr error
@@ -649,6 +662,7 @@ func (s *RunScope) Close() error {
 		s.beginCleanup()
 		s.mu.Lock()
 		order := append([]string(nil), s.order...)
+		pause := s.pause
 		jobs := make([]JobHandle, 0, len(s.jobs))
 		for id, j := range s.jobs {
 			jobs = append(jobs, JobHandle{s, id, j})
@@ -665,8 +679,18 @@ func (s *RunScope) Close() error {
 			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
 		}
 		for n := len(order) - 1; issuerErr == nil && n >= 0; n-- {
-			if err := s.clearFault(ctx, order[n], true); err != nil {
-				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
+			clearErr := s.clearFault(ctx, order[n], true)
+			if clearErr != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], clearErr))
+			}
+			if pause != nil && order[n] == pause.Key {
+				issuerErr = clearErr
+				if issuerErr == nil {
+					issuerErr = s.settleWork(ctx)
+				}
+				if issuerErr != nil {
+					errs = append(errs, fmt.Errorf("post-pause issuer settlement UNKNOWN: %w", issuerErr))
+				}
 			}
 			s.mu.Lock()
 			r := s.restores[order[n]]

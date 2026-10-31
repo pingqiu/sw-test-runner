@@ -166,6 +166,12 @@ func TestPauseEarlyClearFencesAdmissionBeforeJoiningStop(t *testing.T) {
 		if !closed {
 			t.Error("admission remained open while terminal clear waited for STOP")
 		}
+		a.Safety.mu.Lock()
+		gateHeld := len(a.Safety.restores["process-pause/"+victim.id].gate) == 1
+		a.Safety.mu.Unlock()
+		if !gateHeld {
+			t.Error("early clear did not reserve its stage before waking automatic Close")
+		}
 		n.mu.Lock()
 		calls := n.resumeCalls
 		n.mu.Unlock()
@@ -182,6 +188,16 @@ func TestPauseEarlyClearFencesAdmissionBeforeJoiningStop(t *testing.T) {
 		}
 	})
 	if n.resumeCalls != 1 || !run.resourcesSettled() {
-		t.Fatalf("terminal clear failed: calls=%d settled=%v", n.resumeCalls, run.resourcesSettled())
+		run.mu.Lock()
+		readers, joined := run.readers, run.engineJoined
+		run.mu.Unlock()
+		run.scope.mu.Lock()
+		jobs := len(run.scope.jobs)
+		r := run.scope.restores[run.ProcessPauseReceipt().Key]
+		run.scope.mu.Unlock()
+		r.gate <- struct{}{}
+		proof, cleanupErr := r.finalVerified, r.cleanupErr
+		<-r.gate
+		t.Fatalf("terminal clear failed: calls=%d settled=%v readers=%d engineJoined=%v jobs=%d final=%v cleanup=%v close=%v receipt=%+v", n.resumeCalls, run.resourcesSettled(), readers, joined, jobs, proof, cleanupErr, run.Close(), run.ProcessPauseReceipt())
 	}
 }
