@@ -17,11 +17,18 @@ type PackInputs struct {
 	Files    map[string]map[string]string
 }
 
+func (c *ActionContext) boundPackContext() error {
+	if c == nil || c.approved == nil || c.Safety == nil || c.Safety != c.approved.scope || c.Scenario != c.approved.scenario {
+		return errors.New("no bound approved pack context")
+	}
+	return nil
+}
+
 // ApprovedPackInputs only succeeds inside this ApprovedRun's exact Engine
 // context. A caller-created Safety scope, Vars or YAML flag is insufficient.
 func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
-	if c == nil || c.approved == nil || c.Safety == nil || c.Safety != c.approved.scope || c.Scenario != c.approved.scenario {
-		return PackInputs{}, errors.New("no bound approved pack context")
+	if err := c.boundPackContext(); err != nil {
+		return PackInputs{}, err
 	}
 	a := c.approved
 	a.mu.Lock()
@@ -49,13 +56,30 @@ func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
 // RunApprovedPackJob resolves an exact independently approved label. It never
 // accepts a submitted executable, argv, backend, verifier or replacement scope.
 func (c *ActionContext) RunApprovedPackJob(ctx context.Context, label string, background bool) (JobHandle, ExitInfo, error) {
+	h, err := c.startApprovedPackJob(ctx, label, background)
+	if err != nil || background {
+		return h, ExitInfo{}, err
+	}
+	e, err := c.WaitApprovedPackTask(ctx, h)
+	return h, e, err
+}
+
+// StartApprovedPackTask enrolls an ordinary bounded task without waiting. A pack
+// may overlap read load with a restart, then wait on the TASK, never the victim.
+func (c *ActionContext) StartApprovedPackTask(ctx context.Context, label string) (JobHandle, error) {
+	h, err := c.startApprovedPackJob(ctx, label, false)
+	c.FailApprovedPack(err)
+	return h, err
+}
+
+func (c *ActionContext) startApprovedPackJob(ctx context.Context, label string, background bool) (JobHandle, error) {
 	p, err := c.ApprovedPackInputs()
 	if err != nil {
-		return JobHandle{}, ExitInfo{}, err
+		return JobHandle{}, err
 	}
 	pin, ok := p.Jobs[label]
 	if !ok {
-		return JobHandle{}, ExitInfo{}, errors.New("unknown approved pack job")
+		return JobHandle{}, errors.New("unknown approved pack job")
 	}
 	// Keep the action's tighter bound through enrollment and authorization;
 	// cancellation of the original work envelope still fences this context.
@@ -64,23 +88,30 @@ func (c *ActionContext) RunApprovedPackJob(ctx context.Context, label string, ba
 	stop := context.AfterFunc(c.Safety.ctx, cancel)
 	defer stop()
 	if err := work.Err(); err != nil {
-		return JobHandle{}, ExitInfo{}, err
+		return JobHandle{}, err
 	}
-	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background, packLabel: label, CaptureOutput: !background}, false)
-	if err != nil || background {
-		return h, ExitInfo{}, err
+	return c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background, packLabel: label, CaptureOutput: !background}, false)
+}
+
+// WaitApprovedPackTask preserves exact owned stdout and terminal failure. It
+// refuses background service handles: restart alone owns the victim's Wait.
+func (c *ActionContext) WaitApprovedPackTask(ctx context.Context, h JobHandle) (e ExitInfo, err error) {
+	defer func() { c.FailApprovedPack(err) }()
+	if err = c.boundPackContext(); err != nil {
+		return
 	}
-	e, err := c.Safety.Wait(ctx, h)
-	if err == nil && (e.Code != 0 || e.Signal != 0) {
-		err = errors.New("approved pack job failed")
+	j, unlock, err := c.Safety.lockJob(ctx, h)
+	if err != nil {
+		return e, err
 	}
-	if err == nil {
-		_, _, err = e.Output.Decode()
-		if err == nil && e.Output.ReadEnd.After(c.Safety.admission.HardDeadline) {
-			err = errors.New("owned output captured outside original envelope")
-		}
+	valid := !j.spec.retainExit && j.spec.CaptureOutput && j.spec.packLabel != ""
+	unlock()
+	if !valid {
+		return e, errors.New("task waiter refuses a service generation")
 	}
-	return h, e, err
+	e, err = c.Safety.Wait(ctx, h)
+
+	return e, err
 }
 
 // FailApprovedPack retains a pack admission/execution failure in the original

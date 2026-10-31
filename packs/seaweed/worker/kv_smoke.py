@@ -1,5 +1,5 @@
 """Small external-stack CLI around the accepted KV worker/oracle. No lifecycle."""
-import argparse, datetime, hashlib, json, os, sys, pathlib, types
+import argparse, datetime, hashlib, json, os, sys, pathlib, types, time
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -94,27 +94,91 @@ def configure(c):
     return 'loader-rdma'
 
 
+def read_stage_args(stage, route):
+    if stage not in ('seed','load','recovery') or route not in ('dc','http') or (stage=='seed' and route!='dc'):
+        raise ValueError('unsupported read-only case stage/path')
+    return stage, route
+
+
+def read_only(conn, c, stage, route):
+    read_stage_args(stage,route)
+    if stage=='seed':raise ValueError('seed uses the unchanged settled smoke path')
+    helper=exact_helper('soak_native_worker')
+    helper.validate_api(type(conn))
+    before=json.loads(conn.stats_json());started=time.monotonic();epoch=time.time()
+    exact=attempts=0;faults=[];first=last=None
+    # One operation at a time, small reusable allocations, bounded rate/output.
+    while (stage=='load' and time.monotonic()-started<120) or (stage=='recovery' and attempts<c['keys']):
+        key=c['client']+'-'+str(attempts%c['keys'])
+        command=dict(action='get',key=key,seed=c['run_id']+'/'+key,length=c['length'],operation_id=attempts)
+        row=helper.work(conn,command)  # Unknown completion/timeout is fatal; never retried.
+        end=time.time();attempts+=1
+        if not row['ok'] or row['results'] not in (None,[True]):
+            if stage!='load':raise AssertionError('recovery GET miss/error')
+            if len(faults)>=256:raise AssertionError('bounded completed-failure evidence exceeded')
+            faults.append(dict(action='get',key=key,operation_id=row['operation_id'],target=c['rdma_address'],
+                transport=route,started=row['submitted_epoch'],ended=end,ok=row['ok'],error=row['error'],results=row['results']))
+        else:
+            digest=hashlib.sha256(helper.payload(command['seed'],c['length'])).hexdigest()
+            if row['length']!=c['length'] or row['sha256']!=digest:raise AssertionError('GET wrong pre-seeded bytes')
+            exact+=1;first=first if first is not None else end;last=end
+        if stage=='load':time.sleep(.25)
+    after=json.loads(conn.stats_json());a,b=before['loader'],after['loader']
+    expected_transport='rdma' if route=='dc' else 'http'
+    if a['transport']!=expected_transport or b['transport']!=expected_transport:raise AssertionError('wrong read transport')
+    if route=='dc' and (a['http_fallback_allowed'] is not False or b['http_fallback_allowed'] is not False):raise AssertionError('fallback refused')
+    def delta(field):
+        x,y=a[field],b[field]
+        if type(x) is not int or type(y) is not int or x<0 or y<x:raise AssertionError('missing/regressed read counter')
+        return y-x
+    selected='direct_dc' if route=='dc' else 'copied'
+    reads=delta('read_objects');size=delta('read_bytes')
+    if reads<exact or size<exact*c['length'] or delta(selected+'_reads')!=reads or delta(selected+'_bytes')!=size:
+        raise AssertionError('read path witness differs')
+    for other in ('direct_dc','direct_rc','copied'):
+        if other!=selected and (delta(other+'_reads') or delta(other+'_bytes')):raise AssertionError('foreign read path')
+    if delta('write_objects') or delta('write_bytes'):raise AssertionError('read-only stage wrote')
+    errors=after['read_errors']-before['read_errors']
+    if errors<0 or errors>len(faults):raise AssertionError('unattributed read error counter')
+    return dict(status='OBSERVED',stage=stage,transport=route,exact=exact,attempts=attempts,faults=faults,
+        first_exact=first,last_exact=last,started=epoch,ended=time.time(),elapsed=time.monotonic()-started,
+        before=before,after=after,run_id=c['run_id'],client=c['client'],root=c['root'])
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--config', required=True)
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--stage', choices=('seed','load','recovery'))
+    p.add_argument('--read-path', choices=('dc','http'))
     args = p.parse_args()
     emit = lambda obj: print(json.dumps(obj, allow_nan=False), flush=True)
     conn = None
     try:
         c = json.loads(args.config)
+        if args.stage or args.read_path:
+            read_stage_args(args.stage,args.read_path)
+            if c['transport']!='dc':raise ValueError('read-only restart requires DC inventory')
         backing = configure(c)
         if args.dry_run:
-            emit(dict(status='PLAN', code='OK', remedy='obtain independent S0b admission', effects=[], backing=backing, fallback=False, operations=2*c['keys']))
+            if args.stage:
+                emit(dict(status='PLAN',code='OK',effects=[],stage=args.stage,read_path=args.read_path,
+                    backing='loader-http' if args.read_path=='http' else 'loader-rdma',fallback=False,
+                    duration_seconds=120 if args.stage=='load' else 0,operations=None if args.stage=='load' else c['keys']*(2 if args.stage=='seed' else 1)))
+            else:
+                emit(dict(status='PLAN', code='OK', remedy='obtain independent S0b admission', effects=[], backing=backing, fallback=False, operations=2*c['keys']))
             return 0
         sys.path[:0] = [c['helper_dir'], c['native_dir']]
         from seaweedkv_native._native import SeaweedKVConnector
         options = dict(capacity_bytes=1, root=c['root'], collection='lmcache', replication='000')
+        if args.read_path:
+            backing='loader-http' if args.read_path=='http' else 'loader-rdma'
+        if args.read_path=='http':os.environ['SW_RDMA_KVCACHE_PUSH_DC']='0'
         conn = SeaweedKVConnector(c['filer_grpc'], backing, 4, json.dumps(options))
         def metadata(key):
             with urlopen(c['filer_http']+quote(key,safe='/')+'?metadata=true&resolveManifest=true', timeout=8) as r:
                 return json.load(r)
-        result = run(conn, c, metadata, emit)
+        result = read_only(conn,c,args.stage,args.read_path) if args.stage in ('load','recovery') else run(conn, c, metadata, emit)
         conn.close()
         conn = None
         emit(dict(result, code='OK', remedy='inspect ACK/exact/transport records'))
