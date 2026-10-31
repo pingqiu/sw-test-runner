@@ -21,6 +21,43 @@ import (
 // Explicit opt-in only: discovery never unpacks artifacts or contacts a host.
 // The only network peer is a loopback SSH server executing the production setup.
 func TestCloudPinnedArtifactsOffline(t *testing.T) {
+	cloudPinnedArtifactsOffline(t, false)
+}
+
+func TestCloudPreflightRejectsInvalidInnerPrepare(t *testing.T) {
+	cloudPinnedArtifactsOffline(t, true)
+}
+
+func checkCloudPreflightSyntax(ctx context.Context, command string) error {
+	out, err := exec.CommandContext(ctx, "sh", "-n", "-c", command).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("outer shell syntax: %s: %w", out, err)
+	}
+	for _, prefix := range []string{"timeout -k 5 120 sh -ec ", "timeout -k 2 55 sh -c "} {
+		if !strings.HasPrefix(command, prefix) {
+			continue
+		}
+		quoted := strings.TrimPrefix(command, prefix)
+		if len(quoted) < 2 || quoted[0] != '\'' || quoted[len(quoted)-1] != '\'' {
+			return fmt.Errorf("inner shell syntax: expected the production single-quoted script")
+		}
+		script := strings.ReplaceAll(quoted[1:len(quoted)-1], "'\"'\"'", "'")
+		if "'"+strings.ReplaceAll(script, "'", "'\"'\"'")+"'" != quoted {
+			return fmt.Errorf("inner shell syntax: noncanonical production quoting")
+		}
+		out, err := exec.CommandContext(ctx, "sh", "-n", "-c", script).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("inner shell syntax: %s: %w", out, err)
+		}
+		return nil
+	}
+	if strings.HasPrefix(command, "timeout ") {
+		return fmt.Errorf("inner shell syntax: unknown production wrapper")
+	}
+	return nil
+}
+
+func cloudPinnedArtifactsOffline(t *testing.T, invalidPrepare bool) {
 	artifacts := os.Getenv("SEAWEED_CLOUD_ARTIFACT_DIR")
 	if artifacts == "" {
 		t.Skip("set SEAWEED_CLOUD_ARTIFACT_DIR for the exact af8c offline preflight")
@@ -38,11 +75,14 @@ func TestCloudPinnedArtifactsOffline(t *testing.T) {
 	counts := map[string]int{}
 	note := func(s string) { mu.Lock(); counts[s]++; mu.Unlock(); t.Log(s) }
 	address, pin, key, _ := cloudSSH(t, "", func(command string, channel ssh.Channel) uint32 {
-		command = strings.ReplaceAll(command, remoteRoot, root)
-		if out, e := exec.CommandContext(ctx, "sh", "-n", "-c", command).CombinedOutput(); e != nil {
-			fmt.Fprint(channel.Stderr(), string(out))
+		if invalidPrepare && strings.Contains(command, "cloud-init status --wait") {
+			command = strings.TrimSuffix(command, "'") + "; then'"
+		}
+		if e := checkCloudPreflightSyntax(ctx, command); e != nil {
+			fmt.Fprint(channel.Stderr(), e)
 			return 90
 		}
+		command = strings.ReplaceAll(command, remoteRoot, root)
 		note("PASS: production command syntax")
 		if strings.Contains(command, "cloud-init status --wait") {
 			for _, dir := range []string{"worker", "master", "volume", "filer"} {
@@ -118,6 +158,12 @@ func TestCloudPinnedArtifactsOffline(t *testing.T) {
 		cfg.Files[f.name] = CloudFile{Path: filepath.Join(artifacts, f.file), SHA256: f.sha}
 	}
 	_, e := RunCloudHTTP(ctx, raw, cfg)
+	if invalidPrepare {
+		if e == nil || !strings.Contains(e.Error(), "cloud step prepare") || !strings.Contains(e.Error(), "shell syntax") {
+			t.Fatalf("invalid inner prepare passed preflight: %v", e)
+		}
+		return
+	}
 	if e == nil || !strings.Contains(e.Error(), "OFFLINE_STOP_BEFORE_LIVE_KV") {
 		t.Fatalf("offline setup did not reach deliberate live-workload boundary: %v", e)
 	}
