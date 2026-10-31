@@ -60,6 +60,12 @@ variable "image_version" {
     error_message = "Pin a numeric image version. Availability is a later live gate."
   }
 }
+variable "host_keys" {
+  description = "Optional pre-generated VM server key. Private cloud-init/state only; never the controller client key."
+  type        = object({ ed25519_private = string, ed25519_public = string })
+  sensitive   = true
+  default     = null
+}
 variable "nodes" {
   description = "Explicit node map. Adding a node must not reindex existing IPs. Volume nodes require a cache disk."
   type = map(object({

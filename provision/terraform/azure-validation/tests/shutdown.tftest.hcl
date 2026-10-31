@@ -20,14 +20,10 @@ variables {
   process_cleanup_reserve_ms = 15000
   run_declaration            = { work_deadline = "2030-01-01T18:00:00Z", hard_deadline = "2030-01-01T18:30:00Z", cloud_cleanup_reserve_seconds = 1200, budget_usd = 3, abort_estimate_usd = 2.5 }
 }
-run "shutdown_and_expiry" {
-  command = apply
+run "expiry_without_shutdown" {
+  command = plan
   assert {
-    condition     = azurerm_dev_test_global_vm_shutdown_schedule.smoke.enabled && azurerm_dev_test_global_vm_shutdown_schedule.smoke.timezone == "UTC" && azurerm_dev_test_global_vm_shutdown_schedule.smoke.daily_recurrence_time == "1830"
-    error_message = "Native compute shutdown must be enabled at the fixed UTC minute."
-  }
-  assert {
-    condition     = azurerm_dev_test_global_vm_shutdown_schedule.smoke.virtual_machine_id == jsondecode(output.inventory_json).hosts[0].resource_id && azurerm_dev_test_global_vm_shutdown_schedule.smoke.tags.expires_at == var.run_declaration.hard_deadline
-    error_message = "Shutdown must bind the actual one-VM ID and fixed expiry."
+    condition     = output.run_declaration.hard_deadline == var.run_declaration.hard_deadline
+    error_message = "The plan must retain the declared expiry deadline."
   }
 }

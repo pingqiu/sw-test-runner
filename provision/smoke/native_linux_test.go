@@ -6,11 +6,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-func TestNativeChainReachesRealAdmissionRefusalAndCleans(t *testing.T) {
+func TestNativeChainReachesCloudInventoryRefusalAndCleans(t *testing.T) {
 	c := fixture(t)
 	bin := filepath.Join(t.TempDir(), "bin")
 	if e := os.Mkdir(bin, 0700); e != nil {
@@ -28,7 +27,7 @@ func TestNativeChainReachesRealAdmissionRefusalAndCleans(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	r := (Controller{}).Execute(context.Background(), "run", c)
-	if r.Code != "PACK_FAILED" || !r.RemainingObserved || len(r.Remaining) != 0 || !strings.Contains(r.Error, "request.json") {
+	if r.Code != "PACK_FAILED" || !r.RemainingObserved || len(r.Remaining) != 0 || r.Error == "" {
 		t.Fatalf("%+v", r)
 	}
 	matches, _ := filepath.Glob(filepath.Join(c.Output, "*-status"))

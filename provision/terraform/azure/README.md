@@ -20,7 +20,7 @@ The small [one-VM smoke controller](../../smoke/README.md) uses a pinned saved T
 
 The NSG admits controller SSH and listed private-subnet TCP services, then denies other inbound traffic (including Azure's default broad VNet allowance). No RDMA is advertised: all hosts are HTTP with RDMA `not_applicable`. Cloud-init only installs Noble prerequisite package names, including `librdmacm1t64`; it neither uploads Seaweed artifacts nor launches services.
 
-The controller preserves failed/UNKNOWN apply evidence across recovery. A currently empty list cannot settle a pending create: without the original successful-apply receipt, recovery/verify reports CREATE_UNRESOLVED and asks for operator/provider-operation resolution. There is no automatic apply retry, blind state editing or marker-clear command. Terraform destroy retains the RG/RBAC; the full read-only RG list is independent of Terraform state. Native shutdown deallocates compute only, not disks/IPs, and is not a guaranteed billing cutoff.
+The controller preserves failed/UNKNOWN apply evidence across recovery. A currently empty list cannot settle a pending create: without the original successful-apply receipt, recovery/verify reports CREATE_UNRESOLVED and asks for operator/provider-operation resolution. There is no automatic apply retry, blind state editing or marker-clear command. Terraform destroy retains the RG/RBAC; the full read-only RG list is independent of Terraform state. There is no native shutdown/DevTestLab requirement. Expiry tags remain; after session death the next session must destroy and verify, since resources keep billing until cleanup.
 
 ## Static checks (no cloud)
 
