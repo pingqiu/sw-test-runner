@@ -1,11 +1,61 @@
 """Local-only CLI checks; ELF exec replaces product/hardware, never a lab run."""
-import datetime,hashlib,json,os,pathlib,shutil,socket,subprocess,sys,tempfile,unittest
+import datetime,hashlib,json,os,pathlib,shutil,socket,subprocess,sys,tempfile,time,unittest
 from unittest.mock import patch
 import lab_profile as profile
 from test_lab_profile import LaunchContract
 
 @unittest.skipUnless(sys.platform=='linux','Linux private socket/process seam')
 class FilerReplacement(unittest.TestCase):
+ @unittest.skipUnless(shutil.which('cc'), 'ELF product fixture')
+ def test_actual_deploy_kill_replacement_with_worker_umask(self):
+  for writable in (False,True):
+   with self.subTest(group_writable=writable),tempfile.TemporaryDirectory() as tmp:
+    base=pathlib.Path(tmp);root=base/'run';root.mkdir(mode=0o700)
+    release=base/'release';(release/'bin').mkdir(parents=True);binary=release/'bin'/'weed'
+    source=b'''#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <string.h>
+int main(){int f=open("filer/ldb2/CURRENT",O_WRONLY|O_CREAT,0600);
+if(f<0)return 2;write(f,"METADATA",8);close(f);
+int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={.sun_family=AF_UNIX};
+strcpy(a.sun_path,"filer.sock");if(bind(s,(void*)&a,sizeof(a)))return 3;
+for(;;)pause();}
+'''
+    subprocess.run(['cc','-x','c','-','-o',str(binary)],input=source,capture_output=True,timeout=10,check=True)
+    binary.chmod(0o755)
+    c=dict(LaunchContract().config(),root=str(root),release=str(release),roles=['filer'],host='m02',
+     boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+     deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=25)).isoformat(),products={'weed':hashlib.sha256(binary.read_bytes()).hexdigest()})
+    args=[sys.executable,'-I','-B',profile.__file__,'--config',json.dumps(c),'--action','deploy','--role','filer']
+    def wait_for(child,marker):
+     until=time.monotonic()+5
+     while time.monotonic()<until and child.poll() is None:
+      if marker.exists() and (root/'filer.sock').exists():return
+      time.sleep(.02)
+     self.fail('product not started; exit='+str(child.poll()))
+    with (base/'stdout').open('wb') as stdout,(base/'stderr').open('wb') as stderr:
+     old=subprocess.Popen(args,stdout=stdout,stderr=stderr,umask=0o002)
+     try:wait_for(old,root/'filer-generation.json')
+     finally:old.kill();old.wait(timeout=5)
+     self.assertEqual(old.returncode,-9)
+     binding=json.loads((root/'filer-generation.json').read_text())['metadata_directory']
+     if writable:(root/'filer.toml').chmod(0o660)
+     new=subprocess.Popen(args+['--replacement-filer'],stdout=stdout,stderr=stderr,umask=0o002)
+     try:
+      if writable:
+       self.assertEqual(new.wait(timeout=5),1)
+       self.assertFalse((root/'filer-replacement-generation.json').exists())
+      else:
+       wait_for(new,root/'filer-replacement-generation.json')
+       self.assertEqual((root/'filer.toml').stat().st_mode&0o777,0o600)
+       self.assertEqual(json.loads((root/'filer-replacement-generation.json').read_text())['metadata_directory'],binding)
+     finally:
+      if new.poll() is None:new.kill()
+      new.wait(timeout=5)
+    if writable:self.assertIn('replacement filer state not private',(base/'stderr').read_text())
+
  def test_actual_cli_preserves_metadata_and_refuses_foreign_or_live_state(self):
   for mode in ('good','no-socket','recreated-nonempty','unbound-marker','wrong-device','live-old','foreign-boot','bad-config','config-symlink','empty-metadata','metadata-symlink','regular-socket-path','socket-symlink','active-socket','foreign-socket'):
    if mode=='foreign-socket' and os.geteuid()!=0:continue

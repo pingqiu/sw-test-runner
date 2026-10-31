@@ -280,7 +280,7 @@ def launch(config, role, replacement=False):
             with (root / 'master.toml').open('x') as stream:
                 stream.write('[master.cache_volume_rotation]\nenabled = false\n')
         if role == 'filer' and not replacement:
-            with (root / 'filer.toml').open('x') as stream:
+            with os.fdopen(os.open(root / 'filer.toml', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
                 stream.write(filer_config(root))
         identity = process(os.getpid())
         if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
