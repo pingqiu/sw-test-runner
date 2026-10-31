@@ -6,19 +6,27 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 )
 
-func TestTransportApplyRetriesSamePlanAndJournalsEachAttempt(t *testing.T) {
+func TestTransportApplyReplansSameStateAndKeepsUnknown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := fixture(t)
 		f := &fake{}
 		ctl := controller(f)
 		var attempts [][]string
+		plans := 0
 		start := time.Now()
 		ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+			if tool == "terraform" && args[0] == "plan" {
+				plans++
+				if plans > 1 && !strings.Contains(strings.Join(args, " "), "-refresh=true") {
+					t.Fatal("retry did not refresh state")
+				}
+			}
 			if tool == "terraform" && args[0] == "apply" {
 				attempts = append(attempts, append([]string{dir}, args...))
 				if len(attempts) == 1 {
@@ -28,7 +36,7 @@ func TestTransportApplyRetriesSamePlanAndJournalsEachAttempt(t *testing.T) {
 			return f.command(ctx, dir, tool, args...)
 		}
 		r := ctl.Execute(context.Background(), "run", c)
-		if r.Code != "COMPLETE" || len(attempts) != 2 || !reflect.DeepEqual(attempts[0], attempts[1]) || time.Since(start) != 10*time.Second {
+		if r.Code != "CREATE_UNRESOLVED" || !r.CreateUnresolved || plans != 2 || len(attempts) != 2 || !reflect.DeepEqual(attempts[0], attempts[1]) || time.Since(start) != 10*time.Second {
 			t.Fatalf("result=%+v attempts=%v elapsed=%v", r, attempts, time.Since(start))
 		}
 		outputs, _ := filepath.Glob(filepath.Join(c.Output, "*-output"))
@@ -39,6 +47,12 @@ func TestTransportApplyRetriesSamePlanAndJournalsEachAttempt(t *testing.T) {
 		}
 		if !found {
 			t.Fatal("failed attempt evidence lost")
+		}
+		for _, mode := range []string{"destroy", "verify"} {
+			afterRestart := controller(f).Execute(context.Background(), mode, c)
+			if !afterRestart.CreateUnresolved || afterRestart.Code == "COMPLETE" || afterRestart.Code == "EMPTY" {
+				t.Fatalf("%s erased attempt ambiguity: %+v", mode, afterRestart)
+			}
 		}
 	})
 }
@@ -53,9 +67,12 @@ func TestTransportRetriesAreBoundedAndNarrow(t *testing.T) {
 		{"quota", "terraform", "apply", "quota exceeded", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
 		{"validation", "terraform", "apply", "validation error", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
 		{"mixed-4xx", "terraform", "apply", "HTTP response was nil; StatusCode: 403", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
+		{"unknown-provider-code", "terraform", "apply", "Error: creating VM: Code=\"NewProviderError\"; HTTP response was nil", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
+		{"status-200", "terraform", "apply", "Error: HTTP 200; EOF before response", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
+		{"mixed-plain", "terraform", "apply", "ECONNRESET\nunrecognized fatal failure", "APPLY_FAILED_OR_UNKNOWN", 3, 1},
 		{"plan-never-retries", "terraform", "plan", "ECONNRESET", "PLAN_FAILED", 3, 1},
 		{"destroy", "terraform", "destroy", "TLS handshake: connection reset", "COMPLETE", 1, 2},
-		{"request-eof", "terraform", "apply", `Put "https://management.azure.com/resource": EOF`, "COMPLETE", 1, 2},
+		{"request-eof", "terraform", "apply", `Put "https://management.azure.com/resource": EOF`, "CREATE_UNRESOLVED", 1, 2},
 		{"list", "az", "resource", "EOF before response", "COMPLETE", 1, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,23 +108,26 @@ func TestTransportRetriesAreBoundedAndNarrow(t *testing.T) {
 	}
 }
 
-func TestTransportRetryHonorsCancellationAndEvidenceFailure(t *testing.T) {
-	for _, journalFailure := range []bool{false, true} {
+func TestTransportRetryEvidenceFailureIsImmediate(t *testing.T) {
+	for _, destination := range []string{"output", "status"} {
 		synctest.Test(t, func(t *testing.T) {
 			c := fixture(t)
 			f := &fake{}
 			ctl := controller(f)
 			calls, destroyed := 0, false
+			var statusPath string
+			start := time.Now()
 			ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
 				if tool == "terraform" && args[0] == "destroy" {
 					destroyed = true
 				}
 				if tool == "terraform" && args[0] == "apply" {
 					calls++
-					if journalFailure {
+					if calls == 1 {
 						intents, _ := filepath.Glob(filepath.Join(c.Output, "*-terraform-intent.json"))
 						name := intents[len(intents)-1]
-						if e := os.Mkdir(name[:len(name)-len("-intent.json")]+"-output", 0700); e != nil {
+						statusPath = name[:len(name)-len("-intent.json")] + "-status"
+						if e := os.Mkdir(name[:len(name)-len("-intent.json")]+"-"+destination, 0700); e != nil {
 							t.Fatal(e)
 						}
 					}
@@ -115,12 +135,39 @@ func TestTransportRetryHonorsCancellationAndEvidenceFailure(t *testing.T) {
 				}
 				return f.command(ctx, dir, tool, args...)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			r := ctl.Execute(ctx, "run", c)
-			if calls != 1 || !destroyed || !r.CreateUnresolved || r.Code != "APPLY_FAILED_OR_UNKNOWN" {
+			r := ctl.Execute(context.Background(), "run", c)
+			if calls != 1 || !destroyed || !r.CreateUnresolved || r.Code != "APPLY_FAILED_OR_UNKNOWN" || time.Since(start) != 0 {
 				t.Fatalf("%+v calls=%d", r, calls)
+			}
+			if destination == "output" {
+				body, e := os.ReadFile(statusPath)
+				if e != nil || !strings.Contains(string(body), "exit 1") || !strings.Contains(string(body), "directory") {
+					t.Fatalf("writable status lost output/command failure: %s %v", body, e)
+				}
 			}
 		})
 	}
+}
+
+func TestTransportRetryCancellationPreservesCleanup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := fixture(t)
+		f := &fake{}
+		ctl := controller(f)
+		calls := 0
+		ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+			if tool == "terraform" && args[0] == "apply" {
+				calls++
+				return []byte("ECONNRESET"), errors.New("exit 1")
+			}
+			return f.command(ctx, dir, tool, args...)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		start := time.Now()
+		r := ctl.Execute(ctx, "run", c)
+		if calls != 1 || !f.cleanContext || !r.CreateUnresolved || time.Since(start) != 5*time.Second {
+			t.Fatalf("%+v calls=%d elapsed=%v", r, calls, time.Since(start))
+		}
+	})
 }

@@ -272,6 +272,9 @@ func result(code, remedy string) Result {
 // These are private evidence files, not a new operation resolver. A failed or
 // interrupted apply has no success receipt; empty state/list cannot settle it.
 func applyUnresolved(root string) bool {
+	if _, e := os.Stat(filepath.Join(root, "apply-transport-unknown")); !os.IsNotExist(e) {
+		return true
+	}
 	started, e := os.ReadFile(filepath.Join(root, "apply-started"))
 	if e != nil || string(started) != "apply may have issued creates\n" {
 		return true
@@ -289,6 +292,22 @@ func stamp(name, text string) error {
 		e = f.Sync()
 	}
 	return errors.Join(e, f.Close())
+}
+
+func transportOnly(raw []byte) bool {
+	text := string(raw)
+	pattern := `(?i)ECONNRESET|ConnectionResetError(?: 104|\(104, ['"]Connection reset by peer['"]\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get|Delete) "https://[^"\n]+": EOF\b|TLS handshake(?:: connection|:| connection)? reset(?: by peer)?`
+	blocks := regexp.MustCompile(`(?im)^[ \t]*(?:│[ \t]*)?Error:[ \t]*`).Split(text, -1)
+	if len(blocks) == 1 {
+		return regexp.MustCompile(`^(?:` + pattern + `)$`).MatchString(strings.TrimSpace(text))
+	}
+	for _, block := range blocks[1:] {
+		coded := regexp.MustCompile(`(?im)\b(?:code|error[_ ]?code|status(?:[_ ]?code)?)["']?\s*[:=]|\bHTTP(?:/[0-9.]+)?\s+[0-9]{3}\b|\bstatus\s+[0-9]{3}\b|^\s*(?:│\s*)?\([A-Za-z][A-Za-z0-9]+\)`).MatchString(block)
+		if coded || !regexp.MustCompile(pattern).MatchString(block) {
+			return false
+		}
+	}
+	return true
 }
 
 // Execute has no default mutation mode. plan probes local parent writability. run requires
@@ -355,15 +374,17 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			return nil, e
 		}
 		b, e := ctl.Command(cx, root, tool, args...)
-		if w := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600); w != nil {
-			return nil, errors.Join(e, w)
-		}
+		recordErr := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600)
+		e = errors.Join(e, recordErr)
 		status := []byte("OK")
 		if e != nil {
 			status = []byte(e.Error())
 		}
 		if w := os.WriteFile(filepath.Join(c.Output, label+"-status"), status, 0600); w != nil {
 			return nil, errors.Join(e, w)
+		}
+		if recordErr != nil {
+			return nil, e
 		}
 		return b, e
 	}
@@ -374,11 +395,22 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			if e := cx.Err(); e != nil {
 				return nil, e
 			}
+			if attempt > 0 && tool == "terraform" && args[0] == "apply" {
+				if _, e := once(cx, "terraform", "plan", "-refresh=true", "-input=false", "-lock-timeout=0s", "-out=smoke.tfplan", "-no-color"); e != nil {
+					return nil, e
+				}
+				if e := cx.Err(); e != nil {
+					return nil, e
+				}
+			}
 			b, e := once(cx, tool, args...)
-			transport := regexp.MustCompile(`(?i)ECONNRESET|ConnectionResetError|connection reset by peer|HTTP response was nil|EOF before response|(?:Put|Get|Delete) "https://[^"\n]+": EOF\b|TLS handshake[^\n]*reset`).Match(b)
-			rejected := regexp.MustCompile(`(?i)authorization|authentication|quota|validation|StatusCode[=: ]+4[0-9][0-9]|status[^\n0-9]*4[0-9][0-9]|HTTP[/ 0-9.]*4[0-9][0-9]`).Match(b)
-			if e == nil || !eligible || attempt == 2 || !transport || rejected {
+			if e == nil || !eligible || attempt == 2 || !transportOnly(b) {
 				return b, e
+			}
+			if tool == "terraform" && args[0] == "apply" && attempt == 0 {
+				if w := stamp(filepath.Join(c.Output, "apply-transport-unknown"), "provider settlement required for the failed apply attempt\n"); w != nil {
+					return nil, w
+				}
 			}
 			timer := time.NewTimer([]time.Duration{10 * time.Second, 30 * time.Second}[attempt])
 			select {
