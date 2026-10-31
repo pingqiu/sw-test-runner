@@ -63,11 +63,16 @@ func (n *Node) sshConfig() (*ssh.ClientConfig, error) {
 		return nil, fmt.Errorf("parse SSH key: %w", err)
 	}
 
+	algorithms := []string{hostKey.Type()}
+	if hostKey.Type() == ssh.KeyAlgoRSA {
+		algorithms = []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}
+	}
 	return &ssh.ClientConfig{
-		User:            n.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.FixedHostKey(hostKey),
-		Timeout:         10 * time.Second,
+		User:              n.User,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   ssh.FixedHostKey(hostKey),
+		HostKeyAlgorithms: algorithms,
+		Timeout:           10 * time.Second,
 	}, nil
 }
 
