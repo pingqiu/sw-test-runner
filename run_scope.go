@@ -70,6 +70,8 @@ type KillWitness struct {
 	AliveBefore bool
 	Signal      string
 	AppliedAt   time.Time
+	// Controller-local CLOCK_MONOTONIC seconds; zero when absent. Compare only
+	// within the qualified controller boot/clock domain, not the victim clock.
 	PreKillMono float64
 }
 
