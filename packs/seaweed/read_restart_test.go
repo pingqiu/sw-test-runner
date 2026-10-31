@@ -63,7 +63,7 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 			case "late-close-budget":
 				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 89., 90.001
 			case "before-ack":
-				w.KillACK = 33
+				w.PreKill = 33
 			case "overlong":
 				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 95., 96.
 			case "missing-close":
@@ -81,7 +81,7 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 			case "outside-load":
 				o[5].(map[string]any)["ended"] = 500.
 			case "no-prefault-hit":
-				w.KillACK = 1
+				w.PreKill = 1
 			}
 			raw, _ := json.Marshal(row)
 			_, err := CheckReadTaskOutput(captured(raw), c, "load", "dc", w)

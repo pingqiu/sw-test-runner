@@ -6,9 +6,11 @@ import (
 	"errors"
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"os"
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,12 +20,12 @@ type GETOutcome struct {
 	Started, Ended float64
 	Exact          *bool
 }
-type ReadWindow struct{ KillACK float64 }
+type ReadWindow struct{ PreKill float64 }
 
 // Only client-local ordered outcomes earn credit. M02 timestamps are not used.
 func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loadStart, loadEnd float64, c SmokeConfig, w ReadWindow) error {
-	if len(rows) != attempts || w.KillACK <= 0 {
-		return errors.New("outage outcomes/ack missing")
+	if len(rows) != attempts || w.PreKill <= 0 {
+		return errors.New("outage outcomes/pre-Kill marker missing")
 	}
 	prior, begin, end := 0., 0., 0.
 	for i, r := range rows {
@@ -43,10 +45,10 @@ func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loa
 		}
 		prior = r.Ended
 	}
-	if begin != 0 && (begin < w.KillACK || end <= begin || end > w.KillACK+60) {
-		return errors.New("outage outside acknowledged 60s window")
+	if begin != 0 && (begin < w.PreKill || end <= begin || end > w.PreKill+60) {
+		return errors.New("outage outside pre-Kill 60s window")
 	}
-	if rows[0].Ended >= w.KillACK || rows[len(rows)-1].Started <= w.KillACK {
+	if rows[0].Ended >= w.PreKill || rows[len(rows)-1].Started <= w.PreKill {
 		return errors.New("load did not span restart")
 	}
 	return nil
@@ -93,6 +95,12 @@ func readTask(ctx context.Context, a *tr.ActionContext, in tr.PackInputs, label,
 }
 
 func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	for _, host := range d.Observation.Hosts {
+		if host.HostID == "m01" && (err != nil || strings.TrimSpace(string(boot)) != host.BootID) {
+			return nil, errors.New("runner is not the admitted M01 clock")
+		}
+	}
 	x := p.Restart
 	for _, v := range []struct{ label, stage, route string }{{p.Workload[0].Job, "seed", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
 		if _, err := readTask(ctx, a, in, v.label, v.stage, v.route); err != nil {
@@ -116,7 +124,7 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 	if err != nil {
 		return nil, err
 	}
-	ack := 0.
+	readyMono := 0.
 	for _, step := range p.Ready {
 		_, e, err := a.RunApprovedPackJob(ctx, step.Job, false)
 		if err != nil {
@@ -137,7 +145,7 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 			return nil, errors.New("replacement probe not READY")
 		}
 		if step.Host == "m01" {
-			ack = ready.ClientMono
+			readyMono = ready.ClientMono
 		}
 		if step.Host == "m02" {
 			i := ready.Processes["volume"].Identity
@@ -146,8 +154,8 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 			}
 		}
 	}
-	if ack <= 0 {
-		return nil, errors.New("client acknowledgement missing")
+	if readyMono <= 0 {
+		return nil, errors.New("client readiness observation missing")
 	}
 
 	// Load remains active until its fixed duration; no Wait watcher touches victim.
@@ -158,7 +166,7 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 
 	var c SmokeConfig
 	_ = json.Unmarshal([]byte(in.Jobs[x.DC].Argv[3]), &c)
-	if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{ack}); err != nil {
+	if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{receipt.Kill.PreKillMono}); err != nil {
 		return nil, err
 	}
 	for _, v := range []struct{ label, route string }{{x.RecoverDC, "dc"}, {x.RecoverHTTP, "http"}} {

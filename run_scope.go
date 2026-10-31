@@ -70,6 +70,7 @@ type KillWitness struct {
 	AliveBefore bool
 	Signal      string
 	AppliedAt   time.Time
+	PreKillMono float64
 }
 
 // Enroll is inert and retains possible issuers before dispatch. Authorize must
@@ -449,14 +450,20 @@ func (s *RunScope) kill(ctx context.Context, h JobHandle, intent *GenerationExit
 	if s.ctx.Err() != nil {
 		return KillWitness{}, s.ctx.Err()
 	}
+	preKill := 0.
 	if intent != nil {
 		if j.exitIntent != nil || intent.Identity != j.identity || intent.Episode == "" || intent.BoundAt.IsZero() {
 			return KillWitness{}, errors.New("invalid or consumed generation exit intent")
 		}
 		bound := *intent
 		j.exitIntent = &bound
+		preKill, err = generationMonotonic()
+		if err != nil {
+			return KillWitness{}, err
+		}
 	}
 	w, err := s.backend.Kill(ctx, h.id)
+	w.PreKillMono = preKill
 	if err != nil {
 		return w, err
 	}

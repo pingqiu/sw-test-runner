@@ -7,7 +7,7 @@ receipt type. LC6 (restart/error ownership), LC4 (generation change), and LC5
 is the existing runner custody/provider and accepted worker/oracle leaves;
 a separate fault controller or cross-host clock protocol would duplicate them.
 
-The final 750-Go-addition cap includes all three slices and the #26 fixes.
+The review-fix ceiling is 790 Go additions across all three slices and #26 fixes.
 The approved cut is applied: **DC spans the restart. HTTP is a pre-restart and
 post-recovery exact-byte control only. HTTP outage coverage is DEFERRED.**
 Write-under-fault, unknown-write quarantine, native bridge, VF/ENOSPC faults,
@@ -45,29 +45,25 @@ No historical binary/worker hashes can be reused for modified helper bytes.
 4. Reuse both ready probes. M02 must identify the exact replacement PID/start/
    boot plus independently read-back product hash. The replacement preserves
    the owned volume directory and refuses a still-live old generation.
-5. M01 ready-probe entry records client-local monotonic time after the provider
-   has acknowledged Kill. The DC task records every completed GET's ID, indexed
-   key, success/failure and local monotonic start/end. Both records originate
-   from pinned owned M01 jobs on the admitted boot. M02 wall timestamps are
-   never used for outage credit. Read-stage bounds, first/last success, GET
-   outcomes and failure records all use the same monotonic coordinate. Each
-   failed op must match its own outcome interval inside the load bounds. The
-   settled seed retains its separate wall-time metadata contract.
-6. Settle the fixed 120-second DC task. The assessor joins all outcomes to the
-   existing failure IDs and counters. Errors must form one contiguous window,
-   bounded by a preceding success and the next success. Its opening and close
-   must lie inside [marker, marker+60 s], including equality at sampled bounds.
-   Missing bounds, a second window, reordered/foreign outcomes and errors before the marker fail.
-   The marker is a conservative later bound on Kill acknowledgement; early
-   errors receive no credit. This can refuse an otherwise recoverable fault,
-   which must be reported rather than normalized.
+5. After binding the old-generation exit intent, the M01 runner captures P with
+   Linux CLOCK_MONOTONIC immediately before the backend Kill dispatch. It stores
+   P in the existing generation Kill receipt. Failure to read this clock
+   refuses the Kill; a remote wall timestamp is never substituted. Python GET
+   outcomes use the same M01 kernel clock and admitted boot. M01 ready-probe
+   entry still records its own monotonic marker, as an observation only.
+6. Settle the fixed 120-second DC task. Each outcome/failure must join its exact
+   indexed key, op ID and monotonic interval inside the load bounds. Errors may
+   form only one contiguous window, from preceding exact success to next exact
+   success, entirely inside [P,P+60 s]. Any pre-P, late, second or unbounded
+   window fails. Zero errors is allowed. No ready-entry or data-fitted anchor
+   can replace the generation receipt's P.
 7. Only after load settlement and successful attribution, issue named DC and
    HTTP recovery GETs. Thus every credited window closes before recovery GETs.
    Any wrong byte is fatal in the unchanged worker/oracle; it never becomes an
    outage observation. Existing custody/cleanup closes all generations.
 
 The existing profile ready probe remains bounded by 45 seconds/original work.
-The 60-second recovery claim is ONLY the DC window close <= marker+60 s.
+The 60-second recovery claim is ONLY the DC window close <= P+60 s.
 Named recovery GETs at load end check byte correctness; they have no additional
 Kill+60 timing gate, and remain bounded by the original work/hard envelope.
 A zero-error fast restart is allowed.
@@ -87,3 +83,28 @@ A live-victim Wait is refused by the transport fake, so the positive Engine case
 also exercises the required restart ordering. Actual CLI controls preserve
 seed data through replacement, refuse live/foreign-boot old generations, require
 owned TCP listeners and exact-generation CM/DC log witnesses.
+
+## Pre-Kill anchor correction (r10)
+
+R10's real 402-GET trace had three misses and returned to exact reads before the
+ready-entry marker. Its sealed FAIL remains unchanged. The trace fixture keeps
+all raw outcomes/counters; P was NOT recorded in that run. Its replay-only P is
+recorded load start plus the independently fixed 30s fault schedule, not a
+measured r10 dispatch timestamp or a value chosen from failed GET positions.
+A separate actual provider/caller control proves new receipt capture between
+intent binding and backend Kill entry; a late ready observation cannot change P.
+
+Choices: reuse the Linux monotonic clock in the existing custody boundary;
+a Python probe adds dispatch latency, and Go process-relative elapsed time does
+not share Python's absolute clock coordinate. Non-Linux generation restart
+refuses instead of inventing an offset. This reuses our runner machinery;
+no new Mooncake/3FS/NIXL protocol or separate timing framework is introduced.
+The change concerns LC6 timing/error ownership and LC4 generation transition;
+LC5 settlement and the original work/hard deadlines remain unchanged.
+The runner boot must match the admitted M01 observation before seed/load; a
+foreign controller clock refuses attribution rather than mixing clock domains.
+
+The requested entire-window lower bound also constrains the preceding successful
+GET. If that last good sample predates P even though every miss follows P, the
+case still refuses. This conservative sampling limit is not normalized away;
+only the independently reviewed contract may change it, never a fitted P.

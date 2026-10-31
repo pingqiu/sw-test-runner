@@ -8,6 +8,8 @@ import (
 	"errors"
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"golang.org/x/sys/unix"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ type restartCPU struct {
 	*cpuNode
 	t                              *testing.T
 	mode                           string
+	killMono                       float64
 	killed                         map[string]bool
 	events                         []string
 	seed, dcRecovery, httpControls int
@@ -29,6 +32,11 @@ func (n *restartCPU) Kill(_ context.Context, id string) (tr.KillWitness, error) 
 	if !n.live[id] {
 		return tr.KillWitness{}, errors.New("victim gate lost before Kill")
 	}
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return tr.KillWitness{}, err
+	}
+	n.killMono = float64(ts.Sec) + float64(ts.Nsec)/1e9
 	n.killed[id] = true
 	delete(n.live, id)
 	n.events = append(n.events, "kill")
@@ -76,6 +84,10 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 				f := row["faults"].([]any)[1].(map[string]any)
 				f["operation_id"], f["key"], f["started"], f["ended"] = 4, c.Client+"-0", 37., 38.
 			}
+			shiftRestartTrace(row, n.killMono-30)
+			if n.mode == "before-ack" {
+				shiftRestartTrace(row, -3)
+			}
 			raw, _ = json.Marshal(row)
 		} else {
 			if stage == "seed" {
@@ -112,9 +124,9 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 		if n.mode == "wrong-product" {
 			i.ExecutableSHA256 = strings.Repeat("e", 64)
 		}
-		ack := 30.
+		ack := n.killMono + 40
 		if n.mode == "before-ack" {
-			ack = 33
+			ack = n.killMono + 50
 		}
 		row := map[string]any{"status": "READY", "client_mono": ack, "processes": map[string]any{"volume": map[string]any{"scope_identity": i}}}
 		if n.mode == "missing-ready" {
@@ -160,6 +172,49 @@ func restartFixture(t *testing.T, mode string) (*cpuFixture, *restartCPU) {
 	d, err := inventory.Decode([]byte(f.plan.Resolved))
 	if err != nil {
 		t.Fatal(err)
+	}
+	bootRaw, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerBoot := strings.TrimSpace(string(bootRaw))
+	if mode == "controller-boot" {
+		controllerBoot = "11111111-1111-1111-1111-111111111111"
+	}
+	f.node.boots["m01"] = controllerBoot
+	for i := range d.Observation.Hosts {
+		if d.Observation.Hosts[i].HostID == "m01" {
+			d.Observation.Hosts[i].BootID = controllerBoot
+		}
+	}
+	for i := range f.policy.Deployments {
+		if f.policy.Deployments[i].NodeID == "m01" {
+			f.policy.Deployments[i].ExpectedBootID = controllerBoot
+		}
+	}
+	f.binding.Artifacts = f.write(t, "artifacts.json", tr.ApprovedArtifacts{Version: "s0b-artifacts-v1", Deployments: f.policy.Deployments})
+	requested, err := inventory.Decode([]byte(f.plan.Requested))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256
+	d.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256
+	requestRaw, _ := json.Marshal(requested)
+	f.plan.Requested = string(requestRaw)
+	d.Observation.RequestedSHA256 = hash(requestRaw)
+	resolved, _ := json.Marshal(d)
+	f.plan.Resolved = string(resolved)
+	for label, job := range f.policy.Jobs {
+		if job.Node == "m01" && strings.HasSuffix(job.Argv[1], "lab_profile.py") {
+			var config ProfileConfig
+			if err := json.Unmarshal([]byte(job.Argv[3]), &config); err != nil {
+				t.Fatal(err)
+			}
+			config.BootID = controllerBoot
+			raw, _ := json.Marshal(config)
+			job.Argv[3] = string(raw)
+			f.policy.Jobs[label] = job
+		}
 	}
 	f.plan.Restart = &ReadRestart{Episode: "volume-once", DC: "read-dc", RecoverDC: "recover-dc", RecoverHTTP: "control-http"}
 	for _, v := range []struct{ label, stage, route string }{{"smoke", "seed", "dc"}, {"read-dc", "load", "dc"}, {"recover-dc", "recovery", "dc"}, {"control-http", "recovery", "http"}} {
@@ -250,5 +305,29 @@ func TestRestartBindingRefusesBeforeAnyJob(t *testing.T) {
 				t.Fatal("binding refusal followed an effect")
 			}
 		})
+	}
+}
+
+// Real runner CLOCK_MONOTONIC anchor; fixture outcomes retain their fixed offsets.
+func shiftRestartTrace(row map[string]any, shift float64) {
+	for _, k := range []string{"started", "ended", "first_exact", "last_exact"} {
+		row[k] = row[k].(float64) + shift
+	}
+	for _, field := range []string{"outcomes", "faults"} {
+		for _, value := range row[field].([]any) {
+			r := value.(map[string]any)
+			r["started"], r["ended"] = r["started"].(float64)+shift, r["ended"].(float64)+shift
+		}
+	}
+}
+
+func TestRestartRefusesForeignControllerClock(t *testing.T) {
+	f, n := restartFixture(t, "controller-boot")
+	result, _, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, registerFastRestart, &f.runtime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Status != tr.StatusFail || !strings.Contains(result.Error, "runner is not the admitted M01 clock") || n.seed != 0 || n.anyKilled() {
+		t.Fatalf("foreign controller credited: result=%+v seeds=%d", result, n.seed)
 	}
 }
