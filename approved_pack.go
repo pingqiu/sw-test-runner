@@ -17,11 +17,18 @@ type PackInputs struct {
 	Files    map[string]map[string]string
 }
 
+func (c *ActionContext) boundPackContext() error {
+	if c == nil || c.approved == nil || c.Safety == nil || c.Safety != c.approved.scope || c.Scenario != c.approved.scenario {
+		return errors.New("no bound approved pack context")
+	}
+	return nil
+}
+
 // ApprovedPackInputs only succeeds inside this ApprovedRun's exact Engine
 // context. A caller-created Safety scope, Vars or YAML flag is insufficient.
 func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
-	if c == nil || c.approved == nil || c.Safety == nil || c.Safety != c.approved.scope || c.Scenario != c.approved.scenario {
-		return PackInputs{}, errors.New("no bound approved pack context")
+	if err := c.boundPackContext(); err != nil {
+		return PackInputs{}, err
 	}
 	a := c.approved
 	a.mu.Lock()
@@ -90,7 +97,7 @@ func (c *ActionContext) startApprovedPackJob(ctx context.Context, label string, 
 // refuses background service handles: restart alone owns the victim's Wait.
 func (c *ActionContext) WaitApprovedPackTask(ctx context.Context, h JobHandle) (e ExitInfo, err error) {
 	defer func() { c.FailApprovedPack(err) }()
-	if _, err = c.ApprovedPackInputs(); err != nil {
+	if err = c.boundPackContext(); err != nil {
 		return
 	}
 	j, unlock, err := c.Safety.lockJob(ctx, h)
@@ -103,15 +110,7 @@ func (c *ActionContext) WaitApprovedPackTask(ctx context.Context, h JobHandle) (
 		return e, errors.New("task waiter refuses a service generation")
 	}
 	e, err = c.Safety.Wait(ctx, h)
-	if err == nil && (e.Code != 0 || e.Signal != 0) {
-		err = errors.New("approved pack job failed")
-	}
-	if err == nil {
-		_, _, err = e.Output.Decode()
-		if err == nil && e.Output.ReadEnd.After(c.Safety.admission.HardDeadline) {
-			err = errors.New("owned output captured outside original envelope")
-		}
-	}
+
 	return e, err
 }
 

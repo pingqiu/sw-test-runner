@@ -354,8 +354,14 @@ func (s *RunScope) stop(ctx context.Context, h JobHandle) (custody, outcome erro
 	if err := s.backend.Settle(ctx, h.id); err != nil {
 		return err, nil
 	}
+	if j.spec.CaptureOutput && j.spec.packLabel != "" {
+		j.outcomeErr = errors.New("approved task terminal/output not observed before cleanup")
+		s.mu.Lock()
+		s.outcomeErr = errors.Join(s.outcomeErr, j.outcomeErr)
+		s.mu.Unlock()
+	}
 	s.retired(h)
-	return nil, nil
+	return nil, j.outcomeErr
 }
 
 func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
@@ -392,6 +398,16 @@ func (s *RunScope) recordExit(h JobHandle, j *ownedJob, i ExitInfo) {
 	expected := j.exitIntent != nil && j.exitIntent.Identity == i.Identity && j.expectedKill != nil && j.expectedKill.Identity == i.Identity && i.Code == -1 && i.Signal == 9
 	if j.spec.retainExit && !expected && (!i.CleanupStopped || i.Code != -1 || i.Signal != 9) {
 		j.outcomeErr = errors.New("background service exited before intentional cleanup")
+		s.mu.Lock()
+		s.outcomeErr = errors.Join(s.outcomeErr, j.outcomeErr)
+		s.mu.Unlock()
+	}
+	if j.spec.CaptureOutput && j.spec.packLabel != "" {
+		_, _, err := i.Output.Decode()
+		if i.Code != 0 || i.Signal != 0 || i.Output.ReadEnd.After(s.admission.HardDeadline) {
+			err = errors.Join(err, errors.New("approved task terminal/output failed"))
+		}
+		j.outcomeErr = errors.Join(j.outcomeErr, err)
 		s.mu.Lock()
 		s.outcomeErr = errors.Join(s.outcomeErr, j.outcomeErr)
 		s.mu.Unlock()

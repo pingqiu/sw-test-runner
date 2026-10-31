@@ -71,6 +71,9 @@ func checkSeed(rows []map[string]json.RawMessage, c SmokeConfig, route string) (
 	if last.Status != "PASS" || last.ACK != c.Keys || last.Exact != c.Keys || last.Wrong == nil || *last.Wrong != 0 || last.Witness.ReadTransport != "dc" || last.Witness.ReadBytes != c.Keys*c.Length || last.Witness.WriteBytes != c.Keys*c.Length || last.Witness.Fallback == nil || *last.Witness.Fallback {
 		return nil, errors.New("settled seed terminal proof differs")
 	}
+	if err := checkReadCounters(rows[len(rows)-1]["before"], rows[len(rows)-1]["after"], route, c.Keys, c.Length, 0, c.Keys); err != nil {
+		return nil, err
+	}
 	var observed map[string]any
 	err := json.Unmarshal(body, &observed)
 	return observed, err
@@ -185,7 +188,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 	for _, fault := range r.Faults {
 		var f struct {
 			Action, Key, Target, Transport string
-			OperationID                    int `json:"operation_id"`
+			OperationID                    *int `json:"operation_id"`
 			Started, Ended                 float64
 			OK                             *bool
 			Results                        json.RawMessage
@@ -194,16 +197,16 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 		if err = json.Unmarshal(b, &f); err != nil {
 			return nil, err
 		}
-		validKey := false
-		for i := 0; i < c.Keys; i++ {
-			validKey = validKey || f.Key == fmt.Sprintf("%s-%d", c.Client, i)
+		if f.OperationID == nil || *f.OperationID < 0 || *f.OperationID >= r.Attempts {
+			return nil, errors.New("missing/out-of-range operation ID")
 		}
-		if f.Action != "get" || !validKey || f.Target != c.RDMAAddress || f.Transport != route || f.OperationID < 0 || f.OperationID >= r.Attempts || seen[f.OperationID] || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
+		id := *f.OperationID
+		if f.Action != "get" || f.Key != fmt.Sprintf("%s-%d", c.Client, id%c.Keys) || f.Target != c.RDMAAddress || f.Transport != route || seen[id] || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
 			return nil, errors.New("unbound completed GET failure")
 		}
-		seen[f.OperationID] = true
+		seen[id] = true
 	}
-	if err = checkReadCounters(r.Before, r.After, route, r.Exact, c.Length, len(r.Faults)); err != nil {
+	if err = checkReadCounters(r.Before, r.After, route, r.Exact, c.Length, len(r.Faults), 0); err != nil {
 		return nil, err
 	}
 	var observed map[string]any
@@ -211,7 +214,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string) (
 	return observed, err
 }
 
-func checkReadCounters(before, after json.RawMessage, route string, exact, length, faults int) error {
+func checkReadCounters(before, after json.RawMessage, route string, exact, length, faults, writes int) error {
 	var a, b struct {
 		ReadErrors *uint64 `json:"read_errors"`
 		Loader     map[string]json.RawMessage
@@ -252,7 +255,7 @@ func checkReadCounters(before, after json.RawMessage, route string, exact, lengt
 		}
 		counts[name] = v
 	}
-	if counts["write_objects"] != 0 || counts["write_bytes"] != 0 || counts["read_objects"] < uint64(exact) || counts["read_bytes"] < uint64(exact*length) || counts[selected+"_reads"] != counts["read_objects"] || counts[selected+"_bytes"] != counts["read_bytes"] {
+	if counts["write_objects"] != uint64(writes) || counts["write_bytes"] != uint64(writes*length) || (writes > 0 && (counts["read_objects"] != uint64(exact) || counts["read_bytes"] != uint64(exact*length))) || counts["read_objects"] < uint64(exact) || counts["read_bytes"] < uint64(exact*length) || counts[selected+"_reads"] != counts["read_objects"] || counts[selected+"_bytes"] != counts["read_bytes"] {
 		return errors.New("read-only path counters differ")
 	}
 	for _, other := range []string{"direct_dc", "direct_rc", "copied"} {
