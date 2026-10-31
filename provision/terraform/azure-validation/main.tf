@@ -22,6 +22,10 @@ variable "cluster" {
   type    = bool
   default = false
 }
+variable "run_id" {
+  type    = string
+  default = null
+}
 variable "node_host_keys" {
   type      = map(object({ ed25519_private = string, ed25519_public = string }))
   sensitive = true
@@ -57,7 +61,7 @@ module "run" {
   source                     = "../azure"
   resource_group_name        = var.resource_group_name
   location                   = var.location
-  run_id                     = var.cluster ? "ten-http-gate" : "single-http-gate"
+  run_id                     = coalesce(var.run_id, var.cluster ? "ten-http-gate" : "single-http-gate")
   ssh_public_key             = var.ssh_public_key
   host_keys                  = var.host_keys
   node_host_keys             = var.node_host_keys
@@ -86,3 +90,4 @@ output "inventory_json" { value = module.run.inventory_json }
 
 output "run_declaration" { value = module.run.run_declaration }
 output "managed_resource_ids" { value = module.run.managed_resource_ids }
+output "os_disk_ids" { value = module.run.os_disk_ids }
