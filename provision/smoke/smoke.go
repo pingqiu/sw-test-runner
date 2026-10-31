@@ -200,16 +200,61 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	}
 	return files, b, d, nil
 }
-func resourceIDs(raw []byte, run string, all bool) ([]string, error) {
-	var rows []struct {
-		ID, Type string
-		Tags     map[string]string
+
+// raw is a syntactically valid RawMessage from the resource-array decoder.
+func resourceDecisionKeys(raw []byte, tags bool) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if first, _ := d.Token(); first != json.Delim('{') {
+		return errors.New("resource/tags must be an object")
 	}
+	keys := []string{"id", "type", "tags"}
+	if tags {
+		keys = []string{"seaweed_run"}
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		token, _ := d.Token()
+		key := token.(string)
+		var value json.RawMessage
+		if e := d.Decode(&value); e != nil {
+			return e
+		}
+		for _, canonical := range keys {
+			if strings.EqualFold(key, canonical) {
+				if key != canonical || seen[canonical] {
+					return errors.New("duplicate/case-aliased resource decision key")
+				}
+				seen[canonical] = true
+			}
+		}
+		if tags && (len(value) == 0 || value[0] != '"') {
+			return errors.New("individual tag value must be a string")
+		}
+		if !tags && key == "tags" && string(value) != "null" {
+			if e := resourceDecisionKeys(value, true); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+func resourceIDs(raw []byte, run string, all bool) ([]string, error) {
+	var rows []json.RawMessage
 	if e := json.Unmarshal(raw, &rows); e != nil || rows == nil {
 		return nil, errors.New("resource list must be an object array")
 	}
 	ids := []string{}
-	for _, r := range rows {
+	for _, rawRow := range rows {
+		if e := resourceDecisionKeys(rawRow, false); e != nil {
+			return nil, e
+		}
+		var r struct {
+			ID, Type string
+			Tags     map[string]string
+		}
+		if e := json.Unmarshal(rawRow, &r); e != nil {
+			return nil, e
+		}
 		if r.ID == "" || r.Type == "" {
 			return nil, errors.New("resource missing id/type")
 		}

@@ -109,3 +109,45 @@ func TestAllAzureLifecycleArgvAreWrapperSafe(t *testing.T) {
 		}
 	}
 }
+func TestARMResourceDecisionFields(t *testing.T) {
+	const arm = `{"id":"/subscriptions/test/resourceGroups/free/providers/Microsoft.Network/virtualNetworks/vnet","name":"vnet","type":"Microsoft.Network/virtualNetworks","location":"westus2","kind":"","managedBy":"","extendedLocation":null,"identity":{"principalId":"some-id"},"properties":{"provisioningState":"Succeeded","someCamelCase":true},"systemData":{"createdAt":"2026-10-31T20:00:00Z"}`
+	for name, tc := range map[string]struct {
+		raw   string
+		valid bool
+		left  int
+	}{
+		"ARM-null-tags":       {`[` + arm + `,"tags":null}]`, true, 0},
+		"ARM-absent-tags":     {`[` + arm + `}]`, true, 0},
+		"ARM-extra-tags":      {`[` + arm + `,"tags":{"OwnerTeam":"test","seaweed_run":"other"}}]`, true, 0},
+		"ARM-matching-tag":    {`[` + arm + `,"tags":{"OwnerTeam":"test","seaweed_run":"output"}}]`, true, 1},
+		"duplicate-id":        {`[{"id":"/one","id":"/two","type":"Microsoft.Network/virtualNetworks"}]`, false, 0},
+		"id-alias":            {`[{"id":"/one","ID":"/two","type":"Microsoft.Network/virtualNetworks"}]`, false, 0},
+		"tag-container-alias": {`[{"id":"/one","type":"Microsoft.Network/virtualNetworks","tags":{},"Tags":{}}]`, false, 0},
+		"run-tag-alias":       {`[{"id":"/one","type":"Microsoft.Network/virtualNetworks","tags":{"seaweed_run":"output","Seaweed_Run":"foreign"}}]`, false, 0},
+		"run-tag-duplicate":   {`[{"id":"/one","type":"Microsoft.Network/virtualNetworks","tags":{"seaweed_run":"output","seaweed_run":"foreign"}}]`, false, 0},
+		"other-tag-null":      {`[{"id":"/one","type":"Microsoft.Network/virtualNetworks","tags":{"OwnerTeam":null}}]`, false, 0},
+		"other-tag-number":    {`[{"id":"/one","type":"Microsoft.Network/virtualNetworks","tags":{"OwnerTeam":7}}]`, false, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := clusterFixture(t)
+			f := &fake{}
+			if r := controller(f).Execute(context.Background(), "run", c); r.Code != "COMPLETE" {
+				t.Fatal(r)
+			}
+			ctl := Controller{Command: func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+				if strings.Contains(strings.Join(args, " "), "--resource-group") {
+					return []byte(`[]`), nil
+				}
+				return []byte(tc.raw), nil
+			}}
+			r := ctl.Execute(context.Background(), "verify", c)
+			if !tc.valid {
+				if r.RemainingObserved || r.Code != "RESOURCES_REMAIN" || strings.Contains(r.RemainingSummary, "remaining: 0") {
+					t.Fatal(r)
+				}
+			} else if !r.RemainingObserved || len(r.Remaining) != tc.left || (tc.left == 0 && r.Code != "EMPTY") || (tc.left > 0 && r.Code != "RESOURCES_REMAIN") {
+				t.Fatal(r)
+			}
+		})
+	}
+}

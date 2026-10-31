@@ -14,6 +14,7 @@ def main():
     (scratch/'echo.py').write_text('import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
     (scratch/'fake-az.cmd').write_bytes(('@echo off\r\n'+r'C:\Python3\python.exe "'+windows+r'\echo.py" %*'+'\r\n').encode())
     raw = pathlib.Path(a.wrapper).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == 'e5291aa8891aa06beee9eb0b868e48bf11d6b9a4b42f6b2db5519597feebae3f'
     target = br'C:\PROGRA~1\MIA713~1\Azure\CLI2\wbin\az.cmd '
     assert raw.count(target) == 1
     # Substitute only the executable under test. All quoting/interop code is unchanged.
@@ -29,11 +30,14 @@ def main():
     except ValueError:
         old_intact = False
     assert not old_intact, 'old compound query unexpectedly survived; distinguishing RED missing'
-    for args in {tuple(row) for row in rows}:
+    log = [dict(case='old-query', returncode=broken.returncode, stdout=broken.stdout, stderr=broken.stderr, argv=old)]
+    for args in sorted({tuple(row) for row in rows}):
         r = subprocess.run([str(probe), *args], capture_output=True, text=True, timeout=15)
         assert r.returncode == 0, (args,r.returncode,r.stderr)
+        log.append(dict(case="safe-argv",argv=list(args),returncode=r.returncode,stdout=r.stdout,stderr=r.stderr))
         assert json.loads(r.stdout) == list(args), (args,r.stdout)
     receipt = {'result':'PASS','argv_count':len(rows),'distinct_argv':len({tuple(row) for row in rows}),'old_compound_query':'RED: argv not preserved','wrapper_sha256':hashlib.sha256(raw).hexdigest(),'substitution':'az.cmd executable only; real /init -> cmd.exe -> fake-az.cmd -> Windows argv echo'}
+    (scratch/'replay.jsonl').write_text(''.join(json.dumps(x)+'\n' for x in log))
     (scratch/'result.json').write_text(json.dumps(receipt,indent=2)+'\n')
     print(json.dumps(receipt))
 
