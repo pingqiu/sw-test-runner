@@ -48,10 +48,19 @@ Run requires a fresh private output directory. Init uses the committed provider 
 
 The pack waits for cloud-init, uploads and checks the three artifact hashes, installs embedded #19 worker files, starts master/volume/filer/S3, waits for HTTP readiness, runs 16 x 1 MiB SET+immediate exact GET, and saves worker output and service logs. Every command has a deadline; nonzero/missing summary/wrong bytes fails. No workload retries or HTTP fallback. The VM is destroyed even if setup/workload fails. Normal teardown does not turn workload failure into PASS.
 
-The existing native shutdown schedule/expiry tag remains a compute backstop, not disk/IP cleanup. Provider errors may prevent arming. Hard-deadline teardown is best effort; run destroy again after session death and inspect remaining IDs.
+Expiry tags remain, but there is no native shutdown schedule or DevTestLab registration requirement. The run itself destroys resources and lists the full RG. If the controller/session dies, the next session must run the same destroy + verify before any new create; compute, disks and IPs can keep billing until cleanup. Hard-deadline teardown is best effort.
 
 UNKNOWN apply stays sticky: destroy + an empty list cannot prove that an unresolved create will not finish later. `CREATE_UNRESOLVED` never becomes `COMPLETE` without resolving that pending create; remaining IDs and nonzero status must be reported to the owner. `verify` is locally bounded to 30 seconds. The RG/RBAC stay.
 
 ## Verification limits
 
 CPU tests drive the actual native command boundary with fake Terraform/az, including a late asynchronous create after recovery's empty list. Loopback SSH tests use a real handshake to prove pinned-key success/mismatch refusal and exercise transfers/phase calls. Their server simulates service/worker output: they do not execute weed/cloud-init/the native connector or prove Azure service compatibility. Existing M01/M02 strict tests remain unchanged. Cloud qualification still needs the manager token.
+
+Offline resource regression control (mock provider only, no Azure account):
+
+```sh
+terraform -chdir=provision/terraform/azure-validation test -filter=tests/shutdown.tftest.hcl -json -verbose > /private/mock-plan.jsonl
+python3 provision/terraform/azure-validation/tests/check_no_devtestlab.py < /private/mock-plan.jsonl
+```
+
+This checks the actual one-VM mock plan for absence of DevTestLab resources and preservation of expiry tags. Controller destroy/verify/UNKNOWN code is unchanged.

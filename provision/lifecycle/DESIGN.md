@@ -11,11 +11,11 @@ can yield COMPLETE; workload failures remain failed after clean teardown.
 Partial/UNKNOWN apply also enters teardown, without retry. Remaining IDs and a
 nonzero JSON result direct manual recovery.
 
-The module tags resources with fixed expiry. The one-VM wiring root adds native
-shutdown at the minute-aligned UTC hard deadline. Entry bounds that deadline to
-60 minutes and estimate/budget to $3. Shutdown deallocates compute; it does not
-remove disks/IPs. Schedule creation depends on the VM and may fail; no strict
-wall-clock billing guarantee is claimed. Failure requires recovery/reporting.
+The module tags resources with fixed expiry. There is no native shutdown
+schedule or DevTestLab requirement. Entry bounds the deadline to 60 minutes and
+estimate/budget to $3. The run destroys and lists the full RG; after session
+death the next session runs the same destroy/verify before any new create.
+Resources may continue billing until cleanup; no automatic cutoff is claimed.
 
 Credentials stay on Linux. Guests receive only the existing SSH public key.
 No Automation, MI, custom role, copied tokens, new lease implementation or

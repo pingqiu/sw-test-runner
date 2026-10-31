@@ -65,15 +65,3 @@ output "inventory_json" { value = module.run.inventory_json }
 
 output "run_declaration" { value = module.run.run_declaration }
 output "managed_resource_ids" { value = module.run.managed_resource_ids }
-
-# Native deallocation is a compute-billing backstop, not disk/IP cleanup.
-# Exact minute-aligned expiry and <=60-minute admission are controller checks.
-resource "azurerm_dev_test_global_vm_shutdown_schedule" "smoke" {
-  virtual_machine_id    = jsondecode(module.run.inventory_json).hosts[0].resource_id
-  location              = var.location
-  enabled               = true
-  daily_recurrence_time = formatdate("hhmm", var.run_declaration.hard_deadline)
-  timezone              = "UTC"
-  tags                  = { expires_at = var.run_declaration.hard_deadline, managed_by = "sw-test-runner" }
-  notification_settings { enabled = false }
-}
