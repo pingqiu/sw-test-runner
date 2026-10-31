@@ -4,7 +4,9 @@ package seaweed
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
@@ -33,6 +35,17 @@ func cloudSSH(t *testing.T, summary string) (string, string, string, *atomic.Int
 		t.Fatal(e)
 	}
 	cfg := &ssh.ServerConfig{NoClientAuth: true}
+	// Ubuntu normally offers both. The ed25519 pin must select its algorithm,
+	// rather than letting the client prefer the server's unrelated ECDSA key.
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecdsaSigner, err := ssh.NewSignerFromKey(ecdsaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AddHostKey(ecdsaSigner)
 	cfg.AddHostKey(signer)
 	ln, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
