@@ -44,13 +44,14 @@ type approvedJobs struct {
 // Final custody observations survive pruning live indexes. No evidence row is
 // a substitute for the underlying backend's settlement proof.
 type ApprovedJobReceipt struct {
-	ID       string
-	Spec     JobSpec
-	Identity ProcessIdentity
-	State    string
-	Updated  time.Time
-	Exit     *ExitInfo
-	Error    string
+	ID        string
+	PackLabel string
+	Spec      JobSpec
+	Identity  ProcessIdentity
+	State     string
+	Updated   time.Time
+	Exit      *ExitInfo
+	Error     string
 }
 
 func (b *approvedJobs) observe(id, state string, i ProcessIdentity, exit *ExitInfo, err error) {
@@ -134,7 +135,7 @@ func (b *approvedJobs) Enroll(ctx context.Context, id string, a RunAdmission, s 
 	}
 	row.spec = s
 	b.jobs[id] = row
-	b.receipts[id] = ApprovedJobReceipt{ID: id, Spec: s, State: "POSSIBLE", Updated: time.Now()}
+	b.receipts[id] = ApprovedJobReceipt{ID: id, PackLabel: s.packLabel, Spec: s, State: "POSSIBLE", Updated: time.Now()}
 	b.mu.Unlock()
 	i, err := b.run.runtime.Jobs.Enroll(ctx, id, a, s)
 	state := "ENROLLED"

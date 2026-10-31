@@ -66,7 +66,7 @@ func (c *ActionContext) RunApprovedPackJob(ctx context.Context, label string, ba
 	if err := work.Err(); err != nil {
 		return JobHandle{}, ExitInfo{}, err
 	}
-	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background, CaptureOutput: !background}, false)
+	h, err := c.Safety.start(work, JobSpec{Node: pin.Node, Executable: pin.Executable, SHA256: pin.SHA256, Argv: pin.Argv, retainExit: background, packLabel: label, CaptureOutput: !background}, false)
 	if err != nil || background {
 		return h, ExitInfo{}, err
 	}

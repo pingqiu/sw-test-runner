@@ -43,12 +43,19 @@ type TrustedPolicy struct {
 	owner     uint32
 	bootstrap PolicyBootstrap
 }
+// GenerationRestartPlan binds one episode to two independently pinned job labels.
+type GenerationRestartPlan struct {
+	Victim      string `json:"victim"`
+	Replacement string `json:"replacement"`
+}
+
 type ApprovedRunPolicy struct {
-	Version     string                   `json:"version"`
-	Runner      string                   `json:"runner"`
-	Deployments []infra.DeploymentPolicy `json:"deployments"`
-	Jobs        map[string]JobPin        `json:"jobs"`
-	Scripts     []FilePin                `json:"scripts"`
+	GenerationRestarts map[string]GenerationRestartPlan `json:"generation_restarts,omitempty"`
+	Version            string                           `json:"version"`
+	Runner             string                           `json:"runner"`
+	Deployments        []infra.DeploymentPolicy         `json:"deployments"`
+	Jobs               map[string]JobPin                `json:"jobs"`
+	Scripts            []FilePin                        `json:"scripts"`
 }
 type ApprovedInventory struct {
 	Version string         `json:"version"`
@@ -81,6 +88,7 @@ type ApprovedRun struct {
 	readbacks                   map[string]infra.DeploymentReceipt
 	scope                       *RunScope
 	mu                          sync.Mutex
+	generationRestarts          map[string]GenerationRestartReceipt
 	workErr                     error
 	closing                     bool
 	readers                     int
