@@ -49,12 +49,15 @@ No historical binary/worker hashes can be reused for modified helper bytes.
    has acknowledged Kill. The DC task records every completed GET's ID, indexed
    key, success/failure and local monotonic start/end. Both records originate
    from pinned owned M01 jobs on the admitted boot. M02 wall timestamps are
-   never used for outage credit.
+   never used for outage credit. Read-stage bounds, first/last success, GET
+   outcomes and failure records all use the same monotonic coordinate. Each
+   failed op must match its own outcome interval inside the load bounds. The
+   settled seed retains its separate wall-time metadata contract.
 6. Settle the fixed 120-second DC task. The assessor joins all outcomes to the
    existing failure IDs and counters. Errors must form one contiguous window,
-   bounded by a preceding success and the next success, lasting <=60 seconds.
-   Its opening must follow the M01 post-Kill marker. Missing bounds, a second
-   window, reordered/foreign outcomes and errors before the marker fail.
+   bounded by a preceding success and the next success. Its opening and close
+   must lie inside [marker, marker+60 s], including equality at sampled bounds.
+   Missing bounds, a second window, reordered/foreign outcomes and errors before the marker fail.
    The marker is a conservative later bound on Kill acknowledgement; early
    errors receive no credit. This can refuse an otherwise recoverable fault,
    which must be reported rather than normalized.
@@ -63,8 +66,11 @@ No historical binary/worker hashes can be reused for modified helper bytes.
    Any wrong byte is fatal in the unchanged worker/oracle; it never becomes an
    outage observation. Existing custody/cleanup closes all generations.
 
-The existing profile ready probe is bounded by 45 seconds/original work;
-replacement readiness must finish within the 60-second recovery budget.
+The existing profile ready probe remains bounded by 45 seconds/original work.
+The 60-second recovery claim is ONLY the DC window close <= marker+60 s.
+Named recovery GETs at load end check byte correctness; they have no additional
+Kill+60 timing gate, and remain bounded by the original work/hard envelope.
+A zero-error fast restart is allowed.
 Load lasts 120 seconds with <=1024 outcomes and <=256 failure observations;
 unknown completion remains fatal. Original action/work/hard deadlines bound
 all dispatch and settlement. No resource or hardware qualification is claimed

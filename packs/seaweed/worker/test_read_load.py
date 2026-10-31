@@ -26,9 +26,15 @@ class ReadControls(unittest.TestCase):
         row,conn=self.run_case('http','http')
         self.assertEqual((row['exact'],conn.sets),(2,0))
     def test_first_exact_is_completion_not_submission(self):
-        with patch.object(kv_smoke.time,'time',side_effect=[100.,101.,102.,103.,104.,105.]):
+        import itertools
+        clock=itertools.count(100.)
+        with patch.object(kv_smoke.time,'monotonic',side_effect=lambda:next(clock)):
             row,_=self.run_case()
-        self.assertEqual((row['first_exact'],row['last_exact']),(102.,104.))
+        self.assertEqual(row['first_exact'],row['outcomes'][0]['ended'])
+        self.assertGreater(row['first_exact'],row['outcomes'][0]['started'])
+        self.assertEqual(row['last_exact'],row['outcomes'][-1]['ended'])
+        self.assertEqual(row['elapsed'],row['ended']-row['started'])
+        self.assertTrue(all(row['started']<=o['started']<=o['ended']<=row['ended'] for o in row['outcomes']))
     def test_wrong_bytes_miss_and_wrong_route_refuse_recovery(self):
         for mode in ('wrong','miss','http'):
             with self.subTest(mode=mode),self.assertRaises(AssertionError):self.run_case(mode)

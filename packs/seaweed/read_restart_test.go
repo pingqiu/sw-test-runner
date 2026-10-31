@@ -11,10 +11,11 @@ func windowBody(t *testing.T, c SmokeConfig) map[string]any {
 	if err := json.Unmarshal(pythonReadOutput(t, "recovery", "dc"), &r); err != nil {
 		t.Fatal(err)
 	}
-	start := r["started"].(float64)
+	start := 1.
+	r["started"] = start
 	r["run_id"], r["client"], r["root"] = c.RunID, c.Client, c.Root
 	r["stage"], r["elapsed"], r["ended"], r["exact"], r["attempts"] = "load", 120., start+120, 4, 6
-	r["first_exact"], r["last_exact"] = start+2, start+119
+	r["first_exact"], r["last_exact"] = 2., 120.
 	ids := []int{0, 1, 2, 3, 4, 5}
 	times := [][2]float64{{1, 2}, {31, 32}, {33, 34}, {35, 36}, {37, 38}, {119, 120}}
 	outcomes := []any{}
@@ -24,7 +25,7 @@ func windowBody(t *testing.T, c SmokeConfig) map[string]any {
 		key := c.Client + "-" + string(rune('0'+id%c.Keys))
 		outcomes = append(outcomes, map[string]any{"operation_id": id, "key": key, "started": times[i][0], "ended": times[i][1], "exact": exact})
 		if !exact {
-			faults = append(faults, map[string]any{"operation_id": id, "key": key, "action": "get", "target": c.RDMAAddress, "transport": "dc", "started": start + times[i][0], "ended": start + times[i][1], "ok": false, "results": nil})
+			faults = append(faults, map[string]any{"operation_id": id, "key": key, "action": "get", "target": c.RDMAAddress, "transport": "dc", "started": times[i][0], "ended": times[i][1], "ok": false, "results": nil})
 		}
 	}
 	r["faults"], r["outcomes"] = faults, outcomes
@@ -42,7 +43,7 @@ func windowBody(t *testing.T, c SmokeConfig) map[string]any {
 }
 
 func TestRestartWindowActualAssessor(t *testing.T) {
-	for _, mode := range []string{"positive", "missing-outcomes", "second-window", "before-ack", "overlong", "missing-close", "wrong-key", "missing-id", "wrong-outcome", "reordered", "no-prefault-hit", "outside-load"} {
+	for _, mode := range []string{"positive", "missing-outcomes", "second-window", "before-ack", "overlong", "missing-close", "wrong-key", "missing-id", "wrong-outcome", "reordered", "no-prefault-hit", "outside-load", "exact-close-budget", "late-close-budget"} {
 		t.Run(mode, func(t *testing.T) {
 			c := readConfig()
 			row := windowBody(t, c)
@@ -56,7 +57,11 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 				o[3].(map[string]any)["exact"] = true
 				o[4].(map[string]any)["exact"] = false
 				f := row["faults"].([]any)[1].(map[string]any)
-				f["operation_id"], f["key"] = 4, "m01-0"
+				f["operation_id"], f["key"], f["started"], f["ended"] = 4, "m01-0", 37., 38.
+			case "exact-close-budget":
+				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 89., 90.
+			case "late-close-budget":
+				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 89., 90.001
 			case "before-ack":
 				w.KillACK = 33
 			case "overlong":
@@ -80,10 +85,10 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 			}
 			raw, _ := json.Marshal(row)
 			_, err := CheckReadTaskOutput(captured(raw), c, "load", "dc", w)
-			if mode == "positive" && err != nil {
+			if (mode == "positive" || mode == "exact-close-budget") && err != nil {
 				t.Fatal(err)
 			}
-			if mode != "positive" && err == nil {
+			if mode != "positive" && mode != "exact-close-budget" && err == nil {
 				t.Fatal("unproven window accepted")
 			}
 		})

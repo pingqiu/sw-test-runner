@@ -185,7 +185,7 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, w
 	if r.Exact > 0 && (r.FirstExact == nil || r.LastExact == nil || *r.FirstExact < r.Started || *r.LastExact < *r.FirstExact || *r.LastExact > r.Ended) {
 		return nil, errors.New("exact GET boundaries missing")
 	}
-	seen := map[int]bool{}
+	seen := map[int]GETOutcome{}
 	for _, fault := range r.Faults {
 		var f struct {
 			Action, Key, Target, Transport string
@@ -202,16 +202,17 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, w
 			return nil, errors.New("missing/out-of-range operation ID")
 		}
 		id := *f.OperationID
-		if f.Action != "get" || f.Key != fmt.Sprintf("%s-%d", c.Client, id%c.Keys) || f.Target != c.RDMAAddress || f.Transport != route || seen[id] || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
+		_, duplicate := seen[id]
+		if f.Action != "get" || f.Key != fmt.Sprintf("%s-%d", c.Client, id%c.Keys) || f.Target != c.RDMAAddress || f.Transport != route || duplicate || f.OK == nil || (*f.OK && string(f.Results) != "[false]") || f.Started < r.Started || f.Ended < f.Started || f.Ended > r.Ended {
 			return nil, errors.New("unbound completed GET failure")
 		}
-		seen[id] = true
+		seen[id] = GETOutcome{ID: f.OperationID, Key: f.Key, Started: f.Started, Ended: f.Ended}
 	}
 	if err = checkReadCounters(r.Before, r.After, route, r.Exact, c.Length, len(r.Faults), 0); err != nil {
 		return nil, err
 	}
 	if len(window) > 0 {
-		if err = checkWindow(r.Outcomes, seen, r.Attempts, r.Elapsed, c, window[0]); err != nil {
+		if err = checkWindow(r.Outcomes, seen, r.Attempts, r.Started, r.Ended, c, window[0]); err != nil {
 			return nil, err
 		}
 	}

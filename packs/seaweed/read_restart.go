@@ -21,16 +21,17 @@ type GETOutcome struct {
 type ReadWindow struct{ KillACK float64 }
 
 // Only client-local ordered outcomes earn credit. M02 timestamps are not used.
-func checkWindow(rows []GETOutcome, faults map[int]bool, attempts int, elapsed float64, c SmokeConfig, w ReadWindow) error {
+func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loadStart, loadEnd float64, c SmokeConfig, w ReadWindow) error {
 	if len(rows) != attempts || w.KillACK <= 0 {
 		return errors.New("outage outcomes/ack missing")
 	}
 	prior, begin, end := 0., 0., 0.
 	for i, r := range rows {
-		if r.ID == nil || *r.ID != i || r.Key != c.Client+"-"+strconv.Itoa(i%c.Keys) || r.Exact == nil || *r.Exact == faults[i] || r.Started <= 0 || r.Started < prior || r.Ended < r.Started {
+		fault, failed := faults[i]
+		if r.ID == nil || *r.ID != i || r.Key != c.Client+"-"+strconv.Itoa(i%c.Keys) || r.Exact == nil || *r.Exact == failed || r.Started < loadStart || r.Ended > loadEnd || (failed && (r.Started != fault.Started || r.Ended != fault.Ended)) || r.Started < prior || r.Ended < r.Started {
 			return errors.New("outage outcome binding/order differs")
 		}
-		if faults[i] {
+		if failed {
 			if i == 0 || end != 0 {
 				return errors.New("unbounded or second outage window")
 			}
@@ -42,10 +43,10 @@ func checkWindow(rows []GETOutcome, faults map[int]bool, attempts int, elapsed f
 		}
 		prior = r.Ended
 	}
-	if begin != 0 && (begin < w.KillACK || end <= begin || end-begin > 60) {
+	if begin != 0 && (begin < w.KillACK || end <= begin || end > w.KillACK+60) {
 		return errors.New("outage outside acknowledged 60s window")
 	}
-	if rows[len(rows)-1].Ended-rows[0].Started > elapsed || rows[0].Ended >= w.KillACK || rows[len(rows)-1].Started <= w.KillACK {
+	if rows[0].Ended >= w.KillACK || rows[len(rows)-1].Started <= w.KillACK {
 		return errors.New("load did not span restart")
 	}
 	return nil
@@ -111,7 +112,6 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 		return nil, ctx.Err()
 	case <-pause:
 	}
-	started := time.Now()
 	_, receipt, err := a.RestartApprovedPackGeneration(ctx, x.Episode, s.jobs[in.Restarts[x.Episode].Victim])
 	if err != nil {
 		return nil, err
@@ -146,8 +146,8 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 			}
 		}
 	}
-	if ack <= 0 || time.Since(started) > 60*time.Second {
-		return nil, errors.New("replacement recovery exceeds 60s or lacks client ack")
+	if ack <= 0 {
+		return nil, errors.New("client acknowledgement missing")
 	}
 
 	// Load remains active until its fixed duration; no Wait watcher touches victim.

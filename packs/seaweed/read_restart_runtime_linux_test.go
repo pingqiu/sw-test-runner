@@ -74,7 +74,7 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 				o[3].(map[string]any)["exact"] = true
 				o[4].(map[string]any)["exact"] = false
 				f := row["faults"].([]any)[1].(map[string]any)
-				f["operation_id"], f["key"] = 4, c.Client+"-0"
+				f["operation_id"], f["key"], f["started"], f["ended"] = 4, c.Client+"-0", 37., 38.
 			}
 			raw, _ = json.Marshal(row)
 		} else {
