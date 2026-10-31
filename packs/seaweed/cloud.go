@@ -140,7 +140,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 			return "", e
 		}
 	}
-	if _, e = run("configure", "cd "+q(root)+"; tar -xf native.tar; test -d native/seaweedkv_native; printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
+	if _, e = run("configure", "cd "+q(root)+"; tar -xf native.tar; test -d seaweedkv_native; printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
 	}
 	ip := h.Data.Address
@@ -171,7 +171,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	// SmokeArgs only needs endpoints. This local execution view is not published
 	// as an observed inventory and is not S0b admission.
 	d.State = "resolved"
-	args, e := SmokeArgs(d, h.ID, SmokeSettings{NativeDir: root + "/native", HelperDir: root + "/worker", Keys: 16, Length: 1 << 20})
+	args, e := SmokeArgs(d, h.ID, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20})
 	if e != nil {
 		return "", e
 	}

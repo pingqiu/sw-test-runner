@@ -25,7 +25,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func cloudSSH(t *testing.T, summary string) (string, string, string, *atomic.Int32) {
+func cloudSSH(t *testing.T, summary string, execute ...func(string, ssh.Channel) uint32) (string, string, string, *atomic.Int32) {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(key)
@@ -83,6 +83,11 @@ func cloudSSH(t *testing.T, summary string) (string, string, string, *atomic.Int
 							ssh.Unmarshal(r.Payload, &cmd)
 							calls.Add(1)
 							r.Reply(true, nil)
+							if len(execute) != 0 {
+								rc := execute[0](cmd.Command, c)
+								c.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{rc}))
+								return
+							}
 							if strings.HasPrefix(cmd.Command, "cat >") {
 								io.Copy(io.Discard, c)
 							}

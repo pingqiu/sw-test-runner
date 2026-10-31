@@ -27,7 +27,7 @@ Terraform 1.17.1, Azure CLI and credentials stay on the Linux controller. Use th
 }
 ```
 
-The native archive must contain `native/seaweedkv_native`. The cloud HTTP smoke uses the OS filesystem under the inventory run_root, with no disk formatting. The declared cache disk stays unformatted. This is an infrastructure smoke, not cache-disk performance or rotation qualification.
+The released af8c native archive contains top-level `seaweedkv_native/`. Extract it unchanged into run_root and pass run_root as native_dir; do not repack it or add a native/ prefix. The cloud HTTP smoke uses the OS filesystem under the inventory run_root, with no disk formatting. The declared cache disk stays unformatted. This is an infrastructure smoke, not cache-disk performance or rotation qualification.
 
 The controller generates a fresh **server** ed25519 key before Terraform plan/apply, writes it in mode-0600 `host.auto.tfvars.json`, and uses its public half through infra.Node FixedHostKey for the first SSH. Cloud-init installs the private half only on that VM; it is also present in private Terraform plan/state. The client authentication private key never goes to the VM. Keep config/output/state/plan private, never V:/shared evidence. Do not print them. Terraform command output is withheld from command logs.
 
@@ -72,3 +72,17 @@ Every remote command records its step name, exact command, stdout, stderr, exit 
 Before returning a pack failure to the controller's finally destroy, the pack makes one best-effort read-only capture over a fresh connection with the same pinned SSH key. It saves journal output for this run's services, cloud-init output, pinned worker source and worker log/JSONL files in `cloud-failure-fetch.json`, including stderr/exit/error if fetching fails. Missing remote files are marked MISSING. It never collects user-data, private keys or Terraform files. This JSON is private evidence; do not publish raw logs without inspection.
 
 The capture is bounded to the lesser of 60 seconds and remaining work time, including connection/session I/O. It never extends the work/hard envelope or borrows cleanup reserve. A canceled/expired work context records the failed fetch without retrying. Fetch failure never blocks destroy; evidence write failure remains a pack error. Existing UNKNOWN, full-RG verify and verdict semantics are unchanged. Evidence capture is not a cloud workload retry.
+
+## Mandatory local artifact preflight before another VM
+
+Use the exact af8c weed, weed-volume and native.tar.gz together (the test pins all three SHA256s), on a Linux controller or with a cross-built Linux test binary:
+
+```sh
+# Requires Go1.25+ for compiling; never requires cloud credentials.
+go test -c -o /private/cloud-pack-preflight.test ./packs/seaweed
+SEAWEED_CLOUD_ARTIFACT_DIR=/private/af8c-artifacts /private/cloud-pack-preflight.test -test.run '^TestCloudPinnedArtifactsOffline$' -test.v
+```
+
+The opt-in preflight drives RunCloudHTTP over loopback pinned SSH, using the production command strings and upload path. It executes real local uploads, all artifact hash checks, unchanged tar extraction/configuration, and the production worker argv with --dry-run. Every remote command gets a real shell syntax check. Service startup argv is parsed by the pinned binaries with help, via a local systemd substitute that never starts a service. The worker native_dir must bind the actual extracted package parent. Discovery without the env flag skips the preflight and performs no artifact work or host contact.
+
+Cloud-init status/ownership, actual systemd startup, HTTP readiness, service journals, native Python3.12 import and live KV are explicitly NOT_RUN offline. An older local glibc may also prevent the pinned volume CLI from loading (current WSL lacks GLIBC_2.38); that is NOT_RUN, not an argv/runtime PASS. The test deliberately returns from the production pack at the live-workload boundary with exit77; it never fabricates an ACK/exact PASS summary. These limitations still need the reviewed cloud smoke; the local setup preflight does not qualify service/native runtime compatibility.
