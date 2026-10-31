@@ -30,7 +30,7 @@ func TestPauseNormalWorkResume(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if receipt.StoppedMono <= 0 || receipt.PreContMono < receipt.StoppedMono {
+		if receipt.StoppedMono <= 0 || receipt.PreContMono < receipt.StoppedMono || receipt.ResumedMono < receipt.PreContMono {
 			return fmt.Errorf("monotonic custody boundary missing")
 		}
 		if _, _, err = a.RunApprovedPackJob(ctx, "volume1", true); err != nil {

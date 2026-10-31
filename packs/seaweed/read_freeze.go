@@ -35,15 +35,14 @@ func (r *runtimePack) freeze(ctx context.Context, a *tr.ActionContext, p Plan, d
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := json.Marshal(observed["outcomes"])
-	var rows []GETOutcome
-	_ = json.Unmarshal(raw, &rows)
-	covered := false
-	for _, row := range rows {
-		covered = covered || row.Started <= receipt.PreContMono && row.Ended >= receipt.StoppedMono
+	covered, continued := false, false
+	for _, value := range observed["outcomes"].([]any) {
+		row := value.(map[string]any)
+		covered = covered || row["started"].(float64) <= receipt.PreContMono && row["ended"].(float64) >= receipt.StoppedMono
+		continued = continued || row["started"].(float64) > receipt.ResumedMono
 	}
-	if receipt.StoppedMono <= receipt.PreStopMono || receipt.PreContMono-receipt.StoppedMono < 20 || !covered {
-		return nil, errors.New("freeze NOT_COVERED: missing 20s hold/overlapping GET")
+	if receipt.StoppedMono <= receipt.PreStopMono || receipt.PreContMono-receipt.StoppedMono < 20 || !covered || !continued {
+		return nil, errors.New("freeze NOT_COVERED: missing hold/overlap/post-LIVE GET")
 	}
 	if _, err = readTask(ctx, a, in, x.RecoverDC, "recovery", "dc"); err != nil {
 		return nil, err

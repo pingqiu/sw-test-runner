@@ -18,13 +18,13 @@ type ProcessPauseWitness struct {
 	ObservedAt    time.Time
 }
 type ProcessPauseReceipt struct {
-	Key, VictimJobID         string
-	Plan                     ProcessPausePlan
-	Identity                 ProcessIdentity
-	PreStopMono              float64
-	StoppedMono, PreContMono float64
-	Stopped, Resumed, Final  ProcessPauseWitness
-	Error                    string
+	Key, VictimJobID                      string
+	Plan                                  ProcessPausePlan
+	Identity                              ProcessIdentity
+	PreStopMono                           float64
+	StoppedMono, PreContMono, ResumedMono float64
+	Stopped, Resumed, Final               ProcessPauseWitness
+	Error                                 string
 }
 
 // Controller and custodian retain separate instances: a lost reply cannot merge
@@ -88,11 +88,8 @@ func (c *ActionContext) PauseApprovedPackGeneration(ctx context.Context, name st
 // Caller owns the restoration gate. Both paths consume the same one-shot latch.
 func (p *processPause) resume(ctx context.Context) error {
 	p.resumeErr = errors.New("CONT pending or failed")
-	if err := p.signal(ctx, "pause-resume", &p.Resumed); err != nil {
-		return err
-	}
-	p.resumeErr = nil
-	return nil
+	p.resumeErr = p.signal(ctx, "pause-resume", &p.Resumed)
+	return p.resumeErr
 }
 
 func (c *ActionContext) ResumeApprovedPackGeneration(ctx context.Context, name string, victim JobHandle) (receipt *ProcessPauseReceipt, err error) {
@@ -134,12 +131,12 @@ func (c *ActionContext) ResumeApprovedPackGeneration(ctx context.Context, name s
 	err = cleanupCall(ctx, p.resume)
 	if err == nil {
 		r.cleared = true
+		p.run.mu.Lock()
+		p.ResumedMono, err = generationMonotonic()
+		p.run.mu.Unlock()
 	} // Physical success survives WORK closure; never a second CONT.
 	if err == nil {
-		err = s.backend.(*approvedJobs).work(ctx, victim.id, victim.job.spec)
-	}
-	if err == nil {
-		err = errors.Join(ctx.Err(), s.ctx.Err())
+		err = errors.Join(s.backend.(*approvedJobs).work(ctx, victim.id, victim.job.spec), ctx.Err(), s.ctx.Err())
 	}
 	return c.approved.ProcessPauseReceipt(), err
 }
