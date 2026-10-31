@@ -539,12 +539,33 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 	defer cancel()
 	s.mu.Lock()
 	r, ok := s.restores[key]
-	pause := s.pause != nil && s.pause.Key == key
+	p := s.pause
+	pause := p != nil && p.Key == key
+	var pauseEntry *restoration
+	if p != nil {
+		pauseEntry = s.restores[p.Key]
+	}
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown fault resource %q", key)
 	}
-	if pause && !final && ctx.Err() == nil {
+	if p != nil && !pause {
+		if err := take(ctx, pauseEntry.ready, pauseEntry.gate); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		_, pending := s.jobs[p.VictimJobID]
+		s.mu.Unlock()
+		eligible := pauseEntry.finalVerified && pauseEntry.cleanupErr == nil && !pending
+		<-pauseEntry.gate
+		if !eligible {
+			return errors.New("older restoration withheld: pause settlement unproven")
+		}
+	}
+	if pause && !final {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Own this stage before cancelling WORK and waking automatic Close.
 		// The original deadline bounds both STOP join and restoration.
 		deadline, _ := ctx.Deadline()
@@ -557,6 +578,12 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 			return ctx.Err()
 		}
 		defer func() { <-r.gate }()
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return errors.New("late public pause clear refused")
+		}
 		s.beginCleanup()
 		select {
 		case <-r.ready:

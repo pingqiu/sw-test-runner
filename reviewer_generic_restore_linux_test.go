@@ -8,24 +8,23 @@ import (
 	"testing"
 )
 
-func TestReviewerPauseCloseOwnsBarrierForGenericOlderRestore(t *testing.T) {
+func TestReviewerPostPauseOlderRestoreMustActuallyComplete(t *testing.T) {
 	for _, paused := range []bool{false, true} {
 		t.Run(fmt.Sprint(paused), func(t *testing.T) {
 			f, n := pauseFixture(t)
-			_, _ = runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
+			called := 0
+			run, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
 				victim, _, err := a.RunApprovedPackJob(ctx, "volume0", true)
 				if err != nil {
 					return err
 				}
-				err = a.Safety.ApplyFault("reviewer-generic-older", func(context.Context) error { return nil }, func(context.Context) error {
-					// Ordinary ApplyFault relies on Close's issuer barrier, as on the parent.
+				err = a.Safety.ApplyFault("reviewer-positive-older", func(context.Context) error { return nil }, func(context.Context) error {
+					called++
 					n.mu.Lock()
 					_, live := n.ids[victim.id]
-					state := n.state
 					n.mu.Unlock()
-					t.Logf("paused=%v generic_restore victim_still_owned=%v pause_state=%s", paused, live, state)
 					if live {
-						t.Error("Close ran older generic restoration before the resumed victim settled")
+						t.Error("older restore preceded victim settlement")
 					}
 					return nil
 				}, func(context.Context) error { return nil })
@@ -37,6 +36,10 @@ func TestReviewerPauseCloseOwnsBarrierForGenericOlderRestore(t *testing.T) {
 				}
 				return err
 			})
+			t.Logf("paused=%v older_callback_count=%d status=%s settled=%v", paused, called, result.Status, run.resourcesSettled())
+			if called != 1 || result.Status != StatusPass || !run.resourcesSettled() {
+				t.Error("positive did not complete its older restoration and final settlement")
+			}
 		})
 	}
 }
