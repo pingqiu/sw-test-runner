@@ -66,6 +66,11 @@ variable "host_keys" {
   sensitive   = true
   default     = null
 }
+variable "node_host_keys" {
+  type      = map(object({ ed25519_private = string, ed25519_public = string }))
+  sensitive = true
+  default   = {}
+}
 variable "nodes" {
   description = "Explicit node map. Adding a node must not reindex existing IPs. Volume nodes require a cache disk."
   type = map(object({

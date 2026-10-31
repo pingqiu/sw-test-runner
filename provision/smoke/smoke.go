@@ -152,6 +152,7 @@ type declaration struct {
 	Group        string `json:"resource_group_name"`
 	Location     string `json:"location"`
 	Size         string `json:"vm_size"`
+	Cluster      bool   `json:"cluster"`
 	Run          struct {
 		Work    time.Time `json:"work_deadline"`
 		Hard    time.Time `json:"hard_deadline"`
@@ -239,7 +240,16 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	if mode == "plan" {
 		out.Code = "PLAN_ONLY"
 		out.Remedy = "review estimate, module/lock/vars and artifacts; obtain launch token before run"
-		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": 1, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
+		count := 1
+		if d.Cluster {
+			count = 10
+		}
+		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
+		return
+	}
+	if d.Cluster && ctl.Pack == nil {
+		out.Code = "CLUSTER_PACK_UNAVAILABLE"
+		out.Remedy = "install the reviewed multi-node pack successor before a cluster run"
 		return
 	}
 	if ctl.Command == nil {
@@ -310,7 +320,12 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			return
 		}
 		c.Cloud.Output = c.Output
-		if c.Cloud.HostKey, err = hostKey(root); err != nil {
+		if d.Cluster {
+			c.Cloud.HostKeys, err = clusterHostKeys(root)
+		} else {
+			c.Cloud.HostKey, err = hostKey(root)
+		}
+		if err != nil {
 			out.Error = err.Error()
 			return
 		}
@@ -431,6 +446,33 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	out.Code = "OK"
 	return
+}
+
+func clusterHostKeys(root string) (map[string]string, error) {
+	public, keys := map[string]string{}, map[string]map[string]string{}
+	for _, id := range []string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6", "client1", "client2", "client3"} {
+		p, e := hostKey(root)
+		if e != nil {
+			return nil, e
+		}
+		public[id] = p
+		b, e := os.ReadFile(filepath.Join(root, "host.auto.tfvars.json"))
+		if e != nil {
+			return nil, e
+		}
+		var v struct {
+			Key map[string]string `json:"host_keys"`
+		}
+		if e = json.Unmarshal(b, &v); e != nil {
+			return nil, e
+		}
+		keys[id] = v.Key
+	}
+	b, e := json.Marshal(map[string]any{"node_host_keys": keys})
+	if e != nil {
+		return nil, e
+	}
+	return public, os.WriteFile(filepath.Join(root, "host.auto.tfvars.json"), b, 0600)
 }
 
 // Native runs fixed Terraform/Azure CLI argv on the Linux controller. Separate
