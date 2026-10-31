@@ -17,7 +17,7 @@ import (
 )
 
 func TestWorkerRecordMetadataSettle(t *testing.T) {
-	for _, mode := range []string{"local", "cifs-once", "keeps-moving", "content-changed", "capture-unstable", "missing", "original-deadline", "capture-over-deadline"} {
+	for _, mode := range []string{"local", "cifs-once", "cifs-late", "window-boundary-change", "stabilizes-too-late", "keeps-moving", "content-changed", "capture-unstable", "missing", "original-deadline", "capture-over-deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acquire.json")
 			expected := []byte("{\"record\":1}\n")
@@ -35,6 +35,7 @@ func TestWorkerRecordMetadataSettle(t *testing.T) {
 				hard = clock.Add(50 * time.Millisecond)
 			}
 			stats, captures, sleeps := 0, 0, 0
+			changed := false
 			stat := func(name string) (os.FileInfo, error) {
 				stats++
 				if name != path {
@@ -50,6 +51,14 @@ func TestWorkerRecordMetadataSettle(t *testing.T) {
 				}
 				if mode == "keeps-moving" {
 					shift = time.Duration(stats) * time.Millisecond
+				}
+				if mode == "stabilizes-too-late" && clock.Sub(start) <= 5*time.Second {
+					shift = time.Duration(stats) * time.Millisecond
+				}
+				at := map[string]time.Duration{"cifs-late": time.Second, "window-boundary-change": 2500 * time.Millisecond}
+				if when, ok := at[mode]; ok && !changed && clock.Sub(start) >= when {
+					shift = 42 * time.Millisecond
+					changed = true
 				}
 				if shift != 0 {
 					if err := os.Chtimes(name, mtime, mtime.Add(shift)); err != nil {
@@ -80,24 +89,25 @@ func TestWorkerRecordMetadataSettle(t *testing.T) {
 				return snapshotRecord(name, owner, protected)
 			}
 			sleep := func(d time.Duration) {
-				if d <= 0 || d > 100*time.Millisecond {
+				if d <= 0 || d > 250*time.Millisecond {
 					t.Fatal("invalid settle interval", d)
 				}
 				sleeps++
 				clock = clock.Add(d)
 			}
 			err = settleWorkerRecordWith(path, expected, hard, stat, capture, func() time.Time { return clock }, sleep)
-			if mode == "local" || mode == "cifs-once" {
+			if mode == "local" || mode == "cifs-once" || mode == "cifs-late" || mode == "window-boundary-change" {
 				if err != nil || captures != 1 {
 					t.Fatalf("settled record refused: %v captures%d", err, captures)
 				}
-				if mode == "cifs-once" && (stats != 3 || sleeps != 2 || clock.Sub(start) != 200*time.Millisecond) {
-					t.Fatalf("close timestamp not settled: stats%d sleeps%d age%v", stats, sleeps, clock.Sub(start))
+				want := map[string]time.Duration{"local": 2500 * time.Millisecond, "cifs-once": 2750 * time.Millisecond, "cifs-late": 3500 * time.Millisecond, "window-boundary-change": 5 * time.Second}[mode]
+				if clock.Sub(start) != want {
+					t.Fatalf("stable window not proved: age%v want%v stats%d sleeps%d", clock.Sub(start), want, stats, sleeps)
 				}
 			} else if err == nil {
 				t.Fatal("unstable/changed/expired record admitted")
 			}
-			if mode == "keeps-moving" && (clock.Sub(start) != 2*time.Second || captures != 0) {
+			if (mode == "keeps-moving" || mode == "stabilizes-too-late") && (clock.Sub(start) != 6*time.Second || captures != 0) {
 				t.Fatalf("settle bound violated: %v captures%d", clock.Sub(start), captures)
 			}
 			if mode == "original-deadline" && (!clock.Equal(hard) || captures != 0) {
@@ -116,15 +126,15 @@ func TestWorkerLeaseSettleWrites(t *testing.T) {
 		if err := unix.Flock(9, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 			t.Fatal(err)
 		}
-		l := &workerOwnedLease{policy: TrustedPolicy{bootstrap: PolicyBootstrap{LedgerDir: filepath.Dir(lock), WorkerLease: &WorkerLeaseConfig{LockFile: lock}}}, binding: RunBinding{LeaseID: "0123456789abcdef0123456789abcdef", LeaseOwner: "cpu-control", RunID: "settle-writes", HardDeadline: time.Now().Add(10 * time.Second)}, stop: make(chan struct{}), done: make(chan struct{})}
+		l := &workerOwnedLease{policy: TrustedPolicy{bootstrap: PolicyBootstrap{LedgerDir: filepath.Dir(lock), WorkerLease: &WorkerLeaseConfig{LockFile: lock}}}, binding: RunBinding{LeaseID: "0123456789abcdef0123456789abcdef", LeaseOwner: "cpu-control", RunID: "settle-writes", HardDeadline: time.Now().Add(20 * time.Second)}, stop: make(chan struct{}), done: make(chan struct{})}
 		l.acquired, _ = json.Marshal(l.row("started"))
 		check := func(label string, call func() error) {
 			start := time.Now()
 			if err := call(); err != nil {
 				t.Fatal(label, err)
 			}
-			if time.Since(start) < 90*time.Millisecond {
-				t.Fatal(label, "skipped 100ms two-stat settle")
+			if time.Since(start) < 2400*time.Millisecond {
+				t.Fatal(label, "skipped 2.5s stable window")
 			}
 		}
 		check("acquire", func() error { return l.writeNew("acquire", l.acquired) })
@@ -139,7 +149,7 @@ func TestWorkerLeaseSettleWrites(t *testing.T) {
 		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	exe, err := os.Executable()
 	if err != nil {

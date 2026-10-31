@@ -200,12 +200,14 @@ func settleWorkerRecord(name string, expected []byte, hard time.Time) error {
 }
 
 func settleWorkerRecordWith(name string, expected []byte, hard time.Time, stat func(string) (os.FileInfo, error), capture func(string, *uint32, bool) ([]byte, error), now func() time.Time, sleep func(time.Duration)) error {
-	deadline := now().Add(2 * time.Second)
+	deadline := now().Add(6 * time.Second)
 	if hard.Before(deadline) {
 		deadline = hard
 	}
 	var previous os.FileInfo
+	var stableSince time.Time
 	for now().Before(deadline) {
+		sampleStart := now()
 		current, err := stat(name)
 		if err != nil {
 			return err
@@ -213,7 +215,12 @@ func settleWorkerRecordWith(name string, expected []byte, hard time.Time, stat f
 		if !current.Mode().IsRegular() || current.Size() != int64(len(expected)) {
 			return errors.New("written worker record size/type changed")
 		}
-		if previous != nil && sameRecord(previous, current) {
+		if !now().Before(deadline) {
+			break
+		}
+		if previous == nil || !sameRecord(previous, current) {
+			stableSince = now()
+		} else if sampleStart.Sub(stableSince) >= 2500*time.Millisecond {
 			raw, err := capture(name, nil, false)
 			if err != nil {
 				return err
@@ -225,14 +232,14 @@ func settleWorkerRecordWith(name string, expected []byte, hard time.Time, stat f
 		}
 		previous = current
 		wait := deadline.Sub(now())
-		if wait > 100*time.Millisecond {
-			wait = 100 * time.Millisecond
+		if wait > 250*time.Millisecond {
+			wait = 250 * time.Millisecond
 		}
 		if wait > 0 {
 			sleep(wait)
 		}
 	}
-	return errors.New("worker record metadata settle exceeded 2s/original deadline")
+	return errors.New("worker record 2.5s stable window exceeded 6s/original deadline")
 }
 func (l *workerOwnedLease) qualify() error {
 	if err := verifyWorkerFlock(l.policy.bootstrap.WorkerLease.LockFile); err != nil {
