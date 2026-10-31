@@ -175,6 +175,15 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	if err = json.Unmarshal(b, &d); err != nil {
 		return nil, nil, d, err
 	}
+	var vars map[string]json.RawMessage
+	if err = json.Unmarshal(b, &vars); err != nil {
+		return nil, nil, d, err
+	}
+	for _, key := range []string{"host_keys", "node_host_keys"} {
+		if _, present := vars[key]; present {
+			return nil, nil, d, fmt.Errorf("%s is reserved for controller-generated host keys", key)
+		}
+	}
 	uuid := regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
 		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG, <=$3 and minute-aligned cleanup envelope")
