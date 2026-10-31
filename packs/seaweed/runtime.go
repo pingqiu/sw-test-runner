@@ -40,6 +40,7 @@ type ReadRestart struct {
 	DC          string `json:"dc"`
 	RecoverDC   string `json:"recover_dc"`
 	RecoverHTTP string `json:"recover_http"`
+	Role        string `json:"role,omitempty"`
 }
 type Step struct {
 	Host string `json:"host"`
