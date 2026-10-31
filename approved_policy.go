@@ -99,6 +99,19 @@ func validateApprovedPolicy(p ApprovedRunPolicy, b RunBinding, grants []CleanupG
 			return fmt.Errorf("job %s: %w", key, err)
 		}
 	}
+	if len(p.GenerationRestarts) > 128 {
+		return errors.New("too many generation restarts")
+	}
+	victims, replacements := map[string]bool{}, map[string]bool{}
+	for name, g := range p.GenerationRestarts {
+		old, ok := p.Jobs[g.Victim]
+		next, nok := p.Jobs[g.Replacement]
+		if !authorityID.MatchString(name) || !ok || !nok || g.Victim == g.Replacement || victims[g.Victim] || replacements[g.Replacement] || old.Node != next.Node || old.Executable != next.Executable || old.SHA256 != next.SHA256 {
+			return errors.New("invalid exact generation restart plan")
+		}
+		victims[g.Victim] = true
+		replacements[g.Replacement] = true
+	}
 	seen := map[string]bool{}
 	for _, g := range grants {
 		key := g.Node + "/" + g.Resource

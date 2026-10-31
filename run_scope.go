@@ -36,9 +36,10 @@ type JobSpec struct {
 	Node, Executable, SHA256 string
 	StdoutPath, StderrPath   string
 	Argv                     []string
-	Restoration              bool // Set only by the scope's cleanup path.
-	CaptureOutput            bool // Bounded owned-log export; never execution authority.
-	retainExit               bool // Private pack background ownership, never caller authority.
+	Restoration              bool   // Set only by the scope's cleanup path.
+	CaptureOutput            bool   // Bounded owned-log export; never execution authority.
+	packLabel                string // Private originating approved job label.
+	retainExit               bool   // Private pack background ownership, never caller authority.
 }
 
 type ExitInfo struct {
@@ -95,12 +96,14 @@ type JobHandle struct {
 }
 
 type ownedJob struct {
-	ready, gate chan struct{}
-	identity    ProcessIdentity
-	spec        JobSpec
-	settled     bool
-	exit        *ExitInfo
-	outcomeErr  error // Validated terminal failure, not unsettled custody.
+	ready, gate  chan struct{}
+	identity     ProcessIdentity
+	spec         JobSpec
+	settled      bool
+	exit         *ExitInfo
+	expectedKill *KillWitness          // Private, bound only by an approved generation restart.
+	exitIntent   *GenerationExitIntent // Private pre-dispatch intent; never sufficient alone.
+	outcomeErr   error                 // Validated terminal failure, not unsettled custody.
 }
 
 type restoration struct {
@@ -386,7 +389,8 @@ func (s *RunScope) Wait(ctx context.Context, h JobHandle) (ExitInfo, error) {
 // so a concurrent Close cannot miss it after taking its live-job snapshot.
 func (s *RunScope) recordExit(h JobHandle, j *ownedJob, i ExitInfo) {
 	j.exit = &i
-	if j.spec.retainExit && (!i.CleanupStopped || i.Code != -1 || i.Signal != 9) {
+	expected := j.exitIntent != nil && j.exitIntent.Identity == i.Identity && j.expectedKill != nil && j.expectedKill.Identity == i.Identity && i.Code == -1 && i.Signal == 9
+	if j.spec.retainExit && !expected && (!i.CleanupStopped || i.Code != -1 || i.Signal != 9) {
 		j.outcomeErr = errors.New("background service exited before intentional cleanup")
 		s.mu.Lock()
 		s.outcomeErr = errors.Join(s.outcomeErr, j.outcomeErr)
@@ -407,6 +411,10 @@ func validJobExit(i ExitInfo, j *ownedJob) bool {
 }
 
 func (s *RunScope) Kill(ctx context.Context, h JobHandle) (KillWitness, error) {
+	return s.kill(ctx, h, nil)
+}
+
+func (s *RunScope) kill(ctx context.Context, h JobHandle, intent *GenerationExitIntent) (KillWitness, error) {
 	ctx, cancel := s.cleanupContext(ctx)
 	defer cancel()
 	stop := context.AfterFunc(s.ctx, cancel)
@@ -425,12 +433,22 @@ func (s *RunScope) Kill(ctx context.Context, h JobHandle) (KillWitness, error) {
 	if s.ctx.Err() != nil {
 		return KillWitness{}, s.ctx.Err()
 	}
+	if intent != nil {
+		if j.exitIntent != nil || intent.Identity != j.identity || intent.Episode == "" || intent.BoundAt.IsZero() {
+			return KillWitness{}, errors.New("invalid or consumed generation exit intent")
+		}
+		bound := *intent
+		j.exitIntent = &bound
+	}
 	w, err := s.backend.Kill(ctx, h.id)
 	if err != nil {
 		return w, err
 	}
 	if w.Identity != j.identity || !w.AliveBefore || w.Signal != "KILL" || w.AppliedAt.IsZero() {
 		return w, errors.New("unproven kill witness")
+	}
+	if intent != nil {
+		j.expectedKill = &w
 	}
 	return w, nil // A signal alone never retires custody.
 }
