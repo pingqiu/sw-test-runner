@@ -1,5 +1,8 @@
 # Shared Seaweed pack over S0b
 
+See [M01/M02 close-out](M01-M02-CLOSEOUT.md) for the scoped r8 smoke result and
+seven CIFS/SSH/readiness lessons, pinned to the tested runner and product tuple.
+
 This Draft now integrates the accepted S0b runtime at `1d88dca1`. It remains
 local/fake-qualified only: no M01/M02, container, lab, cloud or provider launch
 is authorized by this PR. Protected installation, service bootstrap, independent
