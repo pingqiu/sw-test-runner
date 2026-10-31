@@ -23,6 +23,11 @@ func TestCloudDeferredCollectionWriteErrorsStayFailed(t *testing.T) {
 			output := t.TempDir()
 			var blocked atomic.Bool
 			address, pin, key, _ := cloudSSH(t, "", func(command string, channel ssh.Channel) uint32 {
+
+				if strings.Contains(command, "cloud-init status --wait --format json") {
+					fmt.Fprint(channel, cleanCloudInit)
+					return 0
+				}
 				if strings.HasPrefix(command, "cat >") {
 					io.Copy(io.Discard, channel)
 				}

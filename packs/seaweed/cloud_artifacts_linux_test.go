@@ -75,7 +75,7 @@ func cloudPinnedArtifactsOffline(t *testing.T, invalidPrepare bool) {
 	counts := map[string]int{}
 	note := func(s string) { mu.Lock(); counts[s]++; mu.Unlock(); t.Log(s) }
 	address, pin, key, _ := cloudSSH(t, "", func(command string, channel ssh.Channel) uint32 {
-		if invalidPrepare && strings.Contains(command, "cloud-init status --wait") {
+		if invalidPrepare && strings.Contains(command, "sudo install -d") {
 			command = strings.TrimSuffix(command, "'") + "; then'"
 		}
 		if e := checkCloudPreflightSyntax(ctx, command); e != nil {
@@ -85,6 +85,11 @@ func cloudPinnedArtifactsOffline(t *testing.T, invalidPrepare bool) {
 		command = strings.ReplaceAll(command, remoteRoot, root)
 		note("PASS: production command syntax")
 		if strings.Contains(command, "cloud-init status --wait") {
+			fmt.Fprint(channel, cleanCloudInit)
+			note("NOT_RUN: VM-only cloud-init; production JSON fixture")
+			return 0
+		}
+		if strings.Contains(command, "sudo install -d") {
 			for _, dir := range []string{"worker", "master", "volume", "filer"} {
 				if e := os.Mkdir(filepath.Join(root, dir), 0700); e != nil {
 					fmt.Fprint(channel.Stderr(), e)
@@ -169,7 +174,7 @@ func cloudPinnedArtifactsOffline(t *testing.T, invalidPrepare bool) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if counts["PASS: production command syntax"] != 22 || counts["PASS: production upload"] != 6 || counts["PASS: production artifact/configuration shell"] != 4 || counts["PASS: production worker argv dry-run; live KV NOT_RUN"] != 1 {
+	if counts["PASS: production command syntax"] != 23 || counts["PASS: production upload"] != 6 || counts["PASS: production artifact/configuration shell"] != 4 || counts["PASS: production worker argv dry-run; live KV NOT_RUN"] != 1 {
 		t.Fatalf("setup coverage: %v", counts)
 	}
 	if _, e := os.Stat(filepath.Join(root, "seaweedkv_native", "__init__.py")); e != nil {

@@ -88,6 +88,9 @@ func cloudSSH(t *testing.T, summary string, execute ...func(string, ssh.Channel)
 								c.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{rc}))
 								return
 							}
+							if strings.Contains(cmd.Command, "cloud-init status --wait --format json") {
+								fmt.Fprint(c, cleanCloudInit)
+							}
 							if strings.HasPrefix(cmd.Command, "cat >") {
 								io.Copy(io.Discard, c)
 							}

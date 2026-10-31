@@ -32,7 +32,8 @@ func collectCloudFailure(ctx context.Context, original *infra.Node, dir, root, r
 	n := &infra.Node{Host: original.Host, User: original.User, KeyFile: original.KeyFile, HostKey: original.HostKey}
 	defer n.Close()
 	command := "timeout -k 2 55 sh -c " + quote(
-		"capture_rc=0; sudo journalctl --no-pager -u "+quote("sw-cloud-"+runID+"-*")+" -n 300 || capture_rc=$?; "+
+		"capture_rc=0; units=$(sudo systemctl list-units --all --type=service --no-legend --plain "+quote("sw-cloud-"+runID+"-*")+"); unit_rc=$?; "+
+			"if test \"$unit_rc\" -ne 0; then capture_rc=$unit_rc; elif test -n \"$units\"; then sudo journalctl --no-pager -u "+quote("sw-cloud-"+runID+"-*")+" -n 300 || capture_rc=$?; else printf 'MISSING: run services not started\\n' || capture_rc=$?; fi; "+
 			"for p in /var/log/cloud-init-output.log "+quote(root+"/worker/kv_smoke.py")+" "+
 			quote(root+"/worker/soak_native_worker.py")+" "+quote(root+"/worker/soak_oracle.py")+" "+
 			quote(root+"/worker")+"/*.log "+quote(root+"/worker")+"/*.jsonl "+quote(root+"/cloud-kv.jsonl")+"; do "+
