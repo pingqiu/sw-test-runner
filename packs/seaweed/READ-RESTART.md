@@ -53,9 +53,11 @@ No historical binary/worker hashes can be reused for modified helper bytes.
    entry still records its own monotonic marker, as an observation only.
 6. Settle the fixed 120-second DC task. Each outcome/failure must join its exact
    indexed key, op ID and monotonic interval inside the load bounds. Errors may
-   form only one contiguous window, from preceding exact success to next exact
-   success, entirely inside [P,P+60 s]. Any pre-P, late, second or unbounded
-   window fails. Zero errors is allowed. No ready-entry or data-fitted anchor
+   form only one contiguous run bracketed by preceding/following exact successes.
+   EACH failed GET must start >=P; a failed GET straddling P refuses. The first
+   following exact completion must be <=P+60. The preceding good completion may
+   predate P. Late, second or unbounded runs fail. Zero errors is allowed.
+   No ready-entry or data-fitted anchor
    can replace the generation receipt's P.
 7. Only after load settlement and successful attribution, issue named DC and
    HTTP recovery GETs. Thus every credited window closes before recovery GETs.
@@ -78,7 +80,7 @@ Controls use the real strict entry, policy/GO checks, Engine, custody, output
 checker and profile CLI, replacing SSH/native hardware at explicit fake
 boundaries. The positive path checks sequence and task settlement. Negatives
 cover stale/missing/wrong-product readiness, wrong Kill identity, wrong recovery,
-second/overlong/pre-ack windows, missing or reordered outcomes and wrong keys.
+second/overlong/pre-P failed operations, missing or reordered outcomes and wrong keys.
 A live-victim Wait is refused by the transport fake, so the positive Engine case
 also exercises the required restart ordering. Actual CLI controls preserve
 seed data through replacement, refuse live/foreign-boot old generations, require
@@ -87,13 +89,11 @@ owned TCP listeners and exact-generation CM/DC log witnesses.
 ## Pre-Kill anchor correction (r10)
 
 R10's real 402-GET trace had three misses and returned to exact reads before the
-ready-entry marker. Its sealed FAIL remains unchanged. The trace fixture keeps
-all raw outcomes/counters; P was NOT recorded in that run. Its replay-only P is
-recorded load start plus the independently fixed 30s fault schedule, not a
-measured r10 dispatch timestamp or a value chosen from failed GET positions.
-A separate actual provider/caller control proves new receipt capture between
-intent binding and backend Kill entry; a late ready observation cannot change P.
-
+ready-entry marker. Its sealed FAIL remains unchanged. It has no prospective P;
+no schedule/outcome-derived P may qualify it. The raw trace stays retained, with
+a negative that refuses missing P. The separate provider/caller control proves
+prospective capture between intent binding and backend Kill entry. Actual
+ready-entry remains an observation, not an anchor or a physical-effect time.
 Choices: reuse the Linux monotonic clock in the existing custody boundary;
 a Python probe adds dispatch latency, and Go process-relative elapsed time does
 not share Python's absolute clock coordinate. Non-Linux generation restart
@@ -104,7 +104,9 @@ LC5 settlement and the original work/hard deadlines remain unchanged.
 The runner boot must match the admitted M01 observation before seed/load; a
 foreign controller clock refuses attribution rather than mixing clock domains.
 
-The requested entire-window lower bound also constrains the preceding successful
-GET. If that last good sample predates P even though every miss follows P, the
-case still refuses. This conservative sampling limit is not normalized away;
-only the independently reviewed contract may change it, never a fitted P.
+The bound is pre-dispatch-relative, not proof that Kill caused each failure or
+an exact measurement of physical outage duration. Dispatch and settlement
+consume the same P+60 budget. Never clamp a failed interval to P or retime it.
+The 99.9-success/P100/100.1-fail/101-recovery case must pass; a failed interval
+starting before P refuses even if it completes after P. Original load membership,
+operation IDs/keys/interval joins, wrong-byte and unknown-completion rules stay.

@@ -85,8 +85,8 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 				f["operation_id"], f["key"], f["started"], f["ended"] = 4, c.Client+"-0", 37., 38.
 			}
 			shiftRestartTrace(row, n.killMono-30)
-			if n.mode == "before-ack" {
-				shiftRestartTrace(row, -3)
+			if n.mode == "before-prekill" {
+				shiftRestartTrace(row, -4)
 			}
 			raw, _ = json.Marshal(row)
 		} else {
@@ -125,7 +125,7 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 			i.ExecutableSHA256 = strings.Repeat("e", 64)
 		}
 		ack := n.killMono + 40
-		if n.mode == "before-ack" {
+		if n.mode == "before-prekill" {
 			ack = n.killMono + 50
 		}
 		row := map[string]any{"status": "READY", "client_mono": ack, "processes": map[string]any{"volume": map[string]any{"scope_identity": i}}}
@@ -248,7 +248,7 @@ func registerFastRestart(r *tr.Registry) {
 	}
 }
 func TestRestartThroughApprovedEngine(t *testing.T) {
-	for _, mode := range []string{"positive", "old-ready", "missing-ready", "wrong-product", "kill-identity", "wrong-recovery", "second-window", "before-ack"} {
+	for _, mode := range []string{"positive", "old-ready", "missing-ready", "wrong-product", "kill-identity", "wrong-recovery", "second-window", "before-prekill"} {
 		t.Run(mode, func(t *testing.T) {
 			f, n := restartFixture(t, mode)
 			result, bundle, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, registerFastRestart, &f.runtime, nil)

@@ -8,8 +8,7 @@ Original result manifest3c241b1085b1d673367ac4f9f2b9f7269b7fffce734754451389c903
 at V:/share/rdma/codex03-read-restart-r10-result-20261031/.
 
 It records402 attempts/399exact/3misses and actual M01 times. Actual ready M is
-405658.984701257. NO pre-Kill P was recorded in r10. The replay-only fixture
-uses P=405656.462523641: recorded load start405626.462523641 + the independently
-fixed30s fault schedule. This is explicitly NOT a reconstructed/measured r10
-Kill timestamp, NOT a retiming of its sealed verdict, and NOT an r11 prediction.
-The actual parent/provider tests separately prove where new P is captured.
+405658.984701257. NO prospective pre-Kill P was recorded in r10. Its sealed FAIL
+and unexecuted named recovery jobs cannot be requalified with a synthetic P.
+The current test uses the raw trace only to refuse qualification without P.
+The separate actual parent/provider tests prove the new capture placement.

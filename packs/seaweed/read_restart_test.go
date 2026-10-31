@@ -43,7 +43,7 @@ func windowBody(t *testing.T, c SmokeConfig) map[string]any {
 }
 
 func TestRestartWindowActualAssessor(t *testing.T) {
-	for _, mode := range []string{"positive", "missing-outcomes", "second-window", "before-ack", "overlong", "missing-close", "wrong-key", "missing-id", "wrong-outcome", "reordered", "no-prefault-hit", "outside-load", "exact-close-budget", "late-close-budget"} {
+	for _, mode := range []string{"positive", "missing-outcomes", "second-window", "before-prekill", "overlong", "missing-close", "wrong-key", "missing-id", "wrong-outcome", "reordered", "no-prefault-hit", "outside-load", "exact-close-budget", "late-close-budget"} {
 		t.Run(mode, func(t *testing.T) {
 			c := readConfig()
 			row := windowBody(t, c)
@@ -62,8 +62,8 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 89., 90.
 			case "late-close-budget":
 				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 89., 90.001
-			case "before-ack":
-				w.PreKill = 33
+			case "before-prekill":
+				w.PreKill = 33.001
 			case "overlong":
 				o[4].(map[string]any)["started"], o[4].(map[string]any)["ended"] = 95., 96.
 			case "missing-close":

@@ -34,8 +34,8 @@ func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loa
 			return errors.New("outage outcome binding/order differs")
 		}
 		if failed {
-			if i == 0 || end != 0 {
-				return errors.New("unbounded or second outage window")
+			if i == 0 || end != 0 || r.Started < w.PreKill {
+				return errors.New("pre-Kill failed op, unbounded or second outage window")
 			}
 			if begin == 0 {
 				begin = prior
@@ -45,7 +45,7 @@ func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loa
 		}
 		prior = r.Ended
 	}
-	if begin != 0 && (begin < w.PreKill || end <= begin || end > w.PreKill+60) {
+	if begin != 0 && (end <= begin || end > w.PreKill+60) {
 		return errors.New("outage outside pre-Kill 60s window")
 	}
 	if rows[0].Ended >= w.PreKill || rows[len(rows)-1].Started <= w.PreKill {
