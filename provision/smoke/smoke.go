@@ -356,16 +356,38 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 		b, e := ctl.Command(cx, root, tool, args...)
 		if w := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600); w != nil {
-			e = errors.Join(e, w)
+			return nil, errors.Join(e, w)
 		}
 		status := []byte("OK")
 		if e != nil {
 			status = []byte(e.Error())
 		}
 		if w := os.WriteFile(filepath.Join(c.Output, label+"-status"), status, 0600); w != nil {
-			e = errors.Join(e, w)
+			return nil, errors.Join(e, w)
 		}
 		return b, e
+	}
+	once := call
+	call = func(cx context.Context, tool string, args ...string) ([]byte, error) {
+		eligible := tool == "terraform" && (args[0] == "apply" || args[0] == "destroy") || tool == "az" && args[0] == "resource" && args[1] == "list"
+		for attempt := 0; ; attempt++ {
+			if e := cx.Err(); e != nil {
+				return nil, e
+			}
+			b, e := once(cx, tool, args...)
+			transport := regexp.MustCompile(`(?i)ECONNRESET|ConnectionResetError|connection reset by peer|HTTP response was nil|EOF before response|(?:Put|Get|Delete) "https://[^"\n]+": EOF\b|TLS handshake[^\n]*reset`).Match(b)
+			rejected := regexp.MustCompile(`(?i)authorization|authentication|quota|validation|StatusCode[=: ]+4[0-9][0-9]|status[^\n0-9]*4[0-9][0-9]|HTTP[/ 0-9.]*4[0-9][0-9]`).Match(b)
+			if e == nil || !eligible || attempt == 2 || !transport || rejected {
+				return b, e
+			}
+			timer := time.NewTimer([]time.Duration{10 * time.Second, 30 * time.Second}[attempt])
+			select {
+			case <-cx.Done():
+				timer.Stop()
+				return b, cx.Err()
+			case <-timer.C:
+			}
+		}
 	}
 	list := func(cx context.Context) ([]string, error) {
 		b, e := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--resource-group", d.Group, "--output", "json", "--only-show-errors")
@@ -515,7 +537,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 	}
 	// From this boundary, always destroy and independently list, including a
-	// partial apply/UNKNOWN. No automatic apply retry or custom recovery engine.
+	// partial apply/UNKNOWN. Only transport failures retry the same plan/state.
 	if e = stamp(filepath.Join(c.Output, "apply-started"), "apply may have issued creates\n"); e != nil {
 		out.Code = "EVIDENCE_FAILED"
 		out.Error = e.Error()
