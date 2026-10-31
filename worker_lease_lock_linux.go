@@ -12,6 +12,11 @@ import (
 // FD9 is inherited from the unchanged worker's canonical flock subshell.
 // Never open another holder, close/unlock FD9, or recursively block on flock.
 func verifyWorkerFlock(name string) error {
+	return verifyWorkerFlockWith(name, unix.Flock, unix.Open)
+}
+
+// The syscall seam keeps the real FD/inode checks and isolates filesystem errno controls.
+func verifyWorkerFlockWith(name string, flock func(int, int) error, open func(string, int, uint32) (int, error)) error {
 	if !filepath.IsAbs(name) || filepath.Clean(name) != name || name == "/" {
 		return errors.New("noncanonical worker lock")
 	}
@@ -32,20 +37,21 @@ func verifyWorkerFlock(name string) error {
 	if fd.Dev != at.Dev || fd.Ino != at.Ino || fd.Mode&unix.S_IFMT != unix.S_IFREG {
 		return errors.New("inherited FD9 does not match canonical lock device/inode")
 	}
-	if err = unix.Flock(9, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err = flock(9, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return err
 	}
 	// A separate open description must see exclusion. It is never a holder.
-	probe, err := unix.Open(name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	probe, err := open(name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(probe)
-	if err = unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); err == nil {
-		_ = unix.Flock(probe, unix.LOCK_UN)
+	if err = flock(probe, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		_ = flock(probe, unix.LOCK_UN)
 		return errors.New("canonical flock exclusion not established")
 	}
-	if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+	// CIFS reports contention as EACCES here; an unsuccessful open above still refuses.
+	if err != unix.EWOULDBLOCK && err != unix.EAGAIN && err != unix.EACCES {
 		return err
 	}
 	return nil
