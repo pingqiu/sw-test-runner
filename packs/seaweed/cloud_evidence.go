@@ -32,11 +32,11 @@ func collectCloudFailure(ctx context.Context, original *infra.Node, dir, root, r
 	n := &infra.Node{Host: original.Host, User: original.User, KeyFile: original.KeyFile, HostKey: original.HostKey}
 	defer n.Close()
 	command := "timeout -k 2 55 sh -c " + quote(
-		"sudo journalctl --no-pager -u "+quote("sw-cloud-"+runID+"-*")+" -n 300; "+
+		"capture_rc=0; sudo journalctl --no-pager -u "+quote("sw-cloud-"+runID+"-*")+" -n 300 || capture_rc=$?; "+
 			"for p in /var/log/cloud-init-output.log "+quote(root+"/worker/kv_smoke.py")+" "+
 			quote(root+"/worker/soak_native_worker.py")+" "+quote(root+"/worker/soak_oracle.py")+" "+
 			quote(root+"/worker")+"/*.log "+quote(root+"/worker")+"/*.jsonl "+quote(root+"/cloud-kv.jsonl")+"; do "+
-			"printf '\\n=== %s ===\\n' \"$p\"; if test -f \"$p\"; then tail -c 1048576 \"$p\"; else printf 'MISSING\\n'; fi; done")
+			"printf '\\n=== %s ===\\n' \"$p\" || capture_rc=$?; if test -f \"$p\"; then tail -c 1048576 \"$p\" || capture_rc=$?; else printf 'MISSING\\n' || capture_rc=$?; fi; done; exit \"$capture_rc\"")
 	stdout, stderr, rc := "", "", -1
 	err := n.ConnectContext(cx)
 	if err == nil {

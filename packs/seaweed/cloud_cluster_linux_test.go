@@ -45,6 +45,9 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 				io.Copy(io.Discard, ch)
 				return 0
 			}
+			if variant == "reviewer-journal-shell" && id == "meta" && strings.Contains(cmd, "sudo journalctl") {
+				return reviewerJournalShell(cmd, ch)
+			}
 			if fail && id == "vol6" && strings.Contains(cmd, "systemd-run") {
 				fmt.Fprint(ch.Stderr(), "volume failed")
 				return 9
