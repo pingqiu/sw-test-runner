@@ -130,7 +130,13 @@ seaweed-cloud cleanup --run <id> --json
 ```
 
 `run --dry-run` and `verify --dry-run` use the existing local `plan` path;
-they issue no Terraform, Azure or SSH commands. Ordinary `run` has no dry-run
+they issue no Terraform, Azure or SSH commands. Plan and run check that the output
+parent already exists and permits directory creation by the actual controller
+user. This uses a uniquely named empty local probe directory, removed immediately;
+it creates neither the missing parent nor the run output. Missing, non-directory,
+unwritable or uncleanable parents return nonzero with `OUTPUT_PARENT_REFUSED` and
+a remedy. Create the intended `runs/` parent privately (0700) before preflight.
+Standalone destroy/verify/recovery do not need this probe. Ordinary `run` has no dry-run
 default and intentionally applies. Saved-state `cleanup --run` requires an
 absolute, resolvable controller HOME; unset/relative HOME refuses before reading
 any recovery file. It never searches the current directory for state.
