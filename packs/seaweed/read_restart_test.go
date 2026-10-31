@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 )
 
@@ -92,5 +93,28 @@ func TestRestartWindowActualAssessor(t *testing.T) {
 				t.Fatal("unproven window accepted")
 			}
 		})
+	}
+}
+
+func TestReadWindowRejectsNonfinitePreKill(t *testing.T) {
+	c := readConfig()
+	raw, err := json.Marshal(windowBody(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		value float64
+	}{
+		{"NaN", math.NaN()}, {"positive-infinity", math.Inf(1)}, {"negative-infinity", math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CheckReadTaskOutput(captured(raw), c, "load", "dc", ReadWindow{tc.value}); err == nil {
+				t.Fatal("nonfinite pre-Kill clock accepted")
+			}
+		})
+	}
+	if _, err := CheckReadTaskOutput(captured(raw), c, "load", "dc", ReadWindow{30}); err != nil {
+		t.Fatalf("finite valid pre-Kill clock refused: %v", err)
 	}
 }

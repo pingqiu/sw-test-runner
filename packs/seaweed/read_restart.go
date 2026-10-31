@@ -6,6 +6,7 @@ import (
 	"errors"
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"math"
 	"os"
 	"path"
 	"slices"
@@ -24,7 +25,7 @@ type ReadWindow struct{ PreKill float64 }
 
 // Only client-local ordered outcomes earn credit. M02 timestamps are not used.
 func checkWindow(rows []GETOutcome, faults map[int]GETOutcome, attempts int, loadStart, loadEnd float64, c SmokeConfig, w ReadWindow) error {
-	if len(rows) != attempts || w.PreKill <= 0 {
+	if len(rows) != attempts || math.IsNaN(w.PreKill) || math.IsInf(w.PreKill, 0) || w.PreKill <= 0 {
 		return errors.New("outage outcomes/pre-Kill marker missing")
 	}
 	prior, begin, end := 0., 0., 0.
