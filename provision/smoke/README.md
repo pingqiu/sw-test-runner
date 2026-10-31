@@ -64,3 +64,11 @@ python3 provision/terraform/azure-validation/tests/check_no_devtestlab.py < /pri
 ```
 
 This checks the actual one-VM mock plan for absence of DevTestLab resources and preservation of expiry tags. Controller destroy/verify/UNKNOWN code is unchanged.
+
+## Failed cloud-step evidence
+
+Every remote command records its step name, exact command, stdout, stderr, exit code and transport error in mode-0600 `cloud-step-NNN.json` in the private local output directory. Upload attempts record their operation and error too. A failing step's name and command also appear in the controller's JSON error. Cloud-init status output is retained.
+
+Before returning a pack failure to the controller's finally destroy, the pack makes one best-effort read-only capture over a fresh connection with the same pinned SSH key. It saves journal output for this run's services, cloud-init output, pinned worker source and worker log/JSONL files in `cloud-failure-fetch.json`, including stderr/exit/error if fetching fails. Missing remote files are marked MISSING. It never collects user-data, private keys or Terraform files. This JSON is private evidence; do not publish raw logs without inspection.
+
+The capture is bounded to the lesser of 60 seconds and remaining work time, including connection/session I/O. It never extends the work/hard envelope or borrows cleanup reserve. A canceled/expired work context records the failed fetch without retrying. Fetch failure never blocks destroy; evidence write failure remains a pack error. Existing UNKNOWN, full-RG verify and verdict semantics are unchanged. Evidence capture is not a cloud workload retry.

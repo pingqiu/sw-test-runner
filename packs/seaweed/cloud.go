@@ -49,7 +49,7 @@ func (c CloudConfig) CheckFiles() error {
 
 // RunCloudHTTP installs and exercises the same bounded HTTP worker as #19.
 // The caller owns this fresh VM and always destroys it, even on failure.
-func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error) {
+func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string, failure error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return "", errors.New("cloud phase deadline required")
 	}
@@ -69,31 +69,56 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error
 	if h.RunRoot != "/data/seaweed-runs/"+d.RunID {
 		return "", errors.New("unexpected cloud run root")
 	}
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
+	defer func() {
+		if failure != nil {
+			if e := collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q); e != nil {
+				failure = errors.Join(failure, fmt.Errorf("save failure-log fetch: %w", e))
+			}
+		}
+	}()
 	if e = c.CheckFiles(); e != nil {
 		return "", e
 	}
-	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
 	if e = n.ConnectContext(ctx); e != nil {
-		return "", e
+		return "", fmt.Errorf("cloud step connect: %w", e)
 	}
 	defer n.Close()
-	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-	run := func(cmd string) (string, error) {
-		out, stderr, rc, e := n.Run(ctx, "timeout -k 5 120 sh -ec "+q(cmd))
-		if e != nil || rc != 0 {
-			return out, fmt.Errorf("cloud step failed rc=%d: %s: %w", rc, stderr, e)
+	sequence := 0
+	run := func(name, cmd string) (string, error) {
+		sequence++
+		command := "timeout -k 5 120 sh -ec " + q(cmd)
+		out, stderr, rc, e := n.Run(ctx, command)
+		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, command, out, stderr, rc, e)
+		if e != nil || rc != 0 || w != nil {
+			return out, fmt.Errorf("cloud step %s command=%q rc=%d stderr=%s: %v", name, command, rc, stderr, errors.Join(e, w))
 		}
 		return out, nil
 	}
+	upload := func(name, local, remote string) error {
+		sequence++
+		command := "upload " + local + " -> " + remote
+		e := n.Upload(local, remote)
+		rc := 0
+		if e != nil {
+			rc = -1
+		}
+		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), "upload-"+name, command, "", "", rc, e)
+		if e != nil || w != nil {
+			return fmt.Errorf("cloud step upload-%s command=%q: %v", name, command, errors.Join(e, w))
+		}
+		return nil
+	}
 	root := h.RunRoot
-	if _, e = run("cloud-init status --wait >/dev/null; sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker") + " " + q(root+"/volume") + " " + q(root+"/master") + " " + q(root+"/filer")); e != nil {
+	if _, e = run("prepare", "cloud-init status --wait; sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
 		return "", e
 	}
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
-		if e = n.Upload(c.Files[name].Path, root+"/"+name); e != nil {
+		if e = upload(name, c.Files[name].Path, root+"/"+name); e != nil {
 			return "", e
 		}
-		if _, e = run("printf '%s  %s\\n' " + q(c.Files[name].SHA256) + " " + q(root+"/"+name) + " | sha256sum -c -"); e != nil {
+		if _, e = run("verify-"+name, "printf '%s  %s\\n' "+q(c.Files[name].SHA256)+" "+q(root+"/"+name)+" | sha256sum -c -"); e != nil {
 			return "", e
 		}
 	}
@@ -111,16 +136,16 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error
 		if e = os.WriteFile(p, b, 0600); e != nil {
 			return "", e
 		}
-		if e = n.Upload(p, root+"/worker/"+name); e != nil {
+		if e = upload(name, p, root+"/worker/"+name); e != nil {
 			return "", e
 		}
 	}
-	if _, e = run("cd " + q(root) + "; tar -xf native.tar; test -d native/seaweedkv_native; printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' " + q("dir = \""+root+"/filer\"") + " > filer.toml"); e != nil {
+	if _, e = run("configure", "cd "+q(root)+"; tar -xf native.tar; test -d native/seaweedkv_native; printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
 	}
 	ip := h.Data.Address
 	service := func(role, cmd string) error {
-		_, e := run("sudo systemd-run --unit=" + q("sw-cloud-"+d.RunID+"-"+role) + " --property=WorkingDirectory=" + q(root) + " " + cmd)
+		_, e := run("start-"+role, "sudo systemd-run --unit="+q("sw-cloud-"+d.RunID+"-"+role)+" --property=WorkingDirectory="+q(root)+" "+cmd)
 		return e
 	}
 	master := endpoint(h, "master_http")
@@ -135,11 +160,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error
 		}
 	}
 	defer func() {
-		logs, _ := run("sudo journalctl --no-pager -u " + q("sw-cloud-"+d.RunID+"-*") + " -n 300")
+		logs, _ := run("collect-services", "sudo journalctl --no-pager -u "+q("sw-cloud-"+d.RunID+"-*")+" -n 300")
 		os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600)
 	}()
 	for _, url := range []string{"http://" + master + "/dir/status", "http://" + endpoint(h, "volume_http") + "/status", "http://" + endpoint(h, "filer_http") + "/", "http://" + endpoint(h, "s3_http") + "/"} {
-		if _, e = run("until curl -fsS --max-time 3 " + q(url) + " >/dev/null; do sleep 1; done"); e != nil {
+		if _, e = run("ready-"+url, "until curl -fsS --max-time 3 "+q(url)+" >/dev/null; do sleep 1; done"); e != nil {
 			return "", e
 		}
 	}
@@ -154,7 +179,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (string, error
 	for _, arg := range args {
 		cmd += " " + q(arg)
 	}
-	stdout, e := run(cmd)
+	stdout, e := run("kv-smoke", cmd)
 	output := filepath.Join(c.Output, "cloud-kv.jsonl")
 	if w := os.WriteFile(output, []byte(stdout), 0600); w != nil {
 		return output, w

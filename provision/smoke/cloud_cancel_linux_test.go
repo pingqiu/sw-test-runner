@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,6 +86,13 @@ func TestCloudWorkCancellationReachesControllerDestroyAndList(t *testing.T) {
 	case r := <-done:
 		if r.Code != "PACK_FAILED" || !r.RemainingObserved || !f.cleanContext || !strings.HasSuffix(strings.Join(f.events, ","), "terraform destroy,az resource") {
 			t.Fatalf("%+v events=%v", r, f.events)
+		}
+		capture, e := os.ReadFile(filepath.Join(c.Output, "cloud-failure-fetch.json"))
+		var fetch struct {
+			Error string `json:"error"`
+		}
+		if e != nil || json.Unmarshal(capture, &fetch) != nil || fetch.Error == "" {
+			t.Fatalf("expired work must record the failed bounded fetch before destroy: %s %v", capture, e)
 		}
 	case <-time.After(time.Second):
 		peer.Close()
