@@ -4,13 +4,22 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"time"
 )
+
+// GenerationExitIntent is recorded before signal dispatch; it is not exit proof.
+type GenerationExitIntent struct {
+	Episode  string
+	Identity ProcessIdentity
+	BoundAt  time.Time
+}
 
 // GenerationRestartReceipt proves dispatch and old-generation settlement, not
 // readiness or application recovery. Those remain a pack-level oracle join.
 type GenerationRestartReceipt struct {
 	VictimJobID, ReplacementJobID string
 	Plan                          GenerationRestartPlan
+	Intent                        GenerationExitIntent
 	State                         string
 	Kill                          KillWitness
 	OldExit                       ExitInfo
@@ -55,6 +64,7 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 		return
 	}
 	valid := j.spec.retainExit && j.spec.packLabel == plan.Victim && !j.settled && sameJob(before, j.spec)
+	identity := j.identity
 	unlock()
 	if !valid {
 		err = errors.New("victim is not the exact live approved service generation")
@@ -69,7 +79,7 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 		err = errors.New("generation episode already consumed")
 		return
 	}
-	receipt = GenerationRestartReceipt{Plan: plan, VictimJobID: victim.id, State: "ADMITTED"}
+	receipt = GenerationRestartReceipt{Plan: plan, VictimJobID: victim.id, State: "ADMITTED", Intent: GenerationExitIntent{Episode: name, Identity: identity, BoundAt: time.Now()}}
 	a.generationRestarts[name] = receipt
 	a.mu.Unlock()
 	defer func() {
@@ -81,7 +91,7 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 		a.generationRestarts[name] = receipt
 		a.mu.Unlock()
 	}()
-	receipt.Kill, err = c.Safety.kill(ctx, victim, true)
+	receipt.Kill, err = c.Safety.kill(ctx, victim, &receipt.Intent)
 	if err != nil {
 		return
 	}

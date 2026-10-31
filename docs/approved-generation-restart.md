@@ -21,13 +21,16 @@ mutation. A pack retains the handle returned by `RunApprovedPackJob` and calls
 
 ```text
 consume exact episode + originating service label
+  -> bind old-generation exit intent before signal dispatch
   -> exact-generation KILL witness
   -> owned old-generation exit/descendant settlement
   -> ordinary live-authority replacement enrollment
   -> REPLACEMENT_STARTED receipt
 ```
 
-Only the witnessed old generation's SIGKILL exit is expected. An unrelated exit,
+The intent is recorded before Kill under the existing owned-job gate, and appears
+in the generation receipt. Intent alone never qualifies an exit. Only the
+witnessed old generation's SIGKILL exit is expected. An unrelated exit,
 lost witness, unsettled custody, revoked authority, foreign handle/label, or
 replayed episode cannot earn success. No caller-controlled expected-exit flag is
 exposed. Replacement dispatch uses the existing scope's work and hard deadlines;

@@ -18,11 +18,12 @@ import (
 
 type generationNode struct {
 	*fakeOwnedNode
-	next      int
-	events    []string
-	cleanup   map[string]bool
-	killMode  string
-	afterKill func()
+	next       int
+	events     []string
+	cleanup    map[string]bool
+	killMode   string
+	afterKill  func()
+	beforeKill func()
 }
 
 func (n *generationNode) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (ProcessIdentity, error) {
@@ -51,6 +52,9 @@ func (n *generationNode) Wait(ctx context.Context, id string) (ExitInfo, error) 
 	return e, err
 }
 func (n *generationNode) Kill(ctx context.Context, id string) (KillWitness, error) {
+	if n.beforeKill != nil {
+		n.beforeKill()
+	}
 	n.mu.Lock()
 	n.events = append(n.events, "kill")
 	n.mu.Unlock()
@@ -149,6 +153,16 @@ func TestGenerationRestartSettlesOldBeforeReplacement(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		n.beforeKill = func() {
+			intent := old.job.exitIntent
+			if intent == nil || intent.Episode != "volume-once" || intent.Identity != old.job.identity || intent.BoundAt.IsZero() || old.job.expectedKill != nil {
+				t.Error("exact exit intent was not bound before signal dispatch, or witness pre-existed")
+			}
+			receipt := a.approved.GenerationRestartReceipts()["volume-once"]
+			if intent != nil && receipt.Intent != *intent {
+				t.Error("owned generation receipt does not carry the pre-dispatch intent")
+			}
+		}
 		next, r, err := a.RestartApprovedPackGeneration(ctx, "volume-once", old)
 		if err != nil {
 			return err
@@ -227,17 +241,14 @@ func TestGenerationRestartRefusesUnqualifiedExitAndAuthority(t *testing.T) {
 		})
 	}
 }
-func TestGenerationRestartDoesNotExcuseAnUnrelatedExit(t *testing.T) {
+func TestGenerationRestartDoesNotExcuseReplacementExit(t *testing.T) {
 	f, n := generationFixture(t)
 	_, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
 		old, _, err := a.RunApprovedPackJob(ctx, "volume0", true)
 		if err != nil {
 			return err
 		}
-		if _, _, err = a.RestartApprovedPackGeneration(ctx, "volume-once", old); err != nil {
-			return err
-		}
-		other, _, err := a.RunApprovedPackJob(ctx, "volume0", true)
+		other, _, err := a.RestartApprovedPackGeneration(ctx, "volume-once", old)
 		if err != nil {
 			return err
 		}
@@ -251,7 +262,7 @@ func TestGenerationRestartDoesNotExcuseAnUnrelatedExit(t *testing.T) {
 		return nil
 	})
 	if result.Status != StatusFail {
-		t.Fatalf("unrelated exit became PASS: %+v", result)
+		t.Fatalf("replacement exit became PASS: %+v", result)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -259,6 +270,31 @@ func TestGenerationRestartDoesNotExcuseAnUnrelatedExit(t *testing.T) {
 		t.Fatal(n.killed)
 	}
 }
+func TestGenerationRestartDoesNotEraseAnEarlierStickyExit(t *testing.T) {
+	f, _ := generationFixture(t)
+	_, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
+		other, _, err := a.RunApprovedPackJob(ctx, "volume1", true)
+		if err != nil {
+			return err
+		}
+		if _, err = a.Safety.Kill(ctx, other); err != nil {
+			return err
+		}
+		if _, err = a.Safety.Wait(ctx, other); err == nil {
+			t.Error("unplanned exit was accepted")
+		}
+		old, _, err := a.RunApprovedPackJob(ctx, "volume0", true)
+		if err != nil {
+			return err
+		}
+		_, _, err = a.RestartApprovedPackGeneration(ctx, "volume-once", old)
+		return err
+	})
+	if result.Status != StatusFail {
+		t.Fatalf("restart erased sticky failure: %+v", result)
+	}
+}
+
 func TestGenerationRestartEpisodeCannotBeReplayed(t *testing.T) {
 	f, n := generationFixture(t)
 	_, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
