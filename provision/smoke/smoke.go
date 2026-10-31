@@ -291,7 +291,7 @@ func stamp(name, text string) error {
 	return errors.Join(e, f.Close())
 }
 
-// Execute has no default mutation mode. plan reads local files only. run requires
+// Execute has no default mutation mode. plan probes local parent writability. run requires
 // a fresh private output path; recovery destroy reuses that path and fixed state.
 func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out Result) {
 	out = result("INPUT_REFUSED", "correct pinned inputs; no cloud operation was authorized")
@@ -314,6 +314,17 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	if ctl.Pack == nil && (mode == "run" || mode == "plan") {
 		if err = c.Cloud.CheckFiles(); err != nil {
 			out.Error = err.Error()
+			return
+		}
+	}
+	if mode == "run" || mode == "plan" {
+		probe, e := os.MkdirTemp(filepath.Dir(c.Output), ".seaweed-cloud-write-probe-")
+		if e == nil {
+			e = os.Remove(probe)
+		}
+		if e != nil {
+			out.Code, out.Error = "OUTPUT_PARENT_REFUSED", e.Error()
+			out.Remedy = "create only the intended output parent, owned and writable by the controller user (0700); rerun local preflight before cloud admission"
 			return
 		}
 	}
