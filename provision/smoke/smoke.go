@@ -458,7 +458,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		cx, cancel := context.WithDeadline(context.Background(), end)
 		defer cancel()
 		out.Effects = append(out.Effects, "terraform destroy")
-		_, de := call(cx, "terraform", "destroy", "-input=false", "-auto-approve", "-lock-timeout=0s", "-no-color")
+		_, de := call(cx, "terraform", "destroy", "-parallelism=3", "-input=false", "-auto-approve", "-lock-timeout=0s", "-no-color")
 		ids, ve := list(cx)
 		out.Remaining = ids
 		out.RemainingObserved = ve == nil
@@ -512,7 +512,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	out.Effects = append(out.Effects, "terraform apply")
 	defer cleanup()
-	if _, e = call(work, "terraform", "apply", "-input=false", "-lock-timeout=0s", "-no-color", "smoke.tfplan"); e != nil {
+	if _, e = call(work, "terraform", "apply", "-parallelism=3", "-input=false", "-lock-timeout=0s", "-no-color", "smoke.tfplan"); e != nil {
 		out.Code = "APPLY_FAILED_OR_UNKNOWN"
 		out.Error = e.Error()
 		return
