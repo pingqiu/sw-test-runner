@@ -187,7 +187,52 @@ func (l *workerOwnedLease) writeNew(kind string, raw []byte) error {
 	_, w := f.Write(append(raw, '\n'))
 	s := f.Sync()
 	c := f.Close()
-	return errors.Join(w, s, c)
+	if err := errors.Join(w, s, c); err != nil {
+		return err
+	}
+	return settleWorkerRecord(l.path(kind), append(raw, '\n'), l.binding.HardDeadline)
+}
+
+// CIFS may publish final mtime/ctime shortly after close. Settle only records
+// this writer just published, then keep the ordinary strict capture unchanged.
+func settleWorkerRecord(name string, expected []byte, hard time.Time) error {
+	return settleWorkerRecordWith(name, expected, hard, os.Lstat, snapshotRecord, time.Now, time.Sleep)
+}
+
+func settleWorkerRecordWith(name string, expected []byte, hard time.Time, stat func(string) (os.FileInfo, error), capture func(string, *uint32, bool) ([]byte, error), now func() time.Time, sleep func(time.Duration)) error {
+	deadline := now().Add(2 * time.Second)
+	if hard.Before(deadline) {
+		deadline = hard
+	}
+	var previous os.FileInfo
+	for now().Before(deadline) {
+		current, err := stat(name)
+		if err != nil {
+			return err
+		}
+		if !current.Mode().IsRegular() || current.Size() != int64(len(expected)) {
+			return errors.New("written worker record size/type changed")
+		}
+		if previous != nil && sameRecord(previous, current) {
+			raw, err := capture(name, nil, false)
+			if err != nil {
+				return err
+			}
+			if !now().Before(deadline) || string(raw) != string(expected) {
+				return errors.New("written worker record capture changed or expired")
+			}
+			return nil
+		}
+		previous = current
+		wait := deadline.Sub(now())
+		if wait > 100*time.Millisecond {
+			wait = 100 * time.Millisecond
+		}
+		if wait > 0 {
+			sleep(wait)
+		}
+	}
+	return errors.New("worker record metadata settle exceeded 2s/original deadline")
 }
 func (l *workerOwnedLease) qualify() error {
 	if err := verifyWorkerFlock(l.policy.bootstrap.WorkerLease.LockFile); err != nil {
@@ -229,6 +274,9 @@ func (l *workerOwnedLease) renew() error {
 		return err
 	}
 	if err = os.Rename(f.Name(), l.path("renew")); err != nil {
+		return err
+	}
+	if err = settleWorkerRecord(l.path("renew"), append(raw, '\n'), l.binding.HardDeadline); err != nil {
 		return err
 	}
 	return l.qualify()
