@@ -150,6 +150,7 @@ type RunScope struct {
 	faultReceipts   map[string]FaultReceipt
 	cleanupDeadline time.Time
 	authority       faultAuthority
+	pause           *processPause // Only the independently admitted pause victim.
 }
 
 func NewRunScope(ctx context.Context, a RunAdmission, b OwnedJobBackend, verify func(context.Context, RunAdmission) error) (*RunScope, error) {
@@ -480,6 +481,10 @@ func (s *RunScope) kill(ctx context.Context, h JobHandle, intent *GenerationExit
 
 // Callbacks may Start/Stop other entries, but must not clear their own apply.
 func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Context) error) error {
+	return s.applyFault(key, apply, restore, verify, nil)
+}
+
+func (s *RunScope) applyFault(key string, apply, restore, verify func(context.Context) error, pause *processPause) error {
 	s.mu.Lock()
 	if s.closed || s.ctx.Err() != nil {
 		s.mu.Unlock()
@@ -493,7 +498,17 @@ func (s *RunScope) ApplyFault(key string, apply, restore, verify func(context.Co
 		s.mu.Unlock()
 		return errors.New("conflicting fault resource")
 	}
+	if s.pause != nil {
+		s.mu.Unlock()
+		return errors.New("pause must be the last fault obligation")
+	}
 	r := &restoration{restore: restore, verify: verify, ready: make(chan struct{}), gate: make(chan struct{}, 1)}
+	if pause != nil {
+		pause.run.mu.Lock()
+		pause.run.pauseReceipt = &pause.ProcessPauseReceipt
+		pause.run.mu.Unlock()
+		s.pause = pause
+	}
 	s.restores[key] = r
 	s.order = append(s.order, key)
 	s.mu.Unlock()
@@ -524,14 +539,63 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 	defer cancel()
 	s.mu.Lock()
 	r, ok := s.restores[key]
+	p := s.pause
+	pause := p != nil && p.Key == key
+	var pauseEntry *restoration
+	if p != nil {
+		pauseEntry = s.restores[p.Key]
+	}
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown fault resource %q", key)
 	}
-	if err := take(ctx, r.ready, r.gate); err != nil {
-		return err
+	if p != nil && !pause {
+		if err := take(ctx, pauseEntry.ready, pauseEntry.gate); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		_, pending := s.jobs[p.VictimJobID]
+		s.mu.Unlock()
+		eligible := pauseEntry.finalVerified && pauseEntry.cleanupErr == nil && !pending
+		<-pauseEntry.gate
+		if !eligible {
+			return errors.New("older restoration withheld: pause settlement unproven")
+		}
 	}
-	defer func() { <-r.gate }()
+	if pause && !final {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Own this stage before cancelling WORK and waking automatic Close.
+		// The original deadline bounds both STOP join and restoration.
+		deadline, _ := ctx.Deadline()
+		var detach context.CancelFunc
+		ctx, detach = context.WithDeadline(context.WithoutCancel(ctx), deadline)
+		defer detach()
+		select {
+		case r.gate <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-r.gate }()
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return errors.New("late public pause clear refused")
+		}
+		s.beginCleanup()
+		select {
+		case <-r.ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else {
+		if err := take(ctx, r.ready, r.gate); err != nil {
+			return err
+		}
+		defer func() { <-r.gate }()
+	}
 	priorFinal := r.finalVerified
 	r.finalVerified = false
 	var restoreErr error
@@ -553,11 +617,33 @@ func (s *RunScope) clearFault(ctx context.Context, key string, final bool) error
 
 // Closing fences admission before this snapshot. A failed settlement prevents
 // restoration: an UNKNOWN issuer could otherwise apply a late fault after UP.
-func (s *RunScope) settleWork(ctx context.Context) error {
+func (s *RunScope) settleWork(ctx context.Context) error { return s.settleIssuers(ctx, nil) }
+
+// Only pause restoration may exempt its independently registered victim.
+// Joining ready fences the STOP dispatch before any other issuer is settled.
+func (s *RunScope) settlePauseIssuers(ctx context.Context) error {
+	s.mu.Lock()
+	p := s.pause
+	var ready <-chan struct{}
+	if p != nil {
+		ready = s.restores[p.Key].ready
+	}
+	s.mu.Unlock()
+	if ready != nil {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.settleIssuers(ctx, p)
+}
+
+func (s *RunScope) settleIssuers(ctx context.Context, pause *processPause) error {
 	s.mu.Lock()
 	var jobs []JobHandle
 	for id, j := range s.jobs {
-		if !j.spec.Restoration {
+		if !j.spec.Restoration && (pause == nil || pause.victim.id != id) {
 			jobs = append(jobs, JobHandle{s, id, j})
 		}
 	}
@@ -603,6 +689,7 @@ func (s *RunScope) Close() error {
 		s.beginCleanup()
 		s.mu.Lock()
 		order := append([]string(nil), s.order...)
+		pause := s.pause
 		jobs := make([]JobHandle, 0, len(s.jobs))
 		for id, j := range s.jobs {
 			jobs = append(jobs, JobHandle{s, id, j})
@@ -613,14 +700,24 @@ func (s *RunScope) Close() error {
 		var errs []error
 		var issuerErr error
 		if s.authority != nil {
-			issuerErr = s.settleWork(ctx)
+			issuerErr = s.settlePauseIssuers(ctx)
 		}
 		if issuerErr != nil {
 			errs = append(errs, issuerErr, errors.New("restoration withheld: possible mutation issuer"))
 		}
 		for n := len(order) - 1; issuerErr == nil && n >= 0; n-- {
-			if err := s.clearFault(ctx, order[n], true); err != nil {
-				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], err))
+			clearErr := s.clearFault(ctx, order[n], true)
+			if clearErr != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", order[n], clearErr))
+			}
+			if pause != nil && order[n] == pause.Key {
+				issuerErr = clearErr
+				if issuerErr == nil {
+					issuerErr = s.settleWork(ctx)
+				}
+				if issuerErr != nil {
+					errs = append(errs, fmt.Errorf("post-pause issuer settlement UNKNOWN: %w", issuerErr))
+				}
 			}
 			s.mu.Lock()
 			r := s.restores[order[n]]

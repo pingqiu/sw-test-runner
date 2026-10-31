@@ -116,18 +116,8 @@ func (b *approvedJobs) permitFault(ctx context.Context, row approvedJob, f regis
 	}
 	// Restoration deliberately does NOT re-read revoked/unreadable WORK data.
 	// It still rechecks protected bytes, SSH/boot and exact resource ownership.
-	found := false
-	for _, p := range b.run.runPolicy.Deployments {
-		if p.NodeID == row.spec.Node {
-			found = true
-			if err := b.run.readback(ctx, p); err != nil {
-				return err
-			}
-			break
-		}
-	}
-	if !found {
-		return errors.New("fault node no longer bound")
+	if err := b.run.readbackNode(ctx, row.spec.Node, "fault node no longer bound"); err != nil {
+		return err
 	}
 	observation, err := f.plan.Observe(ctx)
 	if err != nil {

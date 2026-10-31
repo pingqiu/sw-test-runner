@@ -58,16 +58,9 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 		err = errors.New("invalid generation plan")
 		return
 	}
-	j, unlock, e := c.Safety.lockJob(ctx, victim)
+	identity, e := c.liveApprovedService(ctx, plan.Victim, victim)
 	if e != nil {
 		err = e
-		return
-	}
-	valid := j.spec.retainExit && j.spec.packLabel == plan.Victim && !j.settled && sameJob(before, j.spec)
-	identity := j.identity
-	unlock()
-	if !valid {
-		err = errors.New("victim is not the exact live approved service generation")
 		return
 	}
 	a.mu.Lock()
@@ -117,4 +110,16 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 	}
 	receipt.State = "REPLACEMENT_STARTED"
 	return
+}
+
+func (c *ActionContext) liveApprovedService(ctx context.Context, label string, h JobHandle) (ProcessIdentity, error) {
+	j, unlock, err := c.Safety.lockJob(ctx, h)
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	defer unlock()
+	if !j.spec.retainExit || j.settled || j.spec.packLabel != label || !sameJob(c.approved.runPolicy.Jobs[label], j.spec) {
+		return ProcessIdentity{}, errors.New("victim is not the exact live approved service generation")
+	}
+	return j.identity, nil
 }

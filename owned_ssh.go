@@ -13,11 +13,12 @@ import (
 )
 
 type custodyRequest struct {
-	Sequence  uint64
-	Operation string
-	Admission RunAdmission
-	Spec      JobSpec
-	Identity  ProcessIdentity
+	Sequence      uint64
+	Operation     string
+	Admission     RunAdmission
+	Spec          JobSpec
+	Identity      ProcessIdentity
+	PauseDeadline time.Time `json:",omitzero"`
 }
 
 type custodyReply struct {
@@ -27,6 +28,7 @@ type custodyReply struct {
 	Identity       ProcessIdentity
 	Exit           ExitInfo
 	Kill           KillWitness
+	Pause          ProcessPauseWitness `json:",omitzero"`
 }
 
 type custodyChannel struct {
@@ -160,14 +162,22 @@ func (c *custodyChannel) call(ctx context.Context, q custodyRequest) (custodyRep
 	}
 }
 
-func (b *SSHJobs) command(ctx context.Context, id, op string, identity ProcessIdentity) (custodyReply, error) {
+func (b *SSHJobs) command(ctx context.Context, id, op string, identity ProcessIdentity, pauseDeadline ...time.Time) (custodyReply, error) {
 	b.mu.Lock()
 	c := b.jobs[id]
 	b.mu.Unlock()
 	if c == nil {
 		return custodyReply{}, fmt.Errorf("unknown custody id %s", id)
 	}
-	r, err := c.call(ctx, custodyRequest{Operation: op, Identity: identity})
+	q := custodyRequest{Operation: op, Identity: identity}
+	if len(pauseDeadline) != 0 {
+		q.PauseDeadline = pauseDeadline[0]
+		q.Admission.EffectDeadline = q.PauseDeadline
+		if bound, ok := ctx.Deadline(); ok && bound.Before(q.Admission.EffectDeadline) {
+			q.Admission.EffectDeadline = bound
+		}
+	}
+	r, err := c.call(ctx, q)
 	if err == nil && op == "settle" && !r.Exit.Settled {
 		err = errors.New("custody settlement UNKNOWN")
 	}
