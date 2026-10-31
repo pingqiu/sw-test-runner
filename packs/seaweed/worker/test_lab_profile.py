@@ -231,6 +231,26 @@ class ReadinessHTTP(unittest.TestCase):
 @unittest.skipUnless(sys.platform == 'linux', 'actual Linux process/listener seam')
 class OwnedServiceReadiness(unittest.TestCase):
     def test_actual_cli_joins_owned_generations_and_collects(self):
+        def negative_probe(config):
+            # Keep CLI parsing/entry checks, but start the diagnostic budget at
+            # ready(), not before Python startup. Delay exceeds the old 300ms.
+            bootstrap = '''import sys,time,datetime
+source=sys.argv.pop(1)
+namespace={'__name__':'readiness_probe','__file__':source}
+exec(compile(open(source,'rb').read(),source,'exec'),namespace)
+original=namespace['ready']
+def entry(config):
+    config=dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=.3)).isoformat())
+    return original(config)
+namespace['ready']=entry
+time.sleep(.4)
+namespace['main']()
+'''
+            bounded = dict(config, deadline=(datetime.datetime.now(datetime.timezone.utc)+
+                                            datetime.timedelta(seconds=10)).isoformat())
+            return subprocess.run([sys.executable,'-I','-B','-c',bootstrap,profile.__file__,
+                '--config',json.dumps(bounded),'--action','ready'],capture_output=True,timeout=5)
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             sockets = [socket.socket() for _ in range(10)]
@@ -284,10 +304,7 @@ class OwnedServiceReadiness(unittest.TestCase):
                 foreign = json.loads(original)
                 foreign.update(profile.process(children[0].pid))
                 generation.write_text(json.dumps(foreign))
-                short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
-                                              datetime.timedelta(seconds=.3)).isoformat())
-                refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
-                    '--config',json.dumps(short),'--action','ready'],capture_output=True,timeout=3)
+                refused = negative_probe(config)
                 self.assertNotEqual(refused.returncode,0)
                 self.assertIn(b'listeners not owned',refused.stderr)
                 generation.write_text(original)
@@ -295,10 +312,7 @@ class OwnedServiceReadiness(unittest.TestCase):
                 for missing in ('volume_http', 'volume_grpc', 'rdma_control', 'dc_control'):
                     changed = copy.deepcopy(config)
                     changed['services'][missing] = ports['rdma']  # Deliberately unbound TCP port.
-                    changed['deadline'] = (datetime.datetime.now(datetime.timezone.utc)+
-                                           datetime.timedelta(seconds=.3)).isoformat()
-                    refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
-                        '--config',json.dumps(changed),'--action','ready'],capture_output=True,timeout=3)
+                    refused = negative_probe(changed)
                     self.assertNotEqual(refused.returncode,0,missing)
                     self.assertIn(b'listeners not owned',refused.stderr,missing)
                 # Active TCP and DC writer cannot substitute for the exact CM bind marker.
@@ -306,19 +320,13 @@ class OwnedServiceReadiness(unittest.TestCase):
                 for replacement in ('', 'RDMA listener bound on 127.0.0.2:'+str(ports['rdma'])):
                     lines = [line for line in original_log.splitlines() if 'RDMA listener bound on ' not in line]
                     (root/'volume.stdout').write_text('\n'.join(lines+[replacement])+'\n')
-                    short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
-                                                  datetime.timedelta(seconds=.3)).isoformat())
-                    refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
-                        '--config',json.dumps(short),'--action','ready'],capture_output=True,timeout=3)
+                    refused = negative_probe(config)
                     self.assertNotEqual(refused.returncode,0)
                     self.assertIn(b'RDMA CM bind not observed',refused.stderr)
                 (root/'volume.stdout').write_text(original_log)
                 # A live service/socket alone cannot replace the writer marker.
                 (root/'volume.stdout').write_text('FIXTURE_LISTENING\n')
-                short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
-                                              datetime.timedelta(seconds=.3)).isoformat())
-                refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
-                    '--config',json.dumps(short),'--action','ready'],capture_output=True,timeout=3)
+                refused = negative_probe(config)
                 self.assertNotEqual(refused.returncode,0)
                 self.assertIn(b'DC writer not active',refused.stderr)
             finally:
