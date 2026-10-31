@@ -52,7 +52,7 @@ case "$1" in
 esac
 `, 0700)
 	write(filepath.Join(bin, "az"), `#!/bin/sh
-if test -e "$FAKE_CLOUD_HOME/live"; then printf '["/subscriptions/test/live-vm"]'; else printf '[]'; fi
+if test -e "$FAKE_CLOUD_HOME/live"; then printf '[{"id":"/subscriptions/test/live-vm","type":"Microsoft.Compute/virtualMachines"}]'; else printf '[]'; fi
 `, 0700)
 	source, e := filepath.Abs("../..")
 	if e != nil {

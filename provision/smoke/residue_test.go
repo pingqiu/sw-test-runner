@@ -28,11 +28,8 @@ func TestClusterSubscriptionResidueAndTagFailuresNeverClean(t *testing.T) {
 					}
 					return []byte(`{}`), nil
 				}
-				if tool == "az" && strings.Contains(strings.Join(args, " "), "tags.seaweed_run") {
+				if tool == "az" && args[0] == "resource" && !strings.Contains(strings.Join(args, " "), "--resource-group") {
 					scans++
-					if !strings.Contains(strings.Join(args, " "), "Microsoft.Compute/disks") || !strings.Contains(strings.Join(args, " "), "Microsoft.Network/publicIPAddresses") {
-						t.Fatal("incomplete subscription scan")
-					}
 					if scans > 1 {
 						switch kind {
 						case "null":
@@ -40,7 +37,8 @@ func TestClusterSubscriptionResidueAndTagFailuresNeverClean(t *testing.T) {
 						case "timeout":
 							return nil, context.DeadlineExceeded
 						case "tagged-nic", "foreign-vm", "foreign-disk", "foreign-ip":
-							return json.Marshal([]string{"/subscriptions/foreign/" + kind})
+							typ := map[string]string{"tagged-nic": "Microsoft.Network/networkInterfaces", "foreign-vm": "Microsoft.Compute/virtualMachines", "foreign-disk": "Microsoft.Compute/disks", "foreign-ip": "Microsoft.Network/publicIPAddresses"}[kind]
+							return json.Marshal([]any{map[string]any{"id": "/subscriptions/foreign/" + kind, "type": typ, "tags": map[string]string{"seaweed_run": "output"}}})
 						}
 					}
 				}

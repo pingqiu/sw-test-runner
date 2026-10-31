@@ -56,7 +56,7 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 		if args[0] == "tag" {
 			return []byte(`{}`), nil
 		}
-		if strings.Contains(strings.Join(args, " "), "tags.seaweed_run") {
+		if !strings.Contains(strings.Join(args, " "), "--resource-group") {
 			return []byte(`[]`), nil
 		}
 		f.lists++
@@ -64,7 +64,7 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 			return nil, errors.New("list unknown")
 		}
 		if f.live && f.lists > 1 {
-			return []byte(`["/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/vm"]`), nil
+			return []byte(`[{"id":"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/vm","type":"Microsoft.Compute/virtualMachines"}]`), nil
 		}
 		return []byte(`[]`), nil
 	}
