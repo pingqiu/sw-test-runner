@@ -288,6 +288,28 @@ class OwnedServiceReadiness(unittest.TestCase):
                 self.assertNotEqual(refused.returncode,0)
                 self.assertIn(b'listeners not owned',refused.stderr)
                 generation.write_text(original)
+                # RDMA CM has no TCP listener. Every actual TCP port remains mandatory.
+                for missing in ('volume_http', 'volume_grpc', 'rdma_control', 'dc_control'):
+                    changed = copy.deepcopy(config)
+                    changed['services'][missing] = ports['rdma']  # Deliberately unbound TCP port.
+                    changed['deadline'] = (datetime.datetime.now(datetime.timezone.utc)+
+                                           datetime.timedelta(seconds=.3)).isoformat()
+                    refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
+                        '--config',json.dumps(changed),'--action','ready'],capture_output=True,timeout=3)
+                    self.assertNotEqual(refused.returncode,0,missing)
+                    self.assertIn(b'listeners not owned',refused.stderr,missing)
+                # Active TCP and DC writer cannot substitute for the exact CM bind marker.
+                original_log = (root/'volume.stdout').read_text()
+                for replacement in ('', 'RDMA listener bound on 127.0.0.2:'+str(ports['rdma'])):
+                    lines = [line for line in original_log.splitlines() if 'RDMA listener bound on ' not in line]
+                    (root/'volume.stdout').write_text('\n'.join(lines+[replacement])+'\n')
+                    short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+
+                                                  datetime.timedelta(seconds=.3)).isoformat())
+                    refused = subprocess.run([sys.executable,'-I','-B',profile.__file__,
+                        '--config',json.dumps(short),'--action','ready'],capture_output=True,timeout=3)
+                    self.assertNotEqual(refused.returncode,0)
+                    self.assertIn(b'RDMA CM bind not observed',refused.stderr)
+                (root/'volume.stdout').write_text(original_log)
                 # A live service/socket alone cannot replace the writer marker.
                 (root/'volume.stdout').write_text('FIXTURE_LISTENING\n')
                 short = dict(config,deadline=(datetime.datetime.now(datetime.timezone.utc)+

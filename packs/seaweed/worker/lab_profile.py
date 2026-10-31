@@ -322,7 +322,7 @@ def services(config):
     facts = {}
     required = dict(master=('master_http', 'master_grpc'),
                     filer=('filer_http', 'filer_grpc'),
-                    volume=('volume_http', 'volume_grpc', 'rdma', 'rdma_control', 'dc_control'))
+                    volume=('volume_http', 'volume_grpc', 'rdma_control', 'dc_control'))
     for role in config['roles']:
         if role == 'client':
             continue
@@ -342,6 +342,9 @@ def services(config):
             if not any('RDMA DC push-read writer active' in line
                        for log in logs for line in log['markers']):
                 raise ValueError('owned volume DC writer not active')
+            cm = 'RDMA listener bound on ' + config['server_address'] + ':' + str(config['services']['rdma'])
+            if not any(line.rstrip().endswith(cm) for log in logs for line in log['markers']):
+                raise ValueError('owned volume RDMA CM bind not observed')
             facts[role]['logs'] = logs
     return facts
 
@@ -363,7 +366,8 @@ def log_evidence(root, generation):
                 raise ValueError('service log changed during snapshot')
             output.append(dict(path=name, bytes=len(body), sha256=hashlib.sha256(body).hexdigest(),
                                markers=[line for line in body.decode('utf-8', 'replace').splitlines()
-                                        if 'RDMA DC push-read writer active' in line]))
+                                        if 'RDMA DC push-read writer active' in line or
+                                        'RDMA listener bound on ' in line]))
         finally:
             os.close(fd)
     return output
