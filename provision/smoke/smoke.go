@@ -295,15 +295,16 @@ func stamp(name, text string) error {
 }
 
 func transportOnly(raw []byte) bool {
-	text := string(raw)
-	pattern := `(?i)ECONNRESET|ConnectionResetError(?: 104|\(104, ['"]Connection reset by peer['"]\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get|Delete) "https://[^"\n]+": EOF\b|TLS handshake(?:: connection|:| connection)? reset(?: by peer)?`
-	blocks := regexp.MustCompile(`(?im)^[ \t]*(?:│[ \t]*)?Error:[ \t]*`).Split(text, -1)
-	if len(blocks) == 1 {
-		return regexp.MustCompile(`^(?:` + pattern + `)$`).MatchString(strings.TrimSpace(text))
+	endpoint := `https://management\.azure\.com/[A-Za-z0-9/_?=.%:-]+`
+	transport := `(?:ECONNRESET|ConnectionResetError(?: 104|\(104, 'Connection reset by peer'\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get|Delete) "` + endpoint + `": EOF|TLS handshake: connection reset(?: by peer)?|\('Connection aborted\.', ConnectionResetError\(104, 'Connection reset by peer'\)\))`
+	publicIP := `(?:updating|deleting) Public I P Address \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nPublic I P Addresses Name: "[A-Za-z0-9_-]+"\): performing (?:CreateOrUpdate: Put|Delete: Delete) "` + endpoint + `": HTTP response was nil; connection may have been reset`
+	metadata := `(?:\n\n  with module\.run\.azurerm_public_ip\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_public_ip" "node":\n  [0-9]+: resource "azurerm_public_ip" "node" \{)?`
+	blocks := regexp.MustCompile(`(?im)^Error: `).Split(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")), -1)
+	if len(blocks) > 1 {
+		blocks = blocks[1:]
 	}
-	for _, block := range blocks[1:] {
-		coded := regexp.MustCompile(`(?im)\b(?:code|error[_ ]?code|status(?:[_ ]?code)?)["']?\s*[:=]|\bHTTP(?:/[0-9.]+)?\s+[0-9]{3}\b|\bstatus\s+[0-9]{3}\b|^\s*(?:│\s*)?\([A-Za-z][A-Za-z0-9]+\)`).MatchString(block)
-		if coded || !regexp.MustCompile(pattern).MatchString(block) {
+	for _, block := range blocks {
+		if !regexp.MustCompile(`\A(?:` + transport + `|` + publicIP + `)` + metadata + `\z`).MatchString(strings.TrimSpace(block)) {
 			return false
 		}
 	}

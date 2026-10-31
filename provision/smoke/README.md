@@ -52,6 +52,18 @@ Expiry tags remain, but there is no native shutdown schedule or DevTestLab regis
 
 UNKNOWN apply stays sticky: destroy + an empty list cannot prove that an unresolved create will not finish later. `CREATE_UNRESOLVED` never becomes `COMPLETE` without resolving that pending create; remaining IDs and nonzero status must be reported to the owner. `verify` is locally bounded to 30 seconds. The RG/RBAC stay.
 
+Transport retries are deliberately narrow: up to two more attempts after 10/30
+seconds, inside the existing deadline, for apply/destroy/resource-list only.
+Every complete Error block must match a known transport form. The supported
+provider envelope is the observed no-color Public I P Address update/delete
+reset, with its exact optional Terraform source context; standalone reset/EOF/TLS
+forms are explicit alternatives. Unknown provider wrappers, extra details or
+mixed diagnostics refuse retry, even if they mention a reset. This is a complete
+message allowlist, not a keyword blacklist. Apply retry first re-plans with
+`-refresh=true` in the same state. Its synced `apply-transport-unknown` marker
+is never removed automatically, including after success, destroy or verification;
+explicit provider evidence and operator disposition are still required.
+
 ## Verification limits
 
 CPU tests drive the actual native command boundary with fake Terraform/az, including a late asynchronous create after recovery's empty list. Loopback SSH tests use a real handshake to prove pinned-key success/mismatch refusal and exercise transfers/phase calls. Their server simulates service/worker output: they do not execute weed/cloud-init/the native connector or prove Azure service compatibility. Existing M01/M02 strict tests remain unchanged. Cloud qualification still needs the manager token.
