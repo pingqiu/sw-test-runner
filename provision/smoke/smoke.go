@@ -318,11 +318,15 @@ func transportOnly(raw []byte) bool {
 // the existing retry.
 func settleCreates(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), raw []byte, subscription, group, run string) ([]string, error) {
 	types := map[string]string{"azurerm_public_ip": "Microsoft.Network/publicIPAddresses", "azurerm_network_interface": "Microsoft.Network/networkInterfaces"}
-	put := regexp.MustCompile(`performing CreateOrUpdate: Put "https://management\.azure\.com(/subscriptions/[^"?]+)\?api-version=[0-9-]+"`)
+	// Route by "names an ARM resource ID", whatever the accepted form: the
+	// CreateOrUpdate envelope with or without its "Error: " prefix, or the
+	// standalone `Put "<URL>": EOF` (codex01 #52 R1). A Put naming no ARM
+	// resource ID is a generic form and keeps the plain retry.
+	put := regexp.MustCompile(`Put "https://management\.azure\.com(/subscriptions/[^"?]+)[^"]*"`)
 	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.node\["[a-z0-9-]+"\]),`)
 	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
 	var imported []string
-	for _, block := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "Error: ")[1:] {
+	for _, block := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "Error: ") {
 		m := put.FindStringSubmatch(block)
 		if m == nil {
 			continue
@@ -338,12 +342,11 @@ func settleCreates(ctx context.Context, call func(context.Context, string, ...st
 			}
 			continue
 		}
-		var object struct {
-			ID   string
-			Tags map[string]string
-		}
-		if json.Unmarshal(b, &object) != nil || !strings.EqualFold(object.ID, id) || object.Tags["seaweed_run"] != run {
-			return imported, fmt.Errorf("created %s is not this run's (tag %q)", id, object.Tags["seaweed_run"])
+		// The sweep's own ownership check: unambiguous decision keys (one exact
+		// seaweed_run, no duplicate or case-aliased keys), this run's tag, this
+		// subscription/RG and a supported type (codex01 #52 R2).
+		if owned, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run); e != nil || len(owned) != 1 || !strings.EqualFold(owned[0], id) {
+			return imported, fmt.Errorf("created %s is not provably this run's: %v", id, e)
 		}
 		if _, e = call(ctx, "terraform", "import", "-input=false", "-lock-timeout=0s", "-no-color", a[1], id); e != nil {
 			return imported, e
@@ -359,18 +362,39 @@ func keepsImported(ctx context.Context, call func(context.Context, string, ...st
 		return nil
 	}
 	b, e := call(ctx, "terraform", "show", "-json", "-no-color", "smoke.tfplan")
-	var plan struct {
+	var plan *struct {
 		Changes []struct {
 			Address string
-			Change  struct{ Actions []string }
+			Change  *struct{ Actions []string }
 		} `json:"resource_changes"`
 	}
-	if e != nil || json.Unmarshal(b, &plan) != nil {
+	if e != nil || json.Unmarshal(b, &plan) != nil || plan == nil || plan.Changes == nil {
 		return errors.Join(e, errors.New("re-plan after import is unreadable"))
 	}
-	for _, rc := range plan.Changes {
-		if slices.Contains(imported, rc.Address) && slices.Contains(rc.Change.Actions, "delete") {
-			return fmt.Errorf("re-plan would replace imported %s", rc.Address)
+	// Every import must appear with known actions; only an explicit plan that
+	// keeps it counts as proof (codex01 #52 R3). A no-op plan is fine.
+	known := []string{"no-op", "read", "update", "create", "delete"}
+	for _, address := range imported {
+		found := false
+		for _, rc := range plan.Changes {
+			if rc.Address != address {
+				continue
+			}
+			if rc.Change == nil || len(rc.Change.Actions) == 0 {
+				return fmt.Errorf("re-plan has no actions for imported %s", address)
+			}
+			for _, a := range rc.Change.Actions {
+				if !slices.Contains(known, a) {
+					return fmt.Errorf("re-plan action %q for imported %s is unknown", a, address)
+				}
+			}
+			if slices.Contains(rc.Change.Actions, "delete") {
+				return fmt.Errorf("re-plan would replace imported %s", address)
+			}
+			found = true
+		}
+		if !found {
+			return fmt.Errorf("re-plan does not mention imported %s", address)
 		}
 	}
 	return nil
