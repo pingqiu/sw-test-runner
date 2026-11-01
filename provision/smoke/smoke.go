@@ -304,7 +304,7 @@ func transportOnly(raw []byte) bool {
 	nicEndpoint := `https://management\.azure\.com/subscriptions/[a-f0-9-]{36}/resourceGroups/[A-Za-z0-9_-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9_-]+\?api-version=2025-07-01`
 	nic := `creating Network Interface \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nNetwork Interface Name: "[A-Za-z0-9_-]+"\): performing CreateOrUpdate: Put "` + nicEndpoint + `": HTTP response was nil; connection may have been reset`
 	nicMetadata := `\n\n  with module\.run\.azurerm_network_interface\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_network_interface" "node":\n  [0-9]+: resource "azurerm_network_interface" "node" \{`
-	message := `(?:(?:` + transport + `|` + publicIP + `)` + metadata + `|` + nic + nicMetadata + `)`
+	message := `(?:(?:` + transport + `|` + publicIP + `)` + metadata + `|` + nic + nicMetadata + `|` + lostCreateForms() + `)`
 	whole := `\A(?:` + message + `|Error: ` + message + `(?:\s+Error: ` + message + `)*)\z`
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
@@ -317,13 +317,12 @@ func transportOnly(raw []byte) bool {
 // Anything else refuses. Generic transport forms that name no resource keep
 // the existing retry.
 func settleCreates(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), raw []byte, subscription, group, run string) ([]string, error) {
-	types := map[string]string{"azurerm_public_ip": "Microsoft.Network/publicIPAddresses", "azurerm_network_interface": "Microsoft.Network/networkInterfaces"}
 	// Route by "names an ARM resource ID", whatever the accepted form: the
 	// CreateOrUpdate envelope with or without its "Error: " prefix, or the
 	// standalone `Put "<URL>": EOF` (codex01 #52 R1). A Put naming no ARM
 	// resource ID is a generic form and keeps the plain retry.
 	put := regexp.MustCompile(`Put "https://management\.azure\.com(/subscriptions/[^"?]+)[^"]*"`)
-	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.node\["[a-z0-9-]+"\]),`)
+	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.[a-z_]+(?:\["[a-z0-9-]+"\])?),`)
 	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
 	var imported []string
 	for _, block := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "Error: ") {
@@ -332,7 +331,13 @@ func settleCreates(ctx context.Context, call func(context.Context, string, ...st
 			continue
 		}
 		id, a := m[1], address.FindStringSubmatch(block)
-		if a == nil || types[a[2]] == "" || len(id) <= len(scope) || !strings.EqualFold(id[:len(scope)], scope) || !strings.HasPrefix(strings.ToLower(id[len(scope):]), strings.ToLower(types[a[2]])+"/") {
+		// The address's type comes from moduleTypes, so every type the module
+		// creates is covered (run 7e lost a VM create).
+		typ := ""
+		if a != nil {
+			typ = armType(a[2])
+		}
+		if typ == "" || len(id) <= len(scope) || !strings.EqualFold(id[:len(scope)], scope) || !strings.HasPrefix(strings.ToLower(id[len(scope):]), strings.ToLower(typ)+"/") {
 			return imported, fmt.Errorf("lost create PUT %s has no in-scope address of its type", id)
 		}
 		present, b, e := reread(ctx, call, id)

@@ -22,7 +22,6 @@ func orphanIDs(raw []byte, subscription, group, run string) ([]string, error) {
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, err
 	}
-	order := map[string]int{"microsoft.network/networkinterfaces": 0, "microsoft.network/publicipaddresses": 1, "microsoft.compute/disks": 2, "microsoft.network/virtualnetworks": 3, "microsoft.network/networksecuritygroups": 4}
 	ranks := map[string]int{}
 	prefix := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
 	for _, r := range rows {
@@ -30,7 +29,7 @@ func orphanIDs(raw []byte, subscription, group, run string) ([]string, error) {
 			continue
 		}
 		parts := strings.Split(r.ID, "/")
-		rank, ok := order[strings.ToLower(r.Type)]
+		rank, ok := sweepRank(r.Type) // moduleTypes: a VM first, before its NIC (run 7e)
 		if !ok || len(parts) != 9 || !strings.EqualFold(strings.Join(parts[:6], "/")+"/", prefix) || !strings.EqualFold(parts[6]+"/"+parts[7], r.Type) || parts[8] == "" {
 			return nil, fmt.Errorf("unsupported or out-of-scope tagged orphan: %s", r.ID)
 		}
