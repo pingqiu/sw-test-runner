@@ -5,26 +5,28 @@ import (
 	"strings"
 )
 
-// moduleTypes lists every resource type provision/terraform/azure creates, and
-// is the one source of type coverage for the create re-read (settleCreates)
-// and the orphan sweep (Claude01 ruling 6ae76c16). A test keeps it equal to the
-// module, so a new type cannot slip past either. ARM is "" for a type that is
-// not a top-level ARM resource of its own (a child or an association); it is
-// neither re-read nor swept and goes with its parent. Sweep is the deletion
-// order: a VM first, since it holds its NIC (run 7e: NicInUse) and OS disk.
+// moduleTypes lists every resource provision/terraform/azure declares (type
+// and name), and is the one source of type coverage for the create re-read
+// (settleCreates) and the orphan sweep (Claude01 ruling 6ae76c16). A test keeps
+// it equal to the module, so a new resource cannot slip past either. ARM is ""
+// for a type that is not a top-level ARM resource of its own (a child or an
+// association); it is neither re-read nor swept and goes with its parent.
+// Sweep is the deletion order: a VM first, since it holds its NIC (run 7e:
+// NicInUse) and OS disk.
 var moduleTypes = []struct {
-	TF, ARM string
-	Sweep   int
+	TF, Name, ARM string
+	Sweep         int
+	Verb          string // the provider's create verb (observed: PIP "updating", NIC and VM "creating")
 }{
-	{"azurerm_linux_virtual_machine", "Microsoft.Compute/virtualMachines", 0},
-	{"azurerm_network_interface", "Microsoft.Network/networkInterfaces", 1},
-	{"azurerm_public_ip", "Microsoft.Network/publicIPAddresses", 2},
-	{"azurerm_managed_disk", "Microsoft.Compute/disks", 3}, // also each VM's OS disk
-	{"azurerm_virtual_network", "Microsoft.Network/virtualNetworks", 4},
-	{"azurerm_network_security_group", "Microsoft.Network/networkSecurityGroups", 5},
-	{"azurerm_subnet", "", 0},
-	{"azurerm_subnet_network_security_group_association", "", 0},
-	{"azurerm_virtual_machine_data_disk_attachment", "", 0},
+	{"azurerm_linux_virtual_machine", "node", "Microsoft.Compute/virtualMachines", 0, "creating"},
+	{"azurerm_network_interface", "node", "Microsoft.Network/networkInterfaces", 1, "creating"},
+	{"azurerm_public_ip", "node", "Microsoft.Network/publicIPAddresses", 2, "updating"},
+	{"azurerm_managed_disk", "cache", "Microsoft.Compute/disks", 3, "creating"}, // also each VM's OS disk
+	{"azurerm_virtual_network", "run", "Microsoft.Network/virtualNetworks", 4, "creating"},
+	{"azurerm_network_security_group", "run", "Microsoft.Network/networkSecurityGroups", 5, "creating"},
+	{"azurerm_subnet", "run", "", 0, ""},
+	{"azurerm_subnet_network_security_group_association", "run", "", 0, ""},
+	{"azurerm_virtual_machine_data_disk_attachment", "cache", "", 0, ""},
 }
 
 // armType is the ARM type of a module Terraform type, or "".
@@ -48,8 +50,10 @@ func sweepRank(arm string) (int, bool) {
 }
 
 // lostCreateForms is a create PUT that lost its response, for every top-level
-// module type: the PUT names an ARM ID of that type and the block's address is
-// of the matching Terraform type (run 7e lost a VM create, api 2024-03-01).
+// module resource: the PUT names an ARM ID of its type, and the "with" address,
+// the "in resource" line and the source line all name that same module
+// resource, spelled out literally (codex01 #55: no contradictory names). Run 7e
+// lost a VM create (api 2024-03-01).
 func lostCreateForms() string {
 	uuid := `[a-f0-9-]{36}`
 	var forms []string
@@ -57,9 +61,10 @@ func lostCreateForms() string {
 		if m.ARM == "" {
 			continue
 		}
-		forms = append(forms, `(?:creating|updating) [A-Z][A-Za-z ]* \(Subscription: "`+uuid+`"(?:\n[A-Z][A-Za-z ]* Name: "[A-Za-z0-9_-]+")+\): performing CreateOrUpdate: Put "https://management\.azure\.com/subscriptions/`+uuid+
+		decl := `resource "` + m.TF + `" "` + m.Name + `"`
+		forms = append(forms, m.Verb+` [A-Z][A-Za-z ]* \(Subscription: "`+uuid+`"(?:\n[A-Z][A-Za-z ]* Name: "[A-Za-z0-9_-]+")+\): performing CreateOrUpdate: Put "https://management\.azure\.com/subscriptions/`+uuid+
 			`/resourceGroups/[A-Za-z0-9_-]+/providers/`+regexp.QuoteMeta(m.ARM)+`/[A-Za-z0-9_-]+\?api-version=[0-9]{4}-[0-9]{2}-[0-9]{2}": HTTP response was nil; connection may have been reset`+
-			`\n\n  with module\.run\.`+m.TF+`\.[a-z_]+(?:\["[a-z0-9-]+"\])?,\n  on \.\./azure/main\.tf line [0-9]+, in resource "`+m.TF+`" "[a-z_]+":\n  [0-9]+: resource "`+m.TF+`" "[a-z_]+" \{`)
+			`\n\n  with module\.run\.`+m.TF+`\.`+m.Name+`(?:\["[a-z0-9-]+"\])?,\n  on \.\./azure/main\.tf line [0-9]+, in `+decl+`:\n  [0-9]+: `+decl+` \{`)
 	}
 	return strings.Join(forms, "|")
 }

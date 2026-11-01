@@ -20,12 +20,12 @@ func TestModuleTypesAreTheModulesTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var module, table []string
-	for _, m := range regexp.MustCompile(`(?m)^resource "([a-z0-9_]+)"`).FindAllStringSubmatch(string(src), -1) {
-		module = append(module, m[1])
+	for _, m := range regexp.MustCompile(`(?m)^resource "([a-z0-9_]+)" "([a-z0-9_]+)"`).FindAllStringSubmatch(string(src), -1) {
+		module = append(module, m[1]+"."+m[2])
 	}
 	arm, ranks := map[string]bool{}, map[int]bool{}
 	for _, m := range moduleTypes {
-		table = append(table, m.TF)
+		table = append(table, m.TF+"."+m.Name)
 		if m.ARM != "" {
 			if arm[strings.ToLower(m.ARM)] || ranks[m.Sweep] {
 				t.Fatalf("duplicate ARM type or sweep rank: %+v", m)
@@ -67,6 +67,13 @@ func TestLostVMCreateIsATransportForm(t *testing.T) {
 		{"type-not-in-module", strings.ReplaceAll(lost, "Microsoft.Compute/virtualMachines", "Microsoft.Compute/availabilitySets"), false},
 		{"other-failure", strings.Replace(lost, "HTTP response was nil; connection may have been reset", "unexpected status 409", 1), false},
 		{"trailing-error", lost + "\n\nError: quota exceeded", false},
+		{"other-verb", strings.Replace(lost, "creating Linux", "updating Linux", 1), false},
+		// codex01 #55: the with address, the in-resource line and the source
+		// line must all name the same module resource.
+		{"in-resource-name-differs", strings.Replace(lost, `in resource "azurerm_linux_virtual_machine" "node"`, `in resource "azurerm_linux_virtual_machine" "other"`, 1), false},
+		{"source-name-differs", strings.Replace(lost, `88: resource "azurerm_linux_virtual_machine" "node"`, `88: resource "azurerm_linux_virtual_machine" "other"`, 1), false},
+		{"with-name-differs", strings.Replace(lost, `azurerm_linux_virtual_machine.node[`, `azurerm_linux_virtual_machine.other[`, 1), false},
+		{"source-type-differs", strings.Replace(lost, `88: resource "azurerm_linux_virtual_machine"`, `88: resource "azurerm_network_interface"`, 1), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if transportOnly([]byte(tc.raw)) != tc.want {
@@ -99,6 +106,8 @@ func TestLostVMCreateRereadsAndImports(t *testing.T) {
 		{"absent-retries", func() ([]byte, error) { return absentShow(id), errors.New("az: exit status 3") }, "CREATE_UNRESOLVED", 2, 0},
 		{"foreign-tag-refuses", object(vm, "someone-else"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 		{"wrong-type-refuses", object("Microsoft.Network/networkInterfaces", "output"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
+		// codex01 #55 control: only the in-resource name differs; no retry, no import.
+		{"contradictory-names-refuse", object(vm, "output"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -121,7 +130,11 @@ func TestLostVMCreateRereadsAndImports(t *testing.T) {
 					case tool == "terraform" && args[0] == "apply":
 						applies++
 						if applies == 1 {
-							return []byte(lost), errors.New("terraform: exit status 1")
+							message := lost
+							if tc.name == "contradictory-names-refuse" {
+								message = strings.Replace(lost, `in resource "azurerm_linux_virtual_machine" "node"`, `in resource "azurerm_linux_virtual_machine" "other"`, 1)
+							}
+							return []byte(message), errors.New("terraform: exit status 1")
 						}
 					}
 					return f.command(ctx, dir, tool, args...)

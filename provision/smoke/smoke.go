@@ -298,13 +298,9 @@ func stamp(name, text string) error {
 func transportOnly(raw []byte) bool {
 	endpoint := `https://management\.azure\.com/[A-Za-z0-9/_?=.%:-]+`
 	transport := `(?:ECONNRESET|ConnectionResetError(?: 104|\(104, 'Connection reset by peer'\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get) "` + endpoint + `": EOF|TLS handshake: connection reset(?: by peer)?|\('Connection aborted\.', ConnectionResetError\(104, 'Connection reset by peer'\)\))`
-	// Create/PUT forms only; every Delete goes through deleteResets' re-read rule.
-	publicIP := `updating Public I P Address \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nPublic I P Addresses Name: "[A-Za-z0-9_-]+"\): performing CreateOrUpdate: Put "` + endpoint + `": HTTP response was nil; connection may have been reset`
-	metadata := `(?:\n\n  with module\.run\.azurerm_public_ip\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_public_ip" "node":\n  [0-9]+: resource "azurerm_public_ip" "node" \{)?`
-	nicEndpoint := `https://management\.azure\.com/subscriptions/[a-f0-9-]{36}/resourceGroups/[A-Za-z0-9_-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9_-]+\?api-version=2025-07-01`
-	nic := `creating Network Interface \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nNetwork Interface Name: "[A-Za-z0-9_-]+"\): performing CreateOrUpdate: Put "` + nicEndpoint + `": HTTP response was nil; connection may have been reset`
-	nicMetadata := `\n\n  with module\.run\.azurerm_network_interface\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_network_interface" "node":\n  [0-9]+: resource "azurerm_network_interface" "node" \{`
-	message := `(?:(?:` + transport + `|` + publicIP + `)` + metadata + `|` + nic + nicMetadata + `|` + lostCreateForms() + `)`
+	// Create/PUT forms come only from moduleTypes (one path, codex01 #55);
+	// every Delete goes through deleteResets' re-read rule.
+	message := `(?:` + transport + `|` + lostCreateForms() + `)`
 	whole := `\A(?:` + message + `|Error: ` + message + `(?:\s+Error: ` + message + `)*)\z`
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
