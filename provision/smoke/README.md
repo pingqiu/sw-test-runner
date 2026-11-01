@@ -69,8 +69,9 @@ explicit provider evidence and operator disposition are still required.
 The classifier judges a failed tool's stderr, where Terraform writes its
 diagnostics; its stdout refresh, plan and progress text is not part of the
 failure and stays in the recorded output. Unknown stderr text still refuses
-retry. Destroy also accepts the observed run5 NIC `Delete` reset with no source
-context (API 2025-07-01), as a bounded same-state destroy retry.
+retry. Apply and destroy both accept the observed run5 NIC `Delete` reset with
+no source context (API 2025-07-01), like the Public IP update/delete form: a
+bounded same-state retry (apply re-plans first).
 
 ## Verification limits
 
