@@ -309,6 +309,51 @@ func transportOnly(raw []byte) bool {
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
 
+// deleteResets returns the exact ARM IDs when the text is only complete
+// Terraform "deleting <Type> ...: performing Delete" blocks whose response was
+// lost or reset, all inside this subscription/RG. Otherwise it returns nil.
+func deleteResets(raw []byte, subscription, group string) []string {
+	uuid := `[a-f0-9-]{36}`
+	block := `Error: deleting [A-Z][A-Za-z ]* \(Subscription: "` + uuid + `"(?:\n[A-Z][A-Za-z ]* Name: "[A-Za-z0-9._-]+"(?:\) for [A-Z][A-Za-z ]* \(Subscription: "` + uuid + `")?)+\): performing Delete: Delete "https://management\.azure\.com(/subscriptions/` + uuid + `/resourceGroups/[A-Za-z0-9._-]+/providers/[A-Za-z]+\.[A-Za-z]+/[A-Za-z]+/[A-Za-z0-9._-]+)\?api-version=[0-9]{4}-[0-9]{2}-[0-9]{2}": HTTP response was nil; connection may have been reset`
+	text := strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n"))
+	if !regexp.MustCompile(`\A` + block + `(?:\s+` + block + `)*\z`).MatchString(text) {
+		return nil
+	}
+	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
+	var ids []string
+	for _, m := range regexp.MustCompile(block).FindAllStringSubmatch(text, -1) {
+		if len(m[1]) <= len(scope) || !strings.EqualFold(m[1][:len(scope)], scope) {
+			return nil
+		}
+		ids = append(ids, m[1])
+	}
+	return ids
+}
+
+// reread shows one exact ARM ID. One JSON object is present; az's exact
+// ResourceNotFound for this same type, name and RG is absent; anything else errors.
+func reread(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), id string) (bool, []byte, error) {
+	b, e := call(ctx, "az", "resource", "show", "--ids", id, "--output", "json", "--only-show-errors")
+	if e == nil {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(b, &object) != nil || object == nil {
+			return false, nil, fmt.Errorf("re-read %s: not one standalone JSON object", id)
+		}
+		return true, b, nil
+	}
+	diagnostics, failed := b, (*toolError)(nil)
+	if errors.As(e, &failed) {
+		diagnostics = failed.stderr
+	}
+	if p := strings.Split(id, "/"); len(p) == 9 {
+		line := "The Resource '" + p[6] + "/" + p[7] + "/" + p[8] + "' under resource group '" + p[4] + "' was not found. For more details please go to https://aka.ms/ARMResourceNotFoundFix"
+		if strings.TrimSpace(strings.ReplaceAll(string(diagnostics), "\r\n", "\n")) == "ERROR: (ResourceNotFound) "+line+"\nCode: ResourceNotFound\nMessage: "+line {
+			return false, nil, nil
+		}
+	}
+	return false, nil, fmt.Errorf("re-read %s: %w", id, e)
+}
+
 // Execute has no default mutation mode. plan probes local parent writability. run requires
 // a fresh private output path; recovery destroy reuses that path and fixed state.
 func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out Result) {
@@ -409,8 +454,25 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			if errors.As(e, &failed) {
 				diagnostics = failed.stderr
 			}
-			if e == nil || !eligible || attempt == 2 || !transportOnly(diagnostics) {
+			if e == nil || !eligible || attempt == 2 {
 				return b, e
+			}
+			// A destroy whose only failures are lost Delete responses re-reads each
+			// exact ID first: absent is deleted, present is re-deleted by the same-state
+			// retry. An unknown re-read refuses. Create/PUT keeps the form allowlist.
+			if !transportOnly(diagnostics) {
+				ids := []string(nil)
+				if tool == "terraform" && args[0] == "destroy" {
+					ids = deleteResets(diagnostics, d.Subscription, d.Group)
+				}
+				if len(ids) == 0 {
+					return b, e
+				}
+				for _, id := range ids {
+					if _, _, re := reread(cx, once, id); re != nil {
+						return b, errors.Join(e, re)
+					}
+				}
 			}
 			if tool == "terraform" && args[0] == "apply" && attempt == 0 {
 				if w := stamp(filepath.Join(c.Output, "apply-transport-unknown"), "provider settlement required for the failed apply attempt\n"); w != nil {

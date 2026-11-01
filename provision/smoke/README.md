@@ -73,6 +73,23 @@ retry. Apply and destroy both accept the observed run5 NIC `Delete` reset with
 no source context (API 2025-07-01), like the Public IP update/delete form: a
 bounded same-state retry (apply re-plans first).
 
+Deletes follow one generic rule instead of per-type forms. If a destroy's
+stderr is only complete Terraform `deleting <Type> ...: performing Delete:
+Delete "<ARM URL>": HTTP response was nil; connection may have been reset`
+blocks, each with an exact ARM ID inside this subscription and RG, the
+controller re-reads each ID with `az resource show`:
+- One JSON object means present. The bounded same-state destroy retry
+  deletes it again.
+- az's exact `ResourceNotFound` for that same type, name and RG means
+  absent, i.e. deleted.
+- Anything else refuses the retry.
+
+The orphan sweep treats an exact `ResourceNotFound` on its fresh show as
+already deleted. A reset on its own delete re-reads that ID: absent means
+done, present means a re-delete (at most two more). Create/PUT is unchanged
+and keeps the form allowlist above. The controls are run5's NIC and run6's
+Managed Disk lost Delete responses and run6's sweep `ResourceNotFound`.
+
 ## Verification limits
 
 CPU tests drive the actual native command boundary with fake Terraform/az, including a late asynchronous create after recovery's empty list. Loopback SSH tests use a real handshake to prove pinned-key success/mismatch refusal and exercise transfers/phase calls. Their server simulates service/worker output: they do not execute weed/cloud-init/the native connector or prove Azure service compatibility. Existing M01/M02 strict tests remain unchanged. Cloud qualification still needs the manager token.
