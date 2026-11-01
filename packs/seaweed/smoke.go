@@ -23,6 +23,10 @@ type SmokeSettings struct {
 	Length    int    `json:"length"`
 	// Replication is the cloud-only KV loader copy count ("" keeps 000).
 	Replication string `json:"replication,omitempty"`
+	// Soak-only profile fields, set by Plan.profileSettings from Plan.Soak.
+	// Unexported: plan JSON cannot set them here.
+	rotation    *Rotation
+	readyAssign *AssignLayout
 }
 
 // SmokeConfig is emitted by the common inventory consumer, never a cloud driver.
