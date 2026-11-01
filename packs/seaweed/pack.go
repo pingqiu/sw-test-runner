@@ -43,7 +43,9 @@ func result(status, code, remedy, action string, d *inventory.Document) map[stri
 	b, _ := json.Marshal(r)
 	return map[string]string{"value": string(b), "execution_authorized": "false"}
 }
-func phase(name string) bool { return contains(phases, name) || name == "seaweed_read_restart" }
+func phase(name string) bool {
+	return contains(phases, name) || name == "seaweed_read_restart" || name == "seaweed_kv_soak"
+}
 
 // RegisterPack uses owned S0b jobs only; it exposes no raw shell/provider route.
 // It is opt-in registration and is not wired into the CLI.
@@ -55,6 +57,7 @@ func RegisterPack(r *tr.Registry) {
 		r.RegisterMutatingFunc(name, tr.TierDevOps, runtime.run)
 	}
 	r.RegisterMutatingFunc("seaweed_read_restart", tr.TierChaos, runtime.run)
+	r.RegisterMutatingFunc("seaweed_kv_soak", tr.TierChaos, runtime.run)
 }
 func invalid(action string, err error) (map[string]string, error) {
 	const hint = "correct inventory against seaweed.inventory/v1 and preserve requested scope"

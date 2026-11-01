@@ -34,6 +34,7 @@ type Plan struct {
 	Collect   []Step        `json:"collect"`
 	Smoke     SmokeSettings `json:"smoke"`
 	Restart   *ReadRestart  `json:"restart,omitempty"`
+	Soak      *SoakPlan     `json:"soak,omitempty"`
 }
 type ReadRestart struct {
 	Freeze      bool   `json:"freeze,omitempty"`
@@ -57,7 +58,7 @@ func (p Plan) steps(phase string) []Step {
 		return p.Preflight
 	case phases[1]:
 		return append(append([]Step{}, p.Deploy...), p.Ready...)
-	case phases[2], "seaweed_read_restart":
+	case phases[2], "seaweed_read_restart", "seaweed_kv_soak":
 		return p.Workload
 	case phases[3]:
 		return p.Collect
@@ -140,6 +141,9 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 	if len(scenario.Phases) != len(phases) {
 		return errors.New("complete five-phase scenario required")
 	}
+	if p.Soak != nil && p.Restart != nil {
+		return errors.New("soak and restart are exclusive")
+	}
 	for i, phase := range scenario.Phases {
 		if phase.Always != (i == 4) || phase.Parallel || phase.Repeat > 1 || len(phase.Actions) != 1 {
 			return errors.New("phase shape changed")
@@ -149,12 +153,18 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		if i == 2 && p.Restart != nil {
 			want = "seaweed_read_restart"
 		}
+		if i == 2 && p.Soak != nil {
+			want = "seaweed_kv_soak"
+		}
 		if a.Action != want || a.IgnoreError || a.Retry != 0 || a.Node != "" || a.Target != "" || a.Replica != "" || len(a.Params) != 0 {
 			return errors.New("phase skipped/reordered/retried/ignored or redirected")
 		}
 	}
 	b := in.Binding
-	if p.Profile == "m01-m02-v1" && b.HardDeadline.Sub(time.Now()) > 10*time.Minute {
+	now := time.Now()
+	// The ten-minute rule stays for every non-soak plan; a soak plan's ceiling
+	// is SoakHorizon, checked in bindSoak (contract r3, R3).
+	if p.Profile == "m01-m02-v1" && p.Soak == nil && b.HardDeadline.Sub(now) > 10*time.Minute {
 		return errors.New("M01/M02 profile requires original hard deadline within ten minutes; future windows cannot launch early")
 	}
 	rdma := d.Target == "onprem" && (d.Transport == "rc" || d.Transport == "dc") && b.Transport == "rdma"
@@ -220,7 +230,10 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 					return errors.New("workload requires a declared client")
 				}
 				var err error
-				if p.Restart != nil {
+				if p.Soak != nil {
+					// The soak worker's exact admission is step 3; until then the
+					// whole plan refuses below (ErrSoakWorkerUnadmitted).
+				} else if p.Restart != nil {
 					err = checkReadTask(j, in, d, s.Host, p.Smoke, "seed", "dc")
 				} else {
 					err = checkSmoke(j, in, d, s.Host, p.Smoke)
@@ -232,7 +245,7 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 				return errors.New("probe role must be empty")
 			}
 			if p.Profile == "m01-m02-v1" && kind != "workload" {
-				if err := checkProfile(j, in, d, s.Host, kind, s.Role, p.Smoke); err != nil {
+				if err := checkProfile(j, in, d, s.Host, kind, s.Role, p.profileSettings(false)); err != nil {
 					return err
 				}
 			}
@@ -264,6 +277,14 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 	}
 	if p.Restart != nil {
 		return bindRestart(p, d, in, used)
+	}
+	if p.Soak != nil {
+		if err := bindSoak(p, d, in, used, now); err != nil {
+			return err
+		}
+		// Staging refusal (contract r3, R2): no phase of a soak plan binds until
+		// step 3 admits the exact worker, so a soak plan has zero effects.
+		return ErrSoakWorkerUnadmitted
 	}
 	return nil
 }
@@ -335,6 +356,11 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 	}
 	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || sealed.Phases[s.next].Actions[0].Action != act.Action {
 		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
+	}
+	if act.Action == "seaweed_kv_soak" {
+		out, err = r.soak(ctx, a, p, d, in, s)
+		s.terminal = err
+		return out, err
 	}
 	if act.Action == "seaweed_read_restart" {
 		out, err = r.restart(ctx, a, p, d, in, s)
