@@ -303,6 +303,58 @@ def prepare_filer_replacement(root, original):
         sock.unlink()
 
 
+STATE_MARKER = '.sw-test-runner-state'
+
+
+def stable_file(path):
+    """(stat, sha256) of a regular file opened without following symlinks."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(path.name + ' is not a regular file')
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            return info, stream_digest(stream)
+    finally:
+        os.close(fd)
+
+
+def master_state(root):
+    """Identity of the master's retained state. Mutable raft contents are
+    deliberately not hashed. A directory's inode alone cannot tell a deleted
+    and recreated mdir (ext4 reuses the freed number at once), so the join
+    also binds a runner marker written inside it at the first launch, and the
+    write-once master.toml, each by inode, ctime and bytes. ctime cannot be
+    carried over by a copy."""
+    mdir = os.lstat(root / 'master')
+    if not stat.S_ISDIR(mdir.st_mode):
+        raise ValueError('master state dir is not a directory')
+    marker, marker_sha = stable_file(root / 'master' / STATE_MARKER)
+    toml, toml_sha = stable_file(root / 'master.toml')
+    return dict(mdir_dev=mdir.st_dev, mdir_ino=mdir.st_ino, mdir_uid=mdir.st_uid,
+                mdir_mode=stat.S_IMODE(mdir.st_mode),
+                marker_ino=marker.st_ino, marker_ctime_ns=marker.st_ctime_ns, marker_sha256=marker_sha,
+                toml_dev=toml.st_dev, toml_ino=toml.st_ino, toml_ctime_ns=toml.st_ctime_ns,
+                toml_mtime_ns=toml.st_mtime_ns, toml_sha256=toml_sha)
+
+
+def check_master_state(root, old, config):
+    """Before a replacement master touches anything: the same retained state
+    as the original generation, never a recreated or swapped one."""
+    want = old.get('master_state')
+    if not isinstance(want, dict):
+        raise ValueError('original master state join missing')
+    got = master_state(root)
+    if got != want:
+        raise ValueError('master state continuity differs (recreated, swapped or rewritten)')
+    if got['mdir_uid'] != os.getuid() or got['mdir_mode'] != 0o700:
+        raise ValueError('master state dir not private')
+    if not any(e.name != STATE_MARKER for e in os.scandir(root / 'master')):
+        raise ValueError('master state dir is empty')
+    if got['toml_sha256'] != hashlib.sha256(master_toml(config).encode()).hexdigest():
+        raise ValueError('replacement master config differs')
+
+
 def launch(config, role, replacement=False):
     remaining(config)
     root = private_root(config)
@@ -327,7 +379,7 @@ def launch(config, role, replacement=False):
         if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022:
             raise ValueError('product must not be group/other writable')
         if replacement:
-            if role not in ('volume','filer'):raise ValueError('unsupported replacement role')
+            if role not in ('volume','filer','master'):raise ValueError('unsupported replacement role')
             old=json.loads((root / (role+'-generation.json')).read_text())
             if old['boot_id'] != config['boot_id']:raise ValueError('replacement boot differs')
             try:current=process(old['pid'])
@@ -338,15 +390,19 @@ def launch(config, role, replacement=False):
             if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o022:
                 raise ValueError('replacement data dir not private')
             if role == 'filer':prepare_filer_replacement(root, old)
+            if role == 'master':check_master_state(root, old, config)
         else:
             (root / role).mkdir(mode=0o700, exist_ok=False)
             if role == 'filer':(root / role / 'ldb2').mkdir(mode=0o700)
         for sub in ('home', 'cache', 'tmp'):
             (root / sub).mkdir(mode=0o700, exist_ok=True)
-        if role == 'master':
+        if role == 'master' and not replacement:
             # Select a private config instead of an unrelated /etc master.toml.
             with (root / 'master.toml').open('x') as stream:
                 stream.write(master_toml(config))
+            marker = os.open(root / 'master' / STATE_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(marker, 'w') as stream:
+                stream.write(os.urandom(16).hex() + '\n')
         if role == 'filer' and not replacement:
             with os.fdopen(os.open(root / 'filer.toml', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
                 stream.write(filer_config(root))
@@ -354,6 +410,10 @@ def launch(config, role, replacement=False):
         if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
+        if role == 'master':
+            # The state join a replacement must match (R5); the original's is
+            # the reference, a replacement re-records what it verified.
+            identity['master_state'] = master_state(root)
         with (root / (role + ('-replacement' if replacement else '') + '-generation.json')).open('x') as stream:
             json.dump(identity, stream, sort_keys=True)
         print(json.dumps(dict(event='PRODUCT_EXEC', **identity)), flush=True)
@@ -583,6 +643,7 @@ def main():
     parser.add_argument('--role', default='')
     parser.add_argument('--replacement-volume', action='store_true')
     parser.add_argument('--replacement-filer', action='store_true')
+    parser.add_argument('--replacement-master', action='store_true')
     args = parser.parse_args()
     config = json.loads(args.config)
     remaining(config)
@@ -590,6 +651,8 @@ def main():
         raise ValueError('replacement flag requires volume deploy')
     if args.replacement_filer and ((args.action,args.role)!=('deploy','filer') or args.replacement_volume):
         raise ValueError('replacement flag requires filer deploy only')
+    if args.replacement_master and ((args.action,args.role)!=('deploy','master') or args.replacement_volume or args.replacement_filer):
+        raise ValueError('replacement flag requires master deploy only')
     if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != config['boot_id']:
         raise ValueError('host rebooted since inventory')
     if args.action == 'preflight':
@@ -599,7 +662,7 @@ def main():
         row['ports'] = free_service_ports(config)
         row['process_limits'] = Path('/proc/self/limits').read_text()
     elif args.action == 'deploy':
-        launch(config, args.role, args.replacement_volume or args.replacement_filer)
+        launch(config, args.role, args.replacement_volume or args.replacement_filer or args.replacement_master)
         raise AssertionError('exec returned')
     elif args.action == 'ready':
         row = ready(config)

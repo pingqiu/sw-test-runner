@@ -416,6 +416,104 @@ class RotationConfig(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in root.iterdir()), [], 'no dir, config or generation file')
 
 
+@unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
+class MasterReplacementState(unittest.TestCase):
+    """R5: a replacement master reuses the original's retained state, never a
+    recreated or swapped one, and never while the original is live."""
+
+    def setUp(self):
+        temporary = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temporary)
+        base = Path(temporary)
+        self.root, release = base / 'run', base / 'release'
+        self.root.mkdir(mode=0o700)
+        (release / 'bin').mkdir(parents=True)
+        product = release / 'bin' / 'weed'
+        shutil.copyfile('/bin/true', product)  # exits at once: the original is settled
+        product.chmod(0o755)
+        self.config = dict(LaunchContract().config(), rotation=RotationConfig.ROTATION,
+                           root=str(self.root), release=str(release), roles=['master'], host='m02',
+                           boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                           products={'weed': hashlib.sha256(product.read_bytes()).hexdigest()},
+                           deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                                     datetime.timedelta(seconds=10)).isoformat())
+        first = self.deploy(False)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        (self.root / 'master' / 'log').write_bytes(b'raft')  # what the product leaves behind
+
+    def deploy(self, replacement):
+        argv = [sys.executable, '-I', '-B', profile.__file__, '--config', json.dumps(self.config),
+                '--action', 'deploy', '--role', 'master'] + (['--replacement-master'] if replacement else [])
+        return subprocess.run(argv, capture_output=True, timeout=12)
+
+    def refused(self, reason):
+        result = self.deploy(True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(reason.encode(), result.stderr)
+        self.assertNotIn(b'PRODUCT_EXEC', result.stdout)
+        self.assertFalse((self.root / 'master-replacement-generation.json').exists())
+
+    def test_retained_state_is_replaced_without_rewriting_config(self):
+        toml = (self.root / 'master.toml').stat()
+        result = self.deploy(True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'PRODUCT_EXEC', result.stdout)
+        again = (self.root / 'master.toml').stat()
+        self.assertEqual((again.st_ino, again.st_mtime_ns), (toml.st_ino, toml.st_mtime_ns))
+        record = json.loads((self.root / 'master-replacement-generation.json').read_text())
+        original = json.loads((self.root / 'master-generation.json').read_text())
+        self.assertEqual(record['master_state'], original['master_state'])
+
+    def test_mdir_recreated_with_copied_bytes_is_refused(self):
+        (self.root / 'master').rename(self.root / 'master.old')
+        shutil.copytree(self.root / 'master.old', self.root / 'master')
+        (self.root / 'master').chmod(0o700)
+        self.refused('continuity differs')
+
+    def test_mdir_deleted_and_recreated_with_same_inode_is_refused(self):
+        # ext4 hands the freed inode straight back, so dev/inode alone passes this.
+        saved = {p.name: p.read_bytes() for p in (self.root / 'master').iterdir()}
+        before = (self.root / 'master').lstat().st_ino
+        shutil.rmtree(self.root / 'master')
+        (self.root / 'master').mkdir(mode=0o700)
+        for name, data in saved.items():
+            (self.root / 'master' / name).write_bytes(data)
+        if (self.root / 'master').lstat().st_ino != before:
+            self.skipTest('this filesystem did not reuse the inode')
+        self.refused('continuity differs')
+
+    def test_missing_state_marker_is_refused(self):
+        (self.root / 'master' / profile.STATE_MARKER).unlink()
+        self.refused(profile.STATE_MARKER)
+
+    def test_config_recreated_with_identical_bytes_is_refused(self):
+        data = (self.root / 'master.toml').read_bytes()
+        (self.root / 'master.toml').unlink()
+        (self.root / 'master.toml').write_bytes(data)
+        self.refused('continuity differs')
+
+    def test_symlinked_config_is_refused(self):
+        (self.root / 'master.toml').rename(self.root / 'real.toml')
+        (self.root / 'master.toml').symlink_to(self.root / 'real.toml')
+        self.refused('Too many levels of symbolic links')
+
+    def test_still_live_original_is_refused(self):
+        path = self.root / 'master-generation.json'
+        record = json.loads(path.read_text())
+        me = profile.process(os.getpid())  # a live process stands in for the original
+        record.update(pid=me['pid'], starttime=me['starttime'])
+        path.write_text(json.dumps(record))
+        self.refused('still live')
+
+    def test_empty_state_dir_is_refused(self):
+        (self.root / 'master' / 'log').unlink()
+        self.refused('state dir is empty')
+
+    def test_changed_rotation_config_is_refused(self):
+        self.config['rotation'] = dict(RotationConfig.ROTATION, check_interval_seconds=3)
+        self.refused('replacement master config differs')
+
+
 class AssignReadiness(unittest.TestCase):
     """ready() against a local master that refuses Assign until its warm-up ends."""
     LAYOUT = dict(collection='lmcache', replication='000', ttl='2h')
