@@ -301,8 +301,10 @@ func transportOnly(raw []byte) bool {
 	metadata := `(?:\n\n  with module\.run\.azurerm_public_ip\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_public_ip" "node":\n  [0-9]+: resource "azurerm_public_ip" "node" \{)?`
 	nicEndpoint := `https://management\.azure\.com/subscriptions/[a-f0-9-]{36}/resourceGroups/[A-Za-z0-9_-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9_-]+\?api-version=2025-07-01`
 	nic := `creating Network Interface \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nNetwork Interface Name: "[A-Za-z0-9_-]+"\): performing CreateOrUpdate: Put "` + nicEndpoint + `": HTTP response was nil; connection may have been reset`
+	// Observed run5 destroy: NIC Delete reset with no source context.
+	nicDelete := `deleting Network Interface \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nNetwork Interface Name: "[A-Za-z0-9_-]+"\): performing Delete: Delete "` + nicEndpoint + `": HTTP response was nil; connection may have been reset`
 	nicMetadata := `\n\n  with module\.run\.azurerm_network_interface\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_network_interface" "node":\n  [0-9]+: resource "azurerm_network_interface" "node" \{`
-	message := `(?:(?:` + transport + `|` + publicIP + `)` + metadata + `|` + nic + nicMetadata + `)`
+	message := `(?:(?:` + transport + `|` + publicIP + `)` + metadata + `|` + nic + nicMetadata + `|` + nicDelete + `)`
 	whole := `\A(?:` + message + `|Error: ` + message + `(?:\s+Error: ` + message + `)*)\z`
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
@@ -401,7 +403,13 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 				}
 			}
 			b, e := once(cx, tool, args...)
-			if e == nil || !eligible || attempt == 2 || !transportOnly(b) {
+			// Judge the tool's own diagnostics: Terraform's stdout carries refresh,
+			// plan and progress text, never the failure being classified.
+			diagnostics, failed := b, (*toolError)(nil)
+			if errors.As(e, &failed) {
+				diagnostics = failed.stderr
+			}
+			if e == nil || !eligible || attempt == 2 || !transportOnly(diagnostics) {
 				return b, e
 			}
 			if tool == "terraform" && args[0] == "apply" && attempt == 0 {
@@ -676,10 +684,19 @@ func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, erro
 	cmd.WaitDelay = 3 * time.Second
 	b, e := cmd.Output()
 	if e != nil {
-		return append(b, stderr.Bytes()...), fmt.Errorf("%s: %w", tool, e)
+		return append(b, stderr.Bytes()...), &toolError{fmt.Errorf("%s: %w", tool, e), stderr.Bytes()}
 	}
 	return b, nil
 }
+
+// toolError keeps a failed tool's stderr apart from its stdout for the
+// transport classifier; the returned output and message are unchanged.
+type toolError struct {
+	error
+	stderr []byte
+}
+
+func (e *toolError) Unwrap() error { return e.error }
 
 // Only the VM's server key enters private cloud-init/state. The controller's
 // client authentication key never leaves the controller.
