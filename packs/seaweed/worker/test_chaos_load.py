@@ -1,12 +1,14 @@
 """CPU controls for chaos_load.py; fake native connector and fake S3, no hosts."""
-import http.server, json, pathlib, sys, tempfile, threading, time, unittest
+import http.server, json, pathlib, re, sys, tempfile, threading, time, unittest
 from unittest import mock
 from urllib.error import URLError
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import chaos_load
 from test_kv_smoke import FakeConnector
 
-C = dict(run_id='cpu', client='client1-c1', transport='http', keys=16, length=64, root='/testops/cpu/client1-c1', filer_http='http://filer:8888')
+# The client name carries the stage-2 case name, uppercase included (run 7c).
+C = dict(run_id='cpu', client='client1-C1-single-kill', transport='http', keys=16, length=64, root='/testops/cpu/client1-C1-single-kill', filer_http='http://filer:8888')
+BUCKET = re.compile(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]')
 
 
 class Rig:
@@ -28,9 +30,13 @@ class Rig:
         self.conn.submit_batch_get = submit_get
 
     def s3(self, url, data=None, method='GET'):
+        if not BUCKET.fullmatch(url.split('/')[3]):  # S3 bucket naming rules, as the gateway applies them
+            return False, 'http 400 InvalidBucketName'
         if self.s3_mode == 'hang':
             raise TimeoutError('S3 op exceeded 30 s')
         if method == 'PUT':
+            if url.count('/') == 3 and url in self.store:  # the bucket exists: SeaweedFS answers 409
+                return False, 'http 409'
             if url.endswith('-w2') and self.s3_mode == 'put-fails':
                 return False, 'http 503'
             self.store[url] = data
@@ -69,19 +75,34 @@ class ChaosLoadControls(unittest.TestCase):
         self.assertEqual((out['acked_kv'], out['acked_s3']), (sum(x['kind'] == 'kv' for x in rows), sum(x['kind'] == 's3' for x in rows)))
         self.assertTrue(all(x['event'] == 'ACK' and x['fids'] for x in rows))
 
+    def test_every_client_and_case_shares_one_valid_bucket(self):
+        # A bucket is a collection with its own volumes; one per client per case
+        # ran out of free slots in the M02 rehearsal (run 7d would have 9 at 001).
+        names = {chaos_load.bucket_name(dict(C, run_id='azure10-m01-20261101t135000z', client=cl))
+                 for cl in ('client1-C1-single-kill', 'client2-C2-rolling', 'client3-C6-netem')}
+        self.assertEqual(names, {'testops-azure10-m01-20261101t135000z-chaos'})
+        self.assertTrue(BUCKET.fullmatch(names.pop()))
+
+    def test_second_client_writes_into_the_existing_bucket(self):
+        r = Rig()
+        r.run('load')
+        with mock.patch.dict(C, client='client2-C2-rolling', root='/testops/cpu/client2-C2-rolling'):
+            out = r.run('load')
+        self.assertTrue(out['acked_s3'] and all(o['exact'] for o in out['outcomes']))
+
     def test_kv_miss_is_a_recorded_failure_not_fatal(self):
-        r = Rig(kv_miss={'client1-c1-w0'})
+        r = Rig(kv_miss={'client1-C1-single-kill-w0'})
         out = r.run('load')
         failed = [o for o in out['outcomes'] if not o['exact']]
-        self.assertTrue(failed and all(o['kind'] == 'kv_get' and o['key'] == 'client1-c1-w0' for o in failed))
+        self.assertTrue(failed and all(o['kind'] == 'kv_get' and o['key'] == 'client1-C1-single-kill-w0' for o in failed))
 
     def test_failed_put_is_unknown_and_never_read_back(self):
         r = Rig(s3_mode='put-fails')
         out = r.run('load')
-        self.assertIn('client1-c1-w2', out['unknown'])
+        self.assertIn('client1-C1-single-kill-w2', out['unknown'])
         keys = [json.loads(x)['key'] for x in r.journal.read_text().splitlines()]
-        self.assertNotIn('client1-c1-w2', keys)
-        self.assertNotIn('client1-c1-w2', [o['key'] for o in out['outcomes'] if o['kind'] == 's3_get'])
+        self.assertNotIn('client1-C1-single-kill-w2', keys)
+        self.assertNotIn('client1-C1-single-kill-w2', [o['key'] for o in out['outcomes'] if o['kind'] == 's3_get'])
 
     def test_wrong_bytes_and_hangs_are_fatal(self):
         for mode, error in (('wrong', AssertionError), ('hang', TimeoutError)):
@@ -92,7 +113,7 @@ class ChaosLoadControls(unittest.TestCase):
         self.assertEqual(Rig().run('readback')['status'], 'PASS')
         r = Rig()
         r.run('load')
-        r.kv_miss = {'client1-c1-w0'}
+        r.kv_miss = {'client1-C1-single-kill-w0'}
         with self.assertRaises(AssertionError):
             with mock.patch.object(chaos_load, 's3', r.s3):
                 chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
@@ -101,7 +122,7 @@ class ChaosLoadControls(unittest.TestCase):
         r = Rig()
         r.run('load')
         acked = [json.loads(x)['key'] for x in r.journal.read_text().splitlines() if json.loads(x)['kind'] == 's3']
-        r.store['http://s3/testops-cpu-client1-c1/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
+        r.store['http://s3/testops-cpu-chaos/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
         with self.assertRaises(AssertionError), mock.patch.object(chaos_load, 's3', r.s3):
             chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
 

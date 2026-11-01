@@ -5,7 +5,7 @@ for that key only and is never read back. Reads target ACKed keys only.
 Wrong bytes, or an op that does not complete within 30 s, are fatal (rules 1
 and 2); a completed error is a recorded outcome, judged by the controller.
 """
-import argparse, hashlib, http.client, json, pathlib, sys, time
+import argparse, hashlib, http.client, json, pathlib, re, sys, time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -48,6 +48,18 @@ def s3(url, data=None, method='GET'):
         return False, type(e).__name__
 
 
+def bucket_name(c):
+    """One S3 bucket per run, shared by every client and case: keys already carry
+    the client and case. Each bucket is its own collection, and a collection
+    grows 6 volumes (12 slots at 001), so a bucket per client per case runs out
+    of free slots on the 10-node cluster (M02 rehearsal before run 7d). S3 names
+    are 3-63 chars of [a-z0-9-] (run 7c)."""
+    name = ('testops-' + c['run_id'] + '-chaos').lower()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', name):
+        raise ValueError('invalid S3 bucket name ' + name)
+    return name
+
+
 def s3_body(c, key):
     block = hashlib.sha256((c['run_id'] + '/' + key).encode()).digest()
     return (block * (S3_LENGTH // 32))[:S3_LENGTH]
@@ -60,8 +72,10 @@ def fids_of(c, path):
 
 
 def load(conn, c, s3_base, seconds, journal, helper):
-    bucket = s3_base + '/testops-' + c['run_id'] + '-' + c['client']
-    assert s3(bucket, b'', 'PUT')[0], 'S3 bucket create'
+    bucket = s3_base + '/' + bucket_name(c)
+    # Clients share the bucket, and creating an existing one answers 409
+    # (M02 rehearsal), so it is ready when the PUT succeeds or a HEAD finds it.
+    assert s3(bucket, b'', 'PUT')[0] or s3(bucket, None, 'HEAD')[0], 'S3 bucket create'
     acked = {'kv': [], 's3': []}
     outcomes, unknown, n = [], [], 0
     started = time.monotonic()
@@ -92,7 +106,7 @@ def load(conn, c, s3_base, seconds, journal, helper):
             if kind in ('kv_set', 's3_put'):
                 if ok:
                     acked[kind[:2]].append(key)
-                    path = c['root'] + '/' + key if kind == 'kv_set' else '/buckets/testops-%s-%s/%s' % (c['run_id'], c['client'], key)
+                    path = c['root'] + '/' + key if kind == 'kv_set' else '/buckets/%s/%s' % (bucket_name(c), key)
                     try:  # the ACK stands even if its fid lookup fails (e.g. a filer restart)
                         fids = fids_of(c, path)
                     except (OSError, ValueError, http.client.HTTPException):
@@ -110,7 +124,7 @@ def load(conn, c, s3_base, seconds, journal, helper):
 
 
 def readback(conn, c, s3_base, journal, helper):
-    bucket = s3_base + '/testops-' + c['run_id'] + '-' + c['client']
+    bucket = s3_base + '/' + bucket_name(c)
     rows = [json.loads(x) for x in pathlib.Path(journal).read_text().splitlines()]
     for i, r in enumerate(rows):
         t0 = time.monotonic()

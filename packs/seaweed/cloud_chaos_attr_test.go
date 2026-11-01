@@ -1,6 +1,9 @@
 package seaweed
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // One op per second from 0.5 s; fail() picks the failed ones; kinds cycle.
 func attrOps(n int, fail func(i int, start float64) bool) []chaosOp {
@@ -43,6 +46,18 @@ func TestChaosPerOpExcusal(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+	// A load that never ACKs one protocol is NOT_COVERED (Claude01 6ae74dfb).
+	for _, kind := range []string{"kv_set", "s3_put"} {
+		ops := attrOps(160, func(int, float64) bool { return false })
+		for i := range ops {
+			if ops[i].Kind == kind {
+				ops[i].Kind = "kv_get"
+			}
+		}
+		if err := checkChaosOps(ops, chaosWindows{Marks: two}); err == nil || !strings.HasPrefix(err.Error(), "NOT_COVERED") {
+			t.Fatalf("no %s ACK: %v", kind, err)
+		}
 	}
 	ops := attrOps(10, func(int, float64) bool { return false })
 	ops[3].Op = 7

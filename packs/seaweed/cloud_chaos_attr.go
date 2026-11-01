@@ -53,6 +53,15 @@ func checkChaosOps(ops []chaosOp, w chaosWindows) error {
 	if ops[0].Started >= marks[0] || ops[len(ops)-1].Started <= marks[len(marks)-1] {
 		return errors.New("NOT_COVERED: load does not span the fault actions")
 	}
+	// Every client must exercise both protocols: zero KV or zero S3 ACKs is
+	// NOT_COVERED, never PASS (Claude01 6ae74dfb).
+	acked := map[string]bool{}
+	for _, o := range ops {
+		acked[o.Kind] = acked[o.Kind] || o.Exact
+	}
+	if !acked["kv_set"] || !acked["s3_put"] {
+		return fmt.Errorf("NOT_COVERED: KV ACKed %t, S3 ACKed %t", acked["kv_set"], acked["s3_put"])
+	}
 	for _, f := range ops {
 		if f.Exact {
 			continue
