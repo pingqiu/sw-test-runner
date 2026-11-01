@@ -520,6 +520,9 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		defer cancel()
 		out.Effects = append(out.Effects, "terraform destroy")
 		_, de := call(cx, "terraform", "destroy", "-parallelism=3", "-input=false", "-auto-approve", "-lock-timeout=0s", "-no-color")
+		if d.Cluster {
+			de = errors.Join(de, sweepOrphans(cx, d.Subscription, d.Group, filepath.Base(c.Output), call))
+		}
 		ids, ve := list(cx)
 		out.Remaining = ids
 		out.RemainingObserved = ve == nil
