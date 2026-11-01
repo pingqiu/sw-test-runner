@@ -57,10 +57,6 @@ func (f *chaos2Fake) handle(id string) func(string, ssh.Channel) uint32 {
 			name := inner[strings.Index(inner, "/chaos-")+7:]
 			f.cases[id] = name[:strings.Index(name, ".journal")]
 			rec("load " + f.cases[id])
-			if f.variant == "load-hang" {
-				fmt.Fprintln(ch, `{"status": "FAIL", "code": "CHAOS_LOAD_FAILED", "error": "TimeoutError: native completion deadline", "inflight": {"op": 21, "kind": "kv_get"}}`)
-				return 1
-			}
 			fmt.Fprint(ch, f.load(id, base))
 		case strings.Contains(inner, "--stage readback"):
 			rec("readback")
@@ -217,24 +213,6 @@ func TestChaos2SetsRunEveryCase(t *testing.T) {
 				t.Fatal(log)
 			}
 		})
-	}
-}
-
-// Run 7f: every C3 load died and the clients' journals went with the VMs. A
-// failed load now fetches each client's SUBMIT/ACK journal before returning.
-func TestChaos2FailedLoadKeepsJournals(t *testing.T) {
-	f, e := runChaos2Fake(t, "load-hang", "A")
-	if e == nil || !strings.Contains(e.Error(), "load-client") {
-		t.Fatal("false PASS or wrong error:", e)
-	}
-	fetched := 0
-	for _, l := range f.log {
-		if strings.HasSuffix(l, ":journal") {
-			fetched++
-		}
-	}
-	if fetched != len(chaosClients) {
-		t.Fatalf("journals fetched %d, want %d: %v", fetched, len(chaosClients), f.log)
 	}
 }
 

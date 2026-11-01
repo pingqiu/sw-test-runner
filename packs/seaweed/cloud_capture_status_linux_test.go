@@ -72,6 +72,30 @@ func TestApplicableTailFailureStillCollectsRemainingEvidence(t *testing.T) {
 	}
 }
 
+// Run 7f lost which C3 op hung. The run-level failure capture (fresh pinned
+// connection, its own 60 s budget, before destroy, never replacing the
+// failure) now keeps every stage 2 chaos journal, whichever path failed.
+func TestFailureCaptureKeepsChaosJournals(t *testing.T) {
+	bin, root := t.TempDir(), t.TempDir()
+	t.Setenv("REVIEW_CAPTURE_BIN", bin)
+	t.Setenv("REVIEW_CAPTURE_ROOT", root)
+	if e := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexit 0\n"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	submit := `{"event": "SUBMIT", "op": 72, "kind": "kv_set", "key": "client3-C3-partition-w72"}`
+	if e := os.WriteFile(filepath.Join(root, "chaos-C3-partition.journal"), []byte(submit+"\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	raw, c, _ := clusterInput(t, false, "reviewer-journal-shell")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = RunCloudHTTP(ctx, raw, c) // this fixture runs the capture either way
+	b, e := os.ReadFile(filepath.Join(c.Output, "collect/meta/cloud-services.log"))
+	if e != nil || !strings.Contains(string(b), "chaos-C3-partition.journal ===") || !strings.Contains(string(b), submit) {
+		t.Fatalf("chaos journal not captured: %v\n%s", e, b)
+	}
+}
+
 func TestReviewerJournalCaptureFailureMustFailCluster(t *testing.T) {
 	for _, code := range []int{0, 23} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {

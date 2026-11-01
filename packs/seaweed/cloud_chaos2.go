@@ -207,11 +207,7 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		return e
 	}
 	if loadErr != nil {
-		// Run 7f lost which op hung: keep each client's SUBMIT/ACK journal
-		// (saved as this case's step records) before the error ends the run.
-		for _, id := range chaosClients {
-			_, _ = r.step(ctx, id, "journal-"+id, 30, "cat "+cloudQuote(hosts[id].RunRoot+"/chaos-"+x.Name+".journal"))
-		}
+		// The run-level failure capture keeps each client's chaos journal.
 		return loadErr
 	}
 	victims := append([]string{}, x.Victims...)
