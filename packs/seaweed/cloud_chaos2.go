@@ -54,6 +54,8 @@ func chaosPartitionHealScript() string {
 	return `sudo -n sh -c ` + cloudQuote(chaosHeal) + `; if sudo -n iptables -S SWCHAOS >/dev/null 2>&1; then exit 1; fi; echo HEALED`
 }
 
+const chaosNetemProbe = `echo "KERNEL $(uname -r)"; if out=$(modprobe -n -v sch_netem 2>&1); then echo "SCH_NETEM AVAILABLE $out"; else echo "SCH_NETEM MISSING $out"; fi; true`
+
 func chaosNetemScript(metaIP, timer string) string {
 	return chaosDev(metaIP) + `modinfo sch_netem >/dev/null; sudo -n systemd-run --unit=` + cloudQuote(timer) + ` --on-active=150 /bin/sh -c "tc qdisc del dev $dev root || true"; ` +
 		`sudo -n tc qdisc add dev "$dev" root netem delay 50ms 10ms loss 1%; tc qdisc show dev "$dev" | grep -q netem; echo "NETEM $dev"`
@@ -84,6 +86,18 @@ func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) er
 		}
 		defer n.Close()
 		nodes[id] = n
+	}
+	// Read-only probe so run B knows before C6 whether netem exists (Claude01
+	// 6ae71cae): kernel version and a dry-run modprobe; never installs, never fails.
+	if c.ChaosSet == "A" {
+		dir := filepath.Join(c.Output, "chaos", "netem-probe")
+		if e := os.MkdirAll(dir, 0700); e != nil {
+			return e
+		}
+		probe := &chaosRun{dir: dir, nodes: nodes}
+		if _, e := probe.step(ctx, "vol1", "netem-probe", 30, chaosNetemProbe); e != nil {
+			return e
+		}
 	}
 	gens := map[string]int{} // host/role -> live generation (1 = deploy's unit)
 	for _, x := range set {

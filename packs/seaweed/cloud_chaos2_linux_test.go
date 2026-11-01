@@ -78,6 +78,9 @@ func (f *chaos2Fake) handle(id string) func(string, ssh.Channel) uint32 {
 		case strings.Contains(inner, "SWCHAOS"):
 			rec("heal")
 			fmt.Fprintln(ch, "HEALED")
+		case strings.Contains(inner, "modprobe -n -v sch_netem"):
+			rec("netem-probe")
+			fmt.Fprintln(ch, "KERNEL 6.8.0-1015-azure\nSCH_NETEM AVAILABLE insmod /lib/modules/6.8.0-1015-azure/kernel/net/sched/sch_netem.ko.zst")
 		case strings.Contains(inner, "netem delay"):
 			rec("netem")
 			if f.variant == "netem-missing" {
@@ -196,12 +199,15 @@ func TestChaos2SetsRunEveryCase(t *testing.T) {
 			log := strings.Join(f.log, " ")
 			for _, want := range map[string][]string{
 				// C2 restarts vol1 again after C1: it must kill C1's -g2 unit.
-				"A": {"vol1:kill sw-cloud-pack-cpu-volume ", "vol1:kill sw-cloud-pack-cpu-volume-g2 ", "vol2:partition", "vol2:heal", "vol6:identity sw-cloud-pack-cpu-volume-g2"},
+				"A": {"vol1:netem-probe", "vol1:kill sw-cloud-pack-cpu-volume ", "vol1:kill sw-cloud-pack-cpu-volume-g2 ", "vol2:partition", "vol2:heal", "vol6:identity sw-cloud-pack-cpu-volume-g2"},
 				"B": {"meta:kill sw-cloud-pack-cpu-master ", "meta:kill sw-cloud-pack-cpu-filer ", "vol3:kill", "vol4:kill", "vol1:netem", "vol1:clear"},
 			}[set] {
 				if !strings.Contains(log+" ", want) {
 					t.Fatalf("missing %q in %s", want, log)
 				}
+			}
+			if (set == "B") == strings.Contains(log, "netem-probe") {
+				t.Fatal("netem probe must run in set A only:", log)
 			}
 			if strings.Contains(log, "dead-unit") || strings.Contains(log, "unknown") {
 				t.Fatal(log)

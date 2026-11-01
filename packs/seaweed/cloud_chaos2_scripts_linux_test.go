@@ -25,6 +25,7 @@ func chaos2Rig(t *testing.T, broken string) (dir string, run func(script string)
 	stub("systemd-run", `exit 0`)
 	stub("ip", `echo "10.84.1.10 via 10.84.1.1 dev eth0 src 10.84.1.21 uid 0"`)
 	stub("modinfo", map[bool]string{true: "exit 1", false: "exit 0"}[broken == "no-netem"])
+	stub("modprobe", map[bool]string{true: `echo "FATAL: Module sch_netem not found"; exit 1`, false: `echo "insmod /lib/modules/x/sch_netem.ko"`}[broken == "no-netem"])
 	stub("iptables", `state="$RIG/chain"
 case "$1" in
 -N) touch "$state";;
@@ -120,6 +121,22 @@ func TestChaos2NetemScripts(t *testing.T) {
 		}
 		if broken == "no-netem" && firstIndex(calls(), "systemd-run") >= 0 {
 			t.Fatal("timer installed although sch_netem is missing")
+		}
+	}
+}
+
+// The run-7 probe is read-only: it reports, never installs, never fails.
+func TestChaos2NetemProbeIsReadOnly(t *testing.T) {
+	for broken, want := range map[string]string{"": "SCH_NETEM AVAILABLE", "no-netem": "SCH_NETEM MISSING"} {
+		_, run, calls := chaos2Rig(t, broken)
+		out, e := run(chaosNetemProbe)
+		if e != nil || !strings.Contains(out, "KERNEL ") || !strings.Contains(out, want) {
+			t.Fatalf("%q: %q %v", broken, out, e)
+		}
+		for _, c := range calls() {
+			if strings.HasPrefix(c, "sudo") || strings.HasPrefix(c, "systemd-run") || strings.HasPrefix(c, "tc ") {
+				t.Fatal("probe changed state:", c)
+			}
 		}
 	}
 }
