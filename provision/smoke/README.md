@@ -69,7 +69,15 @@ explicit provider evidence and operator disposition are still required.
 The classifier judges a failed tool's stderr, where Terraform writes its
 diagnostics; its stdout refresh, plan and progress text is not part of the
 failure and stays in the recorded output. Unknown stderr text still refuses
-retry. No Delete form is allowlisted: every lost Delete response goes through
+retry. A lost create PUT (the allowlisted Public IP update and NIC create forms)
+may have completed in Azure outside state, so before the retry each such block's
+exact ARM ID is re-read. Absent: the retry proceeds as before. Present: it is
+imported at the block's source-context address only if it is in this
+subscription/RG, of that address's resource type, and carries this run's exact
+`seaweed_run` tag; the following re-plan must not delete or replace it. Anything
+else refuses, and the sticky apply marker stays. Generic forms that name no
+resource keep the plain retry.
+No Delete form is allowlisted: every lost Delete response goes through
 the re-read rule below, on destroy only. A Delete reset during apply refuses
 (fail-safe; applies create into fresh state).
 

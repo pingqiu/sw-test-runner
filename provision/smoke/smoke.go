@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -308,6 +309,130 @@ func transportOnly(raw []byte) bool {
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
 
+// A lost create PUT may have completed in Azure outside Terraform state
+// (runs 3 and 7b), so a plain retry fails "already exists". Each create-form
+// block's exact ID is re-read: absent leaves the retry as before; present is
+// imported at the block's source address only if it is in this subscription/RG,
+// of the address's resource type, and carries this run's exact seaweed_run tag.
+// Anything else refuses. Generic transport forms that name no resource keep
+// the existing retry.
+func settleCreates(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), raw []byte, subscription, group, run string) ([]string, error) {
+	types := map[string]string{"azurerm_public_ip": "Microsoft.Network/publicIPAddresses", "azurerm_network_interface": "Microsoft.Network/networkInterfaces"}
+	// Route by "names an ARM resource ID", whatever the accepted form: the
+	// CreateOrUpdate envelope with or without its "Error: " prefix, or the
+	// standalone `Put "<URL>": EOF` (codex01 #52 R1). A Put naming no ARM
+	// resource ID is a generic form and keeps the plain retry.
+	put := regexp.MustCompile(`Put "https://management\.azure\.com(/subscriptions/[^"?]+)[^"]*"`)
+	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.node\["[a-z0-9-]+"\]),`)
+	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
+	var imported []string
+	for _, block := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "Error: ") {
+		m := put.FindStringSubmatch(block)
+		if m == nil {
+			continue
+		}
+		id, a := m[1], address.FindStringSubmatch(block)
+		if a == nil || types[a[2]] == "" || len(id) <= len(scope) || !strings.EqualFold(id[:len(scope)], scope) || !strings.HasPrefix(strings.ToLower(id[len(scope):]), strings.ToLower(types[a[2]])+"/") {
+			return imported, fmt.Errorf("lost create PUT %s has no in-scope address of its type", id)
+		}
+		present, b, e := reread(ctx, call, id)
+		if e != nil || !present {
+			if e != nil {
+				return imported, e
+			}
+			continue
+		}
+		// The sweep's own ownership check: unambiguous decision keys (one exact
+		// seaweed_run, no duplicate or case-aliased keys), this run's tag, this
+		// subscription/RG and a supported type (codex01 #52 R2).
+		if owned, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run); e != nil || len(owned) != 1 || !strings.EqualFold(owned[0], id) {
+			return imported, fmt.Errorf("created %s is not provably this run's: %v", id, e)
+		}
+		if _, e = call(ctx, "terraform", "import", "-input=false", "-lock-timeout=0s", "-no-color", a[1], id); e != nil {
+			return imported, e
+		}
+		imported = append(imported, a[1])
+	}
+	return imported, nil
+}
+
+// planDecisionKeys is resourceDecisionKeys for a plan: before the typed
+// decode, a duplicate or case-aliased decision field anywhere refuses, since
+// Go's decoder would keep the last duplicate (codex01 #52 R3).
+func planDecisionKeys(d *json.Decoder) error {
+	t, e := d.Token()
+	if e != nil || (t != json.Delim('{') && t != json.Delim('[')) {
+		return e
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		if t == json.Delim('{') {
+			k, _ := d.Token()
+			key, _ := k.(string)
+			for _, canonical := range []string{"resource_changes", "address", "change", "actions"} {
+				if strings.EqualFold(key, canonical) {
+					if key != canonical || seen[canonical] {
+						return errors.New("duplicate/case-aliased plan decision key")
+					}
+					seen[canonical] = true
+				}
+			}
+		}
+		if e = planDecisionKeys(d); e != nil {
+			return e
+		}
+	}
+	_, e = d.Token()
+	return e
+}
+
+// keepsImported refuses a re-plan that would delete or replace an import.
+func keepsImported(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), imported []string) error {
+	if len(imported) == 0 {
+		return nil
+	}
+	b, e := call(ctx, "terraform", "show", "-json", "-no-color", "smoke.tfplan")
+	var plan *struct {
+		Changes []struct {
+			Address string
+			Change  *struct{ Actions []string }
+		} `json:"resource_changes"`
+	}
+	if e == nil {
+		e = planDecisionKeys(json.NewDecoder(bytes.NewReader(b)))
+	}
+	if e != nil || json.Unmarshal(b, &plan) != nil || plan == nil || plan.Changes == nil {
+		return errors.Join(e, errors.New("re-plan after import is unreadable"))
+	}
+	// Every import must appear with known actions; only an explicit plan that
+	// keeps it counts as proof (codex01 #52 R3). A no-op plan is fine.
+	known := []string{"no-op", "read", "update", "create", "delete"}
+	for _, address := range imported {
+		found := false
+		for _, rc := range plan.Changes {
+			if rc.Address != address {
+				continue
+			}
+			if rc.Change == nil || len(rc.Change.Actions) == 0 {
+				return fmt.Errorf("re-plan has no actions for imported %s", address)
+			}
+			for _, a := range rc.Change.Actions {
+				if !slices.Contains(known, a) {
+					return fmt.Errorf("re-plan action %q for imported %s is unknown", a, address)
+				}
+			}
+			if slices.Contains(rc.Change.Actions, "delete") {
+				return fmt.Errorf("re-plan would replace imported %s", address)
+			}
+			found = true
+		}
+		if !found {
+			return fmt.Errorf("re-plan does not mention imported %s", address)
+		}
+	}
+	return nil
+}
+
 func sweptOnly(ids, swept []string) bool {
 	for _, id := range ids {
 		found := false
@@ -447,12 +572,16 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	once := call
 	call = func(cx context.Context, tool string, args ...string) ([]byte, error) {
 		eligible := tool == "terraform" && (args[0] == "apply" || args[0] == "destroy") || tool == "az" && args[0] == "resource" && args[1] == "list"
+		var imported []string
 		for attempt := 0; ; attempt++ {
 			if e := cx.Err(); e != nil {
 				return nil, e
 			}
 			if attempt > 0 && tool == "terraform" && args[0] == "apply" {
 				if _, e := once(cx, "terraform", "plan", "-refresh=true", "-input=false", "-lock-timeout=0s", "-out=smoke.tfplan", "-no-color"); e != nil {
+					return nil, e
+				}
+				if e := keepsImported(cx, once, imported); e != nil {
 					return nil, e
 				}
 				if e := cx.Err(); e != nil {
@@ -490,6 +619,13 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 				if w := stamp(filepath.Join(c.Output, "apply-transport-unknown"), "provider settlement required for the failed apply attempt\n"); w != nil {
 					return nil, w
 				}
+			}
+			if tool == "terraform" && args[0] == "apply" {
+				done, ie := settleCreates(cx, once, diagnostics, d.Subscription, d.Group, filepath.Base(c.Output))
+				if ie != nil {
+					return b, errors.Join(e, ie)
+				}
+				imported = append(imported, done...)
 			}
 			timer := time.NewTimer([]time.Duration{10 * time.Second, 30 * time.Second}[attempt])
 			select {
