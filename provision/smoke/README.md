@@ -6,7 +6,7 @@ Only run with the manager launch token, current price/cap check, an empty dedica
 
 ## Private controller configuration
 
-Terraform 1.17.1, Azure CLI and credentials stay on the Linux controller. Use the existing `provision/terraform/azure-validation` tfvars: explicit subscription/RG, westus2 D2s_v5, pinned image, login **public** key and controller /32. Work/hard UTC deadlines include cloud cleanup reserve; hard end must be minute-aligned and <=60 minutes away; cap <=$3. All paths below are absolute.
+Terraform 1.17.1, Azure CLI and credentials stay on the Linux controller. Use the existing `provision/terraform/azure-validation` tfvars: explicit subscription/RG, westus2 D2s_v5, pinned image, login **public** key and controller /32. Work/hard UTC deadlines include cloud cleanup reserve; hard end must be minute-aligned and <=75 minutes away (60 min work + 15 min cleanup reserve); cap <=$3. All paths below are absolute.
 
 ```json
 {

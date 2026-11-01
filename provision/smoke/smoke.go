@@ -512,7 +512,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	if mode == "run" {
 		remaining := time.Until(d.Run.Hard)
-		if remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > time.Hour || !time.Now().Before(d.Run.Work) {
+		// At most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7).
+		if remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > 75*time.Minute || !time.Now().Before(d.Run.Work) {
 			out.Code = "DEADLINE_REFUSED"
 			return
 		}
