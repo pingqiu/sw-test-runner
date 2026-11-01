@@ -136,7 +136,7 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		hosts []inventory.Host
 	}{{"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}, {"before", servers}, {"load", groups["client"]}, {"after", servers}} {
 		if s.name == "load" {
-			if _, e := assessCloudCluster(ctx, d, c.Output, "--before"); e != nil {
+			if _, e := assessCloudCluster(ctx, d, c.Output, "--before", c.Replication); e != nil {
 				return "", e
 			}
 		}
@@ -153,10 +153,10 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 	if e := phase("collect", d.Hosts); e != nil {
 		return "", e
 	}
-	return assessCloudCluster(ctx, d, c.Output, "--assess")
+	return assessCloudCluster(ctx, d, c.Output, "--assess", c.Replication)
 }
 
-func assessCloudCluster(ctx context.Context, d inventory.Document, root, mode string) (string, error) {
+func assessCloudCluster(ctx context.Context, d inventory.Document, root, mode, replication string) (string, error) {
 	owners := map[string]string{}
 	for _, h := range d.Hosts {
 		if contains(h.Roles, "volume") {
@@ -172,7 +172,11 @@ func assessCloudCluster(ctx context.Context, d inventory.Document, root, mode st
 		return "", e
 	}
 	args, _ := json.Marshal(owners)
-	out, e := exec.CommandContext(ctx, "python3", "-I", script, mode, root, string(args)).CombinedOutput()
+	argv := []string{"-I", script, mode, root, string(args)}
+	if replication != "" {
+		argv = append(argv, "2") // copies per volume under 001
+	}
+	out, e := exec.CommandContext(ctx, "python3", argv...).CombinedOutput()
 	result := filepath.Join(root, "cluster-result.json")
 	return result, errors.Join(e, os.WriteFile(result, out, 0600))
 }

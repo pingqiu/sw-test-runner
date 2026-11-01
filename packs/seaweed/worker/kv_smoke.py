@@ -174,7 +174,8 @@ def main():
             return 0
         sys.path[:0] = [c['helper_dir'], c['native_dir']]
         from seaweedkv_native._native import SeaweedKVConnector
-        options = dict(capacity_bytes=1, root=c['root'], collection='lmcache', replication='000')
+        if c.get('replication','000') not in ('000','001'):raise ValueError('replication must be 000 or 001')
+        options = dict(capacity_bytes=1, root=c['root'], collection='lmcache', replication=c.get('replication','000'))
         if args.read_path:
             backing='loader-http' if args.read_path=='http' else 'loader-rdma'
         if args.read_path=='http':os.environ['SW_RDMA_KVCACHE_PUSH_DC']='0'
