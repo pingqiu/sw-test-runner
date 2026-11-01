@@ -20,7 +20,7 @@ import (
 func TestApprovedPostCloseProof(t *testing.T) {
 	for _, mode := range []string{"repeated-close", "always-clear", "fail-final", "always-foreign", "always-foreign-then-good"} {
 		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTestDir(t, ".s0b-postclose-")
 			lock := filepath.Join(dir, "canonical.lock")
 			f, err := os.OpenFile(lock, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 			if err != nil {

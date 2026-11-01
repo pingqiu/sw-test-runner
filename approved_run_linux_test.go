@@ -27,17 +27,27 @@ type approvedFixture struct {
 	runtime               ApprovedRuntime
 }
 
-func newApprovedFixture(t *testing.T) *approvedFixture {
+// privateTestDir is a fresh 0700 directory under the real home. Trusted
+// records refuse any group- or world-writable ancestor (snapshotRecord), so a
+// test that places them must not use t.TempDir(): its root, /tmp, is 1777.
+func privateTestDir(t *testing.T, pattern string) string {
 	t.Helper()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp(home, ".s0b-run-")
+	dir, err := os.MkdirTemp(home, pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func newApprovedFixture(t *testing.T) *approvedFixture {
+	t.Helper()
+	dir := privateTestDir(t, ".s0b-run-")
+	var err error
 	f := &approvedFixture{dir: dir, node: &fakeOwnedNode{ids: map[string]ProcessIdentity{}, specs: map[string]JobSpec{}}}
 	write := func(name string, v any) FilePin {
 		t.Helper()

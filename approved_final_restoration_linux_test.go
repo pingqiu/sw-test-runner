@@ -24,7 +24,7 @@ import (
 func TestApprovedFinalRestorationControls(t *testing.T) {
 	for _, mode := range []string{"ordinary-pass", "ordinary-fail", "cleared-good", "never-cleared", "stale-final"} {
 		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTestDir(t, ".s0b-final-restore-")
 			lock := filepath.Join(dir, "canonical.lock")
 			f, err := os.OpenFile(lock, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 			if err != nil {
