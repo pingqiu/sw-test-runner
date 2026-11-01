@@ -1,0 +1,21 @@
+{
+  "source_sha": "2dbe555245f9f9aa53e1a3af1893e9fa24f33218",
+  "scope": "all-rows",
+  "archive": "V:\\share\\rdma\\claude02-s3-grill-turn1-2dbe5552\\replay\\run-20261029T194018Z-receipts.tgz",
+  "archive_sha256": "41322194b36a7ad667ab5c71a69377be7735a886421df1e98d3e99b1677b881d",
+  "ops_member_sha256": "a06b4dfd9a77f8d917829c822acdab6a6323ea092b62c2e634b1c5373f66ccae",
+  "fault_member_sha256": "14184eed2e1ee990a9842361e861645e319db4fc08982590ba738dec9699a59e",
+  "reference_sources": {
+    "s3_collect.py": "7501d0fcb7863d9ab7514035b973217ac5989b6c1a29290f433ae6ac9ac3c0c1",
+    "s3_workload.py": "92a9f7b6bc783c8692ae32d220949a3f82fd657c0cc89fe2058b3a2ea2398a21"
+  },
+  "raw_rows": 12400,
+  "unique_operations": 12391,
+  "expected": {
+    "status": "PASS",
+    "unexcused": [],
+    "failed": 111,
+    "refusals": 101
+  },
+  "limit": "A1 error attribution only, no independent byte-oracle expectations or native-path proof"
+}
