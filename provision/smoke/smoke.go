@@ -356,6 +356,36 @@ func settleCreates(ctx context.Context, call func(context.Context, string, ...st
 	return imported, nil
 }
 
+// planDecisionKeys is resourceDecisionKeys for a plan: before the typed
+// decode, a duplicate or case-aliased decision field anywhere refuses, since
+// Go's decoder would keep the last duplicate (codex01 #52 R3).
+func planDecisionKeys(d *json.Decoder) error {
+	t, e := d.Token()
+	if e != nil || (t != json.Delim('{') && t != json.Delim('[')) {
+		return e
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		if t == json.Delim('{') {
+			k, _ := d.Token()
+			key, _ := k.(string)
+			for _, canonical := range []string{"resource_changes", "address", "change", "actions"} {
+				if strings.EqualFold(key, canonical) {
+					if key != canonical || seen[canonical] {
+						return errors.New("duplicate/case-aliased plan decision key")
+					}
+					seen[canonical] = true
+				}
+			}
+		}
+		if e = planDecisionKeys(d); e != nil {
+			return e
+		}
+	}
+	_, e = d.Token()
+	return e
+}
+
 // keepsImported refuses a re-plan that would delete or replace an import.
 func keepsImported(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), imported []string) error {
 	if len(imported) == 0 {
@@ -367,6 +397,9 @@ func keepsImported(ctx context.Context, call func(context.Context, string, ...st
 			Address string
 			Change  *struct{ Actions []string }
 		} `json:"resource_changes"`
+	}
+	if e == nil {
+		e = planDecisionKeys(json.NewDecoder(bytes.NewReader(b)))
 	}
 	if e != nil || json.Unmarshal(b, &plan) != nil || plan == nil || plan.Changes == nil {
 		return errors.Join(e, errors.New("re-plan after import is unreadable"))

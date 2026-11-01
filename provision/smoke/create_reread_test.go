@@ -58,6 +58,7 @@ func TestCreateResetRereadsAndImports(t *testing.T) {
 		{"put-eof-naming-an-id-refuses", `Error: Put "https://management.azure.com` + id + `?api-version=2025-07-01": EOF`, object("output"), nil, false, "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 		{"replan-without-the-import-refuses", lost, object("output"), []byte(`{"resource_changes":[]}`), false, "APPLY_FAILED_OR_UNKNOWN", 1, 1},
 		{"replan-unknown-action-refuses", lost, object("output"), plan("forget"), false, "APPLY_FAILED_OR_UNKNOWN", 1, 1},
+		{"replan-case-aliased-key-refuses", lost, object("output"), []byte(`{"resource_changes":[{"address":` + strconvQuote(address) + `,"change":{"Actions":["no-op"]}}]}`), false, "APPLY_FAILED_OR_UNKNOWN", 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -106,3 +107,5 @@ func TestCreateResetRereadsAndImports(t *testing.T) {
 		})
 	}
 }
+
+func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
