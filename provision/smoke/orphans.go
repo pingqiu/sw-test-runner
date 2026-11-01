@@ -52,39 +52,43 @@ func orphanIDs(raw []byte, subscription, group, run string) ([]string, error) {
 // Contract: the dedicated test RG belongs exclusively to the runner Azure lane;
 // the manager serializes run tokens, and no other writer retags its resources.
 // The fresh tag check below is a sanity check, not atomic ownership protection.
-func sweepOrphans(ctx context.Context, subscription, group, run string, call func(context.Context, string, ...string) ([]byte, error)) error {
+// It returns the IDs it confirmed gone (absent on re-read, or deleted and
+// waited), which the final list may still show for a moment.
+func sweepOrphans(ctx context.Context, subscription, group, run string, call func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
 	b, err := call(ctx, "az", "resource", "list", "--subscription", subscription, "--resource-group", group, "--output", "json", "--only-show-errors")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ids, err := orphanIDs(b, subscription, group, run)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	gone := []string{}
 	for _, id := range ids {
 		// An orphan already gone (exact ResourceNotFound) is deleted, not a failure.
 		present, b, err := reread(ctx, call, id)
 		if err != nil {
-			return err
+			return gone, err
 		}
 		if !present {
+			gone = append(gone, id)
 			continue
 		}
 		current, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run)
 		if e != nil || len(current) != 1 || current[0] != id {
-			return fmt.Errorf("orphan tag/scope changed: %s: %v", id, e)
+			return gone, fmt.Errorf("orphan tag/scope changed: %s: %v", id, e)
 		}
 		if present, err = deleteOrphan(ctx, call, id); err != nil {
-			return err
+			return gone, err
 		}
-		if !present {
-			continue
+		if present {
+			if _, err = call(ctx, "az", "resource", "wait", "--deleted", "--ids", id, "--interval", "2", "--timeout", "90", "--only-show-errors"); err != nil {
+				return gone, err
+			}
 		}
-		if _, err = call(ctx, "az", "resource", "wait", "--deleted", "--ids", id, "--interval", "2", "--timeout", "90", "--only-show-errors"); err != nil {
-			return err
-		}
+		gone = append(gone, id)
 	}
-	return nil
+	return gone, nil
 }
 
 // deleteOrphan deletes one ID. A lost response or reset re-reads it: absent is

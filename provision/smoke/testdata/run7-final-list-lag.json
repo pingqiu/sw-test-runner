@@ -1,0 +1,31 @@
+[
+  {
+    "changedTime": "2026-11-01T12:29:38.336639+00:00",
+    "createdTime": "2026-11-01T12:27:54.491551+00:00",
+    "extendedLocation": null,
+    "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/disks/output-vol2-os",
+    "identity": null,
+    "kind": null,
+    "location": "westus2",
+    "managedBy": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/output-vol2",
+    "name": "output-vol2-os",
+    "plan": null,
+    "properties": null,
+    "provisioningState": "Succeeded",
+    "resourceGroup": "dedicated-test",
+    "sku": {
+      "capacity": null,
+      "family": null,
+      "model": null,
+      "name": "StandardSSD_LRS",
+      "size": null,
+      "tier": "Standard"
+    },
+    "tags": {
+      "expires_at": "2026-11-01T13:40:00Z",
+      "managed_by": "sw-test-runner",
+      "seaweed_run": "output"
+    },
+    "type": "Microsoft.Compute/disks"
+  }
+]
