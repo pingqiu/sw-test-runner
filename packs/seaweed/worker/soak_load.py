@@ -2,7 +2,7 @@
 or a control handshake. Four native workers (3 DC + 1 HTTP), the oracle,
 read-after-ACK, the client kill, a read-only topology poller (decision 3),
 bounded evidence files and one bounded summary row on stdout."""
-import argparse, hashlib, json, multiprocessing as mp, random, re, threading, time, urllib.request
+import argparse, hashlib, json, math, multiprocessing as mp, os, random, re, threading, time, urllib.request
 from pathlib import Path
 from soak_native_worker import child, payload
 from soak_oracle import Oracle, OracleError
@@ -53,6 +53,19 @@ def poll_topology(config, stop, out):
         stop.wait(max(0, row['req'] + 2 - time.monotonic()))
 
 
+def read_bound(path, binding):
+    """A controller fault-window file: nofollow, bounded, exactly bound, or None if absent."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, 'rb') as f:
+        row = json.loads(f.read(4097)[:4096])
+    if any(row.get(k) != v for k, v in binding.items()):
+        raise ValueError('fault-window file binding differs: ' + path.name)
+    return row
+
+
 def run(config):
     import sys
     sys.path[:0] = [config['smoke']['helper_dir'], config['smoke']['native_dir']]
@@ -65,6 +78,38 @@ def run(config):
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
     writers, key_writers, submissions, kills = {i: 0 for i in range(4)}, {}, {}, []
     stop = threading.Event()
+    window = dict(episode=None, acked=False, done=set(), allowed={})  # addendum r4
+    bind = dict(run_id=config['smoke']['run_id'], boot_id=boot_id())
+
+    def fault_window():
+        """Pause: stop all dispatch, drain SETs (a GET error now is fatal: no
+        ack, so no Kill), ack the pending GETs; resume only on the exact close."""
+        if window['episode'] is None:
+            for path in sorted(root.glob('fault-pause-*.json')):
+                ep = path.name[len('fault-pause-'):-len('.json')]
+                if ep in window['done'] or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', ep):
+                    continue
+                row = read_bound(path, dict(bind, episode=ep))
+                if row['role'] not in ('volume', 'master') or not math.isfinite(row['pause_mono']):
+                    raise ValueError('fault pause malformed')
+                window.update(episode=ep, acked=False, pause=row, observed=time.monotonic())
+                window['done'].add(ep)
+                return
+        elif not window['acked']:
+            if any(c['action'] == 'set' for c in commands.values()):
+                return  # still draining SETs
+            pending = [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values()]
+            window['allowed'].update((g['op'], window['episode']) for g in pending)
+            p = window['pause']
+            with (root / ('fault-ack-%s.json' % window['episode'])).open('x') as f:
+                json.dump(dict(bind, role=p['role'], episode=window['episode'], pause_mono=p['pause_mono'],
+                               observed_mono=window['observed'], ack_mono=time.monotonic(), inflight_sets=0,
+                               pending_gets=pending), f)
+            window['acked'] = True
+        else:
+            ep = window['episode']
+            if read_bound(root / ('fault-close-%s.json' % ep), dict(bind, episode=ep)) is not None:
+                window['episode'] = None
     log = lambda name, row: files[name].write(json.dumps(row) + '\n')
 
     def start_worker(i):
@@ -80,7 +125,8 @@ def run(config):
 
     def send(i, action, key, length, seed=None, verification=False):
         seq[0] += 1
-        cmd = dict(action=action, key=key, seed=seed or seeds.get(key), length=length, operation_id=str(seq[0]))
+        cmd = dict(action=action, key=key, seed=seed or seeds.get(key), length=length, operation_id=str(seq[0]),
+                   dispatched=time.monotonic())
         if action == 'set':
             cmd['sequence'] = oracle.begin_write(key, payload(cmd['seed'], length)).sequence
         else:
@@ -117,6 +163,8 @@ def run(config):
             elif row['results'] == [False] and row.get('untouched') is True and MISS.search(row.get('error') or ''):
                 event.update(miss=True, fids=list(v.fids))  # judged in 3b by the decision-3 join
                 counts['misses'] += 1
+            elif cmd['operation_id'] in window['allowed']:  # only ever filled at an ack; kept after resume (r9)
+                event.update(fault_error=True, episode=window['allowed'][cmd['operation_id']])  # credited only by 3b, within [P, P+60]
             else:
                 raise OracleError('unexpected GET error ' + str(row.get('error')))
         log('op-events.jsonl', event)
@@ -172,6 +220,10 @@ def run(config):
                 if not workers[i]['process'].is_alive():
                     raise RuntimeError('worker exited unexpectedly')
                 pump(i)
+            fault_window()
+            if window['episode'] is not None:
+                time.sleep(.002)
+                continue  # paused: no new dispatch of any kind until the exact close
             if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
                 kills.append(client_kill(now))
             for i in range(4):
@@ -181,7 +233,7 @@ def run(config):
                 if key is not None:
                     verify.remove(key)
                     send(i, 'get', key, oracle.latest[key].length, verification=True)
-                elif i == owner and now >= next_write and now < end - 30:
+                elif i == owner and now >= next_write and now < end - config['write_stop_s']:
                     cursor += 1
                     slot = rng.randrange(32) if cursor % 7 else 32 + (cursor // 7) % 480
                     key = config['key_prefix'] + hashlib.sha256(('soak-key-%d' % slot).encode()).hexdigest()

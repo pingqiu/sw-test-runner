@@ -50,7 +50,7 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 		"native": map[string]any{"filer_grpc": c.FilerGRPC, "filer_http": c.FilerHTTP, "native_options": map[string]any{
 			"capacity_bytes": 1, "root": "/" + l.Collection, "collection": l.Collection, "replication": l.Replication}},
 		"layout": l, "duration_s": x.DurationS, "pacing_s": x.PacingS, "quiescence_s": int(QuiescenceReserve.Seconds()),
-		"client_kill_at_s": x.ClientKillAtS, "key_prefix": soakLoadKeyPrefix})
+		"client_kill_at_s": x.ClientKillAtS, "key_prefix": soakLoadKeyPrefix, "write_stop_s": 30})
 	if err != nil {
 		return nil, err
 	}

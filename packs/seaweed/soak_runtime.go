@@ -24,6 +24,11 @@ type soakOps interface {
 	// LoadStart returns the load worker's boot-scoped CLOCK_MONOTONIC start
 	// witness, or an error if it is absent or foreign after WitnessWait.
 	LoadStart(ctx context.Context) (float64, error)
+	// The fault-window handshake (addendum r4): the adapter binds run, M01
+	// boot, role and episode into each exclusive file and checks them on the ack.
+	Pause(episode, role string, pauseMono float64) error
+	Ack(ctx context.Context, episode string) (SoakAck, error)
+	Close(episode string, endMono float64) error
 	Mono() (float64, error) // controller CLOCK_MONOTONIC seconds (same M01 boot)
 	Now() time.Time
 	After(d time.Duration) <-chan time.Time
@@ -56,13 +61,55 @@ func (l *loadLatch) completed() bool {
 	}
 }
 
+// SoakAck is the worker's fault-window acknowledgement (addendum r4).
+type SoakAck struct {
+	PauseMono    float64 `json:"pause_mono"`
+	ObservedMono float64 `json:"observed_mono"`
+	AckMono      float64 `json:"ack_mono"`
+	InflightSets int     `json:"inflight_sets"`
+	PendingGETs  []struct {
+		Op        string  `json:"op"`
+		Submitted float64 `json:"submitted"`
+	} `json:"pending_gets"`
+}
+
+// pauseAndAck pauses the worker and validates its exact acknowledgement
+// within AckWait; anything else means no Kill.
+func pauseAndAck(ctx context.Context, ops soakOps, clk *soakClock, f SoakFault) (SoakAck, error) {
+	pause, err := clk.now()
+	if err == nil {
+		err = ops.Pause(f.Episode, f.Role, pause)
+	}
+	if err != nil {
+		return SoakAck{}, err
+	}
+	actx, cancel := context.WithTimeout(ctx, AckWait)
+	defer cancel()
+	a, err := ops.Ack(actx, f.Episode)
+	now, nerr := clk.now()
+	if err = errors.Join(err, nerr); err != nil {
+		return a, err
+	}
+	seen := map[string]bool{}
+	ok := a.PauseMono == pause && pause <= a.ObservedMono && a.ObservedMono <= a.AckMono && a.AckMono <= now && a.InflightSets == 0
+	for _, g := range a.PendingGETs {
+		ok = ok && g.Op != "" && !seen[g.Op] && g.Submitted > 0 && g.Submitted <= a.ObservedMono
+		seen[g.Op] = true
+	}
+	if !ok { // NaN fails every comparison above
+		return a, errors.New("soak: fault-window ack not exact; no Kill")
+	}
+	return a, nil
+}
+
 // FaultRecord holds actual observations only, never planned times. A failed
 // fault keeps its partial receipt (R1).
 type FaultRecord struct {
 	Episode      string                      `json:"episode"`
 	Role         string                      `json:"role"`
 	DueMono      float64                     `json:"due_mono"`
-	DispatchMono float64                     `json:"dispatch_mono"`
+	DispatchMono float64                     `json:"dispatch_mono"` // P: the fault start, right before the Kill
+	Ack          *SoakAck                    `json:"ack,omitempty"`
 	Receipt      tr.GenerationRestartReceipt `json:"receipt"`
 	Ready        []ReadyRef                  `json:"ready,omitempty"`
 	ReadyMono    float64                     `json:"ready_mono,omitempty"`
@@ -228,13 +275,30 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if ops.WorkDeadline().Sub(ops.Now()) < FaultBudget+postSpan+CollectReserve {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
 		}
+		ack, err := pauseAndAck(ctx, ops, clk, f)
+		if err != nil { // no valid ack: no Kill
+			return records, exit, err
+		}
 		if latch.completed() { // the last observation before Kill
 			return records, exit, errLoadCompleted
 		}
-		rec := FaultRecord{Episode: f.Episode, Role: f.Role, DueMono: due, DispatchMono: now}
+		if now, err = clk.now(); err != nil { // P: immediately before the Kill
+			return records, exit, err
+		}
+		rec := FaultRecord{Episode: f.Episode, Role: f.Role, DueMono: due, DispatchMono: now, Ack: &ack}
 		err = runFault(ctx, ops, p, in, f, victims[in.Restarts[f.Episode].Victim], &rec)
 		records = append(records, rec)
 		if err != nil {
+			return records, exit, err
+		}
+		// Close only while WORK is live; cancel, revoke or error is sticky.
+		if err = ctx.Err(); err != nil || !ops.Now().Before(ops.WorkDeadline()) {
+			return records, exit, errors.Join(err, errors.New("soak: WORK not live; no close"))
+		}
+		if now, err = clk.now(); err != nil {
+			return records, exit, err
+		}
+		if err = ops.Close(f.Episode, now); err != nil {
 			return records, exit, err
 		}
 		if err = waitOrComplete(ctx, ops, latch, RecoveryMargin); err != nil {
@@ -273,7 +337,7 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 			rec.Error = err.Error()
 		}
 	}()
-	fctx, cancel := context.WithTimeout(ctx, FaultBudget)
+	fctx, cancel := context.WithTimeout(ctx, FaultBudget-AckWait)
 	defer cancel()
 	_, receipt, err := ops.Restart(fctx, f.Episode, victim)
 	rec.Receipt = receipt // partial or complete, as the core recorded it (R1)

@@ -79,5 +79,103 @@ class TopologyPoller(unittest.TestCase):
         self.assertTrue(all(1.9 < g < 2.3 for g in gaps), gaps)
 
 
+class FaultWindowWorker(unittest.TestCase):
+    """The real run() with a fake native child (spawned processes) and a test
+    thread acting as the controller of the fault-window handshake (r4)."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        import soak_stats
+        import test_soak_fake_child
+        self.root = Path(tempfile.mkdtemp())
+        self.root.chmod(0o700)
+        self.addCleanup(shutil.rmtree, self.root)
+        saved = soak_load.child
+        soak_load.child = test_soak_fake_child.child
+        self.addCleanup(setattr, soak_load, 'child', saved)
+        url, _ = TopologyPoller.serve(self, [(200, dict(Topology=dict(Layouts=[], DataCenters=[])))])
+        here = str(Path(__file__).resolve().parent)
+        self.boot = soak_stats.boot_id()
+        self.config = dict(root=str(self.root), master_http=url, layout=TopologyPoller.LAYOUT, duration_s=4,
+                           pacing_s=0.25, quiescence_s=1, write_stop_s=1, client_kill_at_s=10 ** 6, key_prefix='k@',
+                           smoke=dict(run_id='run-1', transport='http', keys=1, length=1, helper_dir=here, native_dir=here),
+                           native=dict(fake_delay=0.4))
+
+    def write(self, name, row):
+        with (self.root / name).open('x') as f:
+            json.dump(dict(dict(run_id='run-1', boot_id=self.boot), **row), f)
+
+    def controller(self, at, close=True, fail_after_ack=False, fail_after_close=False):
+        def run():
+            time.sleep(at)
+            self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=time.monotonic()))
+            ack = self.root / 'fault-ack-E1.json'
+            while not ack.exists():
+                time.sleep(0.01)
+            time.sleep(0.05)
+            if fail_after_ack:  # the acknowledged pending GETs now complete with a timeout
+                (self.root / 'fake-fail').touch()
+                time.sleep(0.6)
+                (self.root / 'fake-fail').unlink()
+            if close:
+                self.write('fault-close-E1.json', dict(episode='E1', end_mono=time.monotonic()))
+            if fail_after_close:
+                time.sleep(0.6)  # old pending GETs are done; new ones are post-close
+                (self.root / 'fake-fail').touch()
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t
+
+    def events(self):
+        return [json.loads(l) for l in (self.root / 'op-events.jsonl').read_text().splitlines()]
+
+    def test_pause_stops_dispatch_acks_pending_gets_and_credits_their_errors(self):
+        self.controller(1.5, fail_after_ack=True)
+        summary = soak_load.run(self.config)
+        ack = json.loads((self.root / 'fault-ack-E1.json').read_text())
+        self.assertEqual((ack['episode'], ack['inflight_sets'], ack['run_id']), ('E1', 0, 'run-1'))
+        self.assertTrue(ack['pause_mono'] <= ack['observed_mono'] <= ack['ack_mono'])
+        self.assertTrue(all(g['submitted'] <= ack['observed_mono'] for g in ack['pending_gets']))
+        pending = {g['op'] for g in ack['pending_gets']}
+        credited = [e for e in self.events() if e.get('fault_error')]
+        self.assertTrue(pending and credited, (pending, credited))
+        self.assertTrue({e['op'] for e in credited} <= pending)
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        # No new dispatch between the pause and the close.
+        ops = [int(e['op']) for e in self.events()]
+        self.assertEqual(sorted(ops), list(range(1, len(ops) + 1)))
+
+    def test_a_get_error_without_a_fault_window_is_fatal(self):
+        def fail():
+            time.sleep(1.5)
+            (self.root / 'fake-fail').touch()
+        threading.Thread(target=fail, daemon=True).start()
+        with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
+            soak_load.run(self.config)
+
+    def test_a_new_get_after_the_close_is_fatal(self):
+        self.controller(1.0, fail_after_close=True)
+        with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
+            soak_load.run(self.config)
+
+    def test_a_foreign_pause_is_refused(self):
+        def foreign():
+            time.sleep(1.0)
+            with (self.root / 'fault-pause-E1.json').open('x') as f:
+                json.dump(dict(run_id='other-run', boot_id=self.boot, episode='E1', role='volume', pause_mono=1.0), f)
+        threading.Thread(target=foreign, daemon=True).start()
+        with self.assertRaisesRegex(ValueError, 'binding differs'):
+            soak_load.run(self.config)
+
+    def test_without_a_close_the_worker_never_resumes(self):
+        self.controller(1.0, close=False)
+        soak_load.run(self.config)
+        ack = json.loads((self.root / 'fault-ack-E1.json').read_text())
+        after = [e for e in self.events() if float(e['submitted']) > ack['observed_mono']]
+        self.assertEqual(after, [], 'operations dispatched after the pause without a close')
+
+
 if __name__ == '__main__':
     unittest.main()

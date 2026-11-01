@@ -62,7 +62,8 @@ const (
 	KillSettleBound   = 30 * time.Second
 	ReplacementEnroll = 15 * time.Second
 	ReadyBound        = 45 * time.Second
-	FaultBudget       = KillSettleBound + ReplacementEnroll + ReadyBound
+	AckWait           = 5 * time.Second // the worker's fault-window acknowledgement
+	FaultBudget       = AckWait + KillSettleBound + ReplacementEnroll + ReadyBound
 	RecoveryMargin    = 60 * time.Second
 	QuiescenceReserve = 60 * time.Second
 	CollectReserve    = 120 * time.Second
