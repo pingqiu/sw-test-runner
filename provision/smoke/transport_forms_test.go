@@ -24,6 +24,11 @@ func TestCompleteCapturedTransportFormsAtController(t *testing.T) {
 		name, verb, message, want string
 		calls                     int
 	}{
+		{"real-nic-apply-envelope", "apply", captured["exact_nic_apply_error"], "CREATE_UNRESOLVED", 2},
+		{"nic-unknown-prefix", "apply", "FATAL InvalidParameter\n" + captured["exact_nic_apply_error"], "APPLY_FAILED_OR_UNKNOWN", 1},
+		{"nic-provider-suffix", "apply", captured["exact_nic_apply_error"] + "\nBadRequest", "APPLY_FAILED_OR_UNKNOWN", 1},
+		{"nic-wrong-operation", "apply", strings.Replace(captured["exact_nic_apply_error"], "creating Network Interface", "updating Network Interface", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
+		{"nic-foreign-source", "apply", strings.ReplaceAll(captured["exact_nic_apply_error"], "azurerm_network_interface", "azurerm_public_ip"), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"real-apply-envelope", "apply", captured["exact_apply_error"], "CREATE_UNRESOLVED", 2},
 		{"real-destroy-envelope", "destroy", captured["exact_first_destroy_error"], "COMPLETE", 2},
 		{"unknown-detail-appended", "apply", captured["exact_apply_error"] + "\nPrevious request had InvalidParameter", "APPLY_FAILED_OR_UNKNOWN", 1},
