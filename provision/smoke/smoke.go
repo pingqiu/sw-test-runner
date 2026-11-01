@@ -272,6 +272,9 @@ func result(code, remedy string) Result {
 // These are private evidence files, not a new operation resolver. A failed or
 // interrupted apply has no success receipt; empty state/list cannot settle it.
 func applyUnresolved(root string) bool {
+	if _, e := os.Stat(filepath.Join(root, "apply-transport-unknown")); !os.IsNotExist(e) {
+		return true
+	}
 	started, e := os.ReadFile(filepath.Join(root, "apply-started"))
 	if e != nil || string(started) != "apply may have issued creates\n" {
 		return true
@@ -289,6 +292,16 @@ func stamp(name, text string) error {
 		e = f.Sync()
 	}
 	return errors.Join(e, f.Close())
+}
+
+func transportOnly(raw []byte) bool {
+	endpoint := `https://management\.azure\.com/[A-Za-z0-9/_?=.%:-]+`
+	transport := `(?:ECONNRESET|ConnectionResetError(?: 104|\(104, 'Connection reset by peer'\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get|Delete) "` + endpoint + `": EOF|TLS handshake: connection reset(?: by peer)?|\('Connection aborted\.', ConnectionResetError\(104, 'Connection reset by peer'\)\))`
+	publicIP := `(?:updating|deleting) Public I P Address \(Subscription: "[a-f0-9-]{36}"\nResource Group Name: "[A-Za-z0-9_-]+"\nPublic I P Addresses Name: "[A-Za-z0-9_-]+"\): performing (?:CreateOrUpdate: Put|Delete: Delete) "` + endpoint + `": HTTP response was nil; connection may have been reset`
+	metadata := `(?:\n\n  with module\.run\.azurerm_public_ip\.node\["[a-z0-9-]+"\],\n  on \.\./azure/main\.tf line [0-9]+, in resource "azurerm_public_ip" "node":\n  [0-9]+: resource "azurerm_public_ip" "node" \{)?`
+	message := `(?:` + transport + `|` + publicIP + `)` + metadata
+	whole := `\A(?:` + message + `|Error: ` + message + `(?:\s+Error: ` + message + `)*)\z`
+	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
 
 // Execute has no default mutation mode. plan probes local parent writability. run requires
@@ -355,17 +368,52 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			return nil, e
 		}
 		b, e := ctl.Command(cx, root, tool, args...)
-		if w := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600); w != nil {
-			e = errors.Join(e, w)
-		}
+		recordErr := os.WriteFile(filepath.Join(c.Output, label+"-output"), b, 0600)
+		e = errors.Join(e, recordErr)
 		status := []byte("OK")
 		if e != nil {
 			status = []byte(e.Error())
 		}
 		if w := os.WriteFile(filepath.Join(c.Output, label+"-status"), status, 0600); w != nil {
-			e = errors.Join(e, w)
+			return nil, errors.Join(e, w)
+		}
+		if recordErr != nil {
+			return nil, e
 		}
 		return b, e
+	}
+	once := call
+	call = func(cx context.Context, tool string, args ...string) ([]byte, error) {
+		eligible := tool == "terraform" && (args[0] == "apply" || args[0] == "destroy") || tool == "az" && args[0] == "resource" && args[1] == "list"
+		for attempt := 0; ; attempt++ {
+			if e := cx.Err(); e != nil {
+				return nil, e
+			}
+			if attempt > 0 && tool == "terraform" && args[0] == "apply" {
+				if _, e := once(cx, "terraform", "plan", "-refresh=true", "-input=false", "-lock-timeout=0s", "-out=smoke.tfplan", "-no-color"); e != nil {
+					return nil, e
+				}
+				if e := cx.Err(); e != nil {
+					return nil, e
+				}
+			}
+			b, e := once(cx, tool, args...)
+			if e == nil || !eligible || attempt == 2 || !transportOnly(b) {
+				return b, e
+			}
+			if tool == "terraform" && args[0] == "apply" && attempt == 0 {
+				if w := stamp(filepath.Join(c.Output, "apply-transport-unknown"), "provider settlement required for the failed apply attempt\n"); w != nil {
+					return nil, w
+				}
+			}
+			timer := time.NewTimer([]time.Duration{10 * time.Second, 30 * time.Second}[attempt])
+			select {
+			case <-cx.Done():
+				timer.Stop()
+				return b, cx.Err()
+			case <-timer.C:
+			}
+		}
 	}
 	list := func(cx context.Context) ([]string, error) {
 		b, e := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--resource-group", d.Group, "--output", "json", "--only-show-errors")
@@ -515,7 +563,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 	}
 	// From this boundary, always destroy and independently list, including a
-	// partial apply/UNKNOWN. No automatic apply retry or custom recovery engine.
+	// partial apply/UNKNOWN. Only transport failures retry the same plan/state.
 	if e = stamp(filepath.Join(c.Output, "apply-started"), "apply may have issued creates\n"); e != nil {
 		out.Code = "EVIDENCE_FAILED"
 		out.Error = e.Error()
