@@ -254,6 +254,31 @@ func TestPinAndDeadlineRefuseBeforeContact(t *testing.T) {
 		})
 	}
 }
+
+// Claude01's run 7 ruling: hard end may be up to 75 min away (60 work + 15
+// cleanup reserve); the reserve is not cut. More than 75 refuses.
+func TestHardDeadlineUpTo75Minutes(t *testing.T) {
+	for _, tc := range []struct {
+		away time.Duration
+		ok   bool
+	}{{74 * time.Minute, true}, {76 * time.Minute, false}} {
+		c := fixture(t)
+		b, _ := os.ReadFile(c.Variables)
+		var v map[string]any
+		_ = json.Unmarshal(b, &v)
+		r := v["run_declaration"].(map[string]any)
+		hard := time.Now().Add(tc.away).UTC().Truncate(time.Minute)
+		r["hard_deadline"], r["work_deadline"] = hard, hard.Add(-20*time.Minute) // fixture reserve 1200 s
+		b, _ = json.Marshal(v)
+		_ = os.WriteFile(c.Variables, b, 0600)
+		c.VariablesSHA256 = digest(b)
+		out := controller(&fake{}).Execute(context.Background(), "run", c)
+		if tc.ok == (out.Code == "DEADLINE_REFUSED" || out.Code == "INPUT_REFUSED") || !tc.ok && out.Code != "DEADLINE_REFUSED" {
+			t.Fatalf("hard %v away: %+v", tc.away, out)
+		}
+	}
+}
+
 func TestRecoveryUsesSameSnapshotAndDoesNotCreate(t *testing.T) {
 	c := fixture(t)
 	f := &fake{fail: "destroy"}
