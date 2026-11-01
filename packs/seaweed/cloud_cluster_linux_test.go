@@ -41,11 +41,23 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 		id, i := id, i
 		snap := &atomic.Int32{}
 		address, pin, key, _ := cloudSSH(t, "", func(cmd string, ch ssh.Channel) uint32 {
+
+			if strings.Contains(cmd, "cloud-init status --wait") {
+				if variant == "cancelled-peer-no-services" && id == "client2" {
+					fmt.Fprint(ch, `{"status":"done","errors":["fixture failure"],"recoverable_errors":{}}`)
+					return 2
+				}
+				if variant == "cloud-init-shell" && id == "client2" {
+					return reviewerJournalShell(cmd, ch)
+				}
+				fmt.Fprint(ch, cleanCloudInit)
+				return 0
+			}
 			if strings.HasPrefix(cmd, "cat >") {
 				io.Copy(io.Discard, ch)
 				return 0
 			}
-			if variant == "reviewer-journal-shell" && id == "meta" && strings.Contains(cmd, "sudo journalctl") {
+			if (variant == "reviewer-journal-shell" || variant == "cancelled-peer-no-services") && id == "meta" && strings.Contains(cmd, "sudo journalctl") {
 				return reviewerJournalShell(cmd, ch)
 			}
 			if fail && id == "vol6" && strings.Contains(cmd, "systemd-run") {

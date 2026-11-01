@@ -146,6 +146,17 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return nil
 	}
 	root := h.RunRoot
+	if phase == "" || phase == "prepare" {
+		command := "timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'"
+		out, stderr, rc, runErr := n.Run(ctx, command)
+		gateErr := errors.Join(runErr, qualifyCloudInit(out, rc))
+		gateErr = errors.Join(gateErr,
+			writeCloudStep(c.Output, "cloud-init-step.json", "cloud-init", command, out, stderr, rc, gateErr),
+			os.WriteFile(filepath.Join(c.Output, "cloud-init-status.json"), []byte(out), 0600))
+		if gateErr != nil {
+			return "", fmt.Errorf("cloud step cloud-init command=%q: %w", command, gateErr)
+		}
+	}
 	if phase == "before" || phase == "after" {
 		url := "http://" + endpoint(h, "volume_http") + "/status"
 		if contains(h.Roles, "master") {
@@ -164,7 +175,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		return "", nil
 	}
-	if _, e = run("prepare", "cloud-init status --wait; sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
+	if _, e = run("prepare", "sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
 		return "", e
 	}
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {

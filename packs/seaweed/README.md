@@ -196,3 +196,32 @@ sealed profile facts, as well as boot/GID/MTU/rate; historical DC evidence is
 never a substitute for the new required-DC smoke. The protected worker-owned
 lease option and its test-only remote-tail limit are in
 [the S0b authority contract](../../docs/s0b-authority.md).
+
+## Cloud-init admission and cancelled peers
+
+The HTTP cloud pack waits for cloud-init with JSON output before creating its
+run directories or uploading artifacts. It retains the complete response in
+`cloud-init-status.json` and the original exit code and decision in
+`cloud-init-step.json`. Exit 0 or 2 is accepted only with status `done`, no fatal
+errors (including stage errors), and no unapproved recoverable messages.
+The sole allowed warning is the complete Azure IMDS 410 polling message for
+`169.254.169.254/metadata/instance?api-version=2021-08-01&extended=true`.
+Unknown, mixed, malformed or ambiguous error data refuses preparation.
+This follows [cloud-init's structured status and exit-code contract](https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/status.py).
+
+A peer cancelled before deployment may have no run services or worker logs.
+The collector records those as `MISSING`, using a fresh SSH connection under
+the existing shared collection deadline. A failed service-list query, journal
+read, applicable file read, or evidence write still fails collection. The
+original preparation failure remains the run result; cleanup still runs.
+The client2-shaped JSON control is reconstructed from the observed warning;
+the failed run did not save its original status JSON.
+
+SSH command cancellation aborts that Node's connection and joins
+`session.Run`/`Wait` before reading stdout/stderr buffers. Callers must reconnect
+before reusing a cancelled SSH Node. The cloud collector already uses a fresh
+connection. Linux CPU race control (encrypted loopback only):
+
+```sh
+go test -race ./packs/seaweed -run 'Test(CloudCancelledPeerActiveSSHStreams|CancelledPeerWithoutServicesStillCollects)$' -count=50
+```

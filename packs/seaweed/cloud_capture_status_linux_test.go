@@ -77,7 +77,7 @@ func TestReviewerJournalCaptureFailureMustFailCluster(t *testing.T) {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			bin := t.TempDir()
 			t.Setenv("REVIEW_CAPTURE_BIN", bin)
-			sudo := fmt.Sprintf("#!/bin/sh\nprintf 'reviewer journal exit=%d\\n' >&2\nexit %d\n", code, code)
+			sudo := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = systemctl ]; then printf 'sw-cloud-fixture.service\\n'; exit 0; fi\nprintf 'reviewer journal exit=%d\\n' >&2\nexit %d\n", code, code)
 			if e := os.WriteFile(filepath.Join(bin, "sudo"), []byte(sudo), 0700); e != nil {
 				t.Fatal(e)
 			}
