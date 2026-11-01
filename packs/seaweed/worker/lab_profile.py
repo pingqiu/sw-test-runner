@@ -159,9 +159,13 @@ def master_toml(config):
         raise ValueError('rotation collections')
     if not 0 < rotation['low_watermark'] < rotation['high_watermark'] < 1:
         raise ValueError('rotation watermarks need 0 < low < high < 1')
-    if (rotation['min_age_minutes'] < 0 or rotation['max_volumes_per_cycle'] < 1 or
-            rotation['min_remaining_volumes'] < 0 or rotation['check_interval_seconds'] < 1):
-        raise ValueError('rotation bounds')
+    # The product's own rules (master_cache_volume_rotation.go validate...),
+    # plus caps far inside int64 and time.Duration: an out-of-range value either
+    # stops the master (Fatalf) or makes it skip master.toml (rotation silently off).
+    for key, low, high in (('min_age_minutes', 0, 10**6), ('max_volumes_per_cycle', 1, 10**6),
+                           ('min_remaining_volumes', 1, 10**6), ('check_interval_seconds', 1, 86400)):
+        if not low <= rotation[key] <= high:
+            raise ValueError('rotation %s must be in [%d, %d]' % (key, low, high))
     lines = ['[master.cache_volume_rotation]', 'enabled = true',
              'collections = "' + rotation['collections'] + '"']
     lines += [key + ' = ' + repr(rotation[key]) for key in ROTATION_KEYS if key != 'collections']
@@ -171,7 +175,8 @@ def master_toml(config):
 def assign_probe_url(config, master):
     """Optional plan 'ready_assign' = the workload's own layout. Leader plus
     topology is not ready after a master restart: the master refuses Assign for
-    its whole warm-up. One Assign on an existing layout grows nothing."""
+    its whole warm-up. The probe allocates one unused fid. If the layout has no
+    writable volume, the master grows one for it; ready() records whether it did."""
     layout = config.get('ready_assign')
     if layout is None:
         return None
@@ -182,6 +187,18 @@ def assign_probe_url(config, master):
             not isinstance(layout['ttl'], str) or not re.fullmatch(r'([1-9][0-9]{0,4}[mhdwMy])?', layout['ttl'])):
         raise ValueError('ready_assign layout')
     return master + '/dir/assign?' + urlencode(dict(layout, count=1))
+
+
+def layout_writables(topology, layout):
+    """Writable volume ids of the ready_assign layout in a /dir/status answer."""
+    try:
+        rows = topology['Topology']['Layouts'] or []
+        return sorted({int(v) for row in rows
+                       if (row.get('collection'), row.get('replication'), row.get('ttl') or '') ==
+                       (layout['collection'], layout['replication'], layout['ttl'])
+                       for v in (row.get('writables') or [])})
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('topology layouts unreadable')
 
 
 def remaining(config, limit=2):
@@ -524,11 +541,17 @@ def ready(config):
             row = dict(status='READY', processes=facts, topology=topology, client_mono=client_ack,
                        server_write_join='NOT_OBSERVED')
             if probe_url:
+                layout = config['ready_assign']
+                before = layout_writables(topology, layout)
                 # Warm-up answers 503, which http_json raises: retried within this bound.
                 answer = http_json(probe_url, config)
                 if answer.get('error') or not isinstance(answer.get('fid'), str) or not answer['fid']:
                     raise ValueError('assign probe answered without a fid')
-                row['assign_probe'] = dict(fid=answer['fid'], url=probe_url, mono=time.monotonic())
+                mono = time.monotonic()
+                after = layout_writables(http_json(master + '/dir/status', config), layout)
+                row['assign_probe'] = dict(fid=answer['fid'], url=probe_url, mono=mono,
+                                           writables_before=before, writables_after=after,
+                                           grew=bool(set(after) - set(before)))
             return row
         except (OSError, ValueError, KeyError) as error:
             last = repr(error)

@@ -376,19 +376,59 @@ class RotationConfig(unittest.TestCase):
                dict(self.ROTATION, collections='lm"cache'), dict(self.ROTATION, collections='a\nenabled = false'),
                dict(self.ROTATION, low_watermark=0.3), dict(self.ROTATION, high_watermark=1.0),
                dict(self.ROTATION, min_age_minutes=True), dict(self.ROTATION, check_interval_seconds=0),
-               dict(self.ROTATION, max_volumes_per_cycle='1'), 'enabled']
+               dict(self.ROTATION, max_volumes_per_cycle='1'), 'enabled',
+               # Accepted by r1 but rejected or dropped by the product (claude03 P2-1):
+               dict(self.ROTATION, min_remaining_volumes=0), dict(self.ROTATION, check_interval_seconds=2**63),
+               dict(self.ROTATION, check_interval_seconds=86401), dict(self.ROTATION, min_age_minutes=10**6 + 1),
+               dict(self.ROTATION, max_volumes_per_cycle=0), dict(self.ROTATION, min_remaining_volumes=10**6 + 1)]
         for rotation in bad:
             with self.subTest(rotation=rotation), self.assertRaises(ValueError):
                 profile.master_toml(dict(rotation=rotation))
+
+    def test_boundary_rotation_is_accepted(self):
+        for edge in (dict(min_age_minutes=0, max_volumes_per_cycle=1, min_remaining_volumes=1, check_interval_seconds=1),
+                     dict(min_age_minutes=10**6, max_volumes_per_cycle=10**6, min_remaining_volumes=10**6,
+                          check_interval_seconds=86400)):
+            with self.subTest(edge=edge):
+                self.assertIn('enabled = true', profile.master_toml(dict(rotation=dict(self.ROTATION, **edge))))
+
+    @unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
+    def test_malformed_rotation_refuses_before_any_effect(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, release = base / 'run', base / 'release'
+            root.mkdir(mode=0o700)
+            (release / 'bin').mkdir(parents=True)
+            product = release / 'bin' / 'weed'
+            shutil.copyfile('/bin/true', product)
+            product.chmod(0o755)
+            c = dict(LaunchContract().config(), rotation=dict(self.ROTATION, min_remaining_volumes=0),
+                     root=str(root), release=str(release), roles=['master'], host='m02',
+                     boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                     products={'weed': hashlib.sha256(product.read_bytes()).hexdigest()},
+                     deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                               datetime.timedelta(seconds=10)).isoformat())
+            result = subprocess.run([sys.executable, '-I', '-B', profile.__file__, '--config', json.dumps(c),
+                                     '--action', 'deploy', '--role', 'master'], capture_output=True, timeout=12)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'min_remaining_volumes', result.stderr)
+            self.assertNotIn(b'PRODUCT_EXEC', result.stdout)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), [], 'no dir, config or generation file')
 
 
 class AssignReadiness(unittest.TestCase):
     """ready() against a local master that refuses Assign until its warm-up ends."""
     LAYOUT = dict(collection='lmcache', replication='000', ttl='2h')
 
-    def serve(self, warmup, assign_body=None):
+    def serve(self, warmup, assign_body=None, writables=(5,), grown=()):
         calls = []
         warm_end = time.monotonic() + warmup
+        def layouts():
+            # The probe "grows" the listed ids once it has been answered.
+            assigned = any(p.startswith('/dir/assign?') for p in calls[:-1]) and time.monotonic() >= warm_end
+            ids = list(writables) + (list(grown) if assigned else [])
+            return [dict(collection='lmcache', replication='000', ttl='2h', writables=ids),
+                    dict(collection='other', replication='000', ttl='', writables=[77])]
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -399,7 +439,7 @@ class AssignReadiness(unittest.TestCase):
                     body = dict(IsLeader=True)
                 elif self.path == '/dir/status':
                     body = dict(Topology=dict(DataCenters=[dict(Racks=[dict(DataNodes=[
-                        dict(Url='127.0.0.1:' + str(port), Volumes=1)])])]))
+                        dict(Url='127.0.0.1:' + str(port), Volumes=1)])])], Layouts=layouts()))
                 elif self.path.startswith('/dir/assign?'):
                     if time.monotonic() < warm_end:
                         status, body = 503, dict(error='master is warming up, topology is still loading')
@@ -433,6 +473,14 @@ class AssignReadiness(unittest.TestCase):
         assigns = [p for p in calls if p.startswith('/dir/assign?')]
         self.assertGreater(len(assigns), 1, 'warm-up refusals must have been retried')
         self.assertEqual(assigns[0], '/dir/assign?collection=lmcache&replication=000&ttl=2h&count=1')
+        probe = row['assign_probe']
+        self.assertEqual((probe['writables_before'], probe['writables_after'], probe['grew']), ([5], [5], False))
+
+    def test_probe_records_growth_on_a_layout_without_writables(self):
+        # /dir/assign grows a volume when the layout has none writable; say so.
+        config, calls = self.serve(warmup=0, writables=(), grown=(9,))
+        probe = profile.ready(dict(config, ready_assign=self.LAYOUT))['assign_probe']
+        self.assertEqual((probe['writables_before'], probe['writables_after'], probe['grew']), ([], [9], True))
 
     def test_control_without_layout_reports_ready_during_warmup(self):
         # Today's gate: leader + topology passes while Assign is still refused.
