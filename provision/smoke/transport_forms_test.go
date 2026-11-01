@@ -24,12 +24,14 @@ func TestCompleteCapturedTransportFormsAtController(t *testing.T) {
 		name, verb, message, want string
 		calls                     int
 	}{
-		{"real-nic-apply-envelope", "apply", captured["exact_nic_apply_error"], "CREATE_UNRESOLVED", 2},
+		// Create forms are re-read before the retry (create_reread_test.go); here
+		// they are in scope and absent, so the retry proceeds as before.
+		{"real-nic-apply-envelope", "apply", inScope(captured["exact_nic_apply_error"]), "CREATE_UNRESOLVED", 2},
 		{"nic-unknown-prefix", "apply", "FATAL InvalidParameter\n" + captured["exact_nic_apply_error"], "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"nic-provider-suffix", "apply", captured["exact_nic_apply_error"] + "\nBadRequest", "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"nic-wrong-operation", "apply", strings.Replace(captured["exact_nic_apply_error"], "creating Network Interface", "updating Network Interface", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"nic-foreign-source", "apply", strings.ReplaceAll(captured["exact_nic_apply_error"], "azurerm_network_interface", "azurerm_public_ip"), "APPLY_FAILED_OR_UNKNOWN", 1},
-		{"real-apply-envelope", "apply", captured["exact_apply_error"], "CREATE_UNRESOLVED", 2},
+		{"real-apply-envelope", "apply", inScope(captured["exact_apply_error"]), "CREATE_UNRESOLVED", 2},
 		// Delete resets no longer use a form allowlist: they go through the
 		// re-read rule (delete_reread_test.go). These fixture IDs are outside
 		// the fixture's RG, so the rule refuses them.
@@ -42,7 +44,7 @@ func TestCompleteCapturedTransportFormsAtController(t *testing.T) {
 		{"unknown-between-blocks", "apply", "Error: ECONNRESET\nWrapperFailure\nError: EOF before response", "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"unknown-after-blocks", "apply", "Error: ECONNRESET\nError: EOF before response\nWrapperFailure", "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"two-complete-blocks", "apply", "Error: ECONNRESET\n\nError: EOF before response", "CREATE_UNRESOLVED", 2},
-		{"captured-plus-complete-block", "apply", captured["exact_apply_error"] + "\n\nError: EOF before response", "CREATE_UNRESOLVED", 2},
+		{"captured-plus-complete-block", "apply", inScope(captured["exact_apply_error"]) + "\n\nError: EOF before response", "CREATE_UNRESOLVED", 2},
 		{"unknown-title", "apply", strings.Replace(captured["exact_apply_error"], "Error: updating Public I P Address", "Error: InvalidParameter in Public I P Address", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"mixed-detail-same-line", "apply", strings.Replace(captured["exact_apply_error"], "connection may have been reset", "connection may have been reset; provider failed with NewProviderError", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"unknown-source-detail", "apply", strings.Replace(captured["exact_apply_error"], "in resource", "unknown provider diagnostic in resource", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
@@ -55,6 +57,9 @@ func TestCompleteCapturedTransportFormsAtController(t *testing.T) {
 				ctl := controller(f)
 				calls := 0
 				ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+					if tool == "az" && args[0] == "resource" && args[1] == "show" && tc.verb == "apply" {
+						return absentShow(args[3]), errors.New("az: exit status 3")
+					}
 					if tool == "terraform" && args[0] == tc.verb {
 						calls++
 						if calls == 1 {

@@ -19,7 +19,7 @@ func TestReviewerNICEnvelopeBoundary(t *testing.T) {
 	if err = json.Unmarshal(bytes, &captured); err != nil {
 		t.Fatal(err)
 	}
-	message := captured["exact_nic_apply_error"]
+	message := inScope(captured["exact_nic_apply_error"]) // the create re-read needs an in-scope ID
 	contextAt := strings.Index(message, "\n\n  with ")
 	if contextAt < 0 {
 		t.Fatal("missing captured source context")
@@ -46,6 +46,9 @@ func TestReviewerNICEnvelopeBoundary(t *testing.T) {
 				ctl := controller(f)
 				calls := 0
 				ctl.Command = func(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
+					if tool == "az" && args[0] == "resource" && args[1] == "show" {
+						return absentShow(args[3]), errors.New("az: exit status 3") // never created: retry as before
+					}
 					if tool == "terraform" && args[0] == "apply" {
 						calls++
 						if calls == 1 {

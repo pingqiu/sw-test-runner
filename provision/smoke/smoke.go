@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -308,6 +309,73 @@ func transportOnly(raw []byte) bool {
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
 
+// A lost create PUT may have completed in Azure outside Terraform state
+// (runs 3 and 7b), so a plain retry fails "already exists". Each create-form
+// block's exact ID is re-read: absent leaves the retry as before; present is
+// imported at the block's source address only if it is in this subscription/RG,
+// of the address's resource type, and carries this run's exact seaweed_run tag.
+// Anything else refuses. Generic transport forms that name no resource keep
+// the existing retry.
+func settleCreates(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), raw []byte, subscription, group, run string) ([]string, error) {
+	types := map[string]string{"azurerm_public_ip": "Microsoft.Network/publicIPAddresses", "azurerm_network_interface": "Microsoft.Network/networkInterfaces"}
+	put := regexp.MustCompile(`performing CreateOrUpdate: Put "https://management\.azure\.com(/subscriptions/[^"?]+)\?api-version=[0-9-]+"`)
+	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.node\["[a-z0-9-]+"\]),`)
+	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
+	var imported []string
+	for _, block := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "Error: ")[1:] {
+		m := put.FindStringSubmatch(block)
+		if m == nil {
+			continue
+		}
+		id, a := m[1], address.FindStringSubmatch(block)
+		if a == nil || types[a[2]] == "" || len(id) <= len(scope) || !strings.EqualFold(id[:len(scope)], scope) || !strings.HasPrefix(strings.ToLower(id[len(scope):]), strings.ToLower(types[a[2]])+"/") {
+			return imported, fmt.Errorf("lost create PUT %s has no in-scope address of its type", id)
+		}
+		present, b, e := reread(ctx, call, id)
+		if e != nil || !present {
+			if e != nil {
+				return imported, e
+			}
+			continue
+		}
+		var object struct {
+			ID   string
+			Tags map[string]string
+		}
+		if json.Unmarshal(b, &object) != nil || !strings.EqualFold(object.ID, id) || object.Tags["seaweed_run"] != run {
+			return imported, fmt.Errorf("created %s is not this run's (tag %q)", id, object.Tags["seaweed_run"])
+		}
+		if _, e = call(ctx, "terraform", "import", "-input=false", "-lock-timeout=0s", "-no-color", a[1], id); e != nil {
+			return imported, e
+		}
+		imported = append(imported, a[1])
+	}
+	return imported, nil
+}
+
+// keepsImported refuses a re-plan that would delete or replace an import.
+func keepsImported(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), imported []string) error {
+	if len(imported) == 0 {
+		return nil
+	}
+	b, e := call(ctx, "terraform", "show", "-json", "-no-color", "smoke.tfplan")
+	var plan struct {
+		Changes []struct {
+			Address string
+			Change  struct{ Actions []string }
+		} `json:"resource_changes"`
+	}
+	if e != nil || json.Unmarshal(b, &plan) != nil {
+		return errors.Join(e, errors.New("re-plan after import is unreadable"))
+	}
+	for _, rc := range plan.Changes {
+		if slices.Contains(imported, rc.Address) && slices.Contains(rc.Change.Actions, "delete") {
+			return fmt.Errorf("re-plan would replace imported %s", rc.Address)
+		}
+	}
+	return nil
+}
+
 func sweptOnly(ids, swept []string) bool {
 	for _, id := range ids {
 		found := false
@@ -447,12 +515,16 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	once := call
 	call = func(cx context.Context, tool string, args ...string) ([]byte, error) {
 		eligible := tool == "terraform" && (args[0] == "apply" || args[0] == "destroy") || tool == "az" && args[0] == "resource" && args[1] == "list"
+		var imported []string
 		for attempt := 0; ; attempt++ {
 			if e := cx.Err(); e != nil {
 				return nil, e
 			}
 			if attempt > 0 && tool == "terraform" && args[0] == "apply" {
 				if _, e := once(cx, "terraform", "plan", "-refresh=true", "-input=false", "-lock-timeout=0s", "-out=smoke.tfplan", "-no-color"); e != nil {
+					return nil, e
+				}
+				if e := keepsImported(cx, once, imported); e != nil {
 					return nil, e
 				}
 				if e := cx.Err(); e != nil {
@@ -490,6 +562,13 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 				if w := stamp(filepath.Join(c.Output, "apply-transport-unknown"), "provider settlement required for the failed apply attempt\n"); w != nil {
 					return nil, w
 				}
+			}
+			if tool == "terraform" && args[0] == "apply" {
+				done, ie := settleCreates(cx, once, diagnostics, d.Subscription, d.Group, filepath.Base(c.Output))
+				if ie != nil {
+					return b, errors.Join(e, ie)
+				}
+				imported = append(imported, done...)
 			}
 			timer := time.NewTimer([]time.Duration{10 * time.Second, 30 * time.Second}[attempt])
 			select {
