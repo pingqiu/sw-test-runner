@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -181,6 +182,7 @@ func TestSoakPlanBindRefusals(t *testing.T) {
 			e.Replacement = f.plan.Ready[1].Job
 			f.policy.GenerationRestarts["E1"] = e
 		}, "not the exact private helper"},
+		"at_s overflow":    {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Faults[1].AtS = math.MaxInt64 }, "within the load"},
 		"faults too close": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Faults[1].AtS = 480 + 100 }, "fault budget plus recovery apart"},
 		"faults out of order": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
 			f.plan.Soak.Faults[0].AtS, f.plan.Soak.Faults[1].AtS = 900, 480

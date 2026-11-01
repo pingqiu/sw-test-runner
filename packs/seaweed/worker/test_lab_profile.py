@@ -509,6 +509,56 @@ class MasterReplacementState(unittest.TestCase):
         (self.root / 'master' / 'log').unlink()
         self.refused('state dir is empty')
 
+    def swap_after_check(self, call):
+        """Run the replacement deploy with check_master_state wrapped so that the
+        mdir is deleted and recreated (same bytes) right after check `call` passes."""
+        bootstrap = '''import sys,shutil,os
+source=sys.argv.pop(1); call=int(sys.argv.pop(1))
+ns={'__name__':'swap_probe','__file__':source}
+exec(compile(open(source,'rb').read(),source,'exec'),ns)
+original=ns['check_master_state']; count=[0]
+def wrapped(root,old,config):
+    original(root,old,config); count[0]+=1
+    if count[0]==call:
+        m=root/'master'; saved={p.name:p.read_bytes() for p in m.iterdir()}
+        shutil.rmtree(m); m.mkdir(mode=0o700)
+        for n,b in saved.items(): (m/n).write_bytes(b)
+ns['check_master_state']=wrapped
+ns['main']()
+'''
+        argv = [sys.executable, '-I', '-B', '-c', bootstrap, profile.__file__, str(call), '--config',
+                json.dumps(self.config), '--action', 'deploy', '--role', 'master', '--replacement-master']
+        return subprocess.run(argv, capture_output=True, timeout=12)
+
+    def test_swap_after_first_check_is_refused_before_publication(self):
+        result = self.swap_after_check(1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'continuity differs', result.stderr)
+        self.assertNotIn(b'PRODUCT_EXEC', result.stdout)
+        self.assertFalse((self.root / 'master-replacement-generation.json').exists())
+
+    def test_swap_after_publication_is_refused_before_exec(self):
+        result = self.swap_after_check(2)
+        self.assertNotEqual(result.returncode, 0, 'the product (/bin/true) must never be exec-ed')
+        self.assertIn(b'continuity differs', result.stderr)
+        record = json.loads((self.root / 'master-replacement-generation.json').read_text())
+        original = json.loads((self.root / 'master-generation.json').read_text())
+        self.assertEqual(record['master_state'], original['master_state'], 'the original join, never a fresh one')
+
+    def test_services_reads_the_replacement_master_generation(self):
+        self.assertEqual(self.deploy(True).returncode, 0)
+        replacement = json.loads((self.root / 'master-replacement-generation.json').read_text())
+        seen = []
+        saved = (profile.process, profile.qualify_process, profile.owned_listeners)
+        profile.process = lambda pid: (seen.append(pid), dict(pid=pid, starttime=1, boot_id='b', executable_sha256='x'))[1]
+        profile.qualify_process = lambda expected, current: None
+        profile.owned_listeners = lambda pid: set(self.config['services'].values())
+        try:
+            facts = profile.services(dict(self.config, roles=['master']))
+        finally:
+            profile.process, profile.qualify_process, profile.owned_listeners = saved
+        self.assertEqual((seen, facts['master']['identity']['pid']), ([replacement['pid']], replacement['pid']))
+
     def test_changed_rotation_config_is_refused(self):
         self.config['rotation'] = dict(RotationConfig.ROTATION, check_interval_seconds=3)
         self.refused('replacement master config differs')

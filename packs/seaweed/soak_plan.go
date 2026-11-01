@@ -117,6 +117,36 @@ func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 
 func secs(n int) time.Duration { return time.Duration(n) * time.Second }
 
+// checkSchedule bounds every number before any arithmetic on it (codex01 R1:
+// an at_s near MaxInt64 overflowed the seconds math). bindSoak and runSoak
+// both call it, so a direct runSoak call can't dispatch an unchecked plan.
+func (x *SoakPlan) checkSchedule() error {
+	if x == nil || x.DurationS <= 0 || x.DurationS > int(SoakHorizon/time.Second) {
+		return errors.New("soak duration out of range")
+	}
+	if len(x.Faults) == 0 || len(x.Faults) > 2 {
+		return errors.New("soak needs one or two faults")
+	}
+	roles, prev := map[string]bool{}, 0
+	for i, f := range x.Faults {
+		if f.AtS < 60 || f.AtS > x.DurationS {
+			return errors.New("soak fault at_s must lie within the load, from 60 s")
+		}
+		if (f.Role != "volume" && f.Role != "master") || roles[f.Role] {
+			return errors.New("soak allows one volume and one master fault")
+		}
+		roles[f.Role] = true
+		if i > 0 && secs(f.AtS-prev) < FaultBudget+RecoveryMargin {
+			return errors.New("soak faults must be ordered, from 60 s, one fault budget plus recovery apart")
+		}
+		prev = f.AtS
+	}
+	if secs(prev)+FaultBudget+RecoveryMargin+QuiescenceReserve > secs(x.DurationS) {
+		return errors.New("soak last fault leaves no recovery and quiescence before load end")
+	}
+	return nil
+}
+
 // bindSoak is the soak's static admission (contract r3 R2, R3, R4 shape).
 // used holds every job label bind() already admitted.
 func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]bool, now time.Time) error {
@@ -132,6 +162,9 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 	}
 	if x.DurationS <= 0 || x.DurationS > int(SoakHorizon/time.Second) || math.IsNaN(x.PacingS) || math.IsInf(x.PacingS, 0) || x.PacingS < 0.25 || x.PacingS > 10 {
 		return errors.New("soak duration/pacing out of range")
+	}
+	if err := x.checkSchedule(); err != nil { // every number bounded before any arithmetic
+		return err
 	}
 	if err := x.Rotation.validate(); err != nil {
 		return err
@@ -149,22 +182,12 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 		return errors.New("soak hard deadline beyond the 60 min soak horizon")
 	}
 	// R2: one fault per role, in order; an injective job map; exact episodes.
-	if len(x.Faults) == 0 || len(x.Faults) > 2 || len(in.Restarts) != len(x.Faults) {
+	if len(in.Restarts) != len(x.Faults) {
 		return errors.New("soak restart episodes must be exactly the scheduled faults")
 	}
-	roles, labels, master := map[string]bool{}, map[string]bool{}, false
-	prev := 0
-	for i, f := range x.Faults {
-		if (f.Role != "volume" && f.Role != "master") || roles[f.Role] {
-			return errors.New("soak allows one volume and one master fault")
-		}
-		roles[f.Role] = true
+	labels, master := map[string]bool{}, false
+	for _, f := range x.Faults {
 		master = master || f.Role == "master"
-		// R4: gaps hold one fault's budget plus recovery; the last leaves quiescence.
-		if f.AtS < 60 || (i > 0 && secs(f.AtS-prev) < FaultBudget+RecoveryMargin) {
-			return errors.New("soak faults must be ordered, from 60 s, one fault budget plus recovery apart")
-		}
-		prev = f.AtS
 		ep, ok := in.Restarts[f.Episode]
 		if !ok || ep.Victim == ep.Replacement {
 			return errors.New("soak fault episode not admitted")
@@ -184,9 +207,6 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 		if !victim || used[ep.Replacement] || err != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+f.Role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256 {
 			return errors.New("soak replacement is not the exact private helper of its victim")
 		}
-	}
-	if last := x.Faults[len(x.Faults)-1].AtS; secs(last)+FaultBudget+RecoveryMargin+QuiescenceReserve > secs(x.DurationS) {
-		return errors.New("soak last fault leaves no recovery and quiescence before load end")
 	}
 	if master {
 		if err := x.ReadyAssign.validate(); err != nil {

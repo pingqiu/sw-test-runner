@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ type fakeSoak struct {
 	started  int
 	restarts []string
 	readies  []string
+	readyDL  []time.Time
 	hooks    map[string]func(context.Context) // keyed "restart:<episode>" or "after:<n>"
 	afters   int
 	notReady string // ready job label that answers non-READY
@@ -91,6 +93,9 @@ func (f *fakeSoak) Restart(ctx context.Context, episode string, victim tr.JobHan
 }
 func (f *fakeSoak) RunJob(ctx context.Context, label string) (tr.ExitInfo, error) {
 	f.readies = append(f.readies, label)
+	if dl, ok := ctx.Deadline(); ok {
+		f.readyDL = append(f.readyDL, dl)
+	}
 	if err := ctx.Err(); err != nil {
 		return tr.ExitInfo{}, err
 	}
@@ -117,8 +122,8 @@ func (f *fakeSoak) LoadStart(ctx context.Context) (float64, error) {
 	}
 	return f.start, nil
 }
-func (f *fakeSoak) Mono() (float64, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.mono, nil }
-func (f *fakeSoak) Now() time.Time         { f.mu.Lock(); defer f.mu.Unlock(); return f.wall }
+func (f *fakeSoak) Mono() (float64, error)  { f.mu.Lock(); defer f.mu.Unlock(); return f.mono, nil }
+func (f *fakeSoak) Now() time.Time          { f.mu.Lock(); defer f.mu.Unlock(); return f.wall }
 func (f *fakeSoak) WorkDeadline() time.Time { return f.deadline }
 func (f *fakeSoak) After(d time.Duration) <-chan time.Time {
 	f.afters++
@@ -284,7 +289,11 @@ func TestSoakLateOrForeignReadyStopsTheSchedule(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeSoak(t)
 			set(f)
-			_, _, err := runFake(t, f)
+			records, _, err := runFake(t, f)
+			// The exact READY receipt refs survive the failure (codex01 R4).
+			if last := records[len(records)-1]; len(last.Ready) == 0 || last.Ready[len(last.Ready)-1].StdoutSHA256 == "" {
+				t.Fatalf("partial record lost its READY refs: %+v", last)
+			}
 			restarts := 1
 			if name == "master no fid" {
 				restarts = 2 // the volume fault needs no Assign probe
@@ -293,5 +302,34 @@ func TestSoakLateOrForeignReadyStopsTheSchedule(t *testing.T) {
 				t.Fatalf("err=%v restarts=%v", err, f.restarts)
 			}
 		})
+	}
+}
+
+// codex01 R1: an at_s near MaxInt64 must be refused before any arithmetic or
+// effect, also when runSoak is called directly (not through bind).
+func TestSoakHugeAtSRefusedBeforeAnyEffect(t *testing.T) {
+	for _, at := range []int{math.MaxInt64, math.MaxInt64 / 1000, 1801, 59, -1} {
+		f := newFakeSoak(t)
+		p, in := soakTestPlan()
+		p.Soak.Faults[0].AtS = at
+		_, _, err := runSoak(context.Background(), f, p, in, map[string]tr.JobHandle{})
+		if err == nil || f.started != 0 || len(f.restarts) != 0 {
+			t.Fatalf("at_s=%d: err=%v started=%d restarts=%v", at, err, f.started, f.restarts)
+		}
+	}
+}
+
+// codex01 R4: all READY probes of one fault share one 45 s stage deadline.
+func TestSoakReadyProbesShareOneReadyBound(t *testing.T) {
+	f := newFakeSoak(t)
+	before := time.Now()
+	if _, _, err := runFake(t, f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.readyDL) != 4 || !f.readyDL[0].Equal(f.readyDL[1]) || !f.readyDL[2].Equal(f.readyDL[3]) {
+		t.Fatalf("READY deadlines not shared per fault: %v", f.readyDL)
+	}
+	if f.readyDL[0].Sub(before) > ReadyBound+time.Second {
+		t.Fatalf("READY stage bound %v, want <= %v", f.readyDL[0].Sub(before), ReadyBound)
 	}
 }

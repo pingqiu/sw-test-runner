@@ -410,16 +410,22 @@ def launch(config, role, replacement=False):
         if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
-        if role == 'master':
-            # The state join a replacement must match (R5); the original's is
-            # the reference, a replacement re-records what it verified.
-            identity['master_state'] = master_state(root)
+        if role == 'master' and replacement:
+            # Never record a fresh join: re-verify the ORIGINAL join right before
+            # publication and record that, so a swap after the first check is
+            # refused, not adopted (codex01 R3).
+            check_master_state(root, old, config)
+            identity['master_state'] = old['master_state']
+        elif role == 'master':
+            identity['master_state'] = master_state(root)  # the original: the reference join
         with (root / (role + ('-replacement' if replacement else '') + '-generation.json')).open('x') as stream:
             json.dump(identity, stream, sort_keys=True)
         print(json.dumps(dict(event='PRODUCT_EXEC', **identity)), flush=True)
         os.chdir(root)
         remaining(config)
         if replacement and role == 'filer':filer_metadata(root, old)
+        if replacement and role == 'master':
+            check_master_state(root, old, config)  # the last check before exec
         os.execve(fd, argv, env)
     finally:
         os.close(fd)
@@ -513,7 +519,7 @@ def services(config):
         if role == 'client':
             continue
         generation = root / (role + '-generation.json')
-        if role in ('volume','filer') and (root / (role+'-replacement-generation.json')).exists():
+        if role in ('volume','filer','master') and (root / (role+'-replacement-generation.json')).exists():
             generation=root / (role+'-replacement-generation.json')
         expected = json.loads(generation.read_text())
         # Do not accept a live foreign executable named in an editable PID file.

@@ -64,9 +64,20 @@ type FaultRecord struct {
 	DueMono      float64                     `json:"due_mono"`
 	DispatchMono float64                     `json:"dispatch_mono"`
 	Receipt      tr.GenerationRestartReceipt `json:"receipt"`
+	Ready        []ReadyRef                  `json:"ready,omitempty"`
 	ReadyMono    float64                     `json:"ready_mono,omitempty"`
 	AssignProbe  json.RawMessage             `json:"assign_probe,omitempty"`
 	Error        string                      `json:"error,omitempty"`
+}
+
+// ReadyRef is the exact receipt reference of one fault READY probe, kept
+// even when the probe or its validation fails (codex01 R4).
+type ReadyRef struct {
+	Job          string `json:"job"`
+	Host         string `json:"host"`
+	Code         int    `json:"code"`
+	StdoutSHA256 string `json:"stdout_sha256,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 var errLoadCompleted = errors.New("load completed before the fault schedule ended; no further fault")
@@ -103,6 +114,9 @@ type readyRow struct {
 // under the live action context, never from cleanup or a detached context.
 func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims map[string]tr.JobHandle) (records []FaultRecord, exit tr.ExitInfo, err error) {
 	x := p.Soak
+	if err = x.checkSchedule(); err != nil { // before any arithmetic or effect
+		return nil, exit, err
+	}
 	duration := secs(x.DurationS)
 	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline.
 	if ops.WorkDeadline().Sub(ops.Now()) < duration+QuiescenceReserve+CollectReserve {
@@ -200,11 +214,20 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 	if f.Role == "volume" {
 		binary = "weed-volume"
 	}
+	// One shared 45 s READY stage for all probes of this fault, inside the
+	// fault budget (codex01 R4), not the whole fault budget per probe.
+	rctx, rcancel := context.WithTimeout(fctx, ReadyBound)
+	defer rcancel()
 	for _, step := range p.Soak.FaultReady {
-		e, err := ops.RunJob(fctx, step.Job)
+		ref := ReadyRef{Job: step.Job, Host: step.Host}
+		e, err := ops.RunJob(rctx, step.Job)
+		ref.Code, ref.StdoutSHA256 = e.Code, e.Output.StdoutSHA256
 		if err != nil {
+			ref.Error = err.Error()
+			rec.Ready = append(rec.Ready, ref)
 			return err
 		}
+		rec.Ready = append(rec.Ready, ref)
 		raw, _, err := e.Output.Decode()
 		if err != nil {
 			return err
