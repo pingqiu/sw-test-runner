@@ -22,7 +22,7 @@ locals {
       hard               = var.run_declaration.hard_deadline
       cleanup_reserve_ms = var.process_cleanup_reserve_ms
     }
-    hosts = [for id in sort(keys(var.nodes)) : {
+    hosts = [for id in sort(tolist(setintersection(toset(keys(var.nodes)), toset(keys(azurerm_linux_virtual_machine.node)), toset(keys(azurerm_public_ip.node))))) : {
       id          = id
       resource_id = azurerm_linux_virtual_machine.node[id].id
       roles       = sort(tolist(var.nodes[id].roles))

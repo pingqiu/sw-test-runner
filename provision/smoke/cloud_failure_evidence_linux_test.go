@@ -112,7 +112,7 @@ func TestCloudFailedStepEvidencePrecedesDestroy(t *testing.T) {
 				}
 				if tool == "terraform" && args[0] == "destroy" {
 					destroyChecked = true
-					step, e := os.ReadFile(filepath.Join(c.Output, "cloud-step-001.json"))
+					step, e := os.ReadFile(filepath.Join(c.Output, "cloud-init-step.json"))
 					if e != nil || !strings.Contains(string(step), "diagnostic before destroy") || !strings.Contains(string(step), "cloud-init") {
 						t.Errorf("missing original step evidence before destroy: %s %v", step, e)
 					}
@@ -156,7 +156,7 @@ func TestCloudFailedStepEvidencePrecedesDestroy(t *testing.T) {
 				return f.command(ctx, dir, tool, args...)
 			}}
 			r := ctl.Execute(t.Context(), "run", c)
-			if r.Code != "PACK_FAILED" || !strings.Contains(r.Error, "prepare") || !strings.Contains(r.Error, "cloud-init") || !destroyChecked || !r.RemainingObserved || !strings.HasSuffix(strings.Join(f.events, ","), "terraform destroy,az resource") {
+			if r.Code != "PACK_FAILED" || !strings.Contains(r.Error, "cloud step cloud-init") || !strings.Contains(r.Error, "cloud-init exit 7") || !destroyChecked || !r.RemainingObserved || !strings.HasSuffix(strings.Join(f.events, ","), "terraform destroy,az resource") {
 				t.Fatalf("%+v destroy=%v events=%v", r, destroyChecked, f.events)
 			}
 		})

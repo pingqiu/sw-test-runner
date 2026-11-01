@@ -162,3 +162,9 @@ is confirmed; it includes sensitive host keys/state. Existing `destroy --config`
 and one-VM behavior remain available. A killed local controller after settled
 fake apply is covered by an actual CLI/subprocess recovery control. UNKNOWN
 apply stays non-clean even if destroy/list are empty; notify the run owner.
+
+## Cluster orphan cleanup contract
+
+`rg-codex02-azure-test-20261029` is dedicated to the runner Azure lane. The manager issues serialized run tokens: one run at a time, with no external writer or retagging in this RG. After same-state destroy, cluster cleanup sweeps only supported resources in this RG carrying the current run tag, in NIC -> public IP -> disk -> VNet -> NSG order. It journals and waits for each deletion, then runs the full RG and subscription scans. Unsupported or untagged residuals are reported, never deleted by this sweep.
+
+The fresh pre-delete tag read is a sanity check under that exclusive-writer contract; it is not atomic ownership proof and cannot protect against an external retag between show and delete. Show must return exactly one standalone JSON object; arrays, concatenated objects and trailing tokens refuse. No added read loop attempts to close that race. Sticky create uncertainty and any destroy failure remain non-clean even after the observed resources are gone.
