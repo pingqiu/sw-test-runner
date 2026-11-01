@@ -30,7 +30,7 @@ func chaos2Rig(t *testing.T, broken string) (dir string, run func(script string)
 case "$1" in
 -N) touch "$state";;
 -X) [ "`+broken+`" = sticky ] || rm -f "$state";;
--S) [ -e "$state" ];;
+-S) if [ -n "$2" ]; then [ -e "$state" ]; else echo "-P INPUT ACCEPT"; [ -e "$state" ] && echo "-N SWCHAOS"; for c in INPUT OUTPUT; do [ -e "$state.jump$c" ] && echo "-A $c -j SWCHAOS"; done; true; fi;;
 -C) [ -e "$state.jump$2" ];;
 -I) [ "`+broken+`" = no-jump ] || touch "$state.jump$2";;
 -D) [ -e "$state.jump$2" ] || exit 1; rm -f "$state.jump$2";;

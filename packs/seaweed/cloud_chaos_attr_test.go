@@ -33,7 +33,10 @@ func TestChaosPerOpExcusal(t *testing.T) {
 		// op 92 is a kv_set at 92.5 s on key "ko": past P=30+60, so only a
 		// (wrong) write excusal for unavailable keys could accept it.
 		{"C5 excusal is for reads only", attrOps(160, func(i int, s float64) bool { return i == 92 }), chaosWindows{Marks: two, Unavailable: map[string]bool{"ko": true}, ReadyMono: 95}, false},
-		{"no markers", attrOps(10, func(int, float64) bool { return false }), chaosWindows{}, false},
+		{"no markers", attrOps(10, func(int, float64) bool { return false }), chaosWindows{Marks: nil}, false},
+		{"load ended before the first marker", attrOps(25, func(int, float64) bool { return false }), chaosWindows{Marks: two}, false},
+		{"load started after the first marker", attrOps(160, func(int, float64) bool { return false })[35:], chaosWindows{Marks: two}, false},
+		{"load ended before the last marker", attrOps(90, func(int, float64) bool { return false }), chaosWindows{Marks: two}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := checkChaosOps(tc.ops, tc.w); (err == nil) != tc.ok {

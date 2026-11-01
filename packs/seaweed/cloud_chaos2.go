@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
@@ -50,19 +49,22 @@ func chaosPartitionScript(timer string) string {
 		`sudo -n iptables -I INPUT 1 -j SWCHAOS; sudo -n iptables -I OUTPUT 1 -j SWCHAOS; sudo -n iptables -C INPUT -j SWCHAOS; sudo -n iptables -C OUTPUT -j SWCHAOS; echo PARTITIONED`
 }
 
+// Only a successful, complete rule listing can prove the chain absent; a
+// failed listing is UNKNOWN and refuses (codex01 #49 R3).
 func chaosPartitionHealScript() string {
-	return `sudo -n sh -c ` + cloudQuote(chaosHeal) + `; if sudo -n iptables -S SWCHAOS >/dev/null 2>&1; then exit 1; fi; echo HEALED`
+	return `sudo -n sh -c ` + cloudQuote(chaosHeal) + `; rules=$(sudo -n iptables -S) || exit 1; if printf '%s\n' "$rules" | grep -q SWCHAOS; then exit 1; fi; echo HEALED`
 }
 
 const chaosNetemProbe = `echo "KERNEL $(uname -r)"; if out=$(modprobe -n -v sch_netem 2>&1); then echo "SCH_NETEM AVAILABLE $out"; else echo "SCH_NETEM MISSING $out"; fi; true`
 
 func chaosNetemScript(metaIP, timer string) string {
 	return chaosDev(metaIP) + `modinfo sch_netem >/dev/null; sudo -n systemd-run --unit=` + cloudQuote(timer) + ` --on-active=150 /bin/sh -c "tc qdisc del dev $dev root || true"; ` +
-		`sudo -n tc qdisc add dev "$dev" root netem delay 50ms 10ms loss 1%; tc qdisc show dev "$dev" | grep -q netem; echo "NETEM $dev"`
+		`sudo -n tc qdisc add dev "$dev" root netem delay 50ms 10ms loss 1%; q=$(tc qdisc show dev "$dev"); printf '%s\n' "$q" | grep -q netem; echo "NETEM $dev"`
 }
 
+// As for the partition: only a successful qdisc listing can prove netem gone.
 func chaosNetemClearScript(metaIP string) string {
-	return chaosDev(metaIP) + `sudo -n tc qdisc del dev "$dev" root; if tc qdisc show dev "$dev" | grep -q netem; then exit 1; fi; echo CLEARED`
+	return chaosDev(metaIP) + `sudo -n tc qdisc del dev "$dev" root; q=$(tc qdisc show dev "$dev") || exit 1; if printf '%s\n' "$q" | grep -q netem; then exit 1; fi; echo CLEARED`
 }
 
 func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) error {
@@ -70,23 +72,11 @@ func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) er
 	if !ok || c.Replication != "001" {
 		return errors.New("chaos set A|B needs replication 001")
 	}
-	hosts := map[string]inventory.Host{}
-	for _, h := range d.Hosts {
-		hosts[h.ID] = h
+	hosts, nodes, release, err := chaosConnect(ctx, d, c, append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...))
+	if err != nil {
+		return err
 	}
-	nodes := map[string]*infra.Node{}
-	for _, id := range append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...) {
-		h, ok := hosts[id]
-		if !ok || c.HostKeys[id] == "" {
-			return fmt.Errorf("chaos host %s missing or unpinned", id)
-		}
-		n := cloudNode(h, c.SSHKey, c.HostKeys[id])
-		if e := n.ConnectContext(ctx); e != nil {
-			return fmt.Errorf("chaos connect %s: %w", id, e)
-		}
-		defer n.Close()
-		nodes[id] = n
-	}
+	defer release()
 	// Read-only probe so run B knows before C6 whether netem exists (Claude01
 	// 6ae71cae): kernel version and a dry-run modprobe; never installs, never fails.
 	if c.ChaosSet == "A" {
@@ -94,29 +84,100 @@ func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) er
 		if e := os.MkdirAll(dir, 0700); e != nil {
 			return e
 		}
-		probe := &chaosRun{dir: dir, nodes: nodes}
-		if _, e := probe.step(ctx, "vol1", "netem-probe", 30, chaosNetemProbe); e != nil {
+		if _, e := (&chaosRun{dir: dir, nodes: nodes}).step(ctx, "vol1", "netem-probe", 30, chaosNetemProbe); e != nil {
 			return e
 		}
 	}
-	gens := map[string]int{} // host/role -> live generation (1 = deploy's unit)
+	g := &chaosGens{gens: map[string]int{}, witness: map[string]string{}}
 	for _, x := range set {
 		dir := filepath.Join(c.Output, "chaos", x.Name)
 		if e := os.MkdirAll(dir, 0700); e != nil {
 			return e
 		}
-		if e := runChaos2Case(ctx, d, x, hosts, gens, &chaosRun{dir: dir, rep: c.Replication, nodes: nodes}); e != nil {
+		if e := runChaos2Case(ctx, d, x, hosts, g, &chaosRun{dir: dir, rep: c.Replication, nodes: nodes}); e != nil {
 			return fmt.Errorf("chaos %s: %w", x.Name, e)
 		}
 	}
 	return nil
 }
 
-func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, hosts map[string]inventory.Host, gens map[string]int, r *chaosRun) error {
-	meta, s3 := hosts["meta"], "http://"+endpoint(hosts["meta"], "s3_http")
-	save := func(name string, v any) error {
-		b, _ := json.MarshalIndent(v, "", "  ")
-		return os.WriteFile(filepath.Join(r.dir, name), b, 0600)
+// chaosGens tracks each host/role's live unit generation (1 = deploy's unit)
+// and the last kill witness. C5 kills two hosts in parallel, so every access
+// takes the lock (codex01 #49 R4).
+type chaosGens struct {
+	mu      sync.Mutex
+	gens    map[string]int
+	witness map[string]string
+}
+
+func (g *chaosGens) unit(d inventory.Document, id, role string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.gens[id+"/"+role] == 0 {
+		g.gens[id+"/"+role] = 1
+	}
+	return "sw-cloud-" + d.RunID + "-" + chaosUnit(role, g.gens[id+"/"+role])
+}
+
+func (g *chaosGens) next(id, role string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return chaosUnit(role, max(g.gens[id+"/"+role], 1)+1)
+}
+
+func (g *chaosGens) advance(id, role string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.gens[id+"/"+role] = max(g.gens[id+"/"+role], 1) + 1
+}
+
+func (g *chaosGens) note(key, value string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.witness[key] = value
+}
+
+func (g *chaosGens) noted(key string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.witness[key]
+}
+
+// chaos2Commands builds each client's load and read-back command from the
+// typed SmokeConfig, with every error propagated.
+func chaos2Commands(d inventory.Document, x chaos2Case, hosts map[string]inventory.Host, rep string) (map[string]map[string]string, error) {
+	s3 := "http://" + endpoint(hosts["meta"], "s3_http")
+	cmds := map[string]map[string]string{}
+	for _, id := range chaosClients {
+		root := hosts[id].RunRoot
+		view := d
+		view.State, view.Hosts = "resolved", []inventory.Host{hosts["meta"], hosts["vol1"], hosts[id]}
+		args, e := SmokeArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: rep})
+		if e != nil {
+			return nil, e
+		}
+		var cfg SmokeConfig
+		if e = json.Unmarshal([]byte(args[3]), &cfg); e != nil {
+			return nil, e
+		}
+		cfg.Client, cfg.Root = id+"-"+x.Name, "/testops/"+d.RunID+"/"+id+"-"+x.Name
+		raw, e := json.Marshal(cfg)
+		if e != nil {
+			return nil, e
+		}
+		cmds[id] = map[string]string{}
+		for _, stage := range []string{"load", "readback"} {
+			cmds[id][stage] = "python3 -I " + cloudQuote(root+"/worker/chaos_load.py") + " --config " + cloudQuote(string(raw)) + " --s3 " + cloudQuote(s3) +
+				" --stage " + stage + " --seconds " + strconv.Itoa(x.Seconds) + " --journal " + cloudQuote(root+"/chaos-"+x.Name+".journal")
+		}
+	}
+	return cmds, nil
+}
+
+func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, hosts map[string]inventory.Host, g *chaosGens, r *chaosRun) error {
+	cmds, err := chaos2Commands(d, x, hosts, r.rep)
+	if err != nil {
+		return err
 	}
 	// Volume placement before the fault: volume id -> the hosts holding a copy.
 	placement := map[string][]string{}
@@ -131,162 +192,23 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 			placement[vid] = append(placement[vid], id)
 		}
 	}
-	cmd := func(id, stage string) string {
-		root := hosts[id].RunRoot
-		view := d
-		view.State, view.Hosts = "resolved", []inventory.Host{meta, hosts["vol1"], hosts[id]}
-		args, _ := SmokeArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: r.rep})
-		var cfg map[string]any
-		json.Unmarshal([]byte(args[3]), &cfg)
-		cfg["client"], cfg["root"] = id+"-"+x.Name, "/testops/"+d.RunID+"/"+id+"-"+x.Name
-		raw, _ := json.Marshal(cfg)
-		return "python3 -I " + cloudQuote(root+"/worker/chaos_load.py") + " --config " + cloudQuote(string(raw)) + " --s3 " + cloudQuote(s3) +
-			" --stage " + stage + " --seconds " + strconv.Itoa(x.Seconds) + " --journal " + cloudQuote(root+"/chaos-"+x.Name+".journal")
-	}
-	if _, e := r.step(ctx, "meta", "s3-ready", 30, "until curl -fsS --max-time 3 "+cloudQuote(s3+"/")+" >/dev/null; do sleep 1; done"); e != nil {
+	if _, e := r.step(ctx, "meta", "s3-ready", 30, "until curl -fsS --max-time 3 "+cloudQuote("http://"+endpoint(hosts["meta"], "s3_http")+"/")+" >/dev/null; do sleep 1; done"); e != nil {
 		return e
 	}
-	loadCtx, cancelLoad := context.WithCancel(ctx)
+	cancelLoad, waitLoad := r.startLoad(ctx, x.Seconds+60, func(id string) string { return cmds[id]["load"] })
 	defer cancelLoad()
-	var loads map[string]string
-	var loadErr error
-	loaded := make(chan struct{})
-	go func() {
-		defer close(loaded)
-		loads, loadErr = r.each(loadCtx, "load", x.Seconds+60, func(id string) string { return cmd(id, "load") })
-	}()
-	var marks []map[string]float64
-	ready := map[string]float64{}
-	witness := map[string]string{}
-	wait := func(t time.Duration) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(t):
-			return nil
-		}
-	}
-	mark := func(label string) error { // before every fault action, on every client
-		m, e := r.stamp(ctx, label)
-		marks = append(marks, m)
-		return e
-	}
-	parallel := func(ids []string, f func(id string) error) error {
-		var wg sync.WaitGroup
-		errs := make([]error, len(ids))
-		for i, id := range ids {
-			wg.Add(1)
-			go func(i int, id string) { defer wg.Done(); errs[i] = f(id) }(i, id)
-		}
-		wg.Wait()
-		return errors.Join(errs...)
-	}
-	role := func(id string) string {
-		if id == "meta" {
-			return "master"
-		}
-		return "volume"
-	}
-	unit := func(id, rl string) string {
-		if gens[id+"/"+rl] == 0 {
-			gens[id+"/"+rl] = 1
-		}
-		return "sw-cloud-" + d.RunID + "-" + chaosUnit(rl, gens[id+"/"+rl])
-	}
-	var mu sync.Mutex
-	kill := func(id, rl string) error {
-		old, e := chaosKill(ctx, r, id, rl, unit(id, rl))
-		mu.Lock()
-		witness["kill-"+id+"-"+rl] = old
-		mu.Unlock()
-		return e
-	}
-	start := func(id, rl string) error {
-		mu.Lock()
-		old, next := witness["kill-"+id+"-"+rl], chaosUnit(rl, gens[id+"/"+rl]+1)
-		mu.Unlock()
-		identity, e := chaosStart(ctx, r, d, hosts, id, rl, next, old)
-		mu.Lock()
-		witness["start-"+id+"-"+rl] = identity
-		if e == nil {
-			gens[id+"/"+rl]++
-		}
-		mu.Unlock()
-		return e
-	}
-	fault := func() error {
-		if e := wait(chaos2Settle); e != nil {
-			return e
-		}
-		switch x.Kind {
-		case "kill-hold":
-			if e := errors.Join(mark("kill"), parallel(x.Victims, func(id string) error { return kill(id, role(id)) })); e != nil {
-				return e
-			}
-			if e := errors.Join(wait(chaos2Down), mark("restart"), parallel(x.Victims, func(id string) error { return start(id, role(id)) })); e != nil {
-				return e
-			}
-			m, e := r.stamp(ctx, "ready")
-			ready = m
-			return e
-		case "rolling":
-			for _, id := range x.Victims {
-				if e := errors.Join(mark("kill-"+id), kill(id, "volume"), mark("restart-"+id), start(id, "volume"), wait(chaos2Settle)); e != nil {
-					return e
-				}
-			}
-		case "meta":
-			for _, rl := range []string{"master", "filer"} {
-				if e := errors.Join(mark("kill-"+rl), kill("meta", rl), mark("restart-"+rl), start("meta", rl)); e != nil {
-					return e
-				}
-			}
-		case "partition":
-			if e := mark("partition"); e != nil {
-				return e
-			}
-			out, e := r.step(ctx, x.Victims[0], "partition", 60, chaosPartitionScript("sw-cloud-"+d.RunID+"-autoheal-"+x.Name))
-			if witness["partition"] = out; e != nil || strings.TrimSpace(out) != "PARTITIONED" {
-				return errors.Join(e, errors.New("partition witness missing"))
-			}
-			if e = errors.Join(wait(chaos2Down), mark("heal")); e != nil {
-				return e
-			}
-			out, e = r.step(ctx, x.Victims[0], "heal", 60, chaosPartitionHealScript())
-			if witness["heal"] = out; e != nil || strings.TrimSpace(out) != "HEALED" {
-				return errors.Join(e, errors.New("heal witness missing"))
-			}
-		case "netem":
-			ip := meta.Data.Address
-			if e := mark("netem"); e != nil {
-				return e
-			}
-			out, e := r.step(ctx, x.Victims[0], "netem", 60, chaosNetemScript(ip, "sw-cloud-"+d.RunID+"-autoheal-"+x.Name))
-			if witness["netem"] = out; e != nil || !strings.HasPrefix(strings.TrimSpace(out), "NETEM ") {
-				return errors.Join(e, errors.New("netem witness missing"))
-			}
-			if e = errors.Join(wait(chaos2Netem), mark("clear")); e != nil {
-				return e
-			}
-			out, e = r.step(ctx, x.Victims[0], "clear", 60, chaosNetemClearScript(ip))
-			if witness["clear"] = out; e != nil || strings.TrimSpace(out) != "CLEARED" {
-				return errors.Join(e, errors.New("netem clear witness missing"))
-			}
-		}
-		return nil
-	}
-	faultErr := fault()
+	f := &chaos2Fault{r: r, d: d, x: x, hosts: hosts, g: g, witness: map[string]string{}}
+	faultErr := f.run(ctx)
 	if faultErr != nil {
 		cancelLoad()
 	}
-	<-loaded
-	if e := errors.Join(faultErr, save("markers.json", map[string]any{"marks": marks, "ready": ready}), save("fault.json", witness), save("placement.json", placement)); e != nil {
+	loads, loadErr := waitLoad()
+	if e := errors.Join(faultErr, r.save("markers.json", map[string]any{"marks": f.marks, "ready": f.ready}), r.save("fault.json", f.witness), r.save("placement.json", placement)); e != nil {
 		return e
 	}
 	if loadErr != nil {
 		return loadErr
 	}
-	// C5: keys whose every copy sat on the killed pair may be unavailable.
 	victims := append([]string{}, x.Victims...)
 	sort.Strings(victims)
 	results := map[string]any{}
@@ -299,10 +221,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		if json.Unmarshal([]byte(lines[len(lines)-1]), &out) != nil || out.Status != "OBSERVED" {
 			return fmt.Errorf("%s load output missing", id)
 		}
-		w := chaosWindows{Unavailable: map[string]bool{}, ReadyMono: ready[id]}
-		for _, m := range marks {
+		w := chaosWindows{Unavailable: map[string]bool{}, ReadyMono: f.ready[id]}
+		for _, m := range f.marks {
 			w.Marks = append(w.Marks, m[id])
 		}
+		// C5: keys whose every copy sat on the killed pair may be unavailable.
 		if x.Kind == "kill-hold" && len(victims) == 2 {
 			journal, e := r.step(ctx, id, "journal-"+id, 30, "cat "+cloudQuote(hosts[id].RunRoot+"/chaos-"+x.Name+".journal"))
 			if e != nil {
@@ -333,7 +256,7 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		}
 		results[id] = map[string]int{"ops": len(out.Outcomes), "failed": failed}
 	}
-	back, e := r.each(ctx, "readback", 300, func(id string) string { return cmd(id, "readback") })
+	back, e := r.each(ctx, "readback", 300, func(id string) string { return cmds[id]["readback"] })
 	if e != nil {
 		return e
 	}
@@ -342,5 +265,131 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 			return fmt.Errorf("%s read-back did not PASS", id)
 		}
 	}
-	return save("result.json", results)
+	return r.save("result.json", results)
+}
+
+// chaos2Fault runs one case's fault actions in strict order. Every step is
+// checked before the next is sent, so a failed marker or kill stops the case
+// before any later action (codex01 #49 R1). Only the independent victims of
+// one action run in parallel, after their marker succeeded.
+type chaos2Fault struct {
+	r       *chaosRun
+	d       inventory.Document
+	x       chaos2Case
+	hosts   map[string]inventory.Host
+	g       *chaosGens
+	marks   []map[string]float64
+	ready   map[string]float64
+	witness map[string]string
+}
+
+func (f *chaos2Fault) mark(ctx context.Context, label string) error {
+	m, e := f.r.stamp(ctx, label)
+	if e == nil {
+		f.marks = append(f.marks, m)
+	}
+	return e
+}
+
+func (f *chaos2Fault) each(ids []string, act func(id string) error) error {
+	var wg sync.WaitGroup
+	errs := make([]error, len(ids))
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id string) { defer wg.Done(); errs[i] = act(id) }(i, id)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
+	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.d, id, role))
+	f.g.note("kill-"+id+"-"+role, old)
+	return e
+}
+
+func (f *chaos2Fault) start(ctx context.Context, id, role string) error {
+	identity, e := chaosStart(ctx, f.r, f.d, f.hosts, id, role, f.g.next(id, role), f.g.noted("kill-"+id+"-"+role))
+	f.g.note("start-"+id+"-"+role, identity)
+	if e == nil {
+		f.g.advance(id, role)
+	}
+	return e
+}
+
+func (f *chaos2Fault) wait(ctx context.Context, t time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(t):
+		return nil
+	}
+}
+
+// step runs one witnessed action on the victim and requires its witness line.
+func (f *chaos2Fault) step(ctx context.Context, name, script, want string) error {
+	out, e := f.r.step(ctx, f.x.Victims[0], name, 60, script)
+	f.witness[name] = out
+	if e != nil {
+		return e
+	}
+	if got := strings.TrimSpace(out); got != want && !(want == "NETEM" && strings.HasPrefix(got, "NETEM ")) {
+		return fmt.Errorf("%s witness missing: %q", name, got)
+	}
+	return nil
+}
+
+// sequence runs each step only after the previous one succeeded.
+func sequence(steps ...func() error) error {
+	for _, step := range steps {
+		if e := step(); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func (f *chaos2Fault) run(ctx context.Context) error {
+	role := func(id string) string {
+		if id == "meta" {
+			return "master"
+		}
+		return "volume"
+	}
+	mark := func(label string) func() error { return func() error { return f.mark(ctx, label) } }
+	wait := func(t time.Duration) func() error { return func() error { return f.wait(ctx, t) } }
+	if e := f.wait(ctx, chaos2Settle); e != nil {
+		return e
+	}
+	switch f.x.Kind {
+	case "kill-hold":
+		return sequence(mark("kill"),
+			func() error { return f.each(f.x.Victims, func(id string) error { return f.kill(ctx, id, role(id)) }) },
+			wait(chaos2Down), mark("restart"),
+			func() error { return f.each(f.x.Victims, func(id string) error { return f.start(ctx, id, role(id)) }) },
+			func() (e error) { f.ready, e = f.r.stamp(ctx, "ready"); return e })
+	case "rolling", "meta":
+		for _, id := range f.x.Victims {
+			roles, settle := []string{"volume"}, chaos2Settle
+			if f.x.Kind == "meta" {
+				roles, settle = []string{"master", "filer"}, 0
+			}
+			for _, rl := range roles {
+				if e := sequence(mark("kill-"+id+"-"+rl), func() error { return f.kill(ctx, id, rl) },
+					mark("restart-"+id+"-"+rl), func() error { return f.start(ctx, id, rl) }, wait(settle)); e != nil {
+					return e
+				}
+			}
+		}
+	case "partition", "netem":
+		timer := "sw-cloud-" + f.d.RunID + "-autoheal-" + f.x.Name
+		on, off, onWant, offWant, hold := chaosPartitionScript(timer), chaosPartitionHealScript(), "PARTITIONED", "HEALED", chaos2Down
+		if f.x.Kind == "netem" {
+			ip := f.hosts["meta"].Data.Address
+			on, off, onWant, offWant, hold = chaosNetemScript(ip, timer), chaosNetemClearScript(ip), "NETEM", "CLEARED", chaos2Netem
+		}
+		return sequence(mark(f.x.Kind), func() error { return f.step(ctx, f.x.Kind, on, onWant) },
+			wait(hold), mark("heal"), func() error { return f.step(ctx, "heal", off, offWant) })
+	}
+	return nil
 }

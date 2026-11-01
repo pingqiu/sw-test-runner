@@ -17,7 +17,7 @@ import (
 )
 
 // Fake ten-node cluster for stage 2. Each client's n-th marker in a case is
-// base+30+70n on its own clock; ops run one per second from base+0.5. vol_i
+// base+30+25n on its own clock; ops run one per second from base+0.5. vol_i
 // holds volumes i and i-1, so volume 3 has both copies on {vol3, vol4}.
 type chaos2Fake struct {
 	mu      sync.Mutex
@@ -50,7 +50,7 @@ func (f *chaos2Fake) handle(id string) func(string, ssh.Channel) uint32 {
 		switch {
 		case strings.Contains(inner, "time.monotonic"):
 			rec("stamp")
-			fmt.Fprintf(ch, "%.6f\n", base+30+70*float64(f.stamps[id]))
+			fmt.Fprintf(ch, "%.6f\n", base+30+25*float64(f.stamps[id]))
 			f.stamps[id]++
 		case strings.Contains(inner, "chaos_load.py") && strings.Contains(inner, "--stage load"):
 			f.stamps[id] = 0
@@ -133,10 +133,10 @@ func (f *chaos2Fake) load(id string, base float64) string {
 			o.Key = "kA"
 		}
 		switch {
-		case f.variant == "outside-window" && id == "client2" && s > base+95 && s < base+96:
-			o.Exact = false // P=base+30, fails at base+95.5: past P+60
-		case strings.HasPrefix(f.variant, "c5-") && f.cases[id] == "C5-two-kill" && o.Kind == "kv_get" && s > base+91 && s < base+99:
-			o.Exact = false // past kill+60, before ready(base+170)+60
+		case f.variant == "outside-window" && id == "client2" && s > base+125 && s < base+126:
+			o.Exact = false // latest P=base+55 (restart), fails at base+125.5: past P+60
+		case strings.HasPrefix(f.variant, "c5-") && f.cases[id] == "C5-two-kill" && o.Kind == "kv_get" && s > base+117 && s < base+125:
+			o.Exact = false // past restart(base+55)+60, before ready(base+80)+60
 			if f.variant == "c5-unavailable" {
 				o.Key = "kU" // both copies on {vol3, vol4}
 			}

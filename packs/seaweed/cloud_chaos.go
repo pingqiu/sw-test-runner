@@ -117,24 +117,61 @@ func (r *chaosRun) stamp(ctx context.Context, label string) (map[string]float64,
 	return marks, nil
 }
 
-func runCloudChaos(ctx context.Context, d inventory.Document, c CloudConfig) error {
-	hosts := map[string]inventory.Host{}
+// chaosConnect dials each named pinned host once; release closes them all.
+func chaosConnect(ctx context.Context, d inventory.Document, c CloudConfig, ids []string) (map[string]inventory.Host, map[string]*infra.Node, func(), error) {
+	hosts, nodes := map[string]inventory.Host{}, map[string]*infra.Node{}
 	for _, h := range d.Hosts {
 		hosts[h.ID] = h
 	}
-	nodes := map[string]*infra.Node{}
-	for _, id := range append([]string{"meta", "vol1"}, chaosClients...) {
+	release := func() {
+		for _, n := range nodes {
+			n.Close()
+		}
+	}
+	for _, id := range ids {
 		h, ok := hosts[id]
 		if !ok || c.HostKeys[id] == "" {
-			return fmt.Errorf("chaos host %s missing or unpinned", id)
+			release()
+			return nil, nil, nil, fmt.Errorf("chaos host %s missing or unpinned", id)
 		}
 		n := cloudNode(h, c.SSHKey, c.HostKeys[id])
 		if e := n.ConnectContext(ctx); e != nil {
-			return fmt.Errorf("chaos connect %s: %w", id, e)
+			release()
+			return nil, nil, nil, fmt.Errorf("chaos connect %s: %w", id, e)
 		}
-		defer n.Close()
 		nodes[id] = n
 	}
+	return hosts, nodes, release, nil
+}
+
+func (r *chaosRun) save(name string, v any) error {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return os.WriteFile(filepath.Join(r.dir, name), b, 0600)
+}
+
+// startLoad runs cmd on every client in the background. cancel stops it;
+// wait joins it and returns each client's stdout.
+func (r *chaosRun) startLoad(ctx context.Context, seconds int, cmd func(id string) string) (cancel func(), wait func() (map[string]string, error)) {
+	loadCtx, cancel := context.WithCancel(ctx)
+	var loads map[string]string
+	var loadErr error
+	loaded := make(chan struct{})
+	go func() {
+		defer close(loaded)
+		loads, loadErr = r.each(loadCtx, "load", seconds, cmd)
+	}()
+	return cancel, func() (map[string]string, error) {
+		<-loaded
+		return loads, loadErr
+	}
+}
+
+func runCloudChaos(ctx context.Context, d inventory.Document, c CloudConfig) error {
+	hosts, nodes, release, err := chaosConnect(ctx, d, c, append([]string{"meta", "vol1"}, chaosClients...))
+	if err != nil {
+		return err
+	}
+	defer release()
 	// A restart replaces a role's unit, so later cases target the live one.
 	gens := map[string]int{"volume": 1, "filer": 1}
 	for _, x := range chaosCases {
@@ -186,10 +223,6 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 			cmds[id][stage] = cmd
 		}
 	}
-	save := func(name string, v any) error {
-		b, _ := json.MarshalIndent(v, "", "  ")
-		return os.WriteFile(filepath.Join(r.dir, name), b, 0600)
-	}
 	seeds, e := r.each(ctx, "seed", 120, func(id string) string { return cmds[id]["seed"] })
 	if e != nil {
 		return e
@@ -212,15 +245,8 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 		}
 	}
 
-	loadCtx, cancelLoad := context.WithCancel(ctx)
+	cancelLoad, waitLoad := r.startLoad(ctx, 160, func(id string) string { return cmds[id]["load"] })
 	defer cancelLoad()
-	var loads map[string]string
-	var loadErr error
-	loaded := make(chan struct{})
-	go func() {
-		defer close(loaded)
-		loads, loadErr = r.each(loadCtx, "load", 160, func(id string) string { return cmds[id]["load"] })
-	}()
 	marks, witness := map[string]map[string]float64{}, map[string]string{}
 	fault := func() error {
 		select {
@@ -246,8 +272,8 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 	if faultErr != nil {
 		cancelLoad()
 	}
-	<-loaded
-	if e = errors.Join(faultErr, save("markers.json", marks), save("fault.json", witness)); e != nil {
+	loads, loadErr := waitLoad()
+	if e = errors.Join(faultErr, r.save("markers.json", marks), r.save("fault.json", witness)); e != nil {
 		return e
 	}
 	if loadErr != nil {
@@ -264,7 +290,7 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 		}
 	}
 	if x.Freeze {
-		if e = save("exposure.json", exposed); e != nil {
+		if e = r.save("exposure.json", exposed); e != nil {
 			return e
 		}
 		if !exposed["client1"] && !exposed["client2"] && !exposed["client3"] {

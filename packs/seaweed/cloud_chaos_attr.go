@@ -48,6 +48,11 @@ func checkChaosOps(ops []chaosOp, w chaosWindows) error {
 			return fmt.Errorf("op %d order/binding differs", i)
 		}
 	}
+	// The load must span the fault on this client's own clock: running before
+	// the first action and still issuing ops after the last (codex01 #49 R2).
+	if ops[0].Started >= marks[0] || ops[len(ops)-1].Started <= marks[len(marks)-1] {
+		return errors.New("NOT_COVERED: load does not span the fault actions")
+	}
 	for _, f := range ops {
 		if f.Exact {
 			continue
