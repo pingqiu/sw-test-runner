@@ -6,13 +6,15 @@ import kv_smoke
 from test_kv_smoke import FakeConnector
 
 class ReadControls(unittest.TestCase):
-    def run_case(self, mode='good', route='dc', stage='recovery'):
-        c=dict(run_id='cpu',client='m01',transport='dc',keys=2,length=64,root='/testops/cpu/m01',rdma_address='10.0.2.3:20980')
+    def run_case(self, mode='good', route='dc', stage='recovery', transport='dc'):
+        c=dict(run_id='cpu',client='m01',transport=transport,keys=2,length=64,root='/testops/cpu/m01')
+        if transport=='dc':c['rdma_address']='10.0.2.3:20980'
         conn=FakeConnector(mode)
         for i in range(c['keys']):
             key=c['client']+'-'+str(i)
             conn.values[key]=kv_smoke.exact_helper('soak_native_worker').payload(c['run_id']+'/'+key,c['length'])
         if route=='http':conn.stats['loader']['transport']='http'
+        conn.http=transport=='http'
         try:return kv_smoke.read_only(conn,c,stage,route),conn
         finally:conn.close()
     def test_recovery_exact_has_no_sets_and_dc_witness(self):
@@ -52,12 +54,23 @@ class ReadControls(unittest.TestCase):
             self.assertNotIn('expected_errors',row)
             self.assertTrue(all(f['action']=='get' and f['target']=='10.0.2.3:20980' for f in row['faults']))
         finally:kv_smoke.time.monotonic,kv_smoke.time.sleep=original_now,original_sleep
+    def test_http_inventory_load_records_failure_without_rdma_target(self):
+        now=[0.0]
+        with patch.object(kv_smoke.time,'monotonic',lambda:now[0]),patch.object(kv_smoke.time,'sleep',lambda delay:now.__setitem__(0,now[0]+1)):
+            row,_=self.run_case('miss','http','load','http')
+        self.assertTrue(row['faults'] and all(f['target']=='' and f['transport']=='http' for f in row['faults']))
     def test_wrong_bytes_never_become_an_outage_observation(self):
         with self.assertRaises(AssertionError):self.run_case('wrong',stage='load')
     def test_seed_stage_is_the_existing_smoke_path(self):
         self.assertEqual(kv_smoke.read_stage_args('seed','dc'),('seed','dc'))
         for stage,route in [('seed','http'),('load','rc'),('arbitrary','dc')]:
             with self.assertRaises(ValueError):kv_smoke.read_stage_args(stage,route)
+
+    def test_http_inventory_reads_only_over_http(self):
+        for stage in ('seed','load','recovery'):
+            self.assertEqual(kv_smoke.read_stage_args(stage,'http','http'),(stage,'http'))
+            with self.assertRaises(ValueError):kv_smoke.read_stage_args(stage,'dc','http')
+        with self.assertRaises(ValueError):kv_smoke.read_stage_args('load','http','rc')
 
     def test_real_main_dispatch_has_no_sets(self):
         for stage,route in [('load','dc'),('recovery','dc'),('recovery','http')]:

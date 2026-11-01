@@ -25,6 +25,9 @@ type CloudConfig struct {
 	HostKeys map[string]string    `json:"-"`
 	Output   string               `json:"-"`
 	Files    map[string]CloudFile `json:"files"`
+	// Chaos opts a ten-node run into the read-restart/freeze cases after the
+	// functional phases. Absent or false leaves the run unchanged.
+	Chaos bool `json:"chaos,omitempty"`
 }
 type CloudFile struct {
 	Path   string `json:"path"`
@@ -65,6 +68,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if len(d.Hosts) != 1 {
 		return runCloudCluster(ctx, *d, c)
 	}
+	if c.Chaos {
+		return "", errors.New("chaos needs the ten-node cluster")
+	}
 	h := d.Hosts[0]
 	for _, role := range []string{"master", "filer", "volume", "s3", "client"} {
 		if !contains(h.Roles, role) {
@@ -85,8 +91,8 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if h.RunRoot != "/data/seaweed-runs/"+d.RunID {
 		return "", errors.New("unexpected cloud run root")
 	}
-	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
+	q := cloudQuote
+	n := cloudNode(h, c.SSHKey, c.HostKey)
 	if phase == "collect" {
 		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
 	}
@@ -120,13 +126,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 				return "", context.DeadlineExceeded
 			}
 		}
-		command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + q(cmd)
-		out, stderr, rc, e := n.Run(ctx, command)
-		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, command, out, stderr, rc, e)
-		if e != nil || rc != 0 || w != nil {
-			return out, fmt.Errorf("cloud step %s command=%q rc=%d stderr=%s: %v", name, command, rc, stderr, errors.Join(e, w))
-		}
-		return out, nil
+		return cloudStep(ctx, n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, seconds, cmd)
 	}
 	upload := func(name, local, remote string) error {
 		if phase != "" && (phase != "prepare" || !cloudArtifact(h, name)) {
@@ -215,23 +215,14 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
 	}
-	ip := h.Data.Address
 	service := func(role, cmd string) error {
-		_, e := run("start-"+role, "sudo systemd-run --unit="+q("sw-cloud-"+d.RunID+"-"+role)+" --property=WorkingDirectory="+q(root)+" "+cmd)
+		_, e := run("start-"+role, cloudStart(d, root, role, cmd))
 		return e
 	}
 	master := endpoint(meta, "master_http")
-	volumeMB, maxVolumes := "32", "8"
-	if phase != "" {
-		volumeMB, maxVolumes = "256", "16"
-	}
-	for _, s := range []struct{ role, cmd string }{
-		{"master", q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=" + volumeMB + " -defaultReplication=000 -peers=none"},
-		{"volume", q(root+"/weed-volume") + " --master=" + master + " --ip=" + ip + " --port=" + strconv.Itoa(servicePort(h, "volume_http")) + " --port.grpc=" + strconv.Itoa(servicePort(h, "volume_grpc")) + " --dir=" + q(root+"/volume") + " --max=" + maxVolumes},
-		{"filer", q(root+"/weed") + " -config_dir=" + q(root) + " filer -master=" + master + " -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "filer_http")) + " -port.grpc=" + strconv.Itoa(servicePort(h, "filer_grpc"))},
-		{"s3", q(root+"/weed") + " s3 -filer=" + endpoint(meta, "filer_http") + " -port=" + strconv.Itoa(servicePort(h, "s3_http"))},
-	} {
-		if e = service(s.role, s.cmd); e != nil {
+	commands := cloudServices(h, meta, root, phase != "")
+	for _, role := range []string{"master", "volume", "filer", "s3"} {
+		if e = service(role, commands[role]); e != nil {
 			return "", e
 		}
 	}
@@ -293,6 +284,44 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return output, errors.New("missing or failed KV smoke")
 	}
 	return output, nil
+}
+
+func cloudNode(h inventory.Host, key, pin string) *infra.Node {
+	return &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: key, HostKey: pin}
+}
+
+// cloudStep runs one bounded remote command and journals it as dir/file.
+func cloudStep(ctx context.Context, n *infra.Node, dir, file, name string, seconds int, cmd string) (string, error) {
+	command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + cloudQuote(cmd)
+	out, stderr, rc, e := n.Run(ctx, command)
+	w := writeCloudStep(dir, file, name, command, out, stderr, rc, e)
+	if e != nil || rc != 0 || w != nil {
+		return out, fmt.Errorf("cloud step %s command=%q rc=%d stderr=%s: %v", name, command, rc, stderr, errors.Join(e, w))
+	}
+	return out, nil
+}
+
+func cloudQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+
+// cloudStart starts one service generation as a transient unit; deploy uses the
+// role's unit name, a chaos replacement the same command under unit role+"-g2".
+func cloudStart(d inventory.Document, root, unit, cmd string) string {
+	return "sudo systemd-run --unit=" + cloudQuote("sw-cloud-"+d.RunID+"-"+unit) + " --property=WorkingDirectory=" + cloudQuote(root) + " " + cmd
+}
+
+// cloudServices is the single source of each role's service command.
+func cloudServices(h, meta inventory.Host, root string, cluster bool) map[string]string {
+	q, ip, master := cloudQuote, h.Data.Address, endpoint(meta, "master_http")
+	volumeMB, maxVolumes := "32", "8"
+	if cluster {
+		volumeMB, maxVolumes = "256", "16"
+	}
+	return map[string]string{
+		"master": q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=" + volumeMB + " -defaultReplication=000 -peers=none",
+		"volume": q(root+"/weed-volume") + " --master=" + master + " --ip=" + ip + " --port=" + strconv.Itoa(servicePort(h, "volume_http")) + " --port.grpc=" + strconv.Itoa(servicePort(h, "volume_grpc")) + " --dir=" + q(root+"/volume") + " --max=" + maxVolumes,
+		"filer":  q(root+"/weed") + " -config_dir=" + q(root) + " filer -master=" + master + " -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "filer_http")) + " -port.grpc=" + strconv.Itoa(servicePort(h, "filer_grpc")),
+		"s3":     q(root+"/weed") + " s3 -filer=" + endpoint(meta, "filer_http") + " -port=" + strconv.Itoa(servicePort(h, "s3_http")),
+	}
 }
 
 func servicePort(h inventory.Host, name string) int {

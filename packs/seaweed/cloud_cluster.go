@@ -47,6 +47,9 @@ func cloudStepEnabled(h inventory.Host, phase, name string) bool {
 	return false
 }
 
+// runChaos is the opt-in chaos stage; tests observe whether it is reached.
+var runChaos = runCloudChaos
+
 func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (bundle string, failure error) {
 	groups := map[string][]inventory.Host{}
 	if len(d.Hosts) != 10 || len(c.HostKeys) != 10 {
@@ -138,6 +141,11 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 			}
 		}
 		if e := phase(s.name, s.hosts); e != nil {
+			return "", e
+		}
+	}
+	if c.Chaos {
+		if e := runChaos(ctx, d, c); e != nil {
 			return "", e
 		}
 	}

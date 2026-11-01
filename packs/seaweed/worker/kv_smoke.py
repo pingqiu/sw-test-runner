@@ -94,14 +94,15 @@ def configure(c):
     return 'loader-rdma'
 
 
-def read_stage_args(stage, route):
-    if stage not in ('seed','load','recovery') or route not in ('dc','http') or (stage=='seed' and route!='dc'):
+def read_stage_args(stage, route, transport='dc'):
+    # A DC inventory seeds over DC; an HTTP (cloud) inventory reads only over HTTP.
+    if stage not in ('seed','load','recovery') or route not in ('dc','http') or transport not in ('dc','http') or (stage=='seed' and route!=transport) or (transport=='http' and route!='http'):
         raise ValueError('unsupported read-only case stage/path')
     return stage, route
 
 
 def read_only(conn, c, stage, route):
-    read_stage_args(stage,route)
+    read_stage_args(stage,route,c['transport'])
     if stage=='seed':raise ValueError('seed uses the unchanged settled smoke path')
     helper=exact_helper('soak_native_worker')
     helper.validate_api(type(conn))
@@ -119,7 +120,7 @@ def read_only(conn, c, stage, route):
         if not row['ok'] or row['results'] not in (None,[True]):
             if stage!='load':raise AssertionError('recovery GET miss/error')
             if len(faults)>=256:raise AssertionError('bounded completed-failure evidence exceeded')
-            faults.append(dict(action='get',key=key,operation_id=row['operation_id'],target=c['rdma_address'],
+            faults.append(dict(action='get',key=key,operation_id=row['operation_id'],target=c.get('rdma_address',''),
                 transport=route,started=row['submitted'],ended=end,ok=row['ok'],error=row['error'],results=row['results']))
         else:
             digest=hashlib.sha256(helper.payload(command['seed'],c['length'])).hexdigest()
@@ -161,8 +162,7 @@ def main():
     try:
         c = json.loads(args.config)
         if args.stage or args.read_path:
-            read_stage_args(args.stage,args.read_path)
-            if c['transport']!='dc':raise ValueError('read-only restart requires DC inventory')
+            read_stage_args(args.stage,args.read_path,c['transport'])
         backing = configure(c)
         if args.dry_run:
             if args.stage:
