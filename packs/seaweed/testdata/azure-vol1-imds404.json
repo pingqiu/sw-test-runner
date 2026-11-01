@@ -1,0 +1,58 @@
+{
+  "boot_status_code": "enabled-by-generator",
+  "datasource": "azure",
+  "detail": "DataSourceAzure [seed=IMDS]",
+  "errors": [],
+  "extended_status": "degraded done",
+  "init": {
+    "errors": [],
+    "finished": 4227.23,
+    "recoverable_errors": {
+      "WARNING": [
+        "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')"
+      ]
+    },
+    "start": 4225.8
+  },
+  "init-local": {
+    "errors": [],
+    "finished": 4223.64,
+    "recoverable_errors": {
+      "WARNING": [
+        "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')"
+      ]
+    },
+    "start": 6.09
+  },
+  "last_update": "Thu, 01 Jan 1970 01:11:13 +0000",
+  "modules-config": {
+    "errors": [],
+    "finished": 4229.38,
+    "recoverable_errors": {
+      "WARNING": [
+        "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')"
+      ]
+    },
+    "start": 4228.56
+  },
+  "modules-final": {
+    "errors": [],
+    "finished": 4273.37,
+    "recoverable_errors": {
+      "WARNING": [
+        "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')"
+      ]
+    },
+    "start": 4230.62
+  },
+  "recoverable_errors": {
+    "WARNING": [
+      "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')",
+      "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')",
+      "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')",
+      "Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')"
+    ]
+  },
+  "stage": null,
+  "status": "done"
+}
