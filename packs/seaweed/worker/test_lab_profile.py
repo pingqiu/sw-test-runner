@@ -516,7 +516,7 @@ class VolumeNofile(unittest.TestCase):
     def test_absent_is_unchanged_and_malformed_refuses(self):
         self.assertIsNone(profile.volume_nofile({}))
         self.assertEqual(profile.volume_nofile(dict(volume_nofile=4096)), 4096)
-        for bad in (True, '1048576', 4096.0, 1023, 1048577, -1, [4096]):
+        for bad in (None, True, '1048576', 4096.0, 1023, 1048577, -1, [4096]):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 profile.volume_nofile(dict(volume_nofile=bad))
 
@@ -576,6 +576,13 @@ class VolumeNofile(unittest.TestCase):
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(self.limits(root), resource.getrlimit(resource.RLIMIT_NOFILE))
         self.assertNotIn('nofile', json.loads((root / 'volume-generation.json').read_text()))
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_explicit_null_refuses_before_any_effect(self):
+        root, child = self.deploy_volume(dict(volume_nofile=None))
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn(b'volume_nofile must be an integer', child.stdout + child.stderr)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), [])
 
     @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
     def test_above_the_hard_limit_refuses_before_any_effect(self):

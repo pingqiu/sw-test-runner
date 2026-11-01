@@ -181,11 +181,12 @@ def volume_nofile(config):
     """Optional plan 'volume_nofile': the soft RLIMIT_NOFILE the volume runs
     with, as the product unit sets it. The volume sizes its RDMA connection
     budget from the soft limit (soft/8, clamped 8..256), so a lab shell's 1024
-    caps it at 128. Absent: the inherited limit is unchanged. The hard limit is
-    never raised; a value above it refuses."""
-    value = config.get('volume_nofile')
-    if value is None:
+    caps it at 128. Absent (no key): the inherited limit is unchanged. Present,
+    it must be an integer, so an explicit null refuses. The hard limit is never
+    raised; a value above it refuses."""
+    if 'volume_nofile' not in config:
         return None
+    value = config['volume_nofile']
     if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= PRODUCT_NOFILE:
         raise ValueError('volume_nofile must be an integer in [1024, %d]' % PRODUCT_NOFILE)
     import resource
