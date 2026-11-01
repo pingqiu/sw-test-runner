@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,34 @@ func TestCloudInitJSONGate(t *testing.T) {
 			err := qualifyCloudInit(c.raw, c.rc)
 			if (err == nil) != c.pass {
 				t.Fatalf("pass=%v err=%v", c.pass, err)
+			}
+		})
+	}
+}
+
+// Exact raw vol1 status from Azure10 run4, including all nested repeated warnings.
+func TestCapturedVol1Reprovision404(t *testing.T) {
+	raw, err := os.ReadFile("testdata/azure-vol1-imds404.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, raw string
+		pass      bool
+	}{
+		{"captured", string(raw), true},
+		{"foreign-host", strings.ReplaceAll(string(raw), "169.254.169.254", "10.0.0.1"), false},
+		{"foreign-path", strings.ReplaceAll(string(raw), "metadata/reprovisiondata", "metadata/instance"), false},
+		{"foreign-api", strings.ReplaceAll(string(raw), "2019-06-01", "2021-08-01"), false},
+		{"other-status", strings.ReplaceAll(string(raw), "404 Client Error: Not Found", "410 Client Error: Gone"), false},
+		{"other-attempt", strings.ReplaceAll(string(raw), "attempt 1", "attempt 2"), false},
+		{"mixed-warning", strings.Replace(string(raw), "Polling IMDS", "Unknown warning; Polling IMDS", 1), false},
+		{"fatal", strings.Replace(string(raw), `"errors": []`, `"errors": ["fatal"]`, 1), false},
+		{"nested-fatal", strings.Replace(string(raw), `"init": {`, `"init": {"extra":{"errors":["fatal"]},`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := qualifyCloudInit(tc.raw, 2); (err == nil) != tc.pass {
+				t.Fatalf("pass=%v error=%v", tc.pass, err)
 			}
 		})
 	}

@@ -204,8 +204,10 @@ run directories or uploading artifacts. It retains the complete response in
 `cloud-init-status.json` and the original exit code and decision in
 `cloud-init-step.json`. Exit 0 or 2 is accepted only with status `done`, no fatal
 errors (including stage errors), and no unapproved recoverable messages.
-The sole allowed warning is the complete Azure IMDS 410 polling message for
-`169.254.169.254/metadata/instance?api-version=2021-08-01&extended=true`.
+The allowed warnings are the complete Azure IMDS 410 polling message for
+`169.254.169.254/metadata/instance?api-version=2021-08-01&extended=true`,
+and the exact captured attempt-1 `404 Client Error: Not Found` polling message
+for `169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01`.
 Unknown, mixed, malformed or ambiguous error data refuses preparation.
 This follows [cloud-init's structured status and exit-code contract](https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/status.py).
 
