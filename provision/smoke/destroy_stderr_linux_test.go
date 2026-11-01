@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 )
@@ -22,6 +23,9 @@ func TestNativeDestroyClassifiesTerraformStderr(t *testing.T) {
 	var captured map[string]string
 	if err = json.Unmarshal(body, &captured); err != nil {
 		t.Fatal(err)
+	}
+	for k, v := range captured { // the delete rule re-reads only in-scope IDs
+		captured[k] = strings.ReplaceAll(v, "fixture-rg", "dedicated-test")
 	}
 	progress := "module.run.azurerm_network_interface.node[\"vol4\"]: Refreshing state... [id=/subscriptions/x]\n\nPlan: 0 to add, 0 to change, 46 to destroy.\nmodule.run.azurerm_network_interface.node[\"vol2\"]: Destruction complete after 6s\n"
 	for _, tc := range []struct {
@@ -55,6 +59,9 @@ func TestNativeDestroyClassifiesTerraformStderr(t *testing.T) {
 							return Native(ctx, dir, tool, args...)
 						}
 					}
+					if name == "az" && args[0] == "resource" && args[1] == "show" {
+						return []byte(`{"id":"` + args[3] + `"}`), nil // present: re-delete
+					}
 					return f.command(ctx, dir, name, args...)
 				}
 				r := ctl.Execute(context.Background(), "run", c)
@@ -73,6 +80,9 @@ func TestNativeStdoutNeverRetries(t *testing.T) {
 	body, _ := os.ReadFile("testdata/arm-public-ip-transport.json")
 	var captured map[string]string
 	json.Unmarshal(body, &captured)
+	for k, v := range captured {
+		captured[k] = strings.ReplaceAll(v, "fixture-rg", "dedicated-test")
+	}
 	block := captured["exact_nic_destroy_error"]
 	for _, tc := range []struct {
 		name, stdout, stderr, want string
@@ -100,6 +110,9 @@ func TestNativeStdoutNeverRetries(t *testing.T) {
 						if calls == 1 {
 							return Native(ctx, dir, tool, args...)
 						}
+					}
+					if name == "az" && args[0] == "resource" && args[1] == "show" {
+						return []byte(`{"id":"` + args[3] + `"}`), nil // present: re-delete
 					}
 					return f.command(ctx, dir, name, args...)
 				}

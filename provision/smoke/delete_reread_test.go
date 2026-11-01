@@ -54,6 +54,9 @@ func TestDestroyDeleteResetRereadsExactIDs(t *testing.T) {
 		{"run5-nic-and-run6-disk", strings.TrimSpace(nic) + "\n\n" + disk, "COMPLETE", func(id string) ([]byte, error) {
 			return []byte(`{"id":"` + id + `"}`), nil
 		}, 2, []string{nicID, diskID}},
+		{"public-ip-delete-absent", forms["exact_first_destroy_error"], "COMPLETE", func(string) ([]byte, error) {
+			return []byte(strings.ReplaceAll(notFound(forms, "fixture-run-vol2-ip"), "Microsoft.Compute/disks", "Microsoft.Network/publicIPAddresses")), errors.New("az: exit status 3")
+		}, 2, []string{rereadBase + "Microsoft.Network/publicIPAddresses/fixture-run-vol2-ip"}},
 		{"reread-unknown", disk, "CLEANUP_INCOMPLETE", func(string) ([]byte, error) {
 			return []byte("ERROR: (AuthorizationFailed) denied"), errors.New("az: exit status 1")
 		}, 1, []string{diskID}},
@@ -138,6 +141,8 @@ func TestSweepRereadsInsteadOfStopping(t *testing.T) {
 		{"delete-reset-present", []string{vnet, vnet}, true},
 		{"show-unknown", nil, false},
 		{"delete-other-error", []string{vnet}, false},
+		{"delete-reset-unknown-reread", []string{vnet}, false},
+		{"delete-reset-thrice", []string{vnet, vnet, vnet}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deletes, vnetShows := []string{}, 0
@@ -157,13 +162,16 @@ func TestSweepRereadsInsteadOfStopping(t *testing.T) {
 						return []byte(forms["exact_disk_not_found"]), errors.New("az: exit status 3")
 					}
 					vnetShows++
+					if vnetShows == 2 && tc.name == "delete-reset-unknown-reread" {
+						return []byte("ERROR: (AuthorizationFailed) denied"), errors.New("az: exit status 1")
+					}
 					if vnetShows == 2 && tc.name == "delete-reset-absent" {
 						return []byte(strings.ReplaceAll(forms["exact_disk_not_found"], "Microsoft.Compute/disks/fixture-run-vol6-os", "Microsoft.Network/virtualNetworks/fixture-run-vnet")), errors.New("az: exit status 3")
 					}
 					return json.Marshal(map[string]any{"id": vnet, "type": "Microsoft.Network/virtualNetworks", "tags": map[string]string{"seaweed_run": "fixture-run"}})
 				case "delete":
 					deletes = append(deletes, args[3])
-					if len(deletes) == 1 && strings.HasPrefix(tc.name, "delete-reset") {
+					if (len(deletes) == 1 && strings.HasPrefix(tc.name, "delete-reset")) || tc.name == "delete-reset-thrice" {
 						return []byte(reset), errors.New("az: exit status 1")
 					}
 					if tc.name == "delete-other-error" {
