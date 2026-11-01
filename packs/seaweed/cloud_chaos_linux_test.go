@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -267,10 +268,24 @@ func TestCloudChaosStampOrderAndPerClientJoin(t *testing.T) {
 	if got := strings.Join(faults, " ") + " "; got != want {
 		t.Fatalf("fault/stamp order:\n got %s\nwant %s", got, want)
 	}
+	// Every file the stage writes is one strict JSON value with nothing after it.
 	for _, x := range chaosCases {
-		for _, name := range []string{"markers.json", "fault.json"} {
-			if _, e := os.Stat(filepath.Join(c.Output, "chaos", x.Name, name)); e != nil {
+		names := []string{"markers.json", "fault.json"}
+		if x.Freeze {
+			names = append(names, "exposure.json")
+		}
+		for _, name := range names {
+			raw, e := os.ReadFile(filepath.Join(c.Output, "chaos", x.Name, name))
+			if e != nil {
 				t.Fatal(e)
+			}
+			d := json.NewDecoder(strings.NewReader(string(raw)))
+			var v any
+			if e = d.Decode(&v); e != nil || d.More() {
+				t.Fatalf("%s/%s is not one strict JSON value: %v", x.Name, name, e)
+			}
+			if _, e = d.Token(); e != io.EOF {
+				t.Fatalf("%s/%s has trailing data", x.Name, name)
 			}
 		}
 	}
