@@ -42,6 +42,21 @@ func TestCloudInitJSONGate(t *testing.T) {
 	}
 }
 
+// Exact raw client2 status from Azure10 run 7d: attempts 1 and 2 of the same
+// reprovisiondata 404 poll ("degraded done"). The pin refused attempt 2.
+func TestCapturedClient2Reprovision404Attempt2(t *testing.T) {
+	raw, err := os.ReadFile("testdata/azure-client2-imds404-attempt2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := qualifyCloudInit(string(raw), 2); err != nil {
+		t.Fatal(err)
+	}
+	if qualifyCloudInit(strings.ReplaceAll(string(raw), "404 Client Error: Not Found", "500 Server Error"), 2) == nil {
+		t.Fatal("other status accepted")
+	}
+}
+
 // Exact raw vol1 status from Azure10 run4, including all nested repeated warnings.
 func TestCapturedVol1Reprovision404(t *testing.T) {
 	raw, err := os.ReadFile("testdata/azure-vol1-imds404.json")
@@ -57,7 +72,9 @@ func TestCapturedVol1Reprovision404(t *testing.T) {
 		{"foreign-path", strings.ReplaceAll(string(raw), "metadata/reprovisiondata", "metadata/instance"), false},
 		{"foreign-api", strings.ReplaceAll(string(raw), "2019-06-01", "2021-08-01"), false},
 		{"other-status", strings.ReplaceAll(string(raw), "404 Client Error: Not Found", "410 Client Error: Gone"), false},
-		{"other-attempt", strings.ReplaceAll(string(raw), "attempt 1", "attempt 2"), false},
+		{"other-attempt", strings.ReplaceAll(string(raw), "attempt 1", "attempt 12"), true},
+		{"attempt-zero", strings.ReplaceAll(string(raw), "attempt 1", "attempt 0"), false},
+		{"attempt-not-a-number", strings.ReplaceAll(string(raw), "attempt 1", "attempt 1x"), false},
 		{"mixed-warning", strings.Replace(string(raw), "Polling IMDS", "Unknown warning; Polling IMDS", 1), false},
 		{"fatal", strings.Replace(string(raw), `"errors": []`, `"errors": ["fatal"]`, 1), false},
 		{"nested-fatal", strings.Replace(string(raw), `"init": {`, `"init": {"extra":{"errors":["fatal"]},`, 1), false},
