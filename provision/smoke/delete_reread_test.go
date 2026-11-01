@@ -181,7 +181,7 @@ func TestSweepRereadsInsteadOfStopping(t *testing.T) {
 				}
 				return []byte("{}"), nil
 			}
-			e := sweepOrphans(context.Background(), "11111111-1111-1111-1111-111111111111", "dedicated-test", "fixture-run", call)
+			_, e := sweepOrphans(context.Background(), "11111111-1111-1111-1111-111111111111", "dedicated-test", "fixture-run", call)
 			if (e == nil) != tc.ok || strings.Join(deletes, " ") != strings.Join(tc.deletes, " ") {
 				t.Fatalf("err=%v deletes=%v", e, deletes)
 			}

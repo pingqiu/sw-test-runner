@@ -308,6 +308,19 @@ func transportOnly(raw []byte) bool {
 	return regexp.MustCompile(whole).MatchString(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 }
 
+func sweptOnly(ids, swept []string) bool {
+	for _, id := range ids {
+		found := false
+		for _, s := range swept {
+			found = found || strings.EqualFold(id, s)
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // deleteResets returns the exact ARM IDs when the text is only complete
 // Terraform "deleting <Type> ...: performing Delete" blocks whose response was
 // lost or reset, all inside this subscription/RG. Otherwise it returns nil.
@@ -591,10 +604,26 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		defer cancel()
 		out.Effects = append(out.Effects, "terraform destroy")
 		_, de := call(cx, "terraform", "destroy", "-parallelism=3", "-input=false", "-auto-approve", "-lock-timeout=0s", "-no-color")
+		var swept []string
 		if d.Cluster {
-			de = errors.Join(de, sweepOrphans(cx, d.Subscription, d.Group, filepath.Base(c.Output), call))
+			var se error
+			swept, se = sweepOrphans(cx, d.Subscription, d.Group, filepath.Base(c.Output), call)
+			de = errors.Join(de, se)
 		}
 		ids, ve := list(cx)
+		// ARM's list can lag a delete the sweep itself just confirmed (run7):
+		// re-list at most 3 times, 10 s apart, only while every remaining ID is
+		// one of those. Any other residue or error stays CLEANUP_INCOMPLETE.
+		for try := 0; try < 3 && de == nil && ve == nil && len(ids) > 0 && sweptOnly(ids, swept); try++ {
+			timer := time.NewTimer(10 * time.Second)
+			select {
+			case <-cx.Done():
+				timer.Stop()
+				ve = cx.Err()
+			case <-timer.C:
+				ids, ve = list(cx)
+			}
+		}
 		out.Remaining = ids
 		out.RemainingObserved = ve == nil
 		out.CreateUnresolved = applyUnresolved(c.Output)

@@ -202,14 +202,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", e
 	}
 	defer os.RemoveAll(scratch)
-	helpers := []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"}
-	if phase != "" {
-		helpers = append(helpers, "cloud_batch.py")
-	}
-	if phase != "" && c.ChaosSet != "" {
-		helpers = append(helpers, "chaos_load.py")
-	}
-	for _, name := range helpers {
+	for _, name := range cloudHelpers(phase, c.ChaosSet) {
 		b, e := workerFiles.ReadFile("worker/" + name)
 		if e != nil {
 			return "", e
@@ -298,6 +291,18 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return output, errors.New("missing or failed KV smoke")
 	}
 	return output, nil
+}
+
+// cloudHelpers lists the embedded worker files a node phase uploads.
+func cloudHelpers(phase, chaosSet string) []string {
+	helpers := []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"}
+	if phase != "" {
+		helpers = append(helpers, "cloud_batch.py")
+	}
+	if phase != "" && chaosSet != "" {
+		helpers = append(helpers, "chaos_load.py")
+	}
+	return helpers
 }
 
 func cloudNode(h inventory.Host, key, pin string) *infra.Node {
