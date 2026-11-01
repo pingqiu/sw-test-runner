@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +59,10 @@ func (f *chaos2Fake) handle(id string) func(string, ssh.Channel) uint32 {
 			name := inner[strings.Index(inner, "/chaos-")+7:]
 			f.cases[id] = name[:strings.Index(name, ".journal")]
 			rec("load " + f.cases[id])
+			if f.variant == "load-fail" {
+				fmt.Fprintln(ch, `{"status": "FAIL", "code": "CHAOS_LOAD_FAILED", "error": "TimeoutError: native completion deadline"}`)
+				return 1
+			}
 			fmt.Fprint(ch, f.load(id, base))
 		case strings.Contains(inner, "--stage readback"):
 			rec("readback")
@@ -213,6 +219,21 @@ func TestChaos2SetsRunEveryCase(t *testing.T) {
 				t.Fatal(log)
 			}
 		})
+	}
+}
+
+// codex01 #56: a failed load and a failed markers.json save must both reach
+// the error; the save error alone hid which client's load failed.
+func TestChaos2FailedLoadSurvivesSaveError(t *testing.T) {
+	d, c, f := chaos2Input(t, "load-fail", "A")
+	if e := os.MkdirAll(filepath.Join(c.Output, "chaos", "C1-single-kill", "markers.json"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	e := runCloudChaos2(ctx, d, c)
+	if e == nil || !strings.Contains(e.Error(), "load-client") || !strings.Contains(e.Error(), "markers.json") {
+		t.Fatal("want both the load and the save error:", e, f.log)
 	}
 }
 

@@ -203,11 +203,10 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		cancelLoad()
 	}
 	loads, loadErr := waitLoad()
-	if e := errors.Join(faultErr, r.save("markers.json", map[string]any{"marks": f.marks, "ready": f.ready}), r.save("fault.json", f.witness), r.save("placement.json", placement)); e != nil {
+	// A failed load and a failed save both reach the error (codex01 #56); the
+	// run-level failure capture keeps each client's chaos journal.
+	if e := errors.Join(faultErr, loadErr, r.save("markers.json", map[string]any{"marks": f.marks, "ready": f.ready}), r.save("fault.json", f.witness), r.save("placement.json", placement)); e != nil {
 		return e
-	}
-	if loadErr != nil {
-		return loadErr
 	}
 	victims := append([]string{}, x.Victims...)
 	sort.Strings(victims)

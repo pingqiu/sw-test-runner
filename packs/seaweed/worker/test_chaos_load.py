@@ -11,6 +11,11 @@ C = dict(run_id='cpu', client='client1-C1-single-kill', transport='http', keys=1
 BUCKET = re.compile(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]')
 
 
+def acks(journal):
+    """The journal's ACK rows; SUBMIT rows precede every op (run 7f)."""
+    return [r for r in map(json.loads, pathlib.Path(journal).read_text().splitlines()) if r['event'] == 'ACK']
+
+
 class Rig:
     def __init__(self, s3_mode='good', kv_miss=()):
         self.now, self.store, self.s3_mode, self.kv_miss = [0.0], {}, s3_mode, set(kv_miss)
@@ -71,7 +76,7 @@ class ChaosLoadControls(unittest.TestCase):
         sets = [o['key'] for o in out['outcomes'] if o['kind'] in ('kv_set', 's3_put')]
         self.assertEqual(len(sets), len(set(sets)), 'writes must be write-once')
         self.assertTrue(all(o['exact'] for o in out['outcomes']))
-        rows = [json.loads(x) for x in r.journal.read_text().splitlines()]
+        rows = acks(r.journal)
         self.assertEqual((out['acked_kv'], out['acked_s3']), (sum(x['kind'] == 'kv' for x in rows), sum(x['kind'] == 's3' for x in rows)))
         self.assertTrue(all(x['event'] == 'ACK' and x['fids'] for x in rows))
 
@@ -100,7 +105,7 @@ class ChaosLoadControls(unittest.TestCase):
         r = Rig(s3_mode='put-fails')
         out = r.run('load')
         self.assertIn('client1-C1-single-kill-w2', out['unknown'])
-        keys = [json.loads(x)['key'] for x in r.journal.read_text().splitlines()]
+        keys = [x['key'] for x in acks(r.journal)]
         self.assertNotIn('client1-C1-single-kill-w2', keys)
         self.assertNotIn('client1-C1-single-kill-w2', [o['key'] for o in out['outcomes'] if o['kind'] == 's3_get'])
 
@@ -121,7 +126,7 @@ class ChaosLoadControls(unittest.TestCase):
     def test_readback_refuses_an_inexact_s3_object(self):
         r = Rig()
         r.run('load')
-        acked = [json.loads(x)['key'] for x in r.journal.read_text().splitlines() if json.loads(x)['kind'] == 's3']
+        acked = [x['key'] for x in acks(r.journal) if x['kind'] == 's3']
         r.store['http://s3/testops-cpu-chaos/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
         with self.assertRaises(AssertionError), mock.patch.object(chaos_load, 's3', r.s3):
             chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
@@ -136,8 +141,31 @@ class ChaosLoadControls(unittest.TestCase):
                     r.helper.work = lambda conn, cmd: (slow(), work(conn, cmd))[1]
                 else:
                     r.s3 = lambda *a, **k: (slow(), s3(*a, **k))[1]
-                with self.assertRaises(TimeoutError):
+                with self.assertRaises(TimeoutError) as caught:
                     r.run('load')
+                # The late op's own result is kept (M02 C3: a KV set failed at 30.0 s).
+                late = caught.exception.inflight
+                self.assertEqual((late['kind'][:2], late['ok']), (kind, True))
+                self.assertGreater(late['ended'] - late['started'], 30)
+
+    def test_native_hang_names_the_op_in_flight(self):
+        # Run 7f: every C3 load died on 'native completion deadline' and the
+        # hung op was lost. The error now carries it, with a read's fids.
+        r = Rig()
+        work = r.helper.work
+        def hang_on_fifth_get(conn, cmd):
+            if cmd['action'] == 'get' and cmd['operation_id'] >= 20:
+                raise TimeoutError('native completion deadline')
+            return work(conn, cmd)
+        r.helper.work = hang_on_fifth_get
+        with self.assertRaises(TimeoutError) as caught:
+            r.run('load')
+        e = caught.exception
+        self.assertEqual((e.inflight['op'], e.inflight['kind'], e.inflight['fids']), (21, 'kv_get', ['3,01ab']))
+        self.assertTrue(e.inflight['key'].startswith('client1-C1-single-kill-w') and len(e.outcomes) == 21)
+        rows = [json.loads(x) for x in r.journal.read_text().splitlines()]
+        self.assertEqual(rows[-1], dict(event='SUBMIT', **e.inflight))
+        self.assertEqual(sum(x['event'] == 'SUBMIT' for x in rows), 22)
 
     def test_ack_stands_when_its_fid_lookup_fails(self):
         # From claude03's #48 review: C4 restarts the filer under load.
@@ -153,7 +181,7 @@ class ChaosLoadControls(unittest.TestCase):
                 mock.patch.object(chaos_load.time, 'monotonic', lambda: r.now[0]), \
                 mock.patch.object(chaos_load.time, 'sleep', lambda d: r.now.__setitem__(0, r.now[0] + 1)):
             out = chaos_load.load(r.conn, C, 'http://s3', 40, journal, r.helper)
-        rows = [json.loads(x) for x in journal.read_text().splitlines()]
+        rows = acks(journal)
         self.assertEqual(len(rows), out['acked_kv'] + out['acked_s3'])
         self.assertEqual(sum(x['fids'] is None for x in rows), 1)
 
