@@ -79,6 +79,19 @@ class TopologyPoller(unittest.TestCase):
         self.assertTrue(all(1.9 < g < 2.3 for g in gaps), gaps)
 
 
+class Publish(unittest.TestCase):
+    def test_atomic_exclusive_and_no_temp_left(self):
+        import tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        soak_load.publish(root / 'a.json', dict(x=1))
+        self.assertEqual(json.loads((root / 'a.json').read_text()), dict(x=1))
+        with self.assertRaises(FileExistsError):
+            soak_load.publish(root / 'a.json', dict(x=2))
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ['a.json'])
+        self.assertEqual(json.loads((root / 'a.json').read_text()), dict(x=1))
+
+
 class FaultWindowWorker(unittest.TestCase):
     """The real run() with a fake native child (spawned processes) and a test
     thread acting as the controller of the fault-window handshake (r4)."""
@@ -99,13 +112,12 @@ class FaultWindowWorker(unittest.TestCase):
         here = str(Path(__file__).resolve().parent)
         self.boot = soak_stats.boot_id()
         self.config = dict(root=str(self.root), master_http=url, layout=TopologyPoller.LAYOUT, duration_s=4,
-                           pacing_s=0.25, quiescence_s=1, write_stop_s=1, client_kill_at_s=10 ** 6, key_prefix='k@',
+                           pacing_s=0.25, quiescence_s=2, write_stop_s=1, client_kill_at_s=10 ** 6, key_prefix='k@',
                            smoke=dict(run_id='run-1', transport='http', keys=1, length=1, helper_dir=here, native_dir=here),
-                           native=dict(fake_delay=0.4))
+                           native=dict(fake_delay_get=1.5, fake_delay_set=0.05))
 
-    def write(self, name, row):
-        with (self.root / name).open('x') as f:
-            json.dump(dict(dict(run_id='run-1', boot_id=self.boot), **row), f)
+    def write(self, name, row):  # the controller publishes atomically, like the Go adapter must
+        soak_load.publish(self.root / name, dict(dict(run_id='run-1', boot_id=self.boot), **row))
 
     def controller(self, at, close=True, fail_after_ack=False, fail_after_close=False):
         def run():
@@ -114,15 +126,14 @@ class FaultWindowWorker(unittest.TestCase):
             ack = self.root / 'fault-ack-E1.json'
             while not ack.exists():
                 time.sleep(0.01)
-            time.sleep(0.05)
-            if fail_after_ack:  # the acknowledged pending GETs now complete with a timeout
+            if fail_after_ack:  # every acknowledged pending GET (1.5 s each) now completes with a timeout
                 (self.root / 'fake-fail').touch()
-                time.sleep(0.6)
+                time.sleep(1.7)
                 (self.root / 'fake-fail').unlink()
             if close:
                 self.write('fault-close-E1.json', dict(episode='E1', end_mono=time.monotonic()))
             if fail_after_close:
-                time.sleep(0.6)  # old pending GETs are done; new ones are post-close
+                time.sleep(1.7)  # every old pending GET is done; the next ones are post-close
                 (self.root / 'fake-fail').touch()
         t = threading.Thread(target=run, daemon=True)
         t.start()
@@ -141,7 +152,7 @@ class FaultWindowWorker(unittest.TestCase):
         pending = {g['op'] for g in ack['pending_gets']}
         credited = [e for e in self.events() if e.get('fault_error')]
         self.assertTrue(pending and credited, (pending, credited))
-        self.assertTrue({e['op'] for e in credited} <= pending)
+        self.assertEqual({e['op'] for e in credited}, pending)  # every pending GET, and only those
         self.assertEqual(summary['status'], 'LOAD_DONE')
         # No new dispatch between the pause and the close.
         ops = [int(e['op']) for e in self.events()]
@@ -157,14 +168,15 @@ class FaultWindowWorker(unittest.TestCase):
 
     def test_a_new_get_after_the_close_is_fatal(self):
         self.controller(1.0, fail_after_close=True)
+        self.config['duration_s'] = 6  # room for post-close GETs to complete
         with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
             soak_load.run(self.config)
 
     def test_a_foreign_pause_is_refused(self):
         def foreign():
             time.sleep(1.0)
-            with (self.root / 'fault-pause-E1.json').open('x') as f:
-                json.dump(dict(run_id='other-run', boot_id=self.boot, episode='E1', role='volume', pause_mono=1.0), f)
+            soak_load.publish(self.root / 'fault-pause-E1.json',
+                              dict(run_id='other-run', boot_id=self.boot, episode='E1', role='volume', pause_mono=1.0))
         threading.Thread(target=foreign, daemon=True).start()
         with self.assertRaisesRegex(ValueError, 'binding differs'):
             soak_load.run(self.config)

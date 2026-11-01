@@ -53,6 +53,17 @@ def poll_topology(config, stop, out):
         stop.wait(max(0, row['req'] + 2 - time.monotonic()))
 
 
+def publish(path, row):
+    """Exclusive and atomic: a reader sees the whole file or none (link fails if it exists)."""
+    tmp = path.with_name('.%s.%d.tmp' % (path.name, os.getpid()))
+    with tmp.open('x') as f:
+        json.dump(row, f)
+    try:
+        os.link(tmp, path)
+    finally:
+        tmp.unlink()
+
+
 def read_bound(path, binding):
     """A controller fault-window file: nofollow, bounded, exactly bound, or None if absent."""
     try:
@@ -101,10 +112,10 @@ def run(config):
             pending = [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values()]
             window['allowed'].update((g['op'], window['episode']) for g in pending)
             p = window['pause']
-            with (root / ('fault-ack-%s.json' % window['episode'])).open('x') as f:
-                json.dump(dict(bind, role=p['role'], episode=window['episode'], pause_mono=p['pause_mono'],
-                               observed_mono=window['observed'], ack_mono=time.monotonic(), inflight_sets=0,
-                               pending_gets=pending), f)
+            publish(root / ('fault-ack-%s.json' % window['episode']),
+                    dict(bind, role=p['role'], episode=window['episode'], pause_mono=p['pause_mono'],
+                         observed_mono=window['observed'], ack_mono=time.monotonic(), inflight_sets=0,
+                         pending_gets=pending))
             window['acked'] = True
         else:
             ep = window['episode']
@@ -211,8 +222,7 @@ def run(config):
             start_worker(i)
         poller.start()
         begin = time.monotonic()  # the witness is written before the first operation
-        with (root / WITNESS).open('x') as w:
-            json.dump(dict(boot_id=boot_id(), mono=begin), w)
+        publish(root / WITNESS, dict(boot_id=boot_id(), mono=begin))
         end, pace, next_write, owner, cursor = begin + config['duration_s'], config['pacing_s'], begin, 0, 0
         while time.monotonic() < end:
             now = time.monotonic()

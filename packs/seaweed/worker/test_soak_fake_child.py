@@ -22,7 +22,7 @@ def child(pipe, cfg):
         submitted = time.monotonic()
         pipe.send(dict(event='submitted', operation_id=cmd['operation_id'], action=cmd['action'],
                        pid=os.getpid(), monotonic=submitted))
-        time.sleep(cfg.get('fake_delay', 0.01))
+        time.sleep(cfg.get('fake_delay_' + cmd['action'], 0.01))  # long GETs: always some pending at a pause
         row = dict(operation_id=cmd['operation_id'], action=cmd['action'], key=cmd['key'], submitted=submitted,
                    completed=time.monotonic(), ok=True, error=None, results=None)
         if cmd['action'] == 'set':
