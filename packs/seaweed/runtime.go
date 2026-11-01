@@ -36,6 +36,7 @@ type Plan struct {
 	Restart   *ReadRestart  `json:"restart,omitempty"`
 }
 type ReadRestart struct {
+	Freeze      bool   `json:"freeze,omitempty"`
 	Episode     string `json:"episode"`
 	DC          string `json:"dc"`
 	RecoverDC   string `json:"recover_dc"`

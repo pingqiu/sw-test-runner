@@ -69,6 +69,12 @@ func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[strin
 		return errors.New("unsupported restart role")
 	}
 	ep, ok := in.Restarts[x.Episode]
+	if x.Freeze {
+		ok = in.Pause != nil && in.Pause.Name == x.Episode && in.Pause.AllowWorkResume && role == "volume" && len(in.Restarts) == 0 && x.RecoverHTTP == ""
+		if ok {
+			ep.Victim = in.Pause.Victim
+		}
+	}
 	if p.Profile != "m01-m02-v1" || d.Transport != "dc" || len(p.Workload) != 1 || p.Workload[0].Host != "m01" || !ok {
 		return errors.New("restart needs exact local M01 DC profile/episode")
 	}
@@ -78,11 +84,14 @@ func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[strin
 	}
 	j := in.Jobs[ep.Replacement]
 	want, e := ProfileArgs(d, "m02", "deploy", role, p.Smoke, in.Files["m02"])
-	if !victim || used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256 {
+	if !victim || (!x.Freeze && (used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256)) {
 		return errors.New("replacement not exact private volume helper")
 	}
 	used[ep.Replacement] = true
 	for _, v := range []struct{ label, stage, route string }{{x.DC, "load", "dc"}, {x.RecoverDC, "recovery", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
+		if x.Freeze && v.route == "http" {
+			continue
+		}
 		if used[v.label] {
 			return errors.New("reused read job")
 		}
@@ -115,6 +124,9 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 	}
 	x := p.Restart
 	for _, v := range []struct{ label, stage, route string }{{p.Workload[0].Job, "seed", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
+		if x.Freeze && v.route == "http" {
+			continue
+		}
 		if _, err := readTask(ctx, a, in, v.label, v.stage, v.route); err != nil {
 			return nil, err
 		}
@@ -131,6 +143,9 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-pause:
+	}
+	if x.Freeze {
+		return r.freeze(ctx, a, p, d, in, s, load)
 	}
 	_, receipt, err := a.RestartApprovedPackGeneration(ctx, x.Episode, s.jobs[in.Restarts[x.Episode].Victim])
 	if err != nil {

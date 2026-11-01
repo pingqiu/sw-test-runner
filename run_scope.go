@@ -697,6 +697,14 @@ func (s *RunScope) Close() error {
 		s.mu.Unlock()
 		ctx, cancel := s.cleanupContext(context.Background())
 		defer cancel()
+		if pause != nil {
+			r := s.restores[pause.Key]
+			if err := take(ctx, r.ready, r.gate); err != nil {
+				s.err = fmt.Errorf("pause attempt join UNKNOWN: %w", err)
+				return
+			}
+			<-r.gate
+		}
 		var errs []error
 		var issuerErr error
 		if s.authority != nil {
