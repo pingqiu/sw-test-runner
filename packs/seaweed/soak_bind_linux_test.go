@@ -16,6 +16,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
@@ -28,6 +29,21 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Step 3 helpers deployed, read back and pinned (M01 load, M02 sampler).
+	for i := range f.policy.Deployments {
+		dep := &f.policy.Deployments[i]
+		names := map[string][]string{"m01": {"soak_load.py", "soak_stats.py"}, "m02": {"soak_sampler.py", "soak_stats.py"}}[dep.NodeID]
+		for _, name := range names {
+			body, _ := workerFiles.ReadFile("worker/" + name)
+			dep.Files = append(dep.Files, infra.DeploymentFile{Path: "/opt/seaweed/worker/" + name, SHA256: hash(body), Size: int64(len(body)), Roles: []string{"adapter"}})
+			if dep.NodeID == "m01" || name == "soak_sampler.py" {
+				f.scriptPins = append(f.scriptPins, f.bytes(t, name, body))
+			}
+		}
+	}
+	f.policy.Scripts = f.scriptPins
+	f.binding.Artifacts = f.write(t, "artifacts.json", tr.ApprovedArtifacts{Version: "s0b-artifacts-v1", Deployments: f.policy.Deployments})
+	d.ArtifactManifestSHA256 = f.binding.Artifacts.SHA256
 	f.binding.WorkDeadline = time.Now().Add(hardIn - 3*time.Minute)
 	f.binding.HardDeadline = time.Now().Add(hardIn)
 	d.Deadlines.Work = f.binding.WorkDeadline.UTC().Format(time.RFC3339Nano)
@@ -36,7 +52,7 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 	if err = json.Unmarshal([]byte(f.plan.Requested), &req); err != nil {
 		t.Fatal(err)
 	}
-	req.Deadlines = d.Deadlines
+	req.Deadlines, req.ArtifactManifestSHA256 = d.Deadlines, d.ArtifactManifestSHA256
 	raw, _ := json.Marshal(req)
 	resolved, err := inventory.Resolve(raw, *d)
 	if err != nil {
@@ -47,7 +63,9 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 		Rotation:    &Rotation{Collections: "lmcache", HighWatermark: 0.3, LowWatermark: 0.15, MaxVolumesPerCycle: 1, MinRemainingVolumes: 4, CheckIntervalSeconds: 2},
 		ReadyAssign: &AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"},
 		FaultReady:  []Step{{Host: "m01", Job: "fault-ready-m01"}, {Host: "m02", Job: "fault-ready-m02"}},
-		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}}}
+		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}},
+		Layout:      AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"}, GrowCount: 8, ClientKillAtS: 1320,
+		Setup: Step{Host: "m02", Job: "soak-setup"}, Sampler: Step{Host: "m02", Job: "soak-sampler"}}
 	if pre != nil { // before the pins, so every job stays consistent with the plan
 		pre(f.plan.Soak)
 	}
@@ -103,6 +121,20 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 		j.Argv = pin(s.Host, "ready", "", true)
 		f.policy.Jobs[s.Job] = j
 	}
+	task := func(label, host string, args []string, e error) {
+		if e != nil {
+			t.Fatal(e)
+		}
+		j := f.policy.Jobs[f.plan.Ready[0].Job] // the pinned python3.12 interpreter
+		j.Node, j.Argv = host, args
+		f.policy.Jobs[label] = j
+	}
+	setup, e := ProfileArgs(d, "m02", "soak_setup", "", f.plan.setupSettings(), files("m02"))
+	task(f.plan.Soak.Setup.Job, "m02", setup, e)
+	sampler, e := SoakSamplerArgs(d, f.plan.Smoke, f.plan.Soak)
+	task(f.plan.Soak.Sampler.Job, "m02", sampler, e)
+	load, e := SoakLoadArgs(d, f.plan.Smoke, f.plan.Soak)
+	task(f.plan.Workload[0].Job, "m01", load, e)
 	f.editScenario = func(s *tr.Scenario) { s.Phases[2].Actions[0].Action = "seaweed_kv_soak" }
 	if mutate != nil {
 		mutate(f, d)
@@ -191,7 +223,7 @@ func TestSoakPlanBindRefusals(t *testing.T) {
 		"master fault without ready_assign":       {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.ReadyAssign = nil }, "ready_assign layout"},
 		"beyond the 60 min horizon":               {70 * time.Minute, nil, nil, "60 min soak horizon"},
 		"does not fit the work deadline":          {20 * time.Minute, nil, nil, "does not fit the admitted work deadline"},
-		"pacing below range":                      {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.PacingS = 0.1 }, "duration/pacing"},
+		"pacing below range":                      {45 * time.Minute, func(s *SoakPlan) { s.PacingS = 0.1 }, nil, "duration/pacing"},
 		"rotation product-invalid":                {45 * time.Minute, func(s *SoakPlan) { s.Rotation.MinRemainingVolumes = 0 }, nil, "rotation bounds"},
 		"soak and restart together":               {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Restart = &ReadRestart{Episode: "E1"} }, "exclusive"},
 		"soak plan with the plain workload phase": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.editScenario = nil }, "phase skipped"},
@@ -200,6 +232,20 @@ func TestSoakPlanBindRefusals(t *testing.T) {
 			j.Argv = f.policy.Jobs[f.plan.Ready[1].Job].Argv
 			f.policy.Jobs["fault-ready-m02"] = j
 		}, "profile argv"},
+		"load argv drift": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
+			j := f.policy.Jobs[f.plan.Workload[0].Job]
+			j.Argv = append(append([]string{}, j.Argv[:3]...), strings.Replace(j.Argv[3], `"pacing_s":2`, `"pacing_s":3`, 1))
+			f.policy.Jobs[f.plan.Workload[0].Job] = j
+		}, "soak task argv"},
+		"sampler horizon drift": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
+			j := f.policy.Jobs["soak-sampler"]
+			j.Argv = append(append([]string{}, j.Argv[:3]...), strings.Replace(j.Argv[3], "1860", "1900", 1))
+			f.policy.Jobs["soak-sampler"] = j
+		}, "soak task argv"},
+		"setup grow count drift":       {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.GrowCount = 9 }, "profile argv"},
+		"collection mismatch":          {45 * time.Minute, func(s *SoakPlan) { s.Layout.Collection = "other" }, nil, "collection coherence"},
+		"client kill near a fault":     {45 * time.Minute, func(s *SoakPlan) { s.ClientKillAtS = 950 }, nil, "client kill too close"},
+		"sampler reuses a ready label": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Sampler.Job = f.plan.Ready[1].Job }, "setup/sampler step not exact"},
 		"pause authority carried": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
 			f.policy.ProcessPause = &tr.ProcessPausePlan{Name: "P1", Victim: filer(f), Deadline: time.Now().Add(10 * time.Minute)}
 		}, "no pause authority"},

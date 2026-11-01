@@ -24,6 +24,13 @@ type SoakPlan struct {
 	// Assign would grow it), these carry ready_assign when a master fault exists.
 	FaultReady []Step      `json:"fault_ready"`
 	Faults     []SoakFault `json:"faults"`
+	// Step 3: the cache layout setup grows, the client kill inside the load
+	// worker, and the two extra M02 jobs (deploy-phase setup, soak sampler).
+	Layout        AssignLayout `json:"layout"`
+	GrowCount     int          `json:"grow_count"`
+	ClientKillAtS int          `json:"client_kill_at_s"`
+	Setup         Step         `json:"setup"`
+	Sampler       Step         `json:"sampler"`
 }
 
 type SoakFault struct {
@@ -144,6 +151,17 @@ func (x *SoakPlan) checkSchedule() error {
 	if secs(prev)+FaultBudget+RecoveryMargin+QuiescenceReserve > secs(x.DurationS) {
 		return errors.New("soak last fault leaves no recovery and quiescence before load end")
 	}
+	// The worker's client kill keeps a fault budget plus recovery from every
+	// runner fault and from the load end.
+	k := x.ClientKillAtS
+	if k < 60 || k > x.DurationS || secs(x.DurationS-k) < FaultBudget+RecoveryMargin+QuiescenceReserve {
+		return errors.New("soak client kill must lie within the load with recovery before its end")
+	}
+	for _, f := range x.Faults {
+		if d := f.AtS - k; secs(max(d, -d)) < FaultBudget+RecoveryMargin {
+			return errors.New("soak client kill too close to a runner fault")
+		}
+	}
 	return nil
 }
 
@@ -214,6 +232,24 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 		}
 	} else if x.ReadyAssign != nil {
 		return errors.New("soak ready_assign only with a master fault")
+	}
+	// Step 3: one collection across setup, rotation and ready_assign, and the
+	// two extra M02 jobs, each exact and injective.
+	if err := x.Layout.validate(); err != nil || x.GrowCount < 1 || x.GrowCount > 16 || x.Rotation.Collections != x.Layout.Collection || (x.ReadyAssign != nil && *x.ReadyAssign != x.Layout) {
+		return errors.New("soak layout, grow count or collection coherence")
+	}
+	for _, s := range []Step{x.Setup, x.Sampler} {
+		if s.Host != "m02" || s.Role != "" || used[s.Job] || labels[s.Job] {
+			return errors.New("soak setup/sampler step not exact")
+		}
+		labels[s.Job] = true
+	}
+	if err := checkProfile(in.Jobs[x.Setup.Job], in, d, "m02", "soak_setup", "", p.setupSettings()); err != nil {
+		return err
+	}
+	want, err := SoakSamplerArgs(d, p.Smoke, x)
+	if err := checkSoakTask(in.Jobs[x.Sampler.Job], in, "m02", want, err, p.Smoke, []string{"soak_sampler.py", "soak_stats.py"}, false); err != nil {
+		return err
 	}
 	// Fault ready probes: one per host, distinct from every other job label,
 	// pinned to the profile with the soak fields (Assign probe included).

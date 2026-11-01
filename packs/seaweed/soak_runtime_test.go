@@ -164,7 +164,7 @@ func soakTestPlan() (Plan, tr.PackInputs) {
 	p.Soak = &SoakPlan{DurationS: 1800, PacingS: 2,
 		ReadyAssign: &AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"},
 		FaultReady:  []Step{{Host: "m01", Job: "fault-ready-m01"}, {Host: "m02", Job: "fault-ready-m02"}},
-		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}}}
+		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}}, ClientKillAtS: 1320}
 	in := tr.PackInputs{
 		Restarts: map[string]tr.GenerationRestartPlan{"E1": {Victim: "deploy-volume", Replacement: "replacement-volume"}, "E2": {Victim: "deploy-master", Replacement: "replacement-master"}},
 		Files:    map[string]map[string]string{"m02": {"/opt/profile/bin/weed": strings.Repeat("d", 64), "/opt/profile/bin/weed-volume": strings.Repeat("d", 64)}},

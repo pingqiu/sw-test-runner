@@ -1,4 +1,4 @@
-"""M01 KV soak load (step 3a): the r9 workload loop without ssh, fixed hosts
+"""M01 KV soak load (step 3a): the r9 workload loop without remote shells, fixed hosts
 or a control handshake. Four native workers (3 DC + 1 HTTP), the oracle,
 read-after-ACK, the client kill, a read-only topology poller (decision 3),
 bounded evidence files and one bounded summary row on stdout."""
@@ -54,6 +54,10 @@ def poll_topology(config, stop, out):
 
 
 def run(config):
+    import sys
+    sys.path[:0] = [config['smoke']['helper_dir'], config['smoke']['native_dir']]
+    from kv_smoke import configure
+    configure(config['smoke'])  # the smoke task's exact RDMA environment, inherited by the workers
     root = Path(config['root'])
     files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
