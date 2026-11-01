@@ -57,7 +57,7 @@ seconds, inside the existing deadline, for apply/destroy/resource-list only.
 The entire output must be a known standalone transport form or complete Error
 blocks separated only by whitespace. Unknown text before, between or after
 those blocks refuses retry; no prefix is discarded. The supported
-provider envelope is the observed no-color Public I P Address update/delete
+provider envelope is the observed no-color Public I P Address update (PUT)
 reset, with its exact optional Terraform source context; standalone reset/EOF/TLS
 forms are explicit alternatives. Unknown provider wrappers, extra details or
 mixed diagnostics refuse retry, even if they mention a reset. This is a complete
@@ -69,9 +69,26 @@ explicit provider evidence and operator disposition are still required.
 The classifier judges a failed tool's stderr, where Terraform writes its
 diagnostics; its stdout refresh, plan and progress text is not part of the
 failure and stays in the recorded output. Unknown stderr text still refuses
-retry. Apply and destroy both accept the observed run5 NIC `Delete` reset with
-no source context (API 2025-07-01), like the Public IP update/delete form: a
-bounded same-state retry (apply re-plans first).
+retry. No Delete form is allowlisted: every lost Delete response goes through
+the re-read rule below, on destroy only. A Delete reset during apply refuses
+(fail-safe; applies create into fresh state).
+
+Deletes follow one generic rule instead of per-type forms. If a destroy's
+stderr is only complete Terraform `deleting <Type> ...: performing Delete:
+Delete "<ARM URL>": HTTP response was nil; connection may have been reset`
+blocks, each with an exact ARM ID inside this subscription and RG, the
+controller re-reads each ID with `az resource show`:
+- One JSON object means present. The bounded same-state destroy retry
+  deletes it again.
+- az's exact `ResourceNotFound` for that same type, name and RG means
+  absent, i.e. deleted.
+- Anything else refuses the retry.
+
+The orphan sweep treats an exact `ResourceNotFound` on its fresh show as
+already deleted. A reset on its own delete re-reads that ID: absent means
+done, present means a re-delete (at most two more). Create/PUT is unchanged
+and keeps the form allowlist above. The controls are run5's NIC and run6's
+Managed Disk lost Delete responses and run6's sweep `ResourceNotFound`.
 
 ## Verification limits
 

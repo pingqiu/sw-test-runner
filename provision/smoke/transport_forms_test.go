@@ -30,8 +30,11 @@ func TestCompleteCapturedTransportFormsAtController(t *testing.T) {
 		{"nic-wrong-operation", "apply", strings.Replace(captured["exact_nic_apply_error"], "creating Network Interface", "updating Network Interface", 1), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"nic-foreign-source", "apply", strings.ReplaceAll(captured["exact_nic_apply_error"], "azurerm_network_interface", "azurerm_public_ip"), "APPLY_FAILED_OR_UNKNOWN", 1},
 		{"real-apply-envelope", "apply", captured["exact_apply_error"], "CREATE_UNRESOLVED", 2},
-		{"real-destroy-envelope", "destroy", captured["exact_first_destroy_error"], "COMPLETE", 2},
-		{"real-nic-destroy-envelope", "destroy", captured["exact_nic_destroy_error"], "COMPLETE", 2},
+		// Delete resets no longer use a form allowlist: they go through the
+		// re-read rule (delete_reread_test.go). These fixture IDs are outside
+		// the fixture's RG, so the rule refuses them.
+		{"real-destroy-envelope", "destroy", captured["exact_first_destroy_error"], "CLEANUP_INCOMPLETE", 1},
+		{"real-nic-destroy-envelope", "destroy", captured["exact_nic_destroy_error"], "CLEANUP_INCOMPLETE", 1},
 		{"nic-destroy-source-context", "destroy", strings.TrimSpace(captured["exact_nic_destroy_error"]) + "\n\n  with module.run.azurerm_network_interface.node[\"vol4\"],", "CLEANUP_INCOMPLETE", 1},
 		{"nic-destroy-foreign-path", "destroy", strings.Replace(captured["exact_nic_destroy_error"], "/networkInterfaces/", "/networkSecurityGroups/", 1), "CLEANUP_INCOMPLETE", 1},
 		{"unknown-detail-appended", "apply", captured["exact_apply_error"] + "\nPrevious request had InvalidParameter", "APPLY_FAILED_OR_UNKNOWN", 1},

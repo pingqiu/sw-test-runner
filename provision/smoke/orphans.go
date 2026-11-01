@@ -3,6 +3,7 @@ package smoke
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -61,24 +62,49 @@ func sweepOrphans(ctx context.Context, subscription, group, run string, call fun
 		return err
 	}
 	for _, id := range ids {
-		b, err = call(ctx, "az", "resource", "show", "--ids", id, "--output", "json", "--only-show-errors")
+		// An orphan already gone (exact ResourceNotFound) is deleted, not a failure.
+		present, b, err := reread(ctx, call, id)
 		if err != nil {
 			return err
 		}
-		var object map[string]json.RawMessage
-		if e := json.Unmarshal(b, &object); e != nil || object == nil {
-			return fmt.Errorf("orphan show must be one standalone JSON object: %s: %v", id, e)
+		if !present {
+			continue
 		}
 		current, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run)
 		if e != nil || len(current) != 1 || current[0] != id {
 			return fmt.Errorf("orphan tag/scope changed: %s: %v", id, e)
 		}
-		if _, err = call(ctx, "az", "resource", "delete", "--ids", id, "--only-show-errors"); err != nil {
+		if present, err = deleteOrphan(ctx, call, id); err != nil {
 			return err
+		}
+		if !present {
+			continue
 		}
 		if _, err = call(ctx, "az", "resource", "wait", "--deleted", "--ids", id, "--interval", "2", "--timeout", "90", "--only-show-errors"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// deleteOrphan deletes one ID. A lost response or reset re-reads it: absent is
+// deleted, present is deleted again, at most two more times.
+func deleteOrphan(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), id string) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		b, err := call(ctx, "az", "resource", "delete", "--ids", id, "--only-show-errors")
+		if err == nil {
+			return true, nil
+		}
+		diagnostics, failed := b, (*toolError)(nil)
+		if errors.As(err, &failed) {
+			diagnostics = failed.stderr
+		}
+		if attempt == 2 || !transportOnly(diagnostics) {
+			return true, err
+		}
+		present, _, e := reread(ctx, call, id)
+		if e != nil || !present {
+			return present, errors.Join(e)
+		}
+	}
 }
