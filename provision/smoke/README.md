@@ -66,6 +66,12 @@ message allowlist, not a keyword blacklist. Apply retry first re-plans with
 is never removed automatically, including after success, destroy or verification;
 explicit provider evidence and operator disposition are still required.
 
+The classifier judges a failed tool's stderr, where Terraform writes its
+diagnostics; its stdout refresh, plan and progress text is not part of the
+failure and stays in the recorded output. Unknown stderr text still refuses
+retry. Destroy also accepts the observed run5 NIC `Delete` reset with no source
+context (API 2025-07-01), as a bounded same-state destroy retry.
+
 ## Verification limits
 
 CPU tests drive the actual native command boundary with fake Terraform/az, including a late asynchronous create after recovery's empty list. Loopback SSH tests use a real handshake to prove pinned-key success/mismatch refusal and exercise transfers/phase calls. Their server simulates service/worker output: they do not execute weed/cloud-init/the native connector or prove Azure service compatibility. Existing M01/M02 strict tests remain unchanged. Cloud qualification still needs the manager token.
