@@ -245,3 +245,34 @@ func TestReadLoadCompletedFailuresAreObservationsOnly(t *testing.T) {
 		})
 	}
 }
+
+// A cloud HTTP inventory seeds, loads and recovers over the HTTP loader only.
+func TestReadLoadHTTPInventory(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 required for actual CLI CPU control")
+	}
+	script := `import sys,json
+sys.path.insert(0,'worker')
+import test_kv_smoke,test_read_load
+if sys.argv[1]=='seed':
+ r,events,_=test_kv_smoke.SmokeControls().run_mode('explicit-http','http')
+ for event in events:print(json.dumps(event))
+else:
+ r,_=test_read_load.ReadControls().run_case('http','http','recovery','http')
+print(json.dumps(r))`
+	c := readConfig()
+	c.Transport, c.RDMAAddress = "http", ""
+	for _, stage := range []string{"seed", "recovery"} {
+		raw, err := exec.Command(python, "-B", "-c", script, stage).CombinedOutput()
+		if err != nil {
+			t.Fatalf("actual worker CPU: %v %s", err, raw)
+		}
+		if _, err = CheckReadTaskOutput(captured(raw), c, stage, "http"); err != nil {
+			t.Fatal(stage, err, string(raw))
+		}
+		if _, err = CheckReadTaskOutput(captured(raw), c, stage, "dc"); err == nil {
+			t.Fatal(stage, "DC route accepted for an HTTP inventory")
+		}
+	}
+}

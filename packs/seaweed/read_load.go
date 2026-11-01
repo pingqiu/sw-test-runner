@@ -17,7 +17,7 @@ import (
 )
 
 func checkSeed(rows []map[string]json.RawMessage, c SmokeConfig, route string) (map[string]any, error) {
-	if route != "dc" || len(rows) != 2*c.Keys+1 {
+	if route != c.Transport || len(rows) != 2*c.Keys+1 {
 		return nil, errors.New("settled seed ACK/exact rows missing")
 	}
 	for i := 0; i < c.Keys; i++ {
@@ -68,7 +68,7 @@ func checkSeed(rows []map[string]json.RawMessage, c SmokeConfig, route string) (
 	if err := json.Unmarshal(body, &last); err != nil {
 		return nil, err
 	}
-	if last.Status != "PASS" || last.ACK != c.Keys || last.Exact != c.Keys || last.Wrong == nil || *last.Wrong != 0 || last.Witness.ReadTransport != "dc" || last.Witness.ReadBytes != c.Keys*c.Length || last.Witness.WriteBytes != c.Keys*c.Length || last.Witness.Fallback == nil || *last.Witness.Fallback {
+	if last.Status != "PASS" || last.ACK != c.Keys || last.Exact != c.Keys || last.Wrong == nil || *last.Wrong != 0 || last.Witness.ReadTransport != route || last.Witness.ReadBytes != c.Keys*c.Length || last.Witness.WriteBytes != c.Keys*c.Length || last.Witness.Fallback == nil || *last.Witness.Fallback {
 		return nil, errors.New("settled seed terminal proof differs")
 	}
 	if err := checkReadCounters(rows[len(rows)-1]["before"], rows[len(rows)-1]["after"], route, c.Keys, c.Length, 0, c.Keys); err != nil {
@@ -82,7 +82,8 @@ func checkSeed(rows []map[string]json.RawMessage, c SmokeConfig, route string) (
 // ReadLoadArgs is the small CLI over the accepted worker/oracle leaves. Seed
 // settles before load admission; load performs GETs only for a fixed 120 s.
 func ReadLoadArgs(d *inventory.Document, client string, s SmokeSettings, stage, route string) ([]string, error) {
-	if d == nil || d.Transport != "dc" || !slices.Contains([]string{"seed", "load", "recovery"}, stage) || !slices.Contains([]string{"dc", "http"}, route) || (stage == "seed" && route != "dc") {
+	// A DC inventory seeds over DC; an HTTP (cloud) inventory reads only over HTTP.
+	if d == nil || (d.Transport != "dc" && d.Transport != "http") || !slices.Contains([]string{"seed", "load", "recovery"}, stage) || !slices.Contains([]string{"dc", "http"}, route) || (stage == "seed" && route != d.Transport) || (d.Transport == "http" && route != "http") {
 		return nil, errors.New("unsupported read-only case stage/path")
 	}
 	args, err := SmokeArgs(d, client, s)
@@ -108,9 +109,6 @@ func checkReadTask(j tr.JobPin, in tr.PackInputs, d *inventory.Document, client 
 // or self-reported file. Completed outage observations earn NO error credit
 // here: the scenario must join each one to the exact witnessed outage.
 func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, window ...ReadWindow) (map[string]any, error) {
-	if c.Keys < 1 || c.Keys > 16 || c.Length < 1 || c.Length > 4*1024*1024 || c.Transport != "dc" {
-		return nil, errors.New("invalid read-only bounds")
-	}
 	if exit.Code != 0 || exit.Signal != 0 || !exit.Settled {
 		return nil, errors.New("read task not cleanly settled")
 	}
@@ -118,6 +116,16 @@ func CheckReadTaskOutput(exit tr.ExitInfo, c SmokeConfig, stage, route string, w
 	if err != nil {
 		return nil, err
 	}
+	return checkReadOutput(raw, c, stage, route, window...)
+}
+
+// checkReadOutput judges the worker's stdout bytes; the caller proves how they
+// were captured (owned custody on the lab, the pinned SSH session on cloud).
+func checkReadOutput(raw []byte, c SmokeConfig, stage, route string, window ...ReadWindow) (map[string]any, error) {
+	if c.Keys < 1 || c.Keys > 16 || c.Length < 1 || c.Length > 4*1024*1024 || (c.Transport != "dc" && (c.Transport != "http" || route != "http")) {
+		return nil, errors.New("invalid read-only bounds")
+	}
+	var err error
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	var rows []map[string]json.RawMessage
 	for {

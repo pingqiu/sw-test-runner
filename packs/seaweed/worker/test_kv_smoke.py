@@ -18,7 +18,7 @@ class FakeConnector:
     def submit_batch_get(self,keys,buffers):
         data=self.values[keys[0]];n=len(data)
         if self.mode!='miss':buffers[0][:]=data if self.mode!='wrong' else b'x'*n
-        route='copied' if self.mode in ('http','explicit-http') else 'direct_dc'
+        route='copied' if self.mode in ('http','explicit-http') or getattr(self,'http',False) else 'direct_dc'
         s=self.stats['loader'];s['read_bytes']+=n;s['read_objects']+=1;s[route+'_bytes']+=n;s[route+'_reads']+=1
         return self.complete(True,[self.mode!='miss'],'')
     def complete(self,ok,results,error):
