@@ -11,6 +11,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 S3_LENGTH = 256 * 1024
+OP_LIMIT = 30  # seconds: rule 2, for every op of every kind
 
 
 def kv_smoke():
@@ -23,10 +24,20 @@ def kv_smoke():
 
 
 def s3(url, data=None, method='GET'):
-    """(ok, body or error). A socket timeout is a hang: it raises."""
+    """(ok, body or error). The whole op, not each socket read, is bounded by
+    OP_LIMIT: a stalled or trickling response raises (a hang, rule 2)."""
+    deadline = time.monotonic() + OP_LIMIT
     try:
-        with urlopen(Request(url, data=data, method=method), timeout=30) as r:
-            return True, r.read(S3_LENGTH + 1)
+        with urlopen(Request(url, data=data, method=method), timeout=OP_LIMIT) as r:
+            body = b''
+            while len(body) <= S3_LENGTH:
+                chunk = r.read1(65536)
+                if time.monotonic() > deadline:
+                    raise TimeoutError('S3 op exceeded %d s' % OP_LIMIT)
+                if not chunk:
+                    break
+                body += chunk
+            return True, body
     except HTTPError as e:
         return False, 'http %d' % e.code
     except URLError as e:
@@ -75,12 +86,18 @@ def load(conn, c, s3_base, seconds, journal, helper):
                     raise AssertionError('WRONG bytes for ' + key)
                 error = '' if ok else got
             t1 = time.monotonic()
+            if t1 - t0 > OP_LIMIT:
+                raise TimeoutError('%s %s took %.1f s' % (kind, key, t1 - t0))
             outcomes.append(dict(op=n, kind=kind, key=key, started=t0, ended=t1, exact=ok, error=str(error)))
             if kind in ('kv_set', 's3_put'):
                 if ok:
                     acked[kind[:2]].append(key)
                     path = c['root'] + '/' + key if kind == 'kv_set' else '/buckets/testops-%s-%s/%s' % (c['run_id'], c['client'], key)
-                    out.write(json.dumps(dict(event='ACK', kind=kind[:2], key=key, fids=fids_of(c, path))) + '\n')
+                    try:  # the ACK stands even if its fid lookup fails (e.g. a filer restart)
+                        fids = fids_of(c, path)
+                    except (OSError, ValueError, http.client.HTTPException):
+                        fids = None  # unknown; the owner join treats the key as unplaced
+                    out.write(json.dumps(dict(event='ACK', kind=kind[:2], key=key, fids=fids)) + '\n')
                 else:
                     unknown.append(key)
             n += 1
@@ -96,6 +113,7 @@ def readback(conn, c, s3_base, journal, helper):
     bucket = s3_base + '/testops-' + c['run_id'] + '-' + c['client']
     rows = [json.loads(x) for x in pathlib.Path(journal).read_text().splitlines()]
     for i, r in enumerate(rows):
+        t0 = time.monotonic()
         if r['kind'] == 'kv':
             command = dict(action='get', key=r['key'], seed=c['run_id'] + '/' + r['key'], length=c['length'], operation_id=i)
             row = helper.work(conn, command)
@@ -103,6 +121,8 @@ def readback(conn, c, s3_base, journal, helper):
         else:
             ok, got = s3(bucket + '/' + r['key'])
             exact = ok and got == s3_body(c, r['key'])
+        if time.monotonic() - t0 > OP_LIMIT:
+            raise TimeoutError('read-back of %s took over %d s' % (r['key'], OP_LIMIT))
         if not exact:
             raise AssertionError('ACKed %s %s did not read back exactly' % (r['kind'], r['key']))
     return dict(status='PASS', stage='readback', run_id=c['run_id'], client=c['client'],

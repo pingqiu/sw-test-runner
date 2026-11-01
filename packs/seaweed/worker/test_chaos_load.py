@@ -1,6 +1,7 @@
 """CPU controls for chaos_load.py; fake native connector and fake S3, no hosts."""
-import json, pathlib, sys, tempfile, unittest
+import http.server, json, pathlib, sys, tempfile, threading, time, unittest
 from unittest import mock
+from urllib.error import URLError
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import chaos_load
 from test_kv_smoke import FakeConnector
@@ -95,6 +96,62 @@ class ChaosLoadControls(unittest.TestCase):
         with self.assertRaises(AssertionError):
             with mock.patch.object(chaos_load, 's3', r.s3):
                 chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
+
+    def test_readback_refuses_an_inexact_s3_object(self):
+        r = Rig()
+        r.run('load')
+        acked = [json.loads(x)['key'] for x in r.journal.read_text().splitlines() if json.loads(x)['kind'] == 's3']
+        r.store['http://s3/testops-cpu-client1-c1/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
+        with self.assertRaises(AssertionError), mock.patch.object(chaos_load, 's3', r.s3):
+            chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
+
+    def test_any_op_over_30s_is_fatal(self):
+        for kind in ('kv', 's3'):
+            with self.subTest(kind=kind):
+                r = Rig()
+                slow = lambda: r.now.__setitem__(0, r.now[0] + 31)
+                work, s3 = r.helper.work, r.s3
+                if kind == 'kv':
+                    r.helper.work = lambda conn, cmd: (slow(), work(conn, cmd))[1]
+                else:
+                    r.s3 = lambda *a, **k: (slow(), s3(*a, **k))[1]
+                with self.assertRaises(TimeoutError):
+                    r.run('load')
+
+    def test_ack_stands_when_its_fid_lookup_fails(self):
+        # From claude03's #48 review: C4 restarts the filer under load.
+        r = Rig()
+        calls = [0]
+        def fids(c, p):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise URLError(ConnectionRefusedError(111, 'Connection refused'))
+            return ['3,01ab']
+        journal = pathlib.Path(tempfile.mkdtemp()) / 'journal.jsonl'
+        with mock.patch.object(chaos_load, 's3', r.s3), mock.patch.object(chaos_load, 'fids_of', fids), \
+                mock.patch.object(chaos_load.time, 'monotonic', lambda: r.now[0]), \
+                mock.patch.object(chaos_load.time, 'sleep', lambda d: r.now.__setitem__(0, r.now[0] + 1)):
+            out = chaos_load.load(r.conn, C, 'http://s3', 40, journal, r.helper)
+        rows = [json.loads(x) for x in journal.read_text().splitlines()]
+        self.assertEqual(len(rows), out['acked_kv'] + out['acked_s3'])
+        self.assertEqual(sum(x['fids'] is None for x in rows), 1)
+
+    def test_trickling_s3_response_over_30s_is_fatal(self):
+        # From claude03's #48 review: a real server sends 35 bytes, one per
+        # second; no single socket read waits 30 s, but the GET does.
+        class Trickle(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header('Content-Length', '35'); self.end_headers()
+                for _ in range(35):
+                    self.wfile.write(b'z'); self.wfile.flush(); time.sleep(1)
+            def log_message(self, *a): pass
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Trickle)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(TimeoutError):
+                chaos_load.s3('http://127.0.0.1:%d/obj' % srv.server_port)
+        finally:
+            srv.shutdown()
 
 
 if __name__ == '__main__':

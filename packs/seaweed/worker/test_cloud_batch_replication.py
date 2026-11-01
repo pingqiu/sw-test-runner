@@ -1,5 +1,6 @@
 """cloud_batch assess with replication 001: every volume has exactly R owners."""
-import json, pathlib, sys, tempfile, unittest
+import io, json, pathlib, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import cloud_batch
 
@@ -57,6 +58,19 @@ class ReplicationAssess(unittest.TestCase):
     def test_client_lookup_must_name_both_copies(self):
         with self.assertRaises(AssertionError):
             cloud_batch.assess(build(2, owner_override=[HOSTS['vol1']]), HOSTS, 2)
+
+    def test_main_refuses_a_one_copy_lookup_under_001(self):
+        c = dict(run_id='cpu', client='client1', transport='http', replication='001')
+        rows = [dict(event='ACK', key='client1-b0-0', fids=['3,ab']), dict(event='EXACT', key='client1-b0-0'), dict(status='PASS', ack=16, exact=16, wrong=0)]
+        kv = mock.Mock(returncode=0, stdout='\n'.join(json.dumps(r) for r in rows), stderr='')
+        def urlopen(req, timeout=None):
+            body = json.dumps({'locations': [{'url': '10.84.1.21:8080'}]}).encode() if 'dir/lookup' in req.full_url else b''
+            return mock.MagicMock(__enter__=lambda s: io.BytesIO(body), __exit__=lambda *a: False)
+        argv = ['cloud_batch.py', '--config', json.dumps(c), '--s3', 'http://s3', '--master', 'http://master']
+        with mock.patch.object(cloud_batch.subprocess, 'run', return_value=kv), mock.patch.object(cloud_batch, 'urlopen', urlopen), \
+                mock.patch.object(sys, 'argv', argv), mock.patch('sys.stdout', io.StringIO()):
+            with self.assertRaisesRegex(AssertionError, 'volume copies differ from replication'):
+                cloud_batch.main()
 
 
 if __name__ == '__main__':
