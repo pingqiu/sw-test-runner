@@ -12,7 +12,8 @@ import (
 // the logging message, without the timestamp/logger prefix in cloud-init.log.
 var cloudIMDSGone = regexp.MustCompile(`\APolling IMDS failed attempt [1-9][0-9]* with exception: UrlError\('410 Client Error: Gone for url: http://169\.254\.169\.254/metadata/instance\?api-version=2021-08-01&extended=true'\)\z`)
 
-const cloudIMDSReprovisionNotFound = `Polling IMDS failed attempt 1 with exception: UrlError('404 Client Error: Not Found for url: http://169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01')`
+// Azure retries this poll; run 7d (client2) logged attempts 1 and 2.
+var cloudIMDSReprovisionNotFound = regexp.MustCompile(`\APolling IMDS failed attempt [1-9][0-9]* with exception: UrlError\('404 Client Error: Not Found for url: http://169\.254\.169\.254/metadata/reprovisiondata\?api-version=2019-06-01'\)\z`)
 
 func qualifyCloudInit(raw string, rc int) error {
 	if rc != 0 && rc != 2 {
@@ -62,7 +63,7 @@ func qualifyCloudInit(raw string, rc int) error {
 						}
 						for _, message := range a {
 							s, ok := message.(string)
-							if !ok || level != "WARNING" || (!cloudIMDSGone.MatchString(s) && s != cloudIMDSReprovisionNotFound) {
+							if !ok || level != "WARNING" || (!cloudIMDSGone.MatchString(s) && !cloudIMDSReprovisionNotFound.MatchString(s)) {
 								return fmt.Errorf("unapproved cloud-init %s: %v", level, message)
 							}
 						}

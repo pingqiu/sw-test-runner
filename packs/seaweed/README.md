@@ -206,8 +206,9 @@ run directories or uploading artifacts. It retains the complete response in
 errors (including stage errors), and no unapproved recoverable messages.
 The allowed warnings are the complete Azure IMDS 410 polling message for
 `169.254.169.254/metadata/instance?api-version=2021-08-01&extended=true`,
-and the exact captured attempt-1 `404 Client Error: Not Found` polling message
-for `169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01`.
+and the complete `404 Client Error: Not Found` polling message, any attempt
+number, for `169.254.169.254/metadata/reprovisiondata?api-version=2019-06-01`
+(run 4 logged attempt 1; run 7d logged attempts 1 and 2).
 Unknown, mixed, malformed or ambiguous error data refuses preparation.
 This follows [cloud-init's structured status and exit-code contract](https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/status.py).
 
