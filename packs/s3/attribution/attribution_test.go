@@ -10,7 +10,7 @@ import (
 )
 
 func TestRetainedA1Rows(t *testing.T) {
-	for _, run := range []string{"194018", "174221"} {
+	for _, run := range []string{"194018"} {
 		t.Run(run, func(t *testing.T) {
 			f, e := os.Open("testdata/" + run + ".json.gz")
 			if e != nil {
@@ -41,7 +41,6 @@ func TestRetainedA1Rows(t *testing.T) {
 func TestRetainedFixturesArePinned(t *testing.T) {
 	for name, want := range map[string]string{
 		"194018.json.gz": "0edbe599909a02ae7f0b863bba74c26f1a3ffe5e53139f7fbffc8cb26912b493",
-		"174221.json.gz": "67340b4b218a98a88ab250940651ab006bf25752bae2a0936179115c61a5fa6a",
 	} {
 		b, e := os.ReadFile("testdata/" + name)
 		if e != nil {

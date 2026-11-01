@@ -39,11 +39,8 @@ The report's first 50 unexcused rows are bounded diagnostics, not a full journal
 
 The full `194018Z` journal has 12,400 rows / 12,391 operations after its nine late
 classifications: 111 failed responses, 101 checked refusals and ten excused errors.
-Go matches the frozen Python A1 result exactly. The older `174221Z` fixture
-projects only its two master-episode PUTs (four rows including classifications).
-Its legacy `gateway` label is not accepted as the current `s3` role; no whole-run
-parity is claimed for that older journal. Archive, member, source and fixture
-digests are retained. The legacy product binary was 3565db99-derived, per the
+Go matches the frozen Python A1 result exactly. Archive, member, source and
+fixture digests are retained. The legacy product binary was 3565db99-derived, per the
 packet's provenance correction; this is algorithm replay, not current-main or
 native-path qualification. The original replay's fake-DC path FAIL is unchanged.
 

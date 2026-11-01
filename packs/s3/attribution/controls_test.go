@@ -162,3 +162,95 @@ func TestNoMutationOfInput(t *testing.T) {
 		t.Fatal("input mutated")
 	}
 }
+
+// The frozen A1 TABLE from s3_workload.py (2dbe5552), written out literally.
+func TestRoleTableMatchesFrozenA1(t *testing.T) {
+	all := []string{"http_get", "range_get", "dc_get", "range_dc", "head", "list", "put", "complete", "delete"}
+	table := map[string][2][]string{
+		"master": {all, {"conn", "timeout", "http500", "http503"}},
+		"pair":   {all, {"timeout", "http500", "http503"}},
+		"freeze": {all, {"timeout", "http500", "http503"}},
+		"crash":  {all, {"timeout", "http500", "http503"}},
+		"s3":     {all, {"conn", "timeout"}},
+		"objsvc": {{"dc_get", "range_dc"}, {"http500"}},
+		"client": {{"dc_get"}, {"client_kill"}},
+	}
+	in := func(x string, xs []string) bool {
+		for _, y := range xs {
+			if x == y {
+				return true
+			}
+		}
+		return false
+	}
+	kinds := append(all, "http_416", "abort", "mpu_part", "mpu_create")
+	classes := []string{"conn", "timeout", "http500", "http503", "client_kill", "semantic", ""}
+	for role, rule := range table {
+		for _, k := range kinds {
+			for _, c := range classes {
+				for _, designated := range []bool{false, true} {
+					r := Operation{ID: 1, Kind: k, Key: s("v"), Start: f(100), End: f(110), Class: c, Designated: designated, Witness: &Witness{PID: 7}}
+					fault := Fault{Role: role, Window: []float64{101, 120}}
+					if role == "client" {
+						fault = Fault{Role: role, Window: []float64{110, 110}, Victim: &Victim{PID: 7, Key: "v"}}
+					}
+					want := in(k, rule[0]) && in(c, rule[1]) && (!mutation(k) || designated)
+					if got := Eligible(r, fault); got != want {
+						t.Errorf("%s/%s/%q designated=%v: got %v want %v", role, k, c, designated, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestLateClassificationCannotRewriteOutcome(t *testing.T) {
+	for name, rewrite := range map[string]func(first, late *Operation){
+		"class":   func(first, late *Operation) { first.Class = "semantic" },
+		"outcome": func(first, late *Operation) { late.OK = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, fs := basic()
+			first, late := r, r
+			first.Mark, late.Late = nil, true
+			rewrite(&first, &late)
+			if got := Assess([]Operation{first, late}, fs); got.Status != "FAIL" {
+				t.Fatal(got)
+			}
+		})
+	}
+}
+
+func TestUncoveredGuardsRefuse(t *testing.T) {
+	refusal := func(kind string, ok bool) ([]Operation, []Fault) {
+		r, _ := basic()
+		r.Kind, r.OK, r.Designated, r.Mark, r.Refusal, r.Status = kind, ok, false, nil, true, i(416)
+		return []Operation{r}, []Fault{}
+	}
+	for name, mk := range map[string]func() ([]Operation, []Fault){
+		"mark from differs":   func() ([]Operation, []Fault) { r, fs := basic(); r.Mark.From = f(100.5); return []Operation{r}, fs },
+		"mark index negative": func() ([]Operation, []Fault) { r, fs := basic(); r.Mark.Fault = i(-1); return []Operation{r}, fs },
+		"reversed fault window": func() ([]Operation, []Fault) {
+			r, fs := basic()
+			fs[0].Window, r.Mark.From, r.Mark.To = []float64{120, 101}, f(120), f(101)
+			return []Operation{r}, fs
+		},
+		"victim and witness without pid": func() ([]Operation, []Fault) {
+			r := Operation{ID: 1, Kind: "dc_get", Key: s("v"), Start: f(100), End: f(110), Class: "client_kill", Mark: &Mark{From: f(110), To: f(110), Fault: i(0)}, Witness: &Witness{}}
+			return []Operation{r}, []Fault{{Role: "client", Window: []float64{110, 110}, Victim: &Victim{Key: "v"}}}
+		},
+		"416 refusal on http_get":  func() ([]Operation, []Fault) { return refusal("http_get", false) },
+		"416 refusal on an ok row": func() ([]Operation, []Fault) { return refusal("http_416", true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatal("panic:", p)
+				}
+			}()
+			if got := Assess(mk()); got.Status != "FAIL" {
+				t.Fatal(got)
+			}
+		})
+	}
+}
