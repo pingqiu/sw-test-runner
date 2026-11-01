@@ -61,4 +61,10 @@ func TestReplicationIsOptInAndCloudOnly(t *testing.T) {
 			t.Fatal("one-VM or invalid replication accepted:", rep, err)
 		}
 	}
+	for _, c := range []CloudConfig{{ChaosSet: "A"}, {ChaosSet: "C", Replication: "001"}, {ChaosSet: "B", Replication: "001", Chaos: true}} {
+		c.Files = files
+		if _, err := RunCloudHTTP(ctx, raw, c); err == nil || !strings.Contains(err.Error(), "chaos") {
+			t.Fatalf("invalid chaos_set accepted: %+v %v", c, err)
+		}
+	}
 }

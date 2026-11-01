@@ -331,28 +331,41 @@ func checkCloudFreeze(observed map[string]any, w freezeWindow, onVictim map[stri
 // chaosRestart kills the unit's exact MainPID, waits for that generation to be
 // gone, and starts the same command as unit next; readiness is the deploy URL.
 func chaosRestart(ctx context.Context, r *chaosRun, d inventory.Document, x chaosCase, hosts map[string]inventory.Host, unit, next string, witness map[string]string) error {
-	old, e := r.step(ctx, x.Victim, "kill-"+x.Role, 60, chaosKillScript(unit))
-	witness["old"] = old
-	if e != nil {
+	var e error
+	if witness["old"], e = chaosKill(ctx, r, x.Victim, x.Role, unit); e != nil {
 		return e
 	}
-	h, root := hosts[x.Victim], hosts[x.Victim].RunRoot
-	if _, e = r.step(ctx, x.Victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[x.Role])); e != nil {
-		return e
-	}
-	if witness["new"], e = r.step(ctx, x.Victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next)); e != nil {
-		return e
-	}
-	before, after := strings.Fields(old), strings.Fields(witness["new"])
-	if len(before) != 4 || before[0] != "OLD" || before[3] != "GONE" || len(after) != 3 || after[0] != "NEW" || (before[1] == after[1] && before[2] == after[2]) {
-		return errors.New("replacement generation identity did not change")
-	}
-	url := "http://" + endpoint(h, "volume_http") + "/status"
-	if x.Role == "filer" {
-		url = "http://" + endpoint(h, "filer_http") + "/"
-	}
-	_, e = r.step(ctx, x.Victim, "ready-"+next, 45, "until curl -fsS --max-time 3 "+cloudQuote(url)+" >/dev/null; do sleep 1; done")
+	witness["new"], e = chaosStart(ctx, r, d, hosts, x.Victim, x.Role, next, witness["old"])
 	return e
+}
+
+// chaosKill SIGKILLs the unit's live MainPID and witnesses that generation gone.
+func chaosKill(ctx context.Context, r *chaosRun, victim, role, unit string) (string, error) {
+	old, e := r.step(ctx, victim, "kill-"+role, 60, chaosKillScript(unit))
+	if f := strings.Fields(old); e == nil && (len(f) != 4 || f[0] != "OLD" || f[3] != "GONE") {
+		e = errors.New("kill witness malformed")
+	}
+	return old, e
+}
+
+// chaosStart starts role's same command as unit next on victim, requires a
+// generation identity different from old, then waits for the deploy URL.
+func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts map[string]inventory.Host, victim, role, next, old string) (string, error) {
+	h, root := hosts[victim], hosts[victim].RunRoot
+	if _, e := r.step(ctx, victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[role])); e != nil {
+		return "", e
+	}
+	identity, e := r.step(ctx, victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next))
+	if e != nil {
+		return identity, e
+	}
+	before, after := strings.Fields(old), strings.Fields(identity)
+	if len(before) != 4 || len(after) != 3 || after[0] != "NEW" || (before[1] == after[1] && before[2] == after[2]) {
+		return identity, errors.New("replacement generation identity did not change")
+	}
+	url := map[string]string{"volume": "http://" + endpoint(h, "volume_http") + "/status", "filer": "http://" + endpoint(h, "filer_http") + "/", "master": "http://" + endpoint(h, "master_http") + "/dir/status"}[role]
+	_, e = r.step(ctx, victim, "ready-"+next, 45, "until curl -fsS --max-time 3 "+cloudQuote(url)+" >/dev/null; do sleep 1; done")
+	return identity, e
 }
 
 // chaosFreeze: S after every thread is T, C before CONT, R after none is T.

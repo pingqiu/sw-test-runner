@@ -31,6 +31,8 @@ type CloudConfig struct {
 	// Replication "001" (opt-in, ten-node only) keeps two copies on different
 	// volume servers; absent keeps the default 000 run unchanged.
 	Replication string `json:"replication,omitempty"`
+	// ChaosSet "A" (C1-C3) or "B" (C4-C6) runs stage 2 under replication 001.
+	ChaosSet string `json:"chaos_set,omitempty"`
 }
 type CloudFile struct {
 	Path   string `json:"path"`
@@ -71,10 +73,13 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if c.Replication != "" && c.Replication != "001" {
 		return "", errors.New("replication must be absent or 001")
 	}
+	if _, ok := chaos2Sets[c.ChaosSet]; c.ChaosSet != "" && (!ok || c.Replication != "001" || c.Chaos) {
+		return "", errors.New("chaos_set must be A or B, with replication 001 and without stage-1 chaos")
+	}
 	if len(d.Hosts) != 1 {
 		return runCloudCluster(ctx, *d, c)
 	}
-	if c.Chaos || c.Replication != "" {
+	if c.Chaos || c.Replication != "" || c.ChaosSet != "" {
 		return "", errors.New("chaos and replication need the ten-node cluster")
 	}
 	h := d.Hosts[0]
@@ -200,6 +205,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	helpers := []string{"kv_smoke.py", "soak_native_worker.py", "soak_oracle.py"}
 	if phase != "" {
 		helpers = append(helpers, "cloud_batch.py")
+	}
+	if phase != "" && c.ChaosSet != "" {
+		helpers = append(helpers, "chaos_load.py")
 	}
 	for _, name := range helpers {
 		b, e := workerFiles.ReadFile("worker/" + name)
