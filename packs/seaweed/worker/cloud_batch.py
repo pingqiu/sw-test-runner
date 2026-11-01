@@ -12,6 +12,7 @@ def main():
     c = json.loads(a.config)
     emit = lambda r: print(json.dumps(r, allow_nan=False), flush=True)
     assert c['transport'] == 'http'
+    replicas = {'000': 1, '001': 2}[c.get('replication', '000')]
     bucket = a.s3 + '/testops-' + c['run_id'] + '-' + c['client']
     def request(url, data=None, method='GET'):
         with urlopen(Request(url, data=data, method=method), timeout=10) as r:
@@ -32,8 +33,9 @@ def main():
                     vid = fid.split(',')[0]
                     if vid not in seen:
                         lookup = json.loads(request(a.master+'/dir/lookup?'+urlencode(dict(volumeId=vid))))
-                        assert len(lookup['locations']) == 1
-                        emit(dict(event='OWNER', volume=vid, url=lookup['locations'][0]['url']))
+                        urls = sorted(x['url'] for x in lookup['locations'])
+                        assert len(urls) == replicas == len(set(urls)), 'volume copies differ from replication'
+                        emit(dict(event='OWNER', volume=vid, url=urls[0]) if replicas == 1 else dict(event='OWNER', volume=vid, urls=urls))
                         seen.add(vid)
         key = bucket + '/' + str(i)
         body = hashlib.sha256((c['run_id']+c['client']+str(i)).encode()).digest()*131072
@@ -53,7 +55,7 @@ def before(root, hosts):
         volumes = json.loads((root/'before'/host/'status.json').read_text())['Volumes']
         assert volumes and any(v['ReadOnly'] is False for v in volumes), 'no writable owner '+host
 
-def assess(root, hosts):
+def assess(root, hosts, replicas=1):
     root = pathlib.Path(root)
     read = lambda p: json.loads((root/p).read_text())
     expected, owners, used, counters = set(hosts.values()), {}, set(), {}
@@ -68,12 +70,13 @@ def assess(root, hosts):
         assert all(v>0 for v in delta.values()), 'idle owner '+host
         counters[host] = delta
         for v in after:
-            assert str(v['Id']) not in owners, 'duplicate volume owner'
-            owners[str(v['Id'])] = url
+            owners.setdefault(str(v['Id']), set()).add(url)
+            assert len(owners[str(v['Id'])]) <= replicas, 'duplicate volume owner'
+    assert all(len(s) == replicas for s in owners.values()), 'volume copies differ from replication'
     for client in ('client1','client2','client3'):
         rows = [json.loads(x) for x in (root/'load'/client/'cloud-kv.jsonl').read_text().splitlines()]
-        lookups = {r['volume']:r['url'] for r in rows if r.get('event')=='OWNER'}
-        assert all(owners[v]==url for v,url in lookups.items())
+        lookups = {r['volume']:set(r['urls'] if 'urls' in r else [r['url']]) for r in rows if r.get('event')=='OWNER'}
+        assert all(owners[v]==urls for v,urls in lookups.items())
         for prefix,count in (('',512),('S3_',32)):
             writes = [r for r in rows if r.get('event')==prefix+'ACK']
             reads = [r for r in rows if r.get('event')==prefix+'EXACT']
@@ -87,7 +90,7 @@ def assess(root, hosts):
                     for fid in r['fids']:
                         vid = fid.split(',')[0]
                         assert lookups[vid]==owners[vid]
-                        used.add(owners[vid])
+                        used |= owners[vid]
     assert used==expected, 'owner not exercised'
     print(json.dumps(dict(status='PASS',ack=1536,exact=1536,wrong=0,s3_ack=96,s3_exact=96,owners=sorted(used),server_storage_deltas=counters,evidence_scope='client_ack_exact_owner_join_and_server_storage_deltas')))
 
@@ -96,7 +99,7 @@ if __name__ == '__main__':
         if sys.argv[1:2]==['--before']:
             before(sys.argv[2],json.loads(sys.argv[3]))
         elif sys.argv[1:2]==['--assess']:
-            assess(sys.argv[2],json.loads(sys.argv[3]))
+            assess(sys.argv[2],json.loads(sys.argv[3]),int(sys.argv[4]) if len(sys.argv)>4 else 1)
         else:
             main()
     except Exception as e:

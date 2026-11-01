@@ -28,6 +28,9 @@ type CloudConfig struct {
 	// Chaos opts a ten-node run into the read-restart/freeze cases after the
 	// functional phases. Absent or false leaves the run unchanged.
 	Chaos bool `json:"chaos,omitempty"`
+	// Replication "001" (opt-in, ten-node only) keeps two copies on different
+	// volume servers; absent keeps the default 000 run unchanged.
+	Replication string `json:"replication,omitempty"`
 }
 type CloudFile struct {
 	Path   string `json:"path"`
@@ -65,11 +68,14 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if d.Target != "azure" || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
 		return "", errors.New("one newly created Azure HTTP host and three artifacts required")
 	}
+	if c.Replication != "" && c.Replication != "001" {
+		return "", errors.New("replication must be absent or 001")
+	}
 	if len(d.Hosts) != 1 {
 		return runCloudCluster(ctx, *d, c)
 	}
-	if c.Chaos {
-		return "", errors.New("chaos needs the ten-node cluster")
+	if c.Chaos || c.Replication != "" {
+		return "", errors.New("chaos and replication need the ten-node cluster")
 	}
 	h := d.Hosts[0]
 	for _, role := range []string{"master", "filer", "volume", "s3", "client"} {
@@ -168,7 +174,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if phase == "grow" {
 		for _, v := range d.Hosts {
 			if contains(v.Roles, "volume") {
-				if _, e = run("grow-"+v.ID, "curl -fsS --max-time 15 "+q("http://"+endpoint(meta, "master_http")+"/vol/grow?count=1&collection=lmcache&dataNode="+endpoint(v, "volume_http"))); e != nil {
+				if _, e = run("grow-"+v.ID, "curl -fsS --max-time 15 "+q("http://"+endpoint(meta, "master_http")+"/vol/grow?count=1&collection=lmcache&dataNode="+endpoint(v, "volume_http")+cloudGrowReplication(c.Replication))); e != nil {
 					return "", e
 				}
 			}
@@ -220,7 +226,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return e
 	}
 	master := endpoint(meta, "master_http")
-	commands := cloudServices(h, meta, root, phase != "")
+	commands := cloudServices(h, meta, root, phase != "", c.Replication)
 	for _, role := range []string{"master", "volume", "filer", "s3"} {
 		if e = service(role, commands[role]); e != nil {
 			return "", e
@@ -249,7 +255,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			}
 		}
 	}
-	args, e := SmokeArgs(&d, h.ID, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20})
+	args, e := SmokeArgs(&d, h.ID, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: c.Replication})
 	if e != nil {
 		return "", e
 	}
@@ -310,14 +316,24 @@ func cloudStart(d inventory.Document, root, unit, cmd string) string {
 }
 
 // cloudServices is the single source of each role's service command.
-func cloudServices(h, meta inventory.Host, root string, cluster bool) map[string]string {
+func cloudGrowReplication(replication string) string {
+	if replication == "" {
+		return ""
+	}
+	return "&replication=" + replication
+}
+
+func cloudServices(h, meta inventory.Host, root string, cluster bool, replication string) map[string]string {
 	q, ip, master := cloudQuote, h.Data.Address, endpoint(meta, "master_http")
+	if replication == "" {
+		replication = "000"
+	}
 	volumeMB, maxVolumes := "32", "8"
 	if cluster {
 		volumeMB, maxVolumes = "256", "16"
 	}
 	return map[string]string{
-		"master": q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=" + volumeMB + " -defaultReplication=000 -peers=none",
+		"master": q(root+"/weed") + " master -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "master_http")) + " -mdir=" + q(root+"/master") + " -volumeSizeLimitMB=" + volumeMB + " -defaultReplication=" + replication + " -peers=none",
 		"volume": q(root+"/weed-volume") + " --master=" + master + " --ip=" + ip + " --port=" + strconv.Itoa(servicePort(h, "volume_http")) + " --port.grpc=" + strconv.Itoa(servicePort(h, "volume_grpc")) + " --dir=" + q(root+"/volume") + " --max=" + maxVolumes,
 		"filer":  q(root+"/weed") + " -config_dir=" + q(root) + " filer -master=" + master + " -ip=" + ip + " -port=" + strconv.Itoa(servicePort(h, "filer_http")) + " -port.grpc=" + strconv.Itoa(servicePort(h, "filer_grpc")),
 		"s3":     q(root+"/weed") + " s3 -filer=" + endpoint(meta, "filer_http") + " -port=" + strconv.Itoa(servicePort(h, "s3_http")),

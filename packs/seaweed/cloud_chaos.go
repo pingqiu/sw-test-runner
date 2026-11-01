@@ -65,6 +65,7 @@ func chaosContScript(pid, start string) string {
 
 type chaosRun struct {
 	dir   string
+	rep   string // cloud.replication, for loads and replacement commands
 	nodes map[string]*infra.Node
 	mu    sync.Mutex
 	seq   int
@@ -141,7 +142,7 @@ func runCloudChaos(ctx context.Context, d inventory.Document, c CloudConfig) err
 		if e := os.MkdirAll(dir, 0700); e != nil {
 			return e
 		}
-		if e := runChaosCase(ctx, d, x, hosts, gens, &chaosRun{dir: dir, nodes: nodes}); e != nil {
+		if e := runChaosCase(ctx, d, x, hosts, gens, &chaosRun{dir: dir, rep: c.Replication, nodes: nodes}); e != nil {
 			return fmt.Errorf("chaos %s: %w", x.Name, e)
 		}
 	}
@@ -165,7 +166,7 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 			view := d
 			view.State, view.Hosts = "resolved", []inventory.Host{meta, vol, hosts[id]}
 			root := hosts[id].RunRoot
-			args, e := ReadLoadArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20}, stage, "http")
+			args, e := ReadLoadArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: r.rep}, stage, "http")
 			if e != nil {
 				return e
 			}
@@ -336,7 +337,7 @@ func chaosRestart(ctx context.Context, r *chaosRun, d inventory.Document, x chao
 		return e
 	}
 	h, root := hosts[x.Victim], hosts[x.Victim].RunRoot
-	if _, e = r.step(ctx, x.Victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true)[x.Role])); e != nil {
+	if _, e = r.step(ctx, x.Victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[x.Role])); e != nil {
 		return e
 	}
 	if witness["new"], e = r.step(ctx, x.Victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next)); e != nil {

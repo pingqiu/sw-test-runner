@@ -65,6 +65,7 @@ func TestDestroyDeleteResetRereadsExactIDs(t *testing.T) {
 		}, 1, []string{diskID}},
 		{"out-of-scope-id", raw["fixture-rg"], "CLEANUP_INCOMPLETE", nil, 1, nil},
 		{"unknown-suffix", disk + "\nWrapperFailure", "CLEANUP_INCOMPLETE", nil, 1, nil},
+		{"delete-eof-is-not-allowlisted", "Error: Delete \"https://management.azure.com" + diskID + "?api-version=2023-04-02\": EOF", "CLEANUP_INCOMPLETE", nil, 1, nil},
 		{"put-is-not-delete", strings.Replace(disk, "performing Delete: Delete", "performing CreateOrUpdate: Put", 1), "CLEANUP_INCOMPLETE", nil, 1, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

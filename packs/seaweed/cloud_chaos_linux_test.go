@@ -315,7 +315,10 @@ func TestCloudChaosIsOptIn(t *testing.T) {
 	h := inventory.Host{Data: inventory.DataNetwork{Address: "10.84.1.11"}, Services: []inventory.Service{{Name: "volume_http", Port: 8080}, {Name: "volume_grpc", Port: 18080}, {Name: "master_http", Port: 9333}, {Name: "filer_http", Port: 8888}, {Name: "filer_grpc", Port: 18888}, {Name: "s3_http", Port: 8333}}}
 	meta := h
 	meta.Data.Address = "10.84.1.10"
-	got := cloudServices(h, meta, "/r", true)
+	if s := cloudServices(h, meta, "/r", true, "001")["master"]; !strings.Contains(s, " -defaultReplication=001 ") {
+		t.Fatal("replication 001 not applied:", s)
+	}
+	got := cloudServices(h, meta, "/r", true, "")
 	want := map[string]string{
 		"master": `'/r/weed' master -ip=10.84.1.11 -port=9333 -mdir='/r/master' -volumeSizeLimitMB=256 -defaultReplication=000 -peers=none`,
 		"volume": `'/r/weed-volume' --master=10.84.1.10:9333 --ip=10.84.1.11 --port=8080 --port.grpc=18080 --dir='/r/volume' --max=16`,

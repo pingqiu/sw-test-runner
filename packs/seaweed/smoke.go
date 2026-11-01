@@ -21,6 +21,8 @@ type SmokeSettings struct {
 	HelperDir string `json:"helper_dir"`
 	Keys      int    `json:"keys"`
 	Length    int    `json:"length"`
+	// Replication is the cloud-only KV loader copy count ("" keeps 000).
+	Replication string `json:"replication,omitempty"`
 }
 
 // SmokeConfig is emitted by the common inventory consumer, never a cloud driver.
@@ -42,6 +44,7 @@ type SmokeConfig struct {
 	HelperDir   string `json:"helper_dir"`
 	Keys        int    `json:"keys"`
 	Length      int    `json:"length"`
+	Replication string `json:"replication,omitempty"`
 }
 
 func endpoint(h inventory.Host, name string) string {
@@ -78,10 +81,13 @@ func SmokeArgs(d *inventory.Document, client string, s SmokeSettings) ([]string,
 			worker = h
 		}
 	}
+	if s.Replication != "" && (s.Replication != "001" || d.Transport != "http") {
+		return nil, errors.New("replication 001 is cloud HTTP only")
+	}
 	if filer == nil || volume == nil || worker == nil || (d.Transport != "http" && worker.RDMA.GIDIndex == nil) {
 		return nil, errors.New("missing filer/volume/client or GID")
 	}
-	c := SmokeConfig{RunID: d.RunID, Client: client, Transport: d.Transport, FilerGRPC: endpoint(*filer, "filer_grpc"), FilerHTTP: "http://" + endpoint(*filer, "filer_http"), Root: "/testops/" + d.RunID + "/" + client, NativeDir: s.NativeDir, HelperDir: s.HelperDir, Keys: s.Keys, Length: s.Length}
+	c := SmokeConfig{RunID: d.RunID, Client: client, Transport: d.Transport, FilerGRPC: endpoint(*filer, "filer_grpc"), FilerHTTP: "http://" + endpoint(*filer, "filer_http"), Root: "/testops/" + d.RunID + "/" + client, NativeDir: s.NativeDir, HelperDir: s.HelperDir, Keys: s.Keys, Length: s.Length, Replication: s.Replication}
 	if d.Transport != "http" {
 		c.RDMAAddress, c.RDMAControl, c.DCControl = endpoint(*volume, "rdma"), endpoint(*volume, "rdma_control"), endpoint(*volume, "dc_control")
 		c.Device, c.DevicePort, c.GIDIndex = worker.RDMA.Device, worker.RDMA.Port, worker.RDMA.GIDIndex
