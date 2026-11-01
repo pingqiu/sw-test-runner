@@ -90,6 +90,25 @@ func checkedMono(ops soakOps) (float64, error) {
 	return m, err
 }
 
+// soakClock refuses a controller clock that steps back from the last
+// validated read (codex01: a finite, positive 1001 -> 1000 regression after a
+// timer still dispatched faults). It claims no more than that.
+type soakClock struct {
+	ops  soakOps
+	last float64
+}
+
+func (c *soakClock) now() (float64, error) {
+	m, err := checkedMono(c.ops)
+	if err == nil && m < c.last {
+		err = errors.New("soak: controller clock went backwards")
+	}
+	if err == nil {
+		c.last = m
+	}
+	return m, err
+}
+
 // checkedSpan converts seconds to a Duration only inside the soak horizon,
 // so no float can wrap the conversion. A past (negative) span waits 0 and is
 // judged by the overdue rule as before.
@@ -122,6 +141,7 @@ func waitOrComplete(ctx context.Context, ops soakOps, l *loadLatch, d time.Durat
 type readyRow struct {
 	Status     string
 	ClientMono float64 `json:"client_mono"`
+	ReadyMono  float64 `json:"ready_mono"`
 	Processes  map[string]struct {
 		Identity tr.ProcessIdentity `json:"scope_identity"`
 	}
@@ -142,7 +162,8 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if ops.WorkDeadline().Sub(ops.Now()) < duration+QuiescenceReserve+CollectReserve {
 		return nil, exit, errors.New("soak: not enough work time left to admit the load")
 	}
-	enrolled, err := checkedMono(ops)
+	clk := &soakClock{ops: ops}
+	enrolled, err := clk.now()
 	if err != nil {
 		return nil, exit, err
 	}
@@ -160,7 +181,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	// The witness must lie inside this boot's enrollment/acquisition bracket
 	// (codex01 R1): written after the task was enrolled, read back no later
 	// than now. Anything else, MaxFloat64 included, is refused.
-	acquired, err := checkedMono(ops)
+	acquired, err := clk.now()
 	if err != nil {
 		return nil, exit, err
 	}
@@ -172,19 +193,26 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	}
 	for i, f := range x.Faults {
 		due := start + float64(f.AtS)
-		now, e := checkedMono(ops)
+		now, e := clk.now()
 		if e != nil {
 			return records, exit, e
 		}
-		wait, e := checkedSpan(due - now)
-		if e != nil {
-			return records, exit, e
-		}
-		if err = waitOrComplete(ctx, ops, latch, wait); err != nil {
-			return records, exit, err
-		}
-		if now, err = checkedMono(ops); err != nil {
-			return records, exit, err
+		// Never dispatch before the due time: a timer that fired early is
+		// waited out again, a bounded number of times.
+		for tries := 0; now < due; tries++ {
+			if tries == 3 {
+				return records, exit, errors.New("soak: fault timer fired early repeatedly")
+			}
+			wait, e := checkedSpan(due - now)
+			if e != nil {
+				return records, exit, e
+			}
+			if err = waitOrComplete(ctx, ops, latch, wait); err != nil {
+				return records, exit, err
+			}
+			if now, err = clk.now(); err != nil {
+				return records, exit, err
+			}
 		}
 		if now > due+OverdueTolerance.Seconds() {
 			return records, exit, errors.New("soak: fault overdue; no catch-up")
@@ -215,7 +243,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	}
 	// The load must end by its duration plus the quiescence reserve; an overrun
 	// fails instead of waiting without bound on the work deadline.
-	now, err := checkedMono(ops)
+	now, err := clk.now()
 	if err != nil {
 		return records, exit, err
 	}
@@ -279,7 +307,20 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 			return errors.New("soak: replacement probe not READY")
 		}
 		if step.Host == "m01" {
-			rec.ReadyMono = ready.ClientMono
+			// K7 is measured from the actual successful observation, not the
+			// probe entry (codex01): the Assign's own time after a master
+			// fault, the all-gates-passed time otherwise.
+			rec.ReadyMono = ready.ReadyMono
+			if f.Role == "master" {
+				var probe struct {
+					Mono float64 `json:"mono"`
+				}
+				_ = json.Unmarshal(ready.AssignProbe, &probe)
+				rec.ReadyMono = probe.Mono
+			}
+			if math.IsNaN(rec.ReadyMono) || math.IsInf(rec.ReadyMono, 0) || rec.ReadyMono < ready.ClientMono {
+				return errors.New("soak: client READY time not a successful observation after probe entry")
+			}
 		}
 		if step.Host == "m02" {
 			i := ready.Processes[f.Role].Identity

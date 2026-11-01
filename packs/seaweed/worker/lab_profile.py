@@ -618,6 +618,9 @@ def ready(config):
                 row['assign_probe'] = dict(fid=answer['fid'], url=probe_url, mono=mono,
                                            writables_before=before, writables_after=after,
                                            grew=bool(set(after) - set(before)))
+            # When every gate (and the Assign, if any) has actually succeeded;
+            # client_mono stays the probe-entry time.
+            row['ready_mono'] = time.monotonic()
             return row
         except (OSError, ValueError, KeyError) as error:
             last = repr(error)

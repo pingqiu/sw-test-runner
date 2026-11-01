@@ -623,6 +623,8 @@ class AssignReadiness(unittest.TestCase):
         self.assertEqual(assigns[0], '/dir/assign?collection=lmcache&replication=000&ttl=2h&count=1')
         probe = row['assign_probe']
         self.assertEqual((probe['writables_before'], probe['writables_after'], probe['grew']), ([5], [5], False))
+        # The all-gates-passed time, after the successful Assign; client_mono is the probe entry.
+        self.assertTrue(row['client_mono'] <= probe['mono'] <= row['ready_mono'])
 
     def test_probe_records_growth_on_a_layout_without_writables(self):
         # /dir/assign grows a volume when the layout has none writable; say so.

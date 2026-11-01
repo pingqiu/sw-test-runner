@@ -16,28 +16,32 @@ import (
 // fakeSoak drives runSoak with a virtual clock: After(d) advances it at once.
 // The load "exits" when the clock reaches exitAt; WaitTask then returns.
 type fakeSoak struct {
-	t        *testing.T
-	mu       sync.Mutex
-	mono     float64
-	wall     time.Time
-	deadline time.Time
-	start    float64
-	noWit    bool
-	exitAt   float64 // load exits when mono >= exitAt
-	exitCode int
-	exited   chan struct{}
-	once     sync.Once
-	started  int
-	restarts []string
-	readies  []string
-	readyDL  []time.Time
-	badMono  bool
-	hooks    map[string]func(context.Context) // keyed "restart:<episode>" or "after:<n>"
-	afters   int
-	notReady string // ready job label that answers non-READY
-	noProbe  bool
-	badPID   bool
-	cancel   context.CancelFunc
+	t            *testing.T
+	mu           sync.Mutex
+	mono         float64
+	wall         time.Time
+	deadline     time.Time
+	start        float64
+	noWit        bool
+	exitAt       float64 // load exits when mono >= exitAt
+	exitCode     int
+	exited       chan struct{}
+	once         sync.Once
+	started      int
+	restarts     []string
+	readies      []string
+	readyDL      []time.Time
+	badMono      bool
+	readyLag     float64                          // ready_mono - client_mono in READY rows
+	regressAfter int                              // After call whose return steps the clock back
+	regressBy    float64                          // by this many seconds
+	earlyBy      float64                          // timers fire this many seconds early (first 2 waits)
+	hooks        map[string]func(context.Context) // keyed "restart:<episode>" or "after:<n>"
+	afters       int
+	notReady     string // ready job label that answers non-READY
+	noProbe      bool
+	badPID       bool
+	cancel       context.CancelFunc
 }
 
 const fakeReplacementPID = 4242
@@ -45,6 +49,7 @@ const fakeReplacementPID = 4242
 func newFakeSoak(t *testing.T) *fakeSoak {
 	f := &fakeSoak{t: t, mono: 1000, wall: time.Unix(1_800_000_000, 0), start: 1000.5, exitAt: 1000.5 + 1800, exited: make(chan struct{}), hooks: map[string]func(context.Context){}}
 	f.deadline = f.wall.Add(45 * time.Minute)
+	f.readyLag = 0.5
 	return f
 }
 
@@ -104,14 +109,14 @@ func (f *fakeSoak) RunJob(ctx context.Context, label string) (tr.ExitInfo, error
 	if f.badPID {
 		pid = 1
 	}
-	row := map[string]any{"Status": "READY", "client_mono": f.mono}
+	row := map[string]any{"Status": "READY", "client_mono": f.mono, "ready_mono": f.mono + f.readyLag}
 	if label == f.notReady {
 		row["Status"] = "NOT_READY"
 	}
 	ident := map[string]any{"scope_identity": tr.ProcessIdentity{PID: pid, StartTime: 7, BootID: "m02-boot", ExecutableSHA256: strings.Repeat("d", 64)}}
 	row["Processes"] = map[string]any{"volume": ident, "master": ident}
 	if !f.noProbe {
-		row["assign_probe"] = map[string]any{"fid": "5,01637037d6", "grew": false}
+		row["assign_probe"] = map[string]any{"fid": "5,01637037d6", "grew": false, "mono": f.mono + 0.3}
 	}
 	raw, _ := json.Marshal(row)
 	return captured(raw), nil
@@ -140,7 +145,15 @@ func (f *fakeSoak) After(d time.Duration) <-chan time.Time {
 		hook(nil)
 		return make(chan time.Time) // never fires: only ctx or completion can wake
 	}
+	if f.earlyBy > 0 && f.afters <= 2 && d.Seconds() > f.earlyBy {
+		d -= time.Duration(f.earlyBy * float64(time.Second))
+	}
 	f.advance(d)
+	if f.afters == f.regressAfter {
+		f.mu.Lock()
+		f.mono -= f.regressBy // finite, positive, but backwards
+		f.mu.Unlock()
+	}
 	c := make(chan time.Time, 1)
 	c <- f.wall
 	return c
@@ -375,5 +388,50 @@ func TestCheckedSpanBoundsEveryConversion(t *testing.T) {
 	}
 	if d, err := checkedSpan(1.5); err != nil || d != 1500*time.Millisecond {
 		t.Fatalf("checkedSpan(1.5) = %v %v", d, err)
+	}
+}
+
+// codex01 P2: a finite, positive clock that steps back after a timer must not
+// reach a Kill.
+func TestSoakClockRegressionAfterTimerSendsNoKill(t *testing.T) {
+	f := newFakeSoak(t)
+	// After fault 1's recovery wait the clock reads 100 s earlier than the
+	// value validated when fault 1 was dispatched: fault 2 is never sent.
+	f.regressAfter, f.regressBy = 2, 100
+	_, _, err := runFake(t, f)
+	expectNoFurtherFaults(t, f, err, "backwards", 1)
+}
+
+// A timer that fires early is waited out again: no fault before its due time.
+func TestSoakEarlyTimerNeverDispatchesBeforeDue(t *testing.T) {
+	f := newFakeSoak(t)
+	f.earlyBy = 3
+	records, _, err := runFake(t, f)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("err=%v records=%d", err, len(records))
+	}
+	for _, r := range records {
+		if r.DispatchMono < r.DueMono {
+			t.Fatalf("%s dispatched at %v before due %v", r.Episode, r.DispatchMono, r.DueMono)
+		}
+	}
+}
+
+// codex01's K7 condition: READY time = the actual successful observation.
+func TestSoakReadyTimeIsTheSuccessfulObservation(t *testing.T) {
+	f := newFakeSoak(t)
+	records, _, err := runFake(t, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe struct{ Mono float64 }
+	_ = json.Unmarshal(records[1].AssignProbe, &probe)
+	if records[1].ReadyMono != probe.Mono || records[0].ReadyMono <= records[0].DispatchMono {
+		t.Fatalf("volume ready %v, master ready %v vs Assign %v", records[0].ReadyMono, records[1].ReadyMono, probe.Mono)
+	}
+	g := newFakeSoak(t)
+	g.readyLag = -1 // a "ready" time before the probe even started
+	if _, _, err := runFake(t, g); err == nil || len(g.restarts) != 1 {
+		t.Fatalf("err=%v restarts=%v", err, g.restarts)
 	}
 }
