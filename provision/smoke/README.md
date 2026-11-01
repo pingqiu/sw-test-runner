@@ -69,14 +69,18 @@ explicit provider evidence and operator disposition are still required.
 The classifier judges a failed tool's stderr, where Terraform writes its
 diagnostics; its stdout refresh, plan and progress text is not part of the
 failure and stays in the recorded output. Unknown stderr text still refuses
-retry. A lost create PUT (the allowlisted Public IP update and NIC create forms)
-may have completed in Azure outside state, so before the retry each such block's
+retry. A lost create PUT may have completed in Azure outside state, so before the retry each such block's
 exact ARM ID is re-read. Absent: the retry proceeds as before. Present: it is
 imported at the block's source-context address only if it is in this
 subscription/RG, of that address's resource type, and carries this run's exact
 `seaweed_run` tag; the following re-plan must not delete or replace it. Anything
 else refuses, and the sticky apply marker stays. Generic forms that name no
 resource keep the plain retry.
+Lost create PUTs are recognized for every top-level type the module creates
+(`moduleTypes` in `types.go`; run 7e lost a VM create), with the block's
+address of the matching Terraform type. A test keeps `moduleTypes` equal to
+the module's resource types, so the create re-read and the sweep cover any
+new type.
 No Delete form is allowlisted: every lost Delete response goes through
 the re-read rule below, on destroy only. A Delete reset during apply refuses
 (fail-safe; applies create into fresh state).
@@ -197,7 +201,7 @@ apply stays non-clean even if destroy/list are empty; notify the run owner.
 
 ## Cluster orphan cleanup contract
 
-`rg-codex02-azure-test-20261029` is dedicated to the runner Azure lane. The manager issues serialized run tokens: one run at a time, with no external writer or retagging in this RG. After same-state destroy, cluster cleanup sweeps only supported resources in this RG carrying the current run tag, in NIC -> public IP -> disk -> VNet -> NSG order. It journals and waits for each deletion, then runs the full RG and subscription scans. Unsupported or untagged residuals are reported, never deleted by this sweep.
+`rg-codex02-azure-test-20261029` is dedicated to the runner Azure lane. The manager issues serialized run tokens: one run at a time, with no external writer or retagging in this RG. After same-state destroy, cluster cleanup sweeps only supported resources in this RG carrying the current run tag, in VM -> NIC -> public IP -> disk -> VNet -> NSG order (a VM created outside state holds its NIC; run 7e). The VM's detached OS disk goes as a disk. It journals and waits for each deletion, then runs the full RG and subscription scans. Unsupported or untagged residuals are reported, never deleted by this sweep.
 
 The fresh pre-delete tag read is a sanity check under that exclusive-writer contract; it is not atomic ownership proof and cannot protect against an external retag between show and delete. Show must return exactly one standalone JSON object; arrays, concatenated objects and trailing tokens refuse. No added read loop attempts to close that race. Sticky create uncertainty and any destroy failure remain non-clean even after the observed resources are gone.
 

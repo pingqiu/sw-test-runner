@@ -15,7 +15,8 @@ func TestCleanupSweepsOnlyTaggedScopedOrphans(t *testing.T) {
 			f := &fake{}
 			ctl := controller(f)
 			base := "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/"
-			types := []string{"Microsoft.Network/networkInterfaces", "Microsoft.Network/publicIPAddresses", "Microsoft.Compute/disks", "Microsoft.Network/virtualNetworks", "Microsoft.Network/networkSecurityGroups"}
+			// A tagged orphan VM sweeps first, before the NIC it holds (run 7e: NicInUse).
+			types := []string{"Microsoft.Compute/virtualMachines", "Microsoft.Network/networkInterfaces", "Microsoft.Network/publicIPAddresses", "Microsoft.Compute/disks", "Microsoft.Network/virtualNetworks", "Microsoft.Network/networkSecurityGroups"}
 			rows := []map[string]any{}
 			byID := map[string]map[string]any{}
 			want := []string{}
@@ -75,7 +76,7 @@ func TestCleanupSweepsOnlyTaggedScopedOrphans(t *testing.T) {
 			}
 			r := ctl.Execute(context.Background(), "run", c)
 			if kind == "clean" || kind == "destroy-failed" || kind == "unknown-create" {
-				if strings.Join(deleted, ",") != strings.Join(want, ",") || waits != 5 {
+				if strings.Join(deleted, ",") != strings.Join(want, ",") || waits != len(types) {
 					t.Fatalf("delete order/waits: %v %d", deleted, waits)
 				}
 				if kind == "clean" && r.Code != "COMPLETE" {
