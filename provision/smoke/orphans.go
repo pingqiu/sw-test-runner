@@ -48,6 +48,9 @@ func orphanIDs(raw []byte, subscription, group, run string) ([]string, error) {
 	return ids, nil
 }
 
+// Contract: the dedicated test RG belongs exclusively to the runner Azure lane;
+// the manager serializes run tokens, and no other writer retags its resources.
+// The fresh tag check below is a sanity check, not atomic ownership protection.
 func sweepOrphans(ctx context.Context, subscription, group, run string, call func(context.Context, string, ...string) ([]byte, error)) error {
 	b, err := call(ctx, "az", "resource", "list", "--subscription", subscription, "--resource-group", group, "--output", "json", "--only-show-errors")
 	if err != nil {
@@ -61,6 +64,10 @@ func sweepOrphans(ctx context.Context, subscription, group, run string, call fun
 		b, err = call(ctx, "az", "resource", "show", "--ids", id, "--output", "json", "--only-show-errors")
 		if err != nil {
 			return err
+		}
+		var object map[string]json.RawMessage
+		if e := json.Unmarshal(b, &object); e != nil || object == nil {
+			return fmt.Errorf("orphan show must be one standalone JSON object: %s: %v", id, e)
 		}
 		current, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run)
 		if e != nil || len(current) != 1 || current[0] != id {
