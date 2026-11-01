@@ -57,15 +57,6 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 	return []string{"-I", path.Join(s.HelperDir, "soak_load.py"), "--config", string(raw)}, nil
 }
 
-// SoakSamplerArgs is the exact soak_sampler.py argv for the M02 sampler task.
-func SoakSamplerArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string, error) {
-	raw, err := json.Marshal(map[string]any{"root": runRoot(d, "m02"), "horizon_s": x.DurationS + int(QuiescenceReserve.Seconds())})
-	if err != nil || runRoot(d, "m02") == "" {
-		return nil, errors.New("soak sampler needs the M02 run root")
-	}
-	return []string{"-I", path.Join(s.HelperDir, "soak_sampler.py"), "--config", string(raw)}, nil
-}
-
 // checkSoakTask admits one soak task: exact argv from the joined inventory,
 // the pinned interpreter, and the exact helper bytes read back on that host.
 func checkSoakTask(j tr.JobPin, in tr.PackInputs, host string, want []string, err error, s SmokeSettings, helpers []string, native bool) error {

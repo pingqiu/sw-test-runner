@@ -2,14 +2,14 @@
 or a control handshake. Four native workers (3 DC + 1 HTTP), the oracle,
 read-after-ACK, the client kill, a read-only topology poller (decision 3),
 bounded evidence files and one bounded summary row on stdout."""
-import argparse, hashlib, json, multiprocessing as mp, os, random, re, threading, time, urllib.request
+import argparse, hashlib, json, multiprocessing as mp, random, re, threading, time, urllib.request
 from pathlib import Path
 from soak_native_worker import child, payload
 from soak_oracle import Oracle, OracleError
-from soak_stats import WITNESS, boot_id, identity, process_sample
+from soak_stats import WITNESS, boot_id, identity
 
 MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)')
-EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'client-series.jsonl')
+EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl')
 
 
 def volume_ids(topology):
@@ -165,7 +165,7 @@ def run(config):
         begin = time.monotonic()  # the witness is written before the first operation
         with (root / WITNESS).open('x') as w:
             json.dump(dict(boot_id=boot_id(), mono=begin), w)
-        end, pace, next_write, owner, cursor, next_sample = begin + config['duration_s'], config['pacing_s'], begin, 0, 0, begin
+        end, pace, next_write, owner, cursor = begin + config['duration_s'], config['pacing_s'], begin, 0, 0
         while time.monotonic() < end:
             now = time.monotonic()
             for i in range(4):
@@ -174,10 +174,6 @@ def run(config):
                 pump(i)
             if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
                 kills.append(client_kill(now))
-            if now >= next_sample:
-                log('client-series.jsonl', dict(mono=now, processes=[dict(role='parent', **process_sample(os.getpid(), identity(os.getpid())['starttime']))]
-                    + [dict(role='client-%d' % i, **process_sample(w['identity']['pid'], w['identity']['starttime'])) for i, w in workers.items()]))
-                next_sample += 30
             for i in range(4):
                 if i in commands or now < available.get(i, 0):
                     continue

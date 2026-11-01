@@ -13,7 +13,7 @@ import (
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
-//go:embed worker/kv_smoke.py worker/soak_native_worker.py worker/soak_oracle.py worker/soak_stats.py worker/soak_load.py worker/soak_sampler.py worker/lab_profile.py worker/vf_preflight.py worker/cloud_batch.py worker/chaos_load.py
+//go:embed worker/kv_smoke.py worker/soak_native_worker.py worker/soak_oracle.py worker/soak_stats.py worker/soak_load.py worker/lab_profile.py worker/vf_preflight.py worker/cloud_batch.py worker/chaos_load.py
 var workerFiles embed.FS
 
 type SmokeSettings struct {
@@ -133,7 +133,7 @@ func checkSmoke(j tr.JobPin, in tr.PackInputs, d *inventory.Document, client str
 func checkPinned(in tr.PackInputs, host string, s SmokeSettings, names []string, native bool) error {
 	files := in.Files[host]
 	for name := range files {
-		for _, stem := range []string{"soak_native_worker", "soak_oracle", "soak_stats", "soak_load", "soak_sampler", "kv_smoke"} {
+		for _, stem := range []string{"soak_native_worker", "soak_oracle", "soak_stats", "soak_load", "kv_smoke"} {
 			if strings.HasPrefix(name, path.Join(s.HelperDir, stem)+"/") || name == path.Join(s.HelperDir, stem+".pyc") || strings.HasPrefix(name, path.Join(s.HelperDir, "__pycache__", stem)+".") {
 				return errors.New("competing smoke helper package/bytecode refused")
 			}

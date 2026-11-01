@@ -25,12 +25,11 @@ type SoakPlan struct {
 	FaultReady []Step      `json:"fault_ready"`
 	Faults     []SoakFault `json:"faults"`
 	// Step 3: the cache layout setup grows, the client kill inside the load
-	// worker, and the two extra M02 jobs (deploy-phase setup, soak sampler).
+	// worker, and the deploy-phase M02 setup job.
 	Layout        AssignLayout `json:"layout"`
 	GrowCount     int          `json:"grow_count"`
 	ClientKillAtS int          `json:"client_kill_at_s"`
 	Setup         Step         `json:"setup"`
-	Sampler       Step         `json:"sampler"`
 }
 
 type SoakFault struct {
@@ -234,21 +233,15 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 		return errors.New("soak ready_assign only with a master fault")
 	}
 	// Step 3: one collection across setup, rotation and ready_assign, and the
-	// two extra M02 jobs, each exact and injective.
+	// M02 setup job, exact and injective.
 	if err := x.Layout.validate(); err != nil || x.GrowCount < 1 || x.GrowCount > 16 || x.Rotation.Collections != x.Layout.Collection || (x.ReadyAssign != nil && *x.ReadyAssign != x.Layout) {
 		return errors.New("soak layout, grow count or collection coherence")
 	}
-	for _, s := range []Step{x.Setup, x.Sampler} {
-		if s.Host != "m02" || s.Role != "" || used[s.Job] || labels[s.Job] {
-			return errors.New("soak setup/sampler step not exact")
-		}
-		labels[s.Job] = true
+	if s := x.Setup; s.Host != "m02" || s.Role != "" || used[s.Job] || labels[s.Job] {
+		return errors.New("soak setup step not exact")
 	}
+	labels[x.Setup.Job] = true
 	if err := checkProfile(in.Jobs[x.Setup.Job], in, d, "m02", "soak_setup", "", p.setupSettings()); err != nil {
-		return err
-	}
-	want, err := SoakSamplerArgs(d, p.Smoke, x)
-	if err := checkSoakTask(in.Jobs[x.Sampler.Job], in, "m02", want, err, p.Smoke, []string{"soak_sampler.py", "soak_stats.py"}, false); err != nil {
 		return err
 	}
 	// Fault ready probes: one per host, distinct from every other job label,

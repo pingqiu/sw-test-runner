@@ -21,35 +21,6 @@ def identity(pid):
     return dict(pid=pid, starttime=int(raw[19]), state=raw[0], pgid=int(raw[2]))
 
 
-def process_sample(pid, starttime):
-    """RSS, pinned/locked bytes, fds and threads of one exact process
-    generation (r9 soak_sample.process_sample, without the limits text).
-    A reused PID raises; an exited generation is GONE."""
-    p = Path('/proc') / str(pid)
-
-    def stat():
-        return (p / 'stat').read_text().rsplit(')', 1)[1].split()
-    try:
-        first = stat()
-        if int(first[19]) != int(starttime):
-            raise ValueError('PID was reused')
-        if first[0] in ('Z', 'X', 'x'):
-            return dict(pid=pid, starttime=starttime, status='GONE')
-        status = dict(line.split(':', 1) for line in (p / 'status').read_text().splitlines() if ':' in line)
-
-        def kib(name):
-            words = status.get(name, '').split()
-            return int(words[0]) * 1024 if len(words) == 2 and words[1] == 'kB' else None
-        row = dict(pid=pid, starttime=starttime, status='OBSERVED', rss_bytes=kib('VmRSS'),
-                   pin_bytes=kib('VmPin'), lck_bytes=kib('VmLck'),
-                   fds=len(os.listdir(p / 'fd')), threads=int(status['Threads']))
-        if stat()[19] != first[19]:
-            raise ValueError('PID changed during sample')
-        return row
-    except FileNotFoundError:
-        return dict(pid=pid, starttime=starttime, status='GONE')
-
-
 def boot_id():
     return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 
