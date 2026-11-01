@@ -28,6 +28,7 @@ type chaosFake struct {
 	variant string
 	log     []string
 	stamps  map[string]int
+	killed  map[string]bool // like systemd: a killed unit reports MainPID 0
 }
 
 func (f *chaosFake) record(kind string) {
@@ -46,7 +47,8 @@ func chaosCounters(reads, writes, errs, length int) map[string]any {
 	return map[string]any{"read_errors": errs, "loader": l}
 }
 
-func chaosSeed(c SmokeConfig) string {
+// Seeded key i lives on volume 3 (vol1 in the fake) when even, else volume 4.
+func chaosSeed(c SmokeConfig, volume func(int) int) string {
 	var b strings.Builder
 	for i := 0; i < c.Keys; i++ {
 		key := fmt.Sprintf("%s-%d", c.Client, i)
@@ -56,7 +58,7 @@ func chaosSeed(c SmokeConfig) string {
 			h.Write(block[:min(len(block), c.Length-n)])
 		}
 		digest := fmt.Sprintf("%x", h.Sum(nil))
-		for _, row := range []map[string]any{{"event": "ACK", "key": key, "sequence": i + 1, "length": c.Length, "sha256": digest, "fids": []string{"3,01ab"}}, {"event": "EXACT", "key": key, "length": c.Length, "sha256": digest}} {
+		for _, row := range []map[string]any{{"event": "ACK", "key": key, "sequence": i + 1, "length": c.Length, "sha256": digest, "fids": []string{fmt.Sprintf("%d,01ab", volume(i))}}, {"event": "EXACT", "key": key, "length": c.Length, "sha256": digest}} {
 			raw, _ := json.Marshal(row)
 			b.Write(append(raw, '\n'))
 		}
@@ -100,6 +102,17 @@ func (f *chaosFake) handle(id string) func(string, ssh.Channel) uint32 {
 			inner = strings.ReplaceAll(cmd[i+8:len(cmd)-1], `'"'"'`, `'`)
 		}
 		freeze := strings.Contains(inner, "-volume-freeze")
+		unit := ""
+		if i := strings.Index(inner, "--value '"); i >= 0 {
+			unit = inner[i+9 : i+9+strings.Index(inner[i+9:], "'")]
+		}
+		f.mu.Lock()
+		dead := f.killed[unit]
+		f.mu.Unlock()
+		if dead {
+			f.record("dead-unit")
+			return 1
+		}
 		switch {
 		case strings.Contains(inner, "time.monotonic"):
 			f.record("stamp")
@@ -127,7 +140,11 @@ func (f *chaosFake) handle(id string) func(string, ssh.Channel) uint32 {
 				f.mu.Lock()
 				f.stamps[id] = 0
 				f.mu.Unlock()
-				fmt.Fprint(ch, chaosSeed(c))
+				volume := func(i int) int { return 3 + i%2 }
+				if f.variant == "one-client-unowned" && id == "client2" {
+					volume = func(int) int { return 5 }
+				}
+				fmt.Fprint(ch, chaosSeed(c, volume))
 				return 0
 			}
 			p := base + 30
@@ -138,11 +155,23 @@ func (f *chaosFake) handle(id string) func(string, ssh.Channel) uint32 {
 			fmt.Fprint(ch, chaosRead(c, stage, base, fail))
 		case strings.Contains(inner, "kill -KILL"):
 			f.record("kill")
-			fmt.Fprint(ch, "OLD 100 555\nGONE\n")
+			f.mu.Lock()
+			f.killed[unit] = true
+			f.mu.Unlock()
+			switch f.variant {
+			case "no-gone":
+				fmt.Fprint(ch, "OLD 100 555\nWAITING\n")
+			case "bad-old":
+				fmt.Fprint(ch, "OID 100 555\nGONE\n")
+			default:
+				fmt.Fprint(ch, "OLD 100 555\nGONE\n")
+			}
 		case strings.Contains(inner, `echo "NEW`):
 			f.record("identity")
 			if f.variant == "same-pid" {
 				fmt.Fprint(ch, "NEW 100 555\n")
+			} else if f.variant == "bad-new" {
+				fmt.Fprint(ch, "NEX 200 777\n")
 			} else {
 				fmt.Fprint(ch, "NEW 200 777\n")
 			}
@@ -154,9 +183,18 @@ func (f *chaosFake) handle(id string) func(string, ssh.Channel) uint32 {
 			fmt.Fprint(ch, "PID 100 555\nSTOPPED\n")
 		case strings.Contains(inner, "kill -CONT"):
 			f.record("cont")
-			fmt.Fprint(ch, "LIVE\n")
+			if f.variant != "no-live" {
+				fmt.Fprint(ch, "LIVE\n")
+			}
 		case strings.Contains(inner, "systemd-run"):
 			f.record("start")
+		case strings.Contains(inner, "curl") && !strings.Contains(inner, "until"):
+			f.record("owners")
+			if f.variant == "unowned" {
+				fmt.Fprint(ch, `{"Volumes":[{"Id":7}]}`)
+			} else {
+				fmt.Fprint(ch, `{"Volumes":[{"Id":3},{"Id":9}]}`)
+			}
 		case strings.Contains(inner, "curl"):
 			f.record("ready")
 		default:
@@ -172,7 +210,7 @@ func chaosInput(t *testing.T, variant string) (inventory.Document, CloudConfig, 
 	old := []time.Duration{chaosSettle, chaosHold}
 	chaosSettle, chaosHold = 10*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() { chaosSettle, chaosHold = old[0], old[1] })
-	f := &chaosFake{variant: variant, stamps: map[string]int{}}
+	f := &chaosFake{variant: variant, stamps: map[string]int{}, killed: map[string]bool{}}
 	var d inventory.Document
 	address, _, _, _ := cloudSSH(t, "")
 	json.Unmarshal(cloudInput(t, address), &d)
@@ -219,7 +257,7 @@ func TestCloudChaosStampOrderAndPerClientJoin(t *testing.T) {
 	}
 	var faults []string
 	for _, k := range f.log {
-		if k != "seed" && k != "load" && k != "recovery" {
+		if k != "seed" && k != "load" && k != "recovery" && k != "owners" {
 			faults = append(faults, k)
 		}
 	}
@@ -239,7 +277,7 @@ func TestCloudChaosStampOrderAndPerClientJoin(t *testing.T) {
 }
 
 func TestCloudChaosRefuses(t *testing.T) {
-	for _, variant := range []string{"pre-P", "stamp-fail", "same-pid", "short-hold", "not-stopped"} {
+	for _, variant := range []string{"pre-P", "stamp-fail", "same-pid", "short-hold", "not-stopped", "unowned", "no-gone", "bad-old", "bad-new", "no-live"} {
 		t.Run(variant, func(t *testing.T) {
 			f, _, e := runChaosFake(t, variant)
 			if e == nil {
@@ -291,5 +329,25 @@ func TestCloudChaosIsOptIn(t *testing.T) {
 	}
 	if s := cloudStart(inventory.Document{RunID: "r1"}, "/r", "volume", "X"); s != `sudo systemd-run --unit='sw-cloud-r1-volume' --property=WorkingDirectory='/r' X` {
 		t.Fatal(s)
+	}
+}
+
+// A client with no seeded key on the frozen server is recorded, not failed;
+// the others must still show a frozen-server GET spanning the hold.
+func TestCloudChaosFreezeCoverageIsPerOwner(t *testing.T) {
+	if f, _, e := runChaosFake(t, "one-client-unowned"); e != nil {
+		t.Fatal(e, f.log)
+	}
+	var outcomes []any
+	for s := 0.5; s < 120; s += 0.75 { // claude03's control: serial unblocked 0.5 s GETs
+		outcomes = append(outcomes, map[string]any{"key": "k-1", "started": s, "ended": s + 0.5})
+	}
+	w := freezeWindow{PreStop: 30, Stopped: 31, PreCont: 52, Resumed: 53}
+	observed := map[string]any{"outcomes": outcomes}
+	if exposed, e := checkCloudFreeze(observed, w, map[string]bool{"k-0": true}); e != nil || exposed {
+		t.Fatal("GETs of keys not on the frozen server counted", exposed, e)
+	}
+	if exposed, e := checkCloudFreeze(observed, w, map[string]bool{"k-1": true}); e != nil || !exposed {
+		t.Fatal("frozen-server GETs spanning the hold refused", exposed, e)
 	}
 }

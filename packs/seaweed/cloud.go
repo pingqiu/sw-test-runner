@@ -92,7 +92,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", errors.New("unexpected cloud run root")
 	}
 	q := cloudQuote
-	n := &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: c.SSHKey, HostKey: c.HostKey}
+	n := cloudNode(h, c.SSHKey, c.HostKey)
 	if phase == "collect" {
 		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
 	}
@@ -126,13 +126,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 				return "", context.DeadlineExceeded
 			}
 		}
-		command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + q(cmd)
-		out, stderr, rc, e := n.Run(ctx, command)
-		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, command, out, stderr, rc, e)
-		if e != nil || rc != 0 || w != nil {
-			return out, fmt.Errorf("cloud step %s command=%q rc=%d stderr=%s: %v", name, command, rc, stderr, errors.Join(e, w))
-		}
-		return out, nil
+		return cloudStep(ctx, n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, seconds, cmd)
 	}
 	upload := func(name, local, remote string) error {
 		if phase != "" && (phase != "prepare" || !cloudArtifact(h, name)) {
@@ -290,6 +284,21 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return output, errors.New("missing or failed KV smoke")
 	}
 	return output, nil
+}
+
+func cloudNode(h inventory.Host, key, pin string) *infra.Node {
+	return &infra.Node{Host: net.JoinHostPort(h.Management.Address, strconv.Itoa(h.Management.Port)), User: h.Management.User, KeyFile: key, HostKey: pin}
+}
+
+// cloudStep runs one bounded remote command and journals it as dir/file.
+func cloudStep(ctx context.Context, n *infra.Node, dir, file, name string, seconds int, cmd string) (string, error) {
+	command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + cloudQuote(cmd)
+	out, stderr, rc, e := n.Run(ctx, command)
+	w := writeCloudStep(dir, file, name, command, out, stderr, rc, e)
+	if e != nil || rc != 0 || w != nil {
+		return out, fmt.Errorf("cloud step %s command=%q rc=%d stderr=%s: %v", name, command, rc, stderr, errors.Join(e, w))
+	}
+	return out, nil
 }
 
 func cloudQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
