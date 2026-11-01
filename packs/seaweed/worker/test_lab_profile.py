@@ -164,31 +164,44 @@ class LaunchContract(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
     def test_actual_cli_execs_exact_product_in_same_pid(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
-            root, release = base / 'run', base / 'release'
-            root.mkdir(mode=0o700)
-            (release / 'bin').mkdir(parents=True)
-            product = release / 'bin' / 'weed'
-            shutil.copyfile('/bin/true', product)
-            product.chmod(0o755)
-            c = dict(self.config(), root=str(root), release=str(release),
-                     roles=['master'], host='m02',
-                     boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-                     products={'weed':hashlib.sha256(product.read_bytes()).hexdigest()},
-                     deadline=(datetime.datetime.now(datetime.timezone.utc) +
-                               datetime.timedelta(seconds=10)).isoformat())
-            with subprocess.Popen([sys.executable, '-I', '-B', profile.__file__,
-                                   '--config', json.dumps(c), '--action', 'deploy',
-                                   '--role', 'master'], stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE) as child:
-                out, err = child.communicate(timeout=12)
-                self.assertEqual(child.returncode, 0, err)
-                row = json.loads(out)
-                self.assertEqual(row['pid'], child.pid)
-                self.assertEqual(row['event'], 'PRODUCT_EXEC')
-                self.assertIn('-peers=none', row['argv'])
-                self.assertEqual(json.loads((root / 'master-generation.json').read_text())['pid'], child.pid)
+        root = self.deploy_master({})
+        self.assertEqual((root / 'master.toml').read_text(), '[master.cache_volume_rotation]\nenabled = false\n')
+
+    @unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
+    def test_actual_cli_writes_declared_rotation(self):
+        root = self.deploy_master(dict(rotation=RotationConfig.ROTATION))
+        text = (root / 'master.toml').read_text()
+        self.assertIn('enabled = true\ncollections = "lmcache"\n', text)
+        self.assertIn('check_interval_seconds = 2\n', text)
+
+    def deploy_master(self, extra):
+        temporary = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temporary)
+        base = Path(temporary)
+        root, release = base / 'run', base / 'release'
+        root.mkdir(mode=0o700)
+        (release / 'bin').mkdir(parents=True)
+        product = release / 'bin' / 'weed'
+        shutil.copyfile('/bin/true', product)
+        product.chmod(0o755)
+        c = dict(self.config(), **extra, root=str(root), release=str(release),
+                 roles=['master'], host='m02',
+                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                 products={'weed':hashlib.sha256(product.read_bytes()).hexdigest()},
+                 deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                           datetime.timedelta(seconds=10)).isoformat())
+        with subprocess.Popen([sys.executable, '-I', '-B', profile.__file__,
+                               '--config', json.dumps(c), '--action', 'deploy',
+                               '--role', 'master'], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE) as child:
+            out, err = child.communicate(timeout=12)
+            self.assertEqual(child.returncode, 0, err)
+            row = json.loads(out)
+            self.assertEqual(row['pid'], child.pid)
+            self.assertEqual(row['event'], 'PRODUCT_EXEC')
+            self.assertIn('-peers=none', row['argv'])
+            self.assertEqual(json.loads((root / 'master-generation.json').read_text())['pid'], child.pid)
+        return root
 
 
 class ReadinessHTTP(unittest.TestCase):
@@ -341,6 +354,111 @@ namespace['main']()
                         child.wait(timeout=2)
                 for stream in streams:
                     stream.close()
+
+
+class RotationConfig(unittest.TestCase):
+    ROTATION = dict(collections='lmcache', high_watermark=0.3, low_watermark=0.15,
+                    min_age_minutes=0, max_volumes_per_cycle=1, min_remaining_volumes=4,
+                    check_interval_seconds=2)
+
+    def test_without_rotation_block_the_s0b_profile_is_unchanged(self):
+        self.assertEqual(profile.master_toml({}), '[master.cache_volume_rotation]\nenabled = false\n')
+
+    def test_declared_rotation_is_written_exactly(self):
+        text = profile.master_toml(dict(rotation=self.ROTATION))
+        self.assertEqual(text.splitlines(), [
+            '[master.cache_volume_rotation]', 'enabled = true', 'collections = "lmcache"',
+            'high_watermark = 0.3', 'low_watermark = 0.15', 'min_age_minutes = 0',
+            'max_volumes_per_cycle = 1', 'min_remaining_volumes = 4', 'check_interval_seconds = 2'])
+
+    def test_malformed_rotation_refuses(self):
+        bad = [dict(self.ROTATION, extra=1), {k: v for k, v in self.ROTATION.items() if k != 'collections'},
+               dict(self.ROTATION, collections='lm"cache'), dict(self.ROTATION, collections='a\nenabled = false'),
+               dict(self.ROTATION, low_watermark=0.3), dict(self.ROTATION, high_watermark=1.0),
+               dict(self.ROTATION, min_age_minutes=True), dict(self.ROTATION, check_interval_seconds=0),
+               dict(self.ROTATION, max_volumes_per_cycle='1'), 'enabled']
+        for rotation in bad:
+            with self.subTest(rotation=rotation), self.assertRaises(ValueError):
+                profile.master_toml(dict(rotation=rotation))
+
+
+class AssignReadiness(unittest.TestCase):
+    """ready() against a local master that refuses Assign until its warm-up ends."""
+    LAYOUT = dict(collection='lmcache', replication='000', ttl='2h')
+
+    def serve(self, warmup, assign_body=None):
+        calls = []
+        warm_end = time.monotonic() + warmup
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                calls.append(self.path)
+                status, body = 200, {}
+                if self.path == '/cluster/status':
+                    body = dict(IsLeader=True)
+                elif self.path == '/dir/status':
+                    body = dict(Topology=dict(DataCenters=[dict(Racks=[dict(DataNodes=[
+                        dict(Url='127.0.0.1:' + str(port), Volumes=1)])])]))
+                elif self.path.startswith('/dir/assign?'):
+                    if time.monotonic() < warm_end:
+                        status, body = 503, dict(error='master is warming up, topology is still loading')
+                    else:
+                        body = assign_body if assign_body is not None else dict(fid='5,01637037d6', count=1)
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        ports = dict(master_http=port, volume_http=port, filer_http=port)
+        config = dict(server_address='127.0.0.1', server_services=ports,
+                      deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                                datetime.timedelta(seconds=4)).isoformat())
+        original = profile.services
+        profile.services = lambda config: {}
+        self.addCleanup(setattr, profile, 'services', original)
+        return config, calls
+
+    def test_ready_waits_for_an_assign_after_warmup(self):
+        config, calls = self.serve(warmup=1.0)
+        start = time.monotonic()
+        row = profile.ready(dict(config, ready_assign=self.LAYOUT))
+        self.assertGreaterEqual(time.monotonic() - start, 1.0)
+        self.assertEqual(row['assign_probe']['fid'], '5,01637037d6')
+        assigns = [p for p in calls if p.startswith('/dir/assign?')]
+        self.assertGreater(len(assigns), 1, 'warm-up refusals must have been retried')
+        self.assertEqual(assigns[0], '/dir/assign?collection=lmcache&replication=000&ttl=2h&count=1')
+
+    def test_control_without_layout_reports_ready_during_warmup(self):
+        # Today's gate: leader + topology passes while Assign is still refused.
+        config, calls = self.serve(warmup=3.0)
+        row = profile.ready(config)
+        self.assertNotIn('assign_probe', row)
+        self.assertFalse(any(p.startswith('/dir/assign') for p in calls))
+
+    def test_an_assign_answer_without_fid_is_not_ready(self):
+        for body in (dict(error='no writable volumes'), dict(fid='', count=1),
+                     dict(fid='5,01637037d6', error='no writable volumes')):
+            with self.subTest(body=body):
+                config, calls = self.serve(warmup=0, assign_body=body)
+                config = dict(config, deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                                                datetime.timedelta(seconds=1)).isoformat())
+                with self.assertRaises(TimeoutError):
+                    profile.ready(dict(config, ready_assign=self.LAYOUT))
+
+    def test_malformed_layout_refuses_before_any_request(self):
+        config, calls = self.serve(warmup=0)
+        for layout in (dict(self.LAYOUT, extra='x'), dict(self.LAYOUT, collection='a&b'),
+                       dict(self.LAYOUT, replication='00'), dict(self.LAYOUT, ttl='2h&count=9'),
+                       dict(self.LAYOUT, ttl=2)):
+            with self.subTest(layout=layout), self.assertRaises(ValueError):
+                profile.ready(dict(config, ready_assign=layout))
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':

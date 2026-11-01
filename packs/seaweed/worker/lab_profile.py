@@ -13,7 +13,7 @@ import sys
 import types
 import http.client
 import io
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 
 def stream_digest(stream):
@@ -135,6 +135,55 @@ def product_command(config, role):
     return argv, env
 
 
+ROTATION_KEYS = {
+    'collections': str, 'high_watermark': float, 'low_watermark': float,
+    'min_age_minutes': int, 'max_volumes_per_cycle': int,
+    'min_remaining_volumes': int, 'check_interval_seconds': int}
+NAME = re.compile(r'[A-Za-z0-9_.-]{1,64}')
+
+
+def master_toml(config):
+    """The private master.toml. Without a plan 'rotation' block, cache-volume
+    rotation stays off (the S0b profile). With one, rotation is on with exactly
+    the declared settings; anything undeclared or malformed refuses."""
+    rotation = config.get('rotation')
+    if rotation is None:
+        return '[master.cache_volume_rotation]\nenabled = false\n'
+    if not isinstance(rotation, dict) or set(rotation) != set(ROTATION_KEYS):
+        raise ValueError('rotation keys must be exactly ' + ','.join(sorted(ROTATION_KEYS)))
+    for key, kind in ROTATION_KEYS.items():
+        value = rotation[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float) if kind is float else kind):
+            raise ValueError('rotation ' + key + ' type')
+    if not all(NAME.fullmatch(c) for c in rotation['collections'].split(',')):
+        raise ValueError('rotation collections')
+    if not 0 < rotation['low_watermark'] < rotation['high_watermark'] < 1:
+        raise ValueError('rotation watermarks need 0 < low < high < 1')
+    if (rotation['min_age_minutes'] < 0 or rotation['max_volumes_per_cycle'] < 1 or
+            rotation['min_remaining_volumes'] < 0 or rotation['check_interval_seconds'] < 1):
+        raise ValueError('rotation bounds')
+    lines = ['[master.cache_volume_rotation]', 'enabled = true',
+             'collections = "' + rotation['collections'] + '"']
+    lines += [key + ' = ' + repr(rotation[key]) for key in ROTATION_KEYS if key != 'collections']
+    return '\n'.join(lines) + '\n'
+
+
+def assign_probe_url(config, master):
+    """Optional plan 'ready_assign' = the workload's own layout. Leader plus
+    topology is not ready after a master restart: the master refuses Assign for
+    its whole warm-up. One Assign on an existing layout grows nothing."""
+    layout = config.get('ready_assign')
+    if layout is None:
+        return None
+    if not isinstance(layout, dict) or set(layout) != {'collection', 'replication', 'ttl'}:
+        raise ValueError('ready_assign keys must be exactly collection,replication,ttl')
+    if (not isinstance(layout['collection'], str) or not NAME.fullmatch(layout['collection']) or
+            not isinstance(layout['replication'], str) or not re.fullmatch(r'[0-9]{3}', layout['replication']) or
+            not isinstance(layout['ttl'], str) or not re.fullmatch(r'([1-9][0-9]{0,4}[mhdwMy])?', layout['ttl'])):
+        raise ValueError('ready_assign layout')
+    return master + '/dir/assign?' + urlencode(dict(layout, count=1))
+
+
 def remaining(config, limit=2):
     deadline = datetime.datetime.fromisoformat(config['deadline'].replace('Z', '+00:00')).timestamp()
     seconds = deadline - time.time()
@@ -245,6 +294,8 @@ def launch(config, role, replacement=False):
         raise ValueError('private filer socket already exists')
     if role not in config['roles']:
         raise ValueError('role not assigned to this host')
+    if role == 'master':
+        master_toml(config)  # refuse a malformed rotation block before any effect
     # Custody authorizes the pinned Python helper. It then execs the protected,
     # hash-qualified product in the SAME PID/session; no alternate supervisor.
     fd = os.open(argv[0], os.O_RDONLY | os.O_NOFOLLOW)
@@ -278,7 +329,7 @@ def launch(config, role, replacement=False):
         if role == 'master':
             # Select a private config instead of an unrelated /etc master.toml.
             with (root / 'master.toml').open('x') as stream:
-                stream.write('[master.cache_volume_rotation]\nenabled = false\n')
+                stream.write(master_toml(config))
         if role == 'filer' and not replacement:
             with os.fdopen(os.open(root / 'filer.toml', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
                 stream.write(filer_config(root))
@@ -455,6 +506,8 @@ def ready(config):
     end = time.monotonic() + max(0, stage_deadline - time.time())
     config = dict(config, deadline=datetime.datetime.fromtimestamp(
         stage_deadline, datetime.timezone.utc).isoformat())
+    master = 'http://' + config['server_address'] + ':' + str(config['server_services']['master_http'])
+    probe_url = assign_probe_url(config, master)  # a malformed layout refuses before any request
     while time.monotonic() < end:
         try:
             facts = services(config)
@@ -468,8 +521,15 @@ def ready(config):
             if not topology_contains(topology, volume):
                 raise ValueError('volume missing from master topology')
             http_json('http://' + address + ':' + str(ports['filer_http']) + '/', config, False)
-            return dict(status='READY', processes=facts, topology=topology, client_mono=client_ack,
-                        server_write_join='NOT_OBSERVED')
+            row = dict(status='READY', processes=facts, topology=topology, client_mono=client_ack,
+                       server_write_join='NOT_OBSERVED')
+            if probe_url:
+                # Warm-up answers 503, which http_json raises: retried within this bound.
+                answer = http_json(probe_url, config)
+                if answer.get('error') or not isinstance(answer.get('fid'), str) or not answer['fid']:
+                    raise ValueError('assign probe answered without a fid')
+                row['assign_probe'] = dict(fid=answer['fid'], url=probe_url, mono=time.monotonic())
+            return row
         except (OSError, ValueError, KeyError) as error:
             last = repr(error)
             time.sleep(min(.2, max(0, end - time.monotonic())))
