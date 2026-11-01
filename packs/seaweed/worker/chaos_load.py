@@ -77,7 +77,7 @@ def load(conn, c, s3_base, seconds, journal, helper):
     # (M02 rehearsal), so it is ready when the PUT succeeds or a HEAD finds it.
     assert s3(bucket, b'', 'PUT')[0] or s3(bucket, None, 'HEAD')[0], 'S3 bucket create'
     acked = {'kv': [], 's3': []}
-    outcomes, unknown, n = [], [], 0
+    outcomes, unknown, n, fids_by_key = [], [], 0, {}
     started = time.monotonic()
     with open(journal, 'x', buffering=1) as out:
         while time.monotonic() - started < seconds:
@@ -86,22 +86,21 @@ def load(conn, c, s3_base, seconds, journal, helper):
                 kind = kind[:2] + ('_set' if kind[:2] == 'kv' else '_put')
             key = '%s-w%d' % (c['client'], n) if kind in ('kv_set', 's3_put') else acked[kind[:2]][(n // 4) % len(acked[kind[:2]])]
             t0 = time.monotonic()
-            if kind[:2] == 'kv':
-                command = dict(action=kind[3:], key=key, seed=c['run_id'] + '/' + key, length=c['length'], operation_id=n)
-                row = helper.work(conn, command)  # 30 s native bound; a hang raises
-                ok = row['ok'] and row['results'] in (None, [True])
-                if ok and kind == 'kv_get' and row['sha256'] != hashlib.sha256(helper.payload(command['seed'], c['length'])).hexdigest():
-                    raise AssertionError('WRONG bytes for ' + key)
-                error = row['error']
-            else:
-                body = s3_body(c, key)
-                ok, got = s3(bucket + '/' + key, body if kind == 's3_put' else None, 'PUT' if kind == 's3_put' else 'GET')
-                if ok and kind == 's3_get' and got != body:
-                    raise AssertionError('WRONG bytes for ' + key)
-                error = '' if ok else got
+            # Run 7f lost which op hung: journal every op before it starts, and
+            # carry it (with a read's known fids) out of any fatal error.
+            inflight = dict(op=n, kind=kind, key=key, started=t0, fids=fids_by_key.get(key))
+            out.write(json.dumps(dict(event='SUBMIT', **inflight)) + '\n')
+            try:
+                ok, error = run_op(conn, c, helper, bucket, kind, key, n)
+            except BaseException as e:
+                e.inflight, e.outcomes = inflight, outcomes
+                raise
             t1 = time.monotonic()
             if t1 - t0 > OP_LIMIT:
-                raise TimeoutError('%s %s took %.1f s' % (kind, key, t1 - t0))
+                e = TimeoutError('%s %s took %.1f s' % (kind, key, t1 - t0))
+                # It did complete, late: keep its result (M02 C3: a KV set failed at 30.0 s).
+                e.inflight, e.outcomes = dict(inflight, ended=t1, ok=ok, error=str(error)), outcomes
+                raise e
             outcomes.append(dict(op=n, kind=kind, key=key, started=t0, ended=t1, exact=ok, error=str(error)))
             if kind in ('kv_set', 's3_put'):
                 if ok:
@@ -111,6 +110,7 @@ def load(conn, c, s3_base, seconds, journal, helper):
                         fids = fids_of(c, path)
                     except (OSError, ValueError, http.client.HTTPException):
                         fids = None  # unknown; the owner join treats the key as unplaced
+                    fids_by_key[key] = fids
                     out.write(json.dumps(dict(event='ACK', kind=kind[:2], key=key, fids=fids)) + '\n')
                 else:
                     unknown.append(key)
@@ -123,9 +123,25 @@ def load(conn, c, s3_base, seconds, journal, helper):
                 outcomes=outcomes, acked_kv=len(acked['kv']), acked_s3=len(acked['s3']), unknown=unknown)
 
 
+def run_op(conn, c, helper, bucket, kind, key, n):
+    """One op: (ok, error). Wrong bytes and a native hang raise."""
+    if kind[:2] == 'kv':
+        command = dict(action=kind[3:], key=key, seed=c['run_id'] + '/' + key, length=c['length'], operation_id=n)
+        row = helper.work(conn, command)  # 30 s native bound; a hang raises
+        ok = row['ok'] and row['results'] in (None, [True])
+        if ok and kind == 'kv_get' and row['sha256'] != hashlib.sha256(helper.payload(command['seed'], c['length'])).hexdigest():
+            raise AssertionError('WRONG bytes for ' + key)
+        return ok, row['error']
+    body = s3_body(c, key)
+    ok, got = s3(bucket + '/' + key, body if kind == 's3_put' else None, 'PUT' if kind == 's3_put' else 'GET')
+    if ok and kind == 's3_get' and got != body:
+        raise AssertionError('WRONG bytes for ' + key)
+    return ok, '' if ok else got
+
+
 def readback(conn, c, s3_base, journal, helper):
     bucket = s3_base + '/' + bucket_name(c)
-    rows = [json.loads(x) for x in pathlib.Path(journal).read_text().splitlines()]
+    rows = [r for r in map(json.loads, pathlib.Path(journal).read_text().splitlines()) if r['event'] == 'ACK']  # not SUBMIT rows
     for i, r in enumerate(rows):
         t0 = time.monotonic()
         if r['kind'] == 'kv':
@@ -169,7 +185,9 @@ def main():
         emit(result)
         return 0
     except Exception as error:
-        emit(dict(status='FAIL', code='CHAOS_LOAD_FAILED', error='%s: %s' % (type(error).__name__, error)))
+        # A fatal op error carries the op in flight and the outcomes so far (run 7f).
+        emit(dict(status='FAIL', code='CHAOS_LOAD_FAILED', error='%s: %s' % (type(error).__name__, error),
+                  inflight=getattr(error, 'inflight', None), outcomes=getattr(error, 'outcomes', None)))
         return 1
     finally:
         if conn is not None:
