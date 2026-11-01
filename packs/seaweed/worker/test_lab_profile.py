@@ -564,6 +564,104 @@ ns['main']()
         self.refused('replacement master config differs')
 
 
+@unittest.skipUnless(sys.platform == 'linux', 'Linux fd exec of the pinned product')
+class SoakSetup(unittest.TestCase):
+    """soak_setup against a fake master and a fake pinned weed product."""
+    SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4)
+
+    def build(self, shell_rc=0, grow_count=None, settle=True):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        self.root, release = base / 'run', base / 'release'
+        (self.root / 'volume').mkdir(parents=True, mode=0o700)
+        self.root.chmod(0o700)
+        (release / 'bin').mkdir(parents=True)
+        product = release / 'bin' / 'weed'
+        self.record = base / 'shell-record'
+        product.write_text('#!/bin/sh\nprintf "%%s\\n" "$@" > %s.argv\ncat > %s.stdin\necho configured\nexit %d\n'
+                           % (self.record, self.record, shell_rc))
+        product.chmod(0o755)
+        self.calls, state = [], dict(grown=False)
+        n = self.SETUP['grow_count']
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                self_calls.append(self.path)
+                body = {}
+                if self.path.startswith('/vol/grow?'):
+                    state['grown'] = True
+                    body = dict(count=n if grow_count is None else grow_count)
+                elif self.path == '/dir/status':
+                    ids = list(range(1, n + 1)) if state['grown'] and settle else []
+                    body = dict(Topology=dict(Layouts=[dict(collection='lmcache', replication='000', ttl='2h',
+                                                           writables=ids, live=ids)]))
+                raw = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+        self_calls = self.calls
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        services = dict(master_http=port, master_grpc=port + 1, filer_http=port + 2, filer_grpc=port + 3,
+                        volume_http=port, volume_grpc=port, rdma=1, rdma_control=1, dc_control=1, rdma_push=1)
+        original = profile.services
+        profile.services = lambda config: {'master': {}}
+        self.addCleanup(setattr, profile, 'services', original)
+        return dict(LaunchContract().config(), root=str(self.root), release=str(release), roles=['master', 'filer', 'volume'],
+                    address='127.0.0.1', server_address='127.0.0.1', services=services, server_services=services,
+                    products={'weed': hashlib.sha256(product.read_bytes()).hexdigest()}, soak_setup=dict(self.SETUP),
+                    deadline=(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=30)).isoformat())
+
+    def test_configures_grows_once_and_waits_for_exactly_n(self):
+        config = self.build()
+        row = profile.soak_setup(config)
+        port = config['server_services']['master_http']
+        self.assertEqual((row['status'], row['writables'], row['live'], row['configure']['rc']), ('SOAK_SETUP', [1, 2, 3, 4], [1, 2, 3, 4], 0))
+        self.assertEqual(Path(str(self.record) + '.stdin').read_text(),
+                         'fs.configure -locationPrefix=/lmcache -collection=lmcache -replication=000 -ttl=2h -volumeGrowthCount=1 -apply\n')
+        self.assertEqual(Path(str(self.record) + '.argv').read_text().split(),
+                         ['shell', '-master=127.0.0.1:%d.%d' % (port, port + 1), '-filer=127.0.0.1:%d.%d' % (port + 2, port + 3)])
+        self.assertEqual([c for c in self.calls if c.startswith('/vol/grow')],
+                         ['/vol/grow?collection=lmcache&replication=000&ttl=2h&count=4'])
+        self.assertEqual((self.root / 'fs-configure.stdout').read_text(), 'configured\n')
+
+    def test_failed_configure_refuses_before_any_growth(self):
+        config = self.build(shell_rc=3)
+        with self.assertRaisesRegex(ValueError, 'rc 3'):
+            profile.soak_setup(config)
+        self.assertFalse(any(c.startswith('/vol/grow') for c in self.calls))
+
+    def test_grow_count_mismatch_refuses(self):
+        with self.assertRaisesRegex(ValueError, 'count'):
+            profile.soak_setup(self.build(grow_count=3))
+
+    def test_layout_never_reaching_n_times_out(self):
+        config = self.build(settle=False)
+        config['deadline'] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=2)).isoformat()
+        with self.assertRaises(TimeoutError):
+            profile.soak_setup(config)
+
+    def test_changed_product_bytes_refuse_before_exec(self):
+        config = self.build()
+        config['products'] = dict(weed='0' * 64)
+        with self.assertRaisesRegex(ValueError, 'hash'):
+            profile.soak_setup(config)
+        self.assertFalse(Path(str(self.record) + '.argv').exists())
+
+    def test_malformed_setup_block_refuses(self):
+        config = self.build()
+        for bad in (dict(self.SETUP, extra=1), dict(self.SETUP, grow_count=0), dict(self.SETUP, grow_count=17),
+                    dict(self.SETUP, grow_count=True), dict(self.SETUP, collection='a b'), dict(self.SETUP, ttl='2h&x=1')):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                profile.soak_setup(dict(config, soak_setup=bad))
+        self.assertEqual(self.calls, [])
+
+
 class AssignReadiness(unittest.TestCase):
     """ready() against a local master that refuses Assign until its warm-up ends."""
     LAYOUT = dict(collection='lmcache', replication='000', ttl='2h')

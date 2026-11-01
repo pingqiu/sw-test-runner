@@ -9,6 +9,7 @@ import stat
 import argparse
 import datetime
 import socket
+import subprocess
 import sys
 import types
 import http.client
@@ -628,6 +629,92 @@ def ready(config):
     raise TimeoutError('profile readiness 45s/original-work bound: ' + str(last))
 
 
+def soak_layout(config):
+    """The plan's soak setup block: the cache layout plus how many volumes to grow."""
+    s = config.get('soak_setup')
+    if not isinstance(s, dict) or set(s) != {'collection', 'replication', 'ttl', 'grow_count'}:
+        raise ValueError('soak_setup keys must be exactly collection,replication,ttl,grow_count')
+    layout = {k: s[k] for k in ('collection', 'replication', 'ttl')}
+    if assign_probe_url(dict(ready_assign=layout), 'http://0.0.0.0:1') is None:  # same layout rules as ready_assign
+        raise ValueError('soak_setup layout')
+    n = s['grow_count']
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 16:
+        raise ValueError('soak_setup grow_count must be in [1, 16]')
+    return layout, n
+
+
+def layout_live(topology, layout):
+    """Live volume ids of the layout (the subset writes go to), like layout_writables."""
+    try:
+        return sorted({int(v) for row in (topology['Topology']['Layouts'] or [])
+                       if (row.get('collection'), row.get('replication'), row.get('ttl') or '') ==
+                       (layout['collection'], layout['replication'], layout['ttl'])
+                       for v in (row.get('live') or [])})
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('topology layouts unreadable')
+
+
+def bounded(config, seconds):
+    """config with its deadline cut to now + seconds (never past the original)."""
+    original = datetime.datetime.fromisoformat(config['deadline'].replace('Z', '+00:00')).timestamp()
+    return dict(config, deadline=datetime.datetime.fromtimestamp(
+        min(original, time.time() + seconds), datetime.timezone.utc).isoformat())
+
+
+def soak_setup(config):
+    """M02, after READY: configure the cache layout with the run's own pinned
+    weed, grow exactly N volumes once, and wait until exactly N are writable
+    and live (the r9 setup, without fixed hosts or roots)."""
+    layout, n = soak_layout(config)
+    root = private_root(config)
+    facts = services(config)  # the owned master/filer/volume generations are live
+    address, ports = config['server_address'], config['server_services']
+    master = 'http://%s:%d' % (address, ports['master_http'])
+    _, env = product_command(config, 'master')
+    weed = PurePosixPath(config['release']) / 'bin' / 'weed'
+    fd = os.open(str(weed), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            if stream_digest(stream) != config['products']['weed']:
+                raise ValueError('protected product hash mismatch')
+        command = 'fs.configure -locationPrefix=/%s -collection=%s -replication=%s -ttl=%s -volumeGrowthCount=1 -apply\n' % (
+            layout['collection'], layout['collection'], layout['replication'], layout['ttl'])
+        # Exec the hash-checked open file itself, never the path again.
+        argv = ['/proc/self/fd/%d' % fd, 'shell',
+                '-master=%s:%d.%d' % (address, ports['master_http'], ports['master_grpc']),
+                '-filer=%s:%d.%d' % (address, ports['filer_http'], ports['filer_grpc'])]
+        shell = subprocess.run(argv, input=command.encode(), capture_output=True, env=env, cwd=root,
+                               pass_fds=(fd,), timeout=min(20, remaining(config)))
+    finally:
+        os.close(fd)
+    for name, data in (('fs-configure.stdout', shell.stdout), ('fs-configure.stderr', shell.stderr)):
+        with (root / name).open('xb') as stream:
+            stream.write(data)
+    configure = dict(rc=shell.returncode, command=command.strip(),
+                     stdout_sha256=hashlib.sha256(shell.stdout).hexdigest(),
+                     stderr_sha256=hashlib.sha256(shell.stderr).hexdigest())
+    if shell.returncode != 0:
+        raise ValueError('fs.configure failed with rc %d' % shell.returncode)
+    # One grow call, no retry: a second call could grow a second batch.
+    grow = http_json(master + '/vol/grow?' + urlencode(dict(layout, count=n)), bounded(config, 120))
+    if grow.get('count') != n:
+        raise ValueError('volume grow answered count %r, want %d' % (grow.get('count'), n))
+    staged = bounded(config, 60)
+    end = time.monotonic() + max(0, remaining(staged))
+    last = None
+    while time.monotonic() < end:
+        topology = http_json(master + '/dir/status', staged)
+        writable, live = layout_writables(topology, layout), layout_live(topology, layout)
+        if len(writable) == n and len(live) == n:
+            used = os.statvfs(root / 'volume')
+            return dict(status='SOAK_SETUP', processes=facts, configure=configure, grow=dict(count=n),
+                        writables=writable, live=live,
+                        volume_fs_used_fraction=1 - used.f_bavail / used.f_blocks)
+        last = (writable, live)
+        time.sleep(0.5)
+    raise TimeoutError('layout not exactly %d writable and live within 60 s: %r' % (n, last))
+
+
 def collect(config):
     root = private_root(config)
     facts = services(config)
@@ -648,7 +735,7 @@ def collect(config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'collect'), required=True)
+    parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'soak_setup', 'collect'), required=True)
     parser.add_argument('--role', default='')
     parser.add_argument('--replacement-volume', action='store_true')
     parser.add_argument('--replacement-filer', action='store_true')
@@ -675,6 +762,10 @@ def main():
         raise AssertionError('exec returned')
     elif args.action == 'ready':
         row = ready(config)
+    elif args.action == 'soak_setup':
+        if args.role:
+            raise ValueError('soak_setup takes no role')
+        row = soak_setup(config)
     else:
         row = collect(config)
     print(json.dumps(row, sort_keys=True), flush=True)
