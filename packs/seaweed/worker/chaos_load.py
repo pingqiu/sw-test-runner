@@ -73,7 +73,9 @@ def fids_of(c, path):
 
 def load(conn, c, s3_base, seconds, journal, helper):
     bucket = s3_base + '/' + bucket_name(c)
-    assert s3(bucket, b'', 'PUT')[0], 'S3 bucket create'
+    # Clients share the bucket, and creating an existing one answers 409
+    # (M02 rehearsal), so it is ready when the PUT succeeds or a HEAD finds it.
+    assert s3(bucket, b'', 'PUT')[0] or s3(bucket, None, 'HEAD')[0], 'S3 bucket create'
     acked = {'kv': [], 's3': []}
     outcomes, unknown, n = [], [], 0
     started = time.monotonic()

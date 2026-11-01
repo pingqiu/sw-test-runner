@@ -35,6 +35,8 @@ class Rig:
         if self.s3_mode == 'hang':
             raise TimeoutError('S3 op exceeded 30 s')
         if method == 'PUT':
+            if url.count('/') == 3 and url in self.store:  # the bucket exists: SeaweedFS answers 409
+                return False, 'http 409'
             if url.endswith('-w2') and self.s3_mode == 'put-fails':
                 return False, 'http 503'
             self.store[url] = data
@@ -80,6 +82,13 @@ class ChaosLoadControls(unittest.TestCase):
                  for cl in ('client1-C1-single-kill', 'client2-C2-rolling', 'client3-C6-netem')}
         self.assertEqual(names, {'testops-azure10-m01-20261101t135000z-chaos'})
         self.assertTrue(BUCKET.fullmatch(names.pop()))
+
+    def test_second_client_writes_into_the_existing_bucket(self):
+        r = Rig()
+        r.run('load')
+        with mock.patch.dict(C, client='client2-C2-rolling', root='/testops/cpu/client2-C2-rolling'):
+            out = r.run('load')
+        self.assertTrue(out['acked_s3'] and all(o['exact'] for o in out['outcomes']))
 
     def test_kv_miss_is_a_recorded_failure_not_fatal(self):
         r = Rig(kv_miss={'client1-C1-single-kill-w0'})
