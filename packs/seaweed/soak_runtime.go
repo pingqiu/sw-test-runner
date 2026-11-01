@@ -80,6 +80,26 @@ type ReadyRef struct {
 	Error        string `json:"error,omitempty"`
 }
 
+// checkedMono reads the controller clock and refuses a non-finite or
+// non-positive value before anything is derived from it.
+func checkedMono(ops soakOps) (float64, error) {
+	m, err := ops.Mono()
+	if err == nil && (math.IsNaN(m) || math.IsInf(m, 0) || m <= 0) {
+		err = errors.New("soak: controller clock not a positive finite time")
+	}
+	return m, err
+}
+
+// checkedSpan converts seconds to a Duration only inside the soak horizon,
+// so no float can wrap the conversion. A past (negative) span waits 0 and is
+// judged by the overdue rule as before.
+func checkedSpan(s float64) (time.Duration, error) {
+	if math.IsNaN(s) || s < -SoakHorizon.Seconds() || s > SoakHorizon.Seconds() {
+		return 0, errors.New("soak: derived wait outside the soak horizon")
+	}
+	return time.Duration(max(s, 0) * float64(time.Second)), nil
+}
+
 var errLoadCompleted = errors.New("load completed before the fault schedule ended; no further fault")
 
 // waitOrComplete waits d unless the load completes or ctx ends first.
@@ -122,6 +142,10 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if ops.WorkDeadline().Sub(ops.Now()) < duration+QuiescenceReserve+CollectReserve {
 		return nil, exit, errors.New("soak: not enough work time left to admit the load")
 	}
+	enrolled, err := checkedMono(ops)
+	if err != nil {
+		return nil, exit, err
+	}
 	h, err := ops.StartTask(ctx, p.Workload[0].Job)
 	if err != nil {
 		return nil, exit, err
@@ -130,25 +154,36 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	wctx, cancel := context.WithTimeout(ctx, WitnessWait)
 	start, err := ops.LoadStart(wctx)
 	cancel()
-	if err == nil && (math.IsNaN(start) || math.IsInf(start, 0) || start <= 0) {
-		err = errors.New("soak: load-start witness not a positive finite time")
-	}
 	if err != nil {
 		return nil, exit, fmt.Errorf("soak: load-start witness: %w", err)
+	}
+	// The witness must lie inside this boot's enrollment/acquisition bracket
+	// (codex01 R1): written after the task was enrolled, read back no later
+	// than now. Anything else, MaxFloat64 included, is refused.
+	acquired, err := checkedMono(ops)
+	if err != nil {
+		return nil, exit, err
+	}
+	if !(start >= enrolled && start <= acquired) {
+		return nil, exit, errors.New("soak: load-start witness outside its enrollment bracket")
 	}
 	if latch.completed() {
 		return nil, exit, errLoadCompleted
 	}
 	for i, f := range x.Faults {
 		due := start + float64(f.AtS)
-		now, e := ops.Mono()
+		now, e := checkedMono(ops)
 		if e != nil {
 			return records, exit, e
 		}
-		if err = waitOrComplete(ctx, ops, latch, time.Duration((due-now)*float64(time.Second))); err != nil {
+		wait, e := checkedSpan(due - now)
+		if e != nil {
+			return records, exit, e
+		}
+		if err = waitOrComplete(ctx, ops, latch, wait); err != nil {
 			return records, exit, err
 		}
-		if now, err = ops.Mono(); err != nil {
+		if now, err = checkedMono(ops); err != nil {
 			return records, exit, err
 		}
 		if now > due+OverdueTolerance.Seconds() {
@@ -158,7 +193,11 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if i+1 < len(x.Faults) {
 			post = start + float64(x.Faults[i+1].AtS) - now
 		}
-		if ops.WorkDeadline().Sub(ops.Now()) < FaultBudget+time.Duration(post*float64(time.Second))+CollectReserve {
+		postSpan, e := checkedSpan(post)
+		if e != nil {
+			return records, exit, e
+		}
+		if ops.WorkDeadline().Sub(ops.Now()) < FaultBudget+postSpan+CollectReserve {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
 		}
 		if latch.completed() { // the last observation before Kill
@@ -176,14 +215,17 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	}
 	// The load must end by its duration plus the quiescence reserve; an overrun
 	// fails instead of waiting without bound on the work deadline.
-	now, err := ops.Mono()
+	now, err := checkedMono(ops)
 	if err != nil {
 		return records, exit, err
 	}
-	end := start + float64(x.DurationS) + QuiescenceReserve.Seconds()
+	final, err := checkedSpan(start + float64(x.DurationS) + QuiescenceReserve.Seconds() - now)
+	if err != nil {
+		return records, exit, err
+	}
 	select {
 	case <-latch.done:
-	case <-ops.After(time.Duration((end - now) * float64(time.Second))):
+	case <-ops.After(final):
 		if !latch.completed() {
 			return records, exit, errors.New("soak: load overran its duration plus quiescence")
 		}

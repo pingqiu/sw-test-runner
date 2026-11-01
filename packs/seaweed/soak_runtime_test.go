@@ -31,6 +31,7 @@ type fakeSoak struct {
 	restarts []string
 	readies  []string
 	readyDL  []time.Time
+	badMono  bool
 	hooks    map[string]func(context.Context) // keyed "restart:<episode>" or "after:<n>"
 	afters   int
 	notReady string // ready job label that answers non-READY
@@ -120,9 +121,17 @@ func (f *fakeSoak) LoadStart(ctx context.Context) (float64, error) {
 		<-ctx.Done()
 		return 0, errors.New("load-start witness absent")
 	}
+	f.advance(time.Second) // the worker writes its witness after enrollment
 	return f.start, nil
 }
-func (f *fakeSoak) Mono() (float64, error)  { f.mu.Lock(); defer f.mu.Unlock(); return f.mono, nil }
+func (f *fakeSoak) Mono() (float64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.badMono {
+		return math.NaN(), nil
+	}
+	return f.mono, nil
+}
 func (f *fakeSoak) Now() time.Time          { f.mu.Lock(); defer f.mu.Unlock(); return f.wall }
 func (f *fakeSoak) WorkDeadline() time.Time { return f.deadline }
 func (f *fakeSoak) After(d time.Duration) <-chan time.Time {
@@ -331,5 +340,40 @@ func TestSoakReadyProbesShareOneReadyBound(t *testing.T) {
 	}
 	if f.readyDL[0].Sub(before) > ReadyBound+time.Second {
 		t.Fatalf("READY stage bound %v, want <= %v", f.readyDL[0].Sub(before), ReadyBound)
+	}
+}
+
+// codex01 R1 (clock part): a witness outside the enrollment bracket, or a
+// non-finite controller clock, is refused before any Kill; no float can wrap
+// a duration conversion.
+func TestSoakWitnessOutsideBracketOrBadClockSendsNoKill(t *testing.T) {
+	for name, set := range map[string]func(*fakeSoak){
+		"MaxFloat64 witness":        func(f *fakeSoak) { f.start = math.MaxFloat64 },
+		"witness before enrollment": func(f *fakeSoak) { f.start = f.mono - 1 },
+		"witness in the future":     func(f *fakeSoak) { f.start = f.mono + 100 },
+		"NaN controller clock":      func(f *fakeSoak) { f.badMono = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeSoak(t)
+			set(f)
+			_, _, err := runFake(t, f)
+			if err == nil || len(f.restarts) != 0 {
+				t.Fatalf("err=%v restarts=%v", err, f.restarts)
+			}
+		})
+	}
+}
+
+func TestCheckedSpanBoundsEveryConversion(t *testing.T) {
+	for _, s := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), math.MaxFloat64, -math.MaxFloat64, SoakHorizon.Seconds() + 1} {
+		if _, err := checkedSpan(s); err == nil {
+			t.Fatalf("checkedSpan(%v) admitted", s)
+		}
+	}
+	if d, err := checkedSpan(-5); err != nil || d != 0 {
+		t.Fatalf("a past span must wait 0: %v %v", d, err)
+	}
+	if d, err := checkedSpan(1.5); err != nil || d != 1500*time.Millisecond {
+		t.Fatalf("checkedSpan(1.5) = %v %v", d, err)
 	}
 }
