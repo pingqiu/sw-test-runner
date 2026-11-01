@@ -659,5 +659,88 @@ class AssignReadiness(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class VolumeNofile(unittest.TestCase):
+    """K8: the volume's RDMA connection budget is soft RLIMIT_NOFILE/8; the
+    product unit runs it with LimitNOFILE=1048576, the lab shell with 1024."""
+
+    def test_absent_is_unchanged_and_malformed_refuses(self):
+        self.assertIsNone(profile.volume_nofile({}))
+        self.assertEqual(profile.volume_nofile(dict(volume_nofile=4096)), 4096)
+        for bad in (None, True, '1048576', 4096.0, 1023, 1048577, -1, [4096]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                profile.volume_nofile(dict(volume_nofile=bad))
+
+    def deploy_volume(self, extra, hard=None):
+        temporary = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temporary)
+        base = Path(temporary)
+        root, release = base / 'run', base / 'release'
+        root.mkdir(mode=0o700)
+        (release / 'bin').mkdir(parents=True)
+        product = release / 'bin' / 'weed-volume'
+        # The exec'd "volume" records the open-file limits it was started with.
+        source = ('#include <stdio.h>\n#include <sys/resource.h>\n'
+                  'int main(void){struct rlimit r;getrlimit(RLIMIT_NOFILE,&r);'
+                  'FILE *f=fopen("nofile","wx");if(!f)return 2;'
+                  'fprintf(f,"%llu %llu",(unsigned long long)r.rlim_cur,(unsigned long long)r.rlim_max);'
+                  'return fclose(f)?3:0;}')
+        built = subprocess.run(['cc', '-x', 'c', '-', '-o', str(product)],
+                               input=source.encode(), capture_output=True, timeout=20)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        product.chmod(0o755)
+        c = dict(LaunchContract.config(self), **extra, root=str(root), release=str(release),
+                 roles=['volume'], host='m02', device='mlx5_0', gid_index=3,
+                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                 products={'weed-volume': hashlib.sha256(product.read_bytes()).hexdigest()},
+                 deadline=(datetime.datetime.now(datetime.timezone.utc) +
+                           datetime.timedelta(seconds=10)).isoformat())
+        def limit():
+            import resource
+            if hard is not None:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard))
+        child = subprocess.run([sys.executable, '-I', '-B', profile.__file__, '--config', json.dumps(c),
+                                '--action', 'deploy', '--role', 'volume'],
+                               capture_output=True, timeout=15, preexec_fn=limit)
+        return root, child
+
+    def limits(self, root):
+        return tuple(int(v) for v in (root / 'nofile').read_text().split())
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_actual_cli_runs_the_volume_with_the_declared_soft_limit(self):
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = min(hard, profile.PRODUCT_NOFILE)
+        if want == soft or want < 1024:
+            self.skipTest('need a hard limit above the soft one')
+        root, child = self.deploy_volume(dict(volume_nofile=want))
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(self.limits(root), (want, hard))
+        row = json.loads((root / 'volume-generation.json').read_text())
+        self.assertEqual(row['nofile'], dict(soft=want, hard=hard))
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_actual_cli_without_the_field_keeps_the_inherited_limit(self):
+        import resource
+        root, child = self.deploy_volume({})
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(self.limits(root), resource.getrlimit(resource.RLIMIT_NOFILE))
+        self.assertNotIn('nofile', json.loads((root / 'volume-generation.json').read_text()))
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_explicit_null_refuses_before_any_effect(self):
+        root, child = self.deploy_volume(dict(volume_nofile=None))
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn(b'volume_nofile must be an integer', child.stdout + child.stderr)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
+    def test_above_the_hard_limit_refuses_before_any_effect(self):
+        root, child = self.deploy_volume(dict(volume_nofile=8192), hard=4096)
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn(b'exceeds the hard limit 4096', child.stdout + child.stderr)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), [])
+
+
 if __name__ == '__main__':
     unittest.main()

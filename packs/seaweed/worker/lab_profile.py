@@ -172,6 +172,30 @@ def master_toml(config):
     return '\n'.join(lines) + '\n'
 
 
+# The product unit's open-file limit (seaweed-mono
+# enterprise/terraform/modules/core/templates/weed.service.tftpl: LimitNOFILE=1048576).
+PRODUCT_NOFILE = 1048576
+
+
+def volume_nofile(config):
+    """Optional plan 'volume_nofile': the soft RLIMIT_NOFILE the volume runs
+    with, as the product unit sets it. The volume sizes its RDMA connection
+    budget from the soft limit (soft/8, clamped 8..256), so a lab shell's 1024
+    caps it at 128. Absent (no key): the inherited limit is unchanged. Present,
+    it must be an integer, so an explicit null refuses. The hard limit is never
+    raised; a value above it refuses."""
+    if 'volume_nofile' not in config:
+        return None
+    value = config['volume_nofile']
+    if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= PRODUCT_NOFILE:
+        raise ValueError('volume_nofile must be an integer in [1024, %d]' % PRODUCT_NOFILE)
+    import resource
+    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if hard != resource.RLIM_INFINITY and value > hard:
+        raise ValueError('volume_nofile %d exceeds the hard limit %d' % (value, hard))
+    return value
+
+
 def assign_probe_url(config, master):
     """Optional plan 'ready_assign' = the workload's own layout. Leader plus
     topology is not ready after a master restart: the master refuses Assign for
@@ -365,6 +389,7 @@ def launch(config, role, replacement=False):
         raise ValueError('role not assigned to this host')
     if role == 'master':
         master_toml(config)  # refuse a malformed rotation block before any effect
+    nofile = volume_nofile(config) if role == 'volume' else None  # likewise
     # Custody authorizes the pinned Python helper. It then execs the protected,
     # hash-qualified product in the SAME PID/session; no alternate supervisor.
     fd = os.open(argv[0], os.O_RDONLY | os.O_NOFOLLOW)
@@ -406,8 +431,13 @@ def launch(config, role, replacement=False):
         if role == 'filer' and not replacement:
             with os.fdopen(os.open(root / 'filer.toml', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
                 stream.write(filer_config(root))
+        if nofile is not None:
+            import resource
+            resource.setrlimit(resource.RLIMIT_NOFILE, (nofile, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
         identity = process(os.getpid())
         if role == 'filer':identity['metadata_directory'] = filer_metadata(root, old if replacement else None)
+        if nofile is not None:
+            identity['nofile'] = dict(zip(('soft', 'hard'), resource.getrlimit(resource.RLIMIT_NOFILE)))
         identity.update(executable_sha256=digest, role=role, argv=argv,
                         logs=[os.readlink('/proc/self/fd/' + str(fd)) for fd in (1, 2)])
         if role == 'master' and replacement:
