@@ -117,24 +117,61 @@ func (r *chaosRun) stamp(ctx context.Context, label string) (map[string]float64,
 	return marks, nil
 }
 
-func runCloudChaos(ctx context.Context, d inventory.Document, c CloudConfig) error {
-	hosts := map[string]inventory.Host{}
+// chaosConnect dials each named pinned host once; release closes them all.
+func chaosConnect(ctx context.Context, d inventory.Document, c CloudConfig, ids []string) (map[string]inventory.Host, map[string]*infra.Node, func(), error) {
+	hosts, nodes := map[string]inventory.Host{}, map[string]*infra.Node{}
 	for _, h := range d.Hosts {
 		hosts[h.ID] = h
 	}
-	nodes := map[string]*infra.Node{}
-	for _, id := range append([]string{"meta", "vol1"}, chaosClients...) {
+	release := func() {
+		for _, n := range nodes {
+			n.Close()
+		}
+	}
+	for _, id := range ids {
 		h, ok := hosts[id]
 		if !ok || c.HostKeys[id] == "" {
-			return fmt.Errorf("chaos host %s missing or unpinned", id)
+			release()
+			return nil, nil, nil, fmt.Errorf("chaos host %s missing or unpinned", id)
 		}
 		n := cloudNode(h, c.SSHKey, c.HostKeys[id])
 		if e := n.ConnectContext(ctx); e != nil {
-			return fmt.Errorf("chaos connect %s: %w", id, e)
+			release()
+			return nil, nil, nil, fmt.Errorf("chaos connect %s: %w", id, e)
 		}
-		defer n.Close()
 		nodes[id] = n
 	}
+	return hosts, nodes, release, nil
+}
+
+func (r *chaosRun) save(name string, v any) error {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return os.WriteFile(filepath.Join(r.dir, name), b, 0600)
+}
+
+// startLoad runs cmd on every client in the background. cancel stops it;
+// wait joins it and returns each client's stdout.
+func (r *chaosRun) startLoad(ctx context.Context, seconds int, cmd func(id string) string) (cancel func(), wait func() (map[string]string, error)) {
+	loadCtx, cancel := context.WithCancel(ctx)
+	var loads map[string]string
+	var loadErr error
+	loaded := make(chan struct{})
+	go func() {
+		defer close(loaded)
+		loads, loadErr = r.each(loadCtx, "load", seconds, cmd)
+	}()
+	return cancel, func() (map[string]string, error) {
+		<-loaded
+		return loads, loadErr
+	}
+}
+
+func runCloudChaos(ctx context.Context, d inventory.Document, c CloudConfig) error {
+	hosts, nodes, release, err := chaosConnect(ctx, d, c, append([]string{"meta", "vol1"}, chaosClients...))
+	if err != nil {
+		return err
+	}
+	defer release()
 	// A restart replaces a role's unit, so later cases target the live one.
 	gens := map[string]int{"volume": 1, "filer": 1}
 	for _, x := range chaosCases {
@@ -186,10 +223,6 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 			cmds[id][stage] = cmd
 		}
 	}
-	save := func(name string, v any) error {
-		b, _ := json.MarshalIndent(v, "", "  ")
-		return os.WriteFile(filepath.Join(r.dir, name), b, 0600)
-	}
 	seeds, e := r.each(ctx, "seed", 120, func(id string) string { return cmds[id]["seed"] })
 	if e != nil {
 		return e
@@ -212,15 +245,8 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 		}
 	}
 
-	loadCtx, cancelLoad := context.WithCancel(ctx)
+	cancelLoad, waitLoad := r.startLoad(ctx, 160, func(id string) string { return cmds[id]["load"] })
 	defer cancelLoad()
-	var loads map[string]string
-	var loadErr error
-	loaded := make(chan struct{})
-	go func() {
-		defer close(loaded)
-		loads, loadErr = r.each(loadCtx, "load", 160, func(id string) string { return cmds[id]["load"] })
-	}()
 	marks, witness := map[string]map[string]float64{}, map[string]string{}
 	fault := func() error {
 		select {
@@ -246,8 +272,8 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 	if faultErr != nil {
 		cancelLoad()
 	}
-	<-loaded
-	if e = errors.Join(faultErr, save("markers.json", marks), save("fault.json", witness)); e != nil {
+	loads, loadErr := waitLoad()
+	if e = errors.Join(faultErr, r.save("markers.json", marks), r.save("fault.json", witness)); e != nil {
 		return e
 	}
 	if loadErr != nil {
@@ -264,7 +290,7 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 		}
 	}
 	if x.Freeze {
-		if e = save("exposure.json", exposed); e != nil {
+		if e = r.save("exposure.json", exposed); e != nil {
 			return e
 		}
 		if !exposed["client1"] && !exposed["client2"] && !exposed["client3"] {
@@ -331,28 +357,41 @@ func checkCloudFreeze(observed map[string]any, w freezeWindow, onVictim map[stri
 // chaosRestart kills the unit's exact MainPID, waits for that generation to be
 // gone, and starts the same command as unit next; readiness is the deploy URL.
 func chaosRestart(ctx context.Context, r *chaosRun, d inventory.Document, x chaosCase, hosts map[string]inventory.Host, unit, next string, witness map[string]string) error {
-	old, e := r.step(ctx, x.Victim, "kill-"+x.Role, 60, chaosKillScript(unit))
-	witness["old"] = old
-	if e != nil {
+	var e error
+	if witness["old"], e = chaosKill(ctx, r, x.Victim, x.Role, unit); e != nil {
 		return e
 	}
-	h, root := hosts[x.Victim], hosts[x.Victim].RunRoot
-	if _, e = r.step(ctx, x.Victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[x.Role])); e != nil {
-		return e
-	}
-	if witness["new"], e = r.step(ctx, x.Victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next)); e != nil {
-		return e
-	}
-	before, after := strings.Fields(old), strings.Fields(witness["new"])
-	if len(before) != 4 || before[0] != "OLD" || before[3] != "GONE" || len(after) != 3 || after[0] != "NEW" || (before[1] == after[1] && before[2] == after[2]) {
-		return errors.New("replacement generation identity did not change")
-	}
-	url := "http://" + endpoint(h, "volume_http") + "/status"
-	if x.Role == "filer" {
-		url = "http://" + endpoint(h, "filer_http") + "/"
-	}
-	_, e = r.step(ctx, x.Victim, "ready-"+next, 45, "until curl -fsS --max-time 3 "+cloudQuote(url)+" >/dev/null; do sleep 1; done")
+	witness["new"], e = chaosStart(ctx, r, d, hosts, x.Victim, x.Role, next, witness["old"])
 	return e
+}
+
+// chaosKill SIGKILLs the unit's live MainPID and witnesses that generation gone.
+func chaosKill(ctx context.Context, r *chaosRun, victim, role, unit string) (string, error) {
+	old, e := r.step(ctx, victim, "kill-"+role, 60, chaosKillScript(unit))
+	if f := strings.Fields(old); e == nil && (len(f) != 4 || f[0] != "OLD" || f[3] != "GONE") {
+		e = errors.New("kill witness malformed")
+	}
+	return old, e
+}
+
+// chaosStart starts role's same command as unit next on victim, requires a
+// generation identity different from old, then waits for the deploy URL.
+func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts map[string]inventory.Host, victim, role, next, old string) (string, error) {
+	h, root := hosts[victim], hosts[victim].RunRoot
+	if _, e := r.step(ctx, victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[role])); e != nil {
+		return "", e
+	}
+	identity, e := r.step(ctx, victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next))
+	if e != nil {
+		return identity, e
+	}
+	before, after := strings.Fields(old), strings.Fields(identity)
+	if len(before) != 4 || len(after) != 3 || after[0] != "NEW" || (before[1] == after[1] && before[2] == after[2]) {
+		return identity, errors.New("replacement generation identity did not change")
+	}
+	url := map[string]string{"volume": "http://" + endpoint(h, "volume_http") + "/status", "filer": "http://" + endpoint(h, "filer_http") + "/", "master": "http://" + endpoint(h, "master_http") + "/dir/status"}[role]
+	_, e = r.step(ctx, victim, "ready-"+next, 45, "until curl -fsS --max-time 3 "+cloudQuote(url)+" >/dev/null; do sleep 1; done")
+	return identity, e
 }
 
 // chaosFreeze: S after every thread is T, C before CONT, R after none is T.
