@@ -216,3 +216,12 @@ read, applicable file read, or evidence write still fails collection. The
 original preparation failure remains the run result; cleanup still runs.
 The client2-shaped JSON control is reconstructed from the observed warning;
 the failed run did not save its original status JSON.
+
+SSH command cancellation aborts that Node's connection and joins
+`session.Run`/`Wait` before reading stdout/stderr buffers. Callers must reconnect
+before reusing a cancelled SSH Node. The cloud collector already uses a fresh
+connection. Linux CPU race control (encrypted loopback only):
+
+```sh
+go test -race ./packs/seaweed -run 'Test(CloudCancelledPeerActiveSSHStreams|CancelledPeerWithoutServicesStillCollects)$' -count=50
+```

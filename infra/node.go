@@ -84,6 +84,7 @@ func (n *Node) sshAddress() string {
 }
 
 // Run executes a command and returns stdout, stderr, exit code.
+// Cancelling an SSH command aborts that connection; reconnect before reuse.
 func (n *Node) Run(ctx context.Context, cmd string) (stdout, stderr string, exitCode int, err error) {
 	if n.IsNative {
 		return n.runNative(ctx, cmd)
@@ -143,7 +144,8 @@ func (n *Node) runSSH(ctx context.Context, cmd string) (string, string, int, err
 		n.mu.Unlock()
 		return "", "", -1, fmt.Errorf("SSH not connected")
 	}
-	session, err := n.client.NewSession()
+	client := n.client
+	session, err := client.NewSession()
 	n.mu.Unlock()
 	if err != nil {
 		return "", "", -1, fmt.Errorf("new SSH session: %w", err)
@@ -160,6 +162,10 @@ func (n *Node) runSSH(ctx context.Context, cmd string) (string, string, int, err
 	select {
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGKILL)
+		// Abort this connection even if the peer never sends an exit receipt.
+		// Run/Wait joins both output copy goroutines before buffers are read.
+		_ = client.Close()
+		<-done
 		return outBuf.String(), errBuf.String(), -1, fmt.Errorf("command timed out: %w", ctx.Err())
 	case err := <-done:
 		if err != nil {
