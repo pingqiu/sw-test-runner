@@ -49,9 +49,12 @@ def s3(url, data=None, method='GET'):
 
 
 def bucket_name(c):
-    """S3 bucket names are 3-63 chars of [a-z0-9-]; the client name carries the
-    stage-2 case name (e.g. C1-single-kill), so it is lowercased (run 7c)."""
-    name = ('testops-' + c['run_id'] + '-' + c['client']).lower()
+    """One S3 bucket per run, shared by every client and case: keys already carry
+    the client and case. Each bucket is its own collection, and a collection
+    grows 6 volumes (12 slots at 001), so a bucket per client per case runs out
+    of free slots on the 10-node cluster (M02 rehearsal before run 7d). S3 names
+    are 3-63 chars of [a-z0-9-] (run 7c)."""
+    name = ('testops-' + c['run_id'] + '-chaos').lower()
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', name):
         raise ValueError('invalid S3 bucket name ' + name)
     return name

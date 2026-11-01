@@ -73,6 +73,14 @@ class ChaosLoadControls(unittest.TestCase):
         self.assertEqual((out['acked_kv'], out['acked_s3']), (sum(x['kind'] == 'kv' for x in rows), sum(x['kind'] == 's3' for x in rows)))
         self.assertTrue(all(x['event'] == 'ACK' and x['fids'] for x in rows))
 
+    def test_every_client_and_case_shares_one_valid_bucket(self):
+        # A bucket is a collection with its own volumes; one per client per case
+        # ran out of free slots in the M02 rehearsal (run 7d would have 9 at 001).
+        names = {chaos_load.bucket_name(dict(C, run_id='azure10-m01-20261101t135000z', client=cl))
+                 for cl in ('client1-C1-single-kill', 'client2-C2-rolling', 'client3-C6-netem')}
+        self.assertEqual(names, {'testops-azure10-m01-20261101t135000z-chaos'})
+        self.assertTrue(BUCKET.fullmatch(names.pop()))
+
     def test_kv_miss_is_a_recorded_failure_not_fatal(self):
         r = Rig(kv_miss={'client1-C1-single-kill-w0'})
         out = r.run('load')
@@ -105,7 +113,7 @@ class ChaosLoadControls(unittest.TestCase):
         r = Rig()
         r.run('load')
         acked = [json.loads(x)['key'] for x in r.journal.read_text().splitlines() if json.loads(x)['kind'] == 's3']
-        r.store['http://s3/testops-cpu-client1-c1-single-kill/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
+        r.store['http://s3/testops-cpu-chaos/' + acked[0]] = b'x' * chaos_load.S3_LENGTH
         with self.assertRaises(AssertionError), mock.patch.object(chaos_load, 's3', r.s3):
             chaos_load.readback(r.conn, C, 'http://s3', r.journal, r.helper)
 
