@@ -11,8 +11,16 @@ import (
 	"time"
 )
 
-// ledgerCaptureAttempts bounds the reads of one ledger record that a concurrent atomic renewal may replace.
-const ledgerCaptureAttempts = 3
+// A ledger record may be replaced (temp file + rename) or, on CIFS, keep settling its mtime/ctime for about a
+// second after it was written. The reader re-captures every ledgerRecapture until one capture is unchanged
+// throughout, within ledgerSettle: the same 250 ms / 6 s bounds as settleWorkerRecordWith.
+const (
+	ledgerRecapture = 250 * time.Millisecond
+	ledgerSettle    = 6 * time.Second
+)
+
+// ledgerNow and ledgerSleep pace ledger re-captures; tests replace them with a virtual clock.
+var ledgerNow, ledgerSleep = time.Now, time.Sleep
 
 type LeaseObservation struct {
 	LeaseID, Owner     string
@@ -44,11 +52,21 @@ func ReadLiveLease(dir, id, owner string) (r LeaseObservation, err error) {
 	read := func(suffix string) (map[string]any, error) {
 		var raw []byte
 		var err error
-		for attempt := 1; ; attempt++ { // the worker renews by temp file + rename: a replaced record is a new whole one
+		deadline := ledgerNow().Add(ledgerSettle)
+		expired := func() error { return errors.Join(errors.New("ledger record exceeded its settle bound"), err) }
+		for {
+			if !ledgerNow().Before(deadline) { // an overslept pause starts no further capture
+				return nil, expired()
+			}
 			raw, err = snapshotRecord(filepath.Join(dir, id+suffix+".json"), nil, false)
-			if err == nil || !errors.Is(err, errRecordReplaced) || attempt == ledgerCaptureAttempts {
+			if !ledgerNow().Before(deadline) { // nothing is accepted past the bound
+				return nil, expired()
+			}
+			transient := errors.Is(err, errRecordReplaced) || errors.Is(err, errRecordChanged)
+			if !transient || !ledgerNow().Add(ledgerRecapture).Before(deadline) {
 				break
 			}
+			ledgerSleep(ledgerRecapture)
 		}
 		if err != nil {
 			return nil, err

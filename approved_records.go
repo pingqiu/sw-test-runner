@@ -83,6 +83,10 @@ func ReadClaimedRequest(name, runningDir string, owner uint32) (ClaimedRequest, 
 // atomically may retry it.
 var errRecordReplaced = errors.New("record replaced")
 
+// errRecordChanged: the same file's metadata or size moved during the capture (on CIFS a fresh record's mtime/ctime
+// can still settle about a second after it was written).
+var errRecordChanged = errors.New("record changed during capture")
+
 // recordCaptured runs between a record's read and its re-check; tests use it to replace a record mid-capture.
 var recordCaptured = func(string) {}
 
@@ -142,13 +146,24 @@ func snapshotRecord(name string, owner *uint32, protected bool) ([]byte, error) 
 	}
 	recordCaptured(name)
 	after, err := os.Lstat(name)
-	if err == nil && len(raw) <= 1<<20 && !os.SameFile(before, after) {
-		return nil, fmt.Errorf("%w during capture", errRecordReplaced)
-	}
-	if err != nil || len(raw) > 1<<20 || !sameRecord(before, after) {
-		return nil, errors.New("record changed during capture")
+	if err = recordChangeError(before, after, err, len(raw)); err != nil {
+		return nil, err
 	}
 	return raw, nil
+}
+
+// recordChangeError classifies the re-check after a read. Only a verified replacement or a verified same-file
+// change carries a retryable sentinel; a failed stat or an oversized read proves nothing and stays terminal.
+func recordChangeError(before, after os.FileInfo, statErr error, size int) error {
+	switch {
+	case statErr != nil || size > 1<<20:
+		return errors.New("record unprovable after capture")
+	case !os.SameFile(before, after):
+		return fmt.Errorf("%w during capture", errRecordReplaced)
+	case !sameRecord(before, after):
+		return errRecordChanged
+	}
+	return nil
 }
 
 func decodeStrictJSON(raw []byte, out any) error {
