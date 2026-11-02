@@ -13,6 +13,10 @@ class Version:
     digest: str
     fids: tuple[str, ...]
 
+    def matches(self, length, digest):
+        """The one GET hash/length check (live worker, assessor, finish_read)."""
+        return length == self.length and digest == self.digest
+
 class Oracle:
     def __init__(self):
         self.latest = {}
@@ -56,7 +60,7 @@ class Oracle:
         if version is None:
             raise OracleError("read lacks its per-key guard")
         if status == 200:
-            if len(payload) != version.length or sha256(payload).hexdigest() != version.digest:
+            if not version.matches(len(payload), sha256(payload).hexdigest()):
                 raise OracleError("WRONG_BYTES: latest ACK hash/length differs")
             return "hit"
         if status == 404:

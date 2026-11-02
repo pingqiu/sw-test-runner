@@ -4,6 +4,7 @@ package seaweed
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +47,31 @@ func TestSoakAdapterPublishIsExclusiveAndReadBoundIsStrict(t *testing.T) {
 	}
 	if err := readBound(s.root, &v); err == nil {
 		t.Fatal("directory admitted")
+	}
+}
+
+// codex01's control: a symlink planted where the temp (or the final file) goes
+// must never be followed: its target stays byte-identical and nothing is
+// published through it.
+func TestPublishNeverFollowsAPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "reviewer-owned")
+	os.WriteFile(victim, []byte("keep"), 0o600)
+	p := filepath.Join(dir, "m02-collect.json")
+	os.Symlink(victim, fmt.Sprintf("%s.%d.tmp", p, os.Getpid())) // the r1 predictable temp name
+	if err := publishEvidence(p, []byte(`{"a":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	final := filepath.Join(dir, "faults.json")
+	os.Symlink(victim, final)
+	if err := publishEvidence(final, []byte(`{"b":2}`)); err == nil {
+		t.Fatal("publish through an existing symlink admitted")
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("planted symlink target changed: %q", b)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{"a":1}` {
+		t.Fatalf("published %q", b)
 	}
 }
 

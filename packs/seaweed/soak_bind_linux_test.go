@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -285,5 +286,44 @@ func TestNonSoakPlanRefusesTheSoakPhase(t *testing.T) {
 	out := runSoakEntry(t, f)
 	if !strings.Contains(out, "phase skipped") {
 		t.Fatalf("non-soak plan refused for another reason: %s", refusalLines(out))
+	}
+}
+
+// R1 positive control: a successful soak phase hands over to collect, which
+// runs the M02 evidence and assessor path. Only the soak controller is replaced
+// (the real one needs the admitted M01 clock); the transition is the product's.
+func TestASuccessfulSoakReachesCollectAndTheVerdict(t *testing.T) {
+	ran := 0
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		ran++
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+	out := runEntry(t, soakProfile(t, 45*time.Minute, nil, nil))
+	if ran != 1 || strings.Contains(out, "PHASE_ORDER_REFUSED") || !strings.Contains(out, "SOAK_VERDICT_FAIL") {
+		t.Fatalf("soak (ran %d) did not hand over to collect and the verdict: %.2500s", ran, out)
+	}
+}
+
+// R2: the assessor exactly as admitted (python -I <helper> --config) imports its
+// pinned siblings from a foreign cwd and emits one row Go decodes for this run.
+func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
+	helpers, _ := filepath.Abs("worker")
+	root := t.TempDir()
+	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: root}},
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "boot-1"}}}}
+	argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: helpers}, &SoakPlan{DurationS: 1800, ClientKillAtS: 1320, Layout: AssignLayout{Collection: "lmcache"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", argv...)
+	cmd.Dir = t.TempDir()
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("admitted argv failed: %v", err)
+	}
+	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", "boot-1", root})
+	if err != nil || v.Status != "FAIL" || !strings.Contains(v.Error, "M01 boot") {
+		t.Fatalf("want this run's FAIL row (empty evidence, foreign boot), got %+v %v", v, err)
 	}
 }

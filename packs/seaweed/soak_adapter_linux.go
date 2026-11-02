@@ -59,12 +59,7 @@ func (s *soakAdapter) WorkDeadline() time.Time                { return s.deadlin
 // soak is the seaweed_kv_soak phase: the fault loop over the production
 // adapter, then the FaultRecords published for the verdict (also on failure).
 func (r *runtimePack) soak(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, sess *session) (map[string]string, error) {
-	boot := ""
-	for _, h := range d.Observation.Hosts {
-		if h.HostID == "m01" {
-			boot = h.BootID
-		}
-	}
+	boot := observedBoot(d, "m01")
 	if b, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err != nil || boot == "" || string(bytes.TrimSpace(b)) != boot {
 		return refusal("seaweed_kv_soak", "BINDING_REFUSED", errors.New("runner is not the admitted M01 clock"))
 	}

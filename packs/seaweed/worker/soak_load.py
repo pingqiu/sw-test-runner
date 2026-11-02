@@ -2,8 +2,26 @@
 or a control handshake. Four native workers (3 DC + 1 HTTP), the oracle,
 read-after-ACK, the client kill, a read-only topology poller (decision 3),
 bounded evidence files and one bounded summary row on stdout."""
-import argparse, hashlib, json, math, multiprocessing as mp, os, random, re, threading, time, urllib.request
+import argparse, hashlib, json, math, multiprocessing as mp, os, random, re, stat, sys, threading, time, types, urllib.request
 from pathlib import Path
+
+
+def pinned(name):
+    """The exact protected sibling, as lab_profile loads vf_preflight: -I drops the script directory from
+    sys.path and nothing is searched for. Registered under its name, so `from <name> import` resolves to it."""
+    source = Path(__file__).resolve().with_name(name + '.py')
+    module = sys.modules.get(name)
+    if module is not None and getattr(module, '__file__', None) and Path(module.__file__).resolve() == source:
+        return module
+    module = types.ModuleType(name)
+    module.__file__ = str(source)
+    sys.modules[name] = module
+    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+    return module
+
+
+for _name in ('soak_native_worker', 'soak_oracle', 'soak_stats'):
+    pinned(_name)
 from soak_native_worker import child, payload
 from soak_oracle import Oracle, OracleError
 from soak_stats import WITNESS, boot_id, identity
@@ -65,18 +83,53 @@ def publish(path, row):
         tmp.unlink()
 
 
-def read_bound(path, binding):
-    """A controller fault-window file: nofollow, bounded, exactly bound, or None if absent."""
+def _unique(pairs):
+    row = {}
+    for k, v in pairs:
+        if k in row:
+            raise ValueError('duplicate JSON key ' + repr(k)[:40])
+        row[k] = v
+    return row
+
+
+def _finite(name):
+    raise ValueError('non-finite JSON number ' + name)
+
+
+def strict_json(raw):
+    """One JSON value: duplicate keys and NaN/Infinity refused."""
+    return json.loads(raw, object_pairs_hook=_unique, parse_constant=_finite)
+
+
+def read_evidence(path, limit, line_limit=None, max_rows=None):
+    """The one strict evidence reader: no-follow, a regular file, at most `limit` bytes, strict JSON; with
+    line_limit, JSON lines (each bounded, a torn last line refused, at most max_rows). None if absent."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
+    except OSError as error:  # ELOOP: a symlink is never followed
+        raise ValueError('evidence not openable without following: ' + path.name) from error
     with os.fdopen(fd, 'rb') as f:
-        raw = f.read(4097)
-    if len(raw) > 4096:
-        raise ValueError('fault-window file over 4096 bytes: ' + path.name)
-    row = json.loads(raw)
-    if any(row.get(k) != v for k, v in binding.items()):
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError('evidence is not a regular file: ' + path.name)
+        raw = f.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('evidence over %d bytes: %s' % (limit, path.name))
+    if line_limit is None:
+        return strict_json(raw)
+    lines = raw.split(bytes([10]))  # newline-terminated rows
+    if lines.pop() != b'' or len(lines) > max_rows or any(len(line) > line_limit for line in lines):
+        raise ValueError('evidence lines torn or over bound: ' + path.name)
+    return [strict_json(line) for line in lines]
+
+
+def read_bound(path, binding):
+    """A controller fault-window file: nofollow, bounded, exactly bound, or None if absent."""
+    row = read_evidence(path, 4096)
+    if row is None:
+        return None
+    if not isinstance(row, dict) or any(row.get(k) != v for k, v in binding.items()):
         raise ValueError('fault-window file binding differs: ' + path.name)
     return row
 
@@ -165,7 +218,7 @@ def run(config):
         busy.pop(key)
         if row['operation_id'] != cmd['operation_id']:
             raise OracleError('completion identity')
-        event = dict(worker=i, op=cmd['operation_id'], action=cmd['action'], key=key, submitted=row['submitted'],
+        event = dict(worker=i, op=cmd['operation_id'], action=cmd['action'], key=key, dispatched=cmd['dispatched'], submitted=row['submitted'],
                      completed=row['completed'], ok=row['ok'], error=row.get('error'))
         if cmd['action'] == 'set':
             if not row['ok'] or row['results'] not in (None, [True]):
@@ -181,7 +234,7 @@ def run(config):
             v = oracle.reading.pop(key)
             event.update(sequence=v.sequence, length=row.get('length'), sha256=row.get('sha256'))
             if row['ok'] and row['results'] in (None, [True]):
-                if row['length'] != v.length or row['sha256'] != v.digest:
+                if not v.matches(row['length'], row['sha256']):
                     counts['wrong_bytes'] += 1
                     raise OracleError('WRONG_BYTES latest ACK')
                 counts['hits'] += 1
@@ -215,12 +268,13 @@ def run(config):
                     witness, cmd = submissions.pop(i), commands.pop(i)
                     oracle.reading.pop(cmd['key'])
                     busy.pop(cmd['key'])
+                    killed = time.monotonic()
                     workers[i]['process'].kill()
                     workers[i]['process'].join(5)
                     if workers[i]['process'].is_alive():
                         raise RuntimeError('owned client survived kill')
                     start_worker(i)
-                    return dict(kind='client_kill', worker=i, started=started, finished=time.monotonic(),
+                    return dict(kind='client_kill', worker=i, started=started, killed=killed, finished=time.monotonic(),
                                 witness=witness, replacement=workers[i]['identity'])
             for i in range(4):
                 if i not in commands and oracle.latest:
@@ -280,6 +334,7 @@ def run(config):
             time.sleep(.02)
         if commands or oracle.pending or oracle.reading:
             raise OracleError('unfinished operations after quiescence')
+        log('op-events.jsonl', dict(event='quiescent', mono=time.monotonic(), dispatched=seq[0]))  # the terminal row
         return dict(status='LOAD_DONE', counts=counts, writers=writers, kills=kills, body_start=begin, body_end=body_end,
                     shared_keys_all_four=sum(len(w) == 4 for w in key_writers.values()),
                     witness=dict(boot_id=boot_id(), mono=begin))

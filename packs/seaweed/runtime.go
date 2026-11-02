@@ -304,6 +304,11 @@ type session struct {
 	cleanupErr error
 	jobs       map[string]tr.JobHandle
 }
+
+// soakPhase is the seaweed_kv_soak controller; CPU controls replace it only to
+// prove the phase transition into collect (the real one needs the M01 clock).
+var soakPhase = (*runtimePack).soak
+
 type runtimePack struct {
 	mu       sync.Mutex
 	sessions map[*tr.RunScope]*session
@@ -356,13 +361,12 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || sealed.Phases[s.next].Actions[0].Action != act.Action {
 		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
 	}
-	if act.Action == "seaweed_kv_soak" {
-		out, err = r.soak(ctx, a, p, d, in, s)
-		s.terminal = err
-		return out, err
-	}
-	if act.Action == "seaweed_read_restart" {
-		out, err = r.restart(ctx, a, p, d, in, s)
+	if act.Action == "seaweed_kv_soak" || act.Action == "seaweed_read_restart" {
+		phase := (*runtimePack).restart
+		if act.Action == "seaweed_kv_soak" {
+			phase = soakPhase
+		}
+		out, err = phase(r, ctx, a, p, d, in, s)
 		s.terminal = err
 		if err == nil {
 			s.next++
