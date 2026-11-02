@@ -44,4 +44,26 @@ jobs:
           python-version: '3.12'
       - name: worker python tests
         working-directory: packs/seaweed/worker
-        run: python -m unittest discover -v
+        # `unittest discover` alone exits 0 on an empty discovery ("Ran 0 / OK").
+        # Discover once, refuse zero tests, and run exactly that suite. The guard
+        # proves itself first: an empty directory must fail.
+        run: |
+          cat > "$RUNNER_TEMP/guarded_unittest.py" <<'PY'
+          import os, sys, unittest
+          # Guarded: multiprocessing children re-import __main__ (this file).
+          if __name__ == '__main__':
+              os.chdir(sys.argv[1])  # discover from '.', as `python -m unittest discover` does
+              suite = unittest.defaultTestLoader.discover('.')
+              count = suite.countTestCases()
+              print(f"discovered {count} tests in {os.getcwd()}", flush=True)
+              if count == 0:
+                  sys.exit("no tests discovered: refusing an empty run")
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+          mkdir "$RUNNER_TEMP/empty-discovery"
+          if python "$RUNNER_TEMP/guarded_unittest.py" "$RUNNER_TEMP/empty-discovery"; then
+            echo "guard accepted an empty discovery"; exit 1
+          fi
+          echo "guard refused the empty discovery, as required"
+          python "$RUNNER_TEMP/guarded_unittest.py" "$PWD"
