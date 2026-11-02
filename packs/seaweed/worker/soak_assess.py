@@ -52,14 +52,15 @@ def obj(root, name):
 
 def get_case(e):
     """Every GET outcome is exactly one recognised case; anything else is unknown."""
-    case = {(True, False, False): 'hit', (False, True, False): 'miss', (False, False, True): 'fault'}.get(
+    case = {(True, False, False): 'hit', (False, True, False): 'miss', (True, True, False): 'miss', (False, False, True): 'fault'}.get(
         (e['ok'], e.get('miss') is True, e.get('fault_error') is True), 'unknown')
     try:
         if case == 'hit':
             typed(e, length=int, sha256=str, sequence=int)
         elif case == 'miss':
-            typed(e, sequence=int, fids=list, error=str)
-            case = case if MISS.search(e['error']) else 'unknown'
+            typed(e, sequence=int, fids=list)
+            if not e['ok']:  # r9: an ok=False miss only in the DC status-1 shape; ok=True not-hit is a candidate
+                case = case if MISS.search(typed(e, error=str)['error']) else 'unknown'
         elif case == 'fault':
             typed(e, sequence=int, episode=str)
     except ValueError:

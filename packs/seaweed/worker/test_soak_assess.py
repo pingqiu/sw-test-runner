@@ -226,6 +226,13 @@ class SoakAssess(unittest.TestCase):
                                         completed=1105, ok=True))
         self.mutate(ch, 'misses')
 
+    def test_an_ok_not_hit_miss_candidate_is_judged_like_any_miss(self):
+        # r9 (soak_workload.py sha 6a4bbb6b l.74-99): ok=True with results != [True] is a miss candidate, no error text.
+        ev = evidence()
+        self.ev(ev, 'g2').update(ok=True, error='', results=[False])
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+
     def test_a_miss_without_the_miss_error(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(error='permission denied'), 'get_outcomes')
 

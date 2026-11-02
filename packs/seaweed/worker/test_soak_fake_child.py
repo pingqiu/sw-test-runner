@@ -27,6 +27,10 @@ def child(pipe, cfg):
                    completed=time.monotonic(), ok=True, error=None, results=None)
         if cmd['action'] == 'set':
             row['fids'] = ['3,0a1b2c']
+        elif (root / 'fake-notfound').exists():  # r9's miss-candidate shape: ok, the key not returned, no error text
+            row.update(results=[False], error='')
+        elif (root / 'fake-fail-empty').exists():  # a failed GET with an EMPTY error (the 11-02 r2 stop)
+            row.update(ok=False, error='', results=[False], untouched=False)
         elif (root / 'fake-fail').exists():  # its content, if any, is the error text
             row.update(ok=False, error=(root / 'fake-fail').read_text() or 'operation timed out')
         else:
