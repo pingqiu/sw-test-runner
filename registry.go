@@ -3,6 +3,7 @@ package testrunner
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // ActionContext provides action handlers with access to the scenario's
@@ -109,6 +110,8 @@ type Registry struct {
 	// return a mutating handler. The CLI sets this to true when the
 	// operator passes --allow-mutating; CI defaults to refusing.
 	AllowMutating bool
+
+	leaseEnvelope LeaseEnvelopeFunc
 }
 
 // NewRegistry creates an empty registry.
@@ -138,6 +141,16 @@ func (r *Registry) RegisterMutating(name, tier string, h ActionHandler) {
 func (r *Registry) RegisterMutatingFunc(name, tier string, f ActionHandlerFunc) {
 	r.handlers[name] = actionEntry{handler: f, tier: tier, mutating: true}
 }
+
+// LeaseEnvelopeFunc is a pack's trusted judgement, made before any worker
+// lease is written, of how long the pinned run may hold the lab. It sees the
+// captured pinned inputs with the DECLARED deployment files and boots (which
+// readback must later equal). An error, or anything up to WorkerEnvelope,
+// keeps the ten-minute envelope; core caps any longer answer at SoakHorizon.
+type LeaseEnvelopeFunc func(PackInputs) (time.Duration, error)
+
+// RegisterLeaseEnvelope installs the pack's envelope judgement (one per registry).
+func (r *Registry) RegisterLeaseEnvelope(f LeaseEnvelopeFunc) { r.leaseEnvelope = f }
 
 // IsMutating reports whether the named action is registered as
 // mutating. Used by validate to surface mutating actions in a

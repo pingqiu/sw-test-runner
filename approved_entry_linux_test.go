@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/pingqiu/sw-test-runner/infra"
 	"golang.org/x/sys/unix"
@@ -93,6 +94,23 @@ func init() {
 					}
 					cancel()
 				}()
+			}
+		}
+		switch os.Getenv("S0B_CPU_CUSTODY") {
+		case "soak-hook-valid", "soak-hook-over":
+			// A trusted pack judgement that proved its plan (stands in for the
+			// Seaweed bind); asks for more than SoakHorizon, which core must cap.
+			register = func(r *Registry) {
+				r.RegisterLeaseEnvelope(func(PackInputs) (time.Duration, error) { return 2 * SoakHorizon, nil })
+			}
+		case "soak-hook-refused":
+			// codex01's composed control: an approved_job first, a late soak
+			// handler, and a pack judgement that refuses the plan.
+			register = func(r *Registry) {
+				r.RegisterLeaseEnvelope(func(PackInputs) (time.Duration, error) { return 0, errors.New("test: not a valid soak plan") })
+				r.RegisterFunc(SoakAction, TierCore, func(context.Context, *ActionContext, Action) (map[string]string, error) {
+					return nil, errors.New("test: late soak refusal")
+				})
 			}
 		}
 		result, bundle, err := RunApprovedRequest(ctx, args[2], args[4], register, &runtime, nil)

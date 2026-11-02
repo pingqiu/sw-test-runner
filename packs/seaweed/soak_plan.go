@@ -61,7 +61,7 @@ type AssignLayout struct {
 // Frozen soak budgets (contract r3, R3/R4). SoakHorizon is claude01's ruling
 // (6ae7b460): a ceiling on the plan's hard deadline, never an extension.
 const (
-	SoakHorizon       = 60 * time.Minute
+	SoakHorizon       = tr.SoakHorizon // one value: the worker envelope admits a soak scenario up to it
 	KillSettleBound   = 30 * time.Second
 	ReplacementEnroll = 15 * time.Second
 	ReadyBound        = 45 * time.Second

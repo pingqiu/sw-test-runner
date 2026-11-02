@@ -29,7 +29,33 @@ type workerOwnedLease struct {
 	released   bool
 }
 
-func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*workerOwnedLease, context.Context, error) {
+// The worker-owned envelope is ten minutes. Only the registered pack's trusted
+// judgement over the captured pins (for Seaweed: its full bind of a valid KV
+// soak plan) can extend it, and never past SoakHorizon (claude01's ruling). It
+// is decided before any acquire is written; an action label alone proves nothing.
+const (
+	WorkerEnvelope = 10 * time.Minute
+	SoakAction     = "seaweed_kv_soak"
+	SoakHorizon    = 60 * time.Minute
+)
+
+func workerEnvelope(pre *ApprovedRun, register func(*Registry)) time.Duration {
+	if register == nil {
+		return WorkerEnvelope
+	}
+	r := NewRegistry()
+	register(r)
+	if r.leaseEnvelope == nil {
+		return WorkerEnvelope
+	}
+	d, err := r.leaseEnvelope(pre.declaredPackInputs())
+	if err != nil || d <= WorkerEnvelope {
+		return WorkerEnvelope
+	}
+	return min(d, SoakHorizon)
+}
+
+func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy, register func(*Registry)) (*workerOwnedLease, context.Context, error) {
 	if p.bootstrap.WorkerLease == nil {
 		return nil, ctx, nil
 	}
@@ -43,8 +69,8 @@ func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*wo
 		return nil, ctx, errors.New("invalid explicit worker lease identity")
 	}
 	lock := p.bootstrap.WorkerLease.LockFile
-	if p.bootstrap.LedgerDir != lock+".ledger" || b.HardDeadline.Sub(time.Now()) > 10*time.Minute {
-		return nil, ctx, errors.New("worker lease lock/ledger or ten-minute envelope mismatch")
+	if p.bootstrap.LedgerDir != lock+".ledger" || b.HardDeadline.Sub(time.Now()) > workerEnvelope(pre, register) {
+		return nil, ctx, errors.New("worker lease lock/ledger or envelope mismatch (ten minutes; a pack-bound soak plan SoakHorizon)")
 	}
 	if err = verifyWorkerFlock(lock); err != nil {
 		return nil, ctx, err
