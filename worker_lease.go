@@ -29,6 +29,28 @@ type workerOwnedLease struct {
 	released   bool
 }
 
+// The worker-owned envelope: ten minutes, except a scenario that runs the KV
+// soak action, which may hold the lab up to SoakHorizon (claude01's ruling; the
+// seaweed pack's bind still charges the soak's exact budget inside it).
+const (
+	WorkerEnvelope = 10 * time.Minute
+	SoakAction     = "seaweed_kv_soak"
+	SoakHorizon    = 60 * time.Minute
+)
+
+func workerEnvelope(s *Scenario) time.Duration {
+	if s != nil {
+		for _, phase := range s.Phases {
+			for _, a := range phase.Actions {
+				if a.Action == SoakAction {
+					return SoakHorizon
+				}
+			}
+		}
+	}
+	return WorkerEnvelope
+}
+
 func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*workerOwnedLease, context.Context, error) {
 	if p.bootstrap.WorkerLease == nil {
 		return nil, ctx, nil
@@ -43,8 +65,8 @@ func beginWorkerLease(ctx context.Context, request string, p TrustedPolicy) (*wo
 		return nil, ctx, errors.New("invalid explicit worker lease identity")
 	}
 	lock := p.bootstrap.WorkerLease.LockFile
-	if p.bootstrap.LedgerDir != lock+".ledger" || b.HardDeadline.Sub(time.Now()) > 10*time.Minute {
-		return nil, ctx, errors.New("worker lease lock/ledger or ten-minute envelope mismatch")
+	if p.bootstrap.LedgerDir != lock+".ledger" || b.HardDeadline.Sub(time.Now()) > workerEnvelope(pre.scenario) {
+		return nil, ctx, errors.New("worker lease lock/ledger or envelope mismatch (ten minutes; a soak scenario SoakHorizon)")
 	}
 	if err = verifyWorkerFlock(lock); err != nil {
 		return nil, ctx, err

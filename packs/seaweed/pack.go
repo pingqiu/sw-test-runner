@@ -57,7 +57,7 @@ func RegisterPack(r *tr.Registry) {
 		r.RegisterMutatingFunc(name, tr.TierDevOps, runtime.run)
 	}
 	r.RegisterMutatingFunc("seaweed_read_restart", tr.TierChaos, runtime.run)
-	r.RegisterMutatingFunc("seaweed_kv_soak", tr.TierChaos, runtime.run)
+	r.RegisterMutatingFunc(tr.SoakAction, tr.TierChaos, runtime.run)
 }
 func invalid(action string, err error) (map[string]string, error) {
 	const hint = "correct inventory against seaweed.inventory/v1 and preserve requested scope"
