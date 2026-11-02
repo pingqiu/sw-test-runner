@@ -194,7 +194,7 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 	if b.HardDeadline.Sub(b.WorkDeadline) < CleanupReserve {
 		return errors.New("soak needs the cleanup reserve between work and hard deadlines")
 	}
-	if DeployReserve+secs(x.DurationS)+QuiescenceReserve+LoadExitGrace+CollectReserve > b.WorkDeadline.Sub(now) {
+	if DeployReserve+WitnessWait+secs(x.DurationS)+QuiescenceReserve+LoadExitGrace+CollectReserve > b.WorkDeadline.Sub(now) {
 		return errors.New("soak does not fit the admitted work deadline")
 	}
 	if b.HardDeadline.Sub(now) > SoakHorizon {
