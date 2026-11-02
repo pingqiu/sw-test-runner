@@ -26,6 +26,9 @@ type fakeSoak struct {
 	exitAt       float64 // load exits when mono >= exitAt
 	exitCode     int
 	exited       chan struct{}
+	waitFails    chan struct{} // closed at failAt: WaitTask fails with no exit receipt while the load runs on (r3)
+	failAt       float64       // 0: never
+	failOnce     sync.Once
 	once         sync.Once
 	started      int
 	restarts     []string
@@ -50,7 +53,7 @@ type fakeSoak struct {
 const fakeReplacementPID = 4242
 
 func newFakeSoak(t *testing.T) *fakeSoak {
-	f := &fakeSoak{t: t, mono: 1000, wall: time.Unix(1_800_000_000, 0), start: 1000.5, exitAt: 1000.5 + 1800, exited: make(chan struct{}), hooks: map[string]func(context.Context){}}
+	f := &fakeSoak{t: t, mono: 1000, wall: time.Unix(1_800_000_000, 0), start: 1000.5, exitAt: 1000.5 + 1800, exited: make(chan struct{}), waitFails: make(chan struct{}), hooks: map[string]func(context.Context){}}
 	f.deadline = f.wall.Add(45 * time.Minute)
 	f.readyLag = 0.5
 	return f
@@ -61,7 +64,12 @@ func (f *fakeSoak) advance(d time.Duration) {
 	f.mono += d.Seconds()
 	f.wall = f.wall.Add(d)
 	crossed := f.mono >= f.exitAt
+	failed := f.failAt > 0 && f.mono >= f.failAt
 	f.mu.Unlock()
+	if failed {
+		f.failOnce.Do(func() { close(f.waitFails) })
+		time.Sleep(20 * time.Millisecond) // the observer publishes the failure, as for an exit
+	}
 	if crossed {
 		f.once.Do(func() { close(f.exited) })
 		// Let the observer goroutine publish the completion first: this models
@@ -77,10 +85,12 @@ func (f *fakeSoak) StartTask(ctx context.Context, label string) (tr.JobHandle, e
 func (f *fakeSoak) WaitTask(ctx context.Context, h tr.JobHandle) (tr.ExitInfo, error) {
 	select {
 	case <-f.exited:
-		if f.exitCode != 0 {
-			return tr.ExitInfo{Code: f.exitCode}, errors.New("load exited non-zero")
+		if f.exitCode != 0 { // as RunScope.Wait: a settled exit receipt plus the outcome error
+			return tr.ExitInfo{Code: f.exitCode, Settled: true}, errors.New("load exited non-zero")
 		}
 		return tr.ExitInfo{Code: 0, Settled: true}, nil
+	case <-f.waitFails:
+		return tr.ExitInfo{}, errors.New("renewal: record changed during capture")
 	case <-ctx.Done():
 		return tr.ExitInfo{}, ctx.Err()
 	}
@@ -283,6 +293,23 @@ func TestSoakCompletionDuringRecoveryIsEarly(t *testing.T) {
 	f.exitAt = f.start + 960
 	_, _, err := runFake(t, f)
 	expectNoFurtherFaults(t, f, err, "load completed", 2)
+}
+
+// r3 (11-02): WaitTask failed with no exit receipt (a ledger read raced the lease renewal) while the load was
+// healthy. That is a wait failure with its own cause, never "load completed", and no further fault is sent.
+func TestSoakWaitFailureIsNotLoadCompletion(t *testing.T) {
+	for _, at := range []string{"before the first fault", "between faults", "after the last fault"} {
+		f := newFakeSoak(t)
+		f.failAt = f.start + map[string]float64{"before the first fault": 222, "between faults": 700, "after the last fault": 1000}[at]
+		_, exit, err := runFake(t, f)
+		if err == nil || strings.Contains(err.Error(), "load completed") || !strings.Contains(err.Error(), "load task wait failed") ||
+			!strings.Contains(err.Error(), "record changed during capture") || exit.Settled {
+			t.Fatalf("%s: err=%v exit=%+v", at, err, exit)
+		}
+		if want := map[string]int{"before the first fault": 0, "between faults": 1, "after the last fault": 2}[at]; len(f.restarts) != want {
+			t.Fatalf("%s: restarts=%v, want %d", at, f.restarts, want)
+		}
+	}
 }
 
 // After the last fault the wait for the load is bounded: an overrun fails.

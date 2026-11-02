@@ -78,6 +78,14 @@ func ReadClaimedRequest(name, runningDir string, owner uint32) (ClaimedRequest, 
 	return request, nil
 }
 
+// errRecordReplaced: the path named a different file at the end of a capture than at its start (an atomic
+// rename-replace). The capture is refused like any other change; only a caller that knows its writer renames
+// atomically may retry it.
+var errRecordReplaced = errors.New("record replaced")
+
+// recordCaptured runs between a record's read and its re-check; tests use it to replace a record mid-capture.
+var recordCaptured = func(string) {}
+
 func snapshotRecord(name string, owner *uint32, protected bool) ([]byte, error) {
 	if !filepath.IsAbs(name) || filepath.Clean(name) != name || strings.ContainsRune(name, 0) {
 		return nil, errors.New("noncanonical record path")
@@ -122,14 +130,21 @@ func snapshotRecord(name string, owner *uint32, protected bool) ([]byte, error) 
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
+	if err != nil {
 		return nil, errors.New("record replaced while opening")
+	}
+	if !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("%w while opening", errRecordReplaced)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	if err != nil {
 		return nil, err
 	}
+	recordCaptured(name)
 	after, err := os.Lstat(name)
+	if err == nil && len(raw) <= 1<<20 && !os.SameFile(before, after) {
+		return nil, fmt.Errorf("%w during capture", errRecordReplaced)
+	}
 	if err != nil || len(raw) > 1<<20 || !sameRecord(before, after) {
 		return nil, errors.New("record changed during capture")
 	}

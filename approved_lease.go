@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// ledgerCaptureAttempts bounds the reads of one ledger record that a concurrent atomic renewal may replace.
+const ledgerCaptureAttempts = 3
+
 type LeaseObservation struct {
 	LeaseID, Owner     string
 	Started, Stamp     float64
@@ -39,7 +42,14 @@ func ReadLiveLease(dir, id, owner string) (r LeaseObservation, err error) {
 		return r, err
 	}
 	read := func(suffix string) (map[string]any, error) {
-		raw, err := snapshotRecord(filepath.Join(dir, id+suffix+".json"), nil, false)
+		var raw []byte
+		var err error
+		for attempt := 1; ; attempt++ { // the worker renews by temp file + rename: a replaced record is a new whole one
+			raw, err = snapshotRecord(filepath.Join(dir, id+suffix+".json"), nil, false)
+			if err == nil || !errors.Is(err, errRecordReplaced) || attempt == ledgerCaptureAttempts {
+				break
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
