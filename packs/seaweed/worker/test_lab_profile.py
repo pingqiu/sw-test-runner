@@ -623,7 +623,7 @@ class SoakSetup(unittest.TestCase):
     """soak_setup against a fake master and a fake pinned weed product."""
     SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4)
 
-    def build(self, shell_rc=0, grow_count=None, settle=True):
+    def build(self, shell_rc=0, grow_count=None, settle=True, grow_delay=0):
         base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, base)
         self.root, release = base / 'run', base / 'release'
@@ -644,6 +644,7 @@ class SoakSetup(unittest.TestCase):
                 self_calls.append(self.path)
                 body = {}
                 if self.path.startswith('/vol/grow?'):
+                    time.sleep(grow_delay)  # a real master answers only after allocating
                     state['grown'] = True
                     body = dict(count=n if grow_count is None else grow_count)
                 elif self.path == '/dir/status':
@@ -683,6 +684,17 @@ class SoakSetup(unittest.TestCase):
         self.assertEqual([c for c in self.calls if c.startswith('/vol/grow')],
                          ['/vol/grow?collection=lmcache&replication=000&ttl=2h&count=4'])
         self.assertEqual((self.root / 'fs-configure.stdout').read_text(), 'configured\n')
+
+    def test_a_grow_slower_than_the_2_s_read_cap_completes(self):
+        # 11-02 parity run: an 8-volume grow took ~10 s and the 2 s per-read cap raised TimeoutError.
+        row = profile.soak_setup(self.build(grow_delay=3.5))
+        self.assertEqual((row['status'], row['grow']), ('SOAK_SETUP', dict(count=4)))
+
+    def test_a_grow_past_the_work_deadline_still_times_out(self):
+        config = self.build(grow_delay=6)
+        config['deadline'] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=3)).isoformat()
+        with self.assertRaises(TimeoutError):
+            profile.soak_setup(config)
 
     def test_failed_configure_refuses_before_any_growth(self):
         config = self.build(shell_rc=3)
