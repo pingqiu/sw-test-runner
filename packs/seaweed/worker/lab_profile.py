@@ -771,10 +771,15 @@ def soak_collect(config):
     for order, name in enumerate(names[:want]):
         gen = json.loads((root / name).read_text())
         pid = int(gen['pid'])
-        if pid <= 0 or pid in pids:
+        if pid <= 0 or pid in pids or gen.get('role') != 'master' or gen.get('boot_id') != config['boot_id']:
             raise ValueError('master generation identity')
         pids.add(pid)
+        streams = sorted(Path(x).suffix for x in gen['logs'])
+        if streams != ['.stderr', '.stdout'] or any(Path(x).parent != root for x in gen['logs']):
+            raise ValueError('master generation must list its own stdout and stderr')
         glogs = sorted(p for p in (root / 'tmp').iterdir() if '.log.INFO.' in p.name and p.name.endswith('.%d' % pid))
+        if not glogs:  # one generation's sources cannot stand in for another's
+            raise ValueError('master generation has no glog')
         for file in [Path(x) for x in gen['logs']] + glogs:
             if file.parent not in (root, root / 'tmp') or file.resolve() != file:
                 raise ValueError('master log outside the owned output root')

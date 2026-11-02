@@ -37,6 +37,7 @@ func (n *cpuNode) soakRow(argv []string) []byte {
 	if i < 0 || !strings.HasSuffix(argv[1], "soak_assess.py") {
 		return nil
 	}
+	n.assessRuns++
 	var b SoakBinding
 	if json.Unmarshal([]byte(argv[i+1]), &b) != nil {
 		return nil
@@ -45,13 +46,19 @@ func (n *cpuNode) soakRow(argv []string) []byte {
 	for _, c := range soakCriteria {
 		criteria[c] = map[string]string{"outcome": "PASS", "reason": "stand-in"}
 	}
-	row, _ := json.Marshal(map[string]any{"status": "PASS", "criteria": criteria, "k7": []any{}, "resources": "NOT_OBSERVED",
+	status := "PASS"
+	if n.assessFail {
+		status, criteria["misses"] = "FAIL", map[string]string{"outcome": "FAIL", "reason": "stand-in"}
+	}
+	row, _ := json.Marshal(map[string]any{"status": status, "criteria": criteria, "k7": []any{}, "resources": "NOT_OBSERVED",
 		"binding": map[string]string{"schema": b.Schema, "run_id": b.RunID, "boot_id": b.BootID, "root": b.Root}})
 	return append(row, '\n')
 }
 
 type cpuNode struct {
-	soakPass bool // answer the soak collect and assessor jobs with a successful row
+	soakPass       bool // answer the soak collect and assessor jobs with a successful row
+	assessFail     bool // the assessor row says FAIL instead
+	assessRuns     int
 	mu             sync.Mutex
 	ids            map[string]tr.ProcessIdentity
 	specs          map[string]tr.JobSpec

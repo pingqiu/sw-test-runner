@@ -581,20 +581,22 @@ class SoakCollect(unittest.TestCase):
         (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000000.4242').write_text(line.format(3, 4, 'lmcache'))
         (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000000.999').write_text(line.format(4, 6, 'lmcache'))  # foreign pid
         (self.root / 'master-replacement.stderr').write_text(line.format(5, 9, 'lmcache'))
+        (self.root / 'master-replacement.stdout').write_text('')
+        (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000100.4343').write_text('')
         self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'])
-        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stderr'])
+        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stdout', 'master-replacement.stderr'])
         for name in ('lmcache_3.dat', 'lmcache_x_7.dat', 'other_5.dat'):
             (self.root / 'volume' / name).write_bytes(b'')
-        self.config = dict(root=str(self.root), soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2))
+        self.config = dict(root=str(self.root), boot_id='boot-m02', soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2))
 
-    def gen(self, name, pid, logs):
-        (self.root / name).write_text(json.dumps(dict(pid=pid, logs=[str(self.root / x) for x in logs])))
+    def gen(self, name, pid, logs, **kw):
+        (self.root / name).write_text(json.dumps(dict(dict(pid=pid, logs=[str(self.root / x) for x in logs], role='master', boot_id='boot-m02'), **kw)))
 
     def test_rotations_of_this_runs_master_generations_and_dat_ids(self):
         row = profile.soak_collect(self.config)
         self.assertEqual([r['vid'] for r in row['rotated']], [2, 4, 9])  # not 5 (other), not 6 (foreign pid)
         self.assertEqual(row['dat_vids'], [3, 7])
-        self.assertEqual(len(row['sources']), 4)
+        self.assertEqual(len(row['sources']), 6)
 
     def test_episode_events_read_both_streams_and_count_a_line_once(self):
         stamped = 'I1102 09:25:16.146813 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 21 collection=lmcache bytes=1\n'
@@ -607,6 +609,44 @@ class SoakCollect(unittest.TestCase):
         ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 21]
         self.assertEqual(sorted((e['kind'], e['stamp'], e['gen']) for e in ev), [
             ('birth', '1102 09:10:16.000002', 0), ('success', '1102 09:25:16.146813', 0), ('unwritable', '1102 09:24:16.000001', 0)])
+
+    # codex01 review db5d4589: each generation's own sources must be complete; another's cannot stand in.
+    def refused_collect(self):
+        with self.assertRaises((ValueError, OSError)):
+            profile.soak_collect(self.config)
+
+    def test_empty_replacement_logs_fail_the_collect(self):
+        self.gen('master-replacement-generation.json', 4343, [])
+        self.refused_collect()
+
+    def test_omitted_original_stderr_fails_the_collect(self):
+        self.gen('master-generation.json', 4242, ['master.stdout'])
+        self.refused_collect()
+
+    def test_omitted_replacement_stdout_fails_the_collect(self):
+        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stderr'])
+        self.refused_collect()
+
+    def test_one_stream_listed_twice_fails_the_collect(self):
+        self.gen('master-generation.json', 4242, ['master.stderr', 'master.stderr'])
+        self.refused_collect()
+
+    def test_a_generation_without_its_own_glog_fails_the_collect(self):
+        (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000100.4343').unlink()
+        self.refused_collect()
+
+    def test_a_log_in_tmp_cannot_stand_in_for_a_stream(self):
+        (self.root / 'tmp' / 'x.stderr').write_text('')
+        self.gen('master-generation.json', 4242, ['master.stdout', 'tmp/x.stderr'])
+        self.refused_collect()
+
+    def test_a_generation_of_another_role_fails_the_collect(self):
+        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stdout', 'master-replacement.stderr'], role='filer')
+        self.refused_collect()
+
+    def test_a_generation_of_another_boot_fails_the_collect(self):
+        self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'], boot_id='other')
+        self.refused_collect()
 
     def test_a_missing_replacement_generation_fails_the_collect(self):
         (self.root / 'master-replacement-generation.json').unlink()
@@ -649,8 +689,8 @@ class SoakCollect(unittest.TestCase):
         with self.assertRaises((ValueError, OSError)):
             profile.soak_collect(self.config)
         self.setUp()
-        self.gen('master-generation.json', 4242, ['../outside.log'])
-        with self.assertRaisesRegex(ValueError, 'outside'):
+        self.gen('master-generation.json', 4242, ['master.stdout', '../outside.stderr'])
+        with self.assertRaisesRegex(ValueError, 'own stdout and stderr'):
             profile.soak_collect(self.config)
         self.setUp()
         saved = profile.LOG_BOUND
