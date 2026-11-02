@@ -312,7 +312,7 @@ func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
 	helpers, _ := filepath.Abs("worker")
 	root := t.TempDir()
 	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: root}},
-		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "boot-1"}}}}
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "boot-1"}, {HostID: "m02", BootID: "boot-2"}}}}
 	argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: helpers}, &SoakPlan{DurationS: 1800, ClientKillAtS: 1320, Layout: AssignLayout{Collection: "lmcache"}})
 	if err != nil {
 		t.Fatal(err)

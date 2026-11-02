@@ -390,9 +390,30 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		}
 		background := act.Action == phases[1] && containsStep(p.Deploy, step.Job)
 		var h tr.JobHandle
-		if h, _, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
+		setup := p.Soak != nil && step.Job == p.Soak.Setup.Job // the first clock sample (decision 3 r6)
+		var t1, t4 float64
+		if setup {
+			if t1, err = controllerMono(); err != nil {
+				s.terminal = err
+				return refusal(act.Action, "OWNED_JOB_FAILED", err)
+			}
+		}
+		var e tr.ExitInfo
+		if h, e, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
 			s.terminal = err
 			return refusal(act.Action, "OWNED_JOB_FAILED", err)
+		}
+		if setup {
+			if t4, err = controllerMono(); err == nil {
+				var row []byte
+				if row, _, err = e.Output.Decode(); err == nil {
+					err = publishClock(runRoot(d, "m01"), "soak-clock-s1.json", d.RunID, row, t1, t4)
+				}
+			}
+			if err != nil {
+				s.terminal = err
+				return refusal(act.Action, "OWNED_JOB_FAILED", err)
+			}
 		}
 		if background {
 			s.jobs[step.Job] = h

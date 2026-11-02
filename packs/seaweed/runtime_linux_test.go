@@ -4,10 +4,12 @@ package seaweed
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +23,8 @@ import (
 
 // Fake only at the transport boundary: no SSH, native import, host or network.
 // The strict records, lease, GO, readback qualification and Engine are real.
+func init() { clockPublish = func(string, []byte) error { return nil } }
+
 type cpuNode struct {
 	mu             sync.Mutex
 	ids            map[string]tr.ProcessIdentity
@@ -80,6 +84,10 @@ func (n *cpuNode) Wait(_ context.Context, id string) (tr.ExitInfo, error) {
 	exit := tr.ExitInfo{Identity: n.ids[id], Code: 0, Settled: true, StdoutPath: s.StdoutPath, StderrPath: s.StderrPath}
 	if s.CaptureOutput && !n.dropOutput {
 		exit.Output = tr.CapturedOutput{Complete: true, StdoutBase64: "e30K", StderrBase64: "", StdoutSHA256: hash([]byte("{}\n")), StderrSHA256: hash(nil), ReadStart: time.Now(), ReadEnd: time.Now()}
+		if slices.Contains(s.Argv, "soak_setup") { // the real job's row carries its paired clock capture
+			row := []byte(`{"clock":{"boot_id":"b","entry_epoch":1793610000,"exit_epoch":1793610001,"entry_mono":7000,"exit_mono":7001}}` + "\n")
+			exit.Output.StdoutBase64, exit.Output.StdoutSHA256 = base64.StdEncoding.EncodeToString(row), hash(row)
+		}
 	}
 	if n.cleanupStopped[id] {
 		exit.Code, exit.Signal, exit.CleanupStopped = -1, 9, true

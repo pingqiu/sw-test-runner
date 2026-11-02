@@ -749,6 +749,9 @@ def soak_setup(config):
 
 
 ROTATED = re.compile(r'rotated non-replicated cache Volume (\d+) collection=(\S+) ')  # r9 soak_server
+EPISODE = ((re.compile(r'Created Volume (\d+) on'), 'birth'), (re.compile(r'Volume (\d+) becomes unwritable'), 'unwritable'),
+           (ROTATED, 'success'))
+STAMP = re.compile(r'[IWEF](\d{4} \d\d:\d\d:\d\d\.\d+)')
 LOG_BOUND, ROTATED_BOUND = 256 << 20, 4000
 
 
@@ -760,8 +763,8 @@ def soak_collect(config):
     whole collect: never a partial answer."""
     layout, _ = soak_layout(config)
     coll, root = layout['collection'], private_root(config)
-    sources, rotated = [], {}
-    for name in ('master-generation.json', 'master-replacement-generation.json'):
+    sources, rotated, events = [], {}, {}
+    for order, name in enumerate(('master-generation.json', 'master-replacement-generation.json')):
         if not (root / name).exists():
             continue
         gen = json.loads((root / name).read_text())
@@ -776,17 +779,26 @@ def soak_collect(config):
                 if not stat.S_ISREG(st.st_mode) or st.st_size > LOG_BOUND:
                     raise ValueError('master log type/bound: ' + file.name)
                 for raw in f:
-                    m = ROTATED.search(raw.decode('utf-8', 'replace'))
+                    text = raw.decode('utf-8', 'replace').strip()
+                    m = ROTATED.search(text)
                     if m and m.group(2) == coll:
-                        rotated.setdefault(int(m.group(1)), raw.decode('utf-8', 'replace').strip()[:300])
+                        rotated.setdefault(int(m.group(1)), text[:300])
                         if len(rotated) > ROTATED_BOUND:
                             raise ValueError('rotation lines over bound')
+                    when = STAMP.match(text)
+                    for pattern, kind in EPISODE if when else ():
+                        m = pattern.search(text)
+                        if m:  # one physical line in stderr and glog is one event (decision 3 r6 section 3)
+                            events.setdefault(text[:300], dict(kind=kind, vid=int(m.group(1)), stamp=when.group(1), gen=order, line=text[:300]))
+                            if len(events) > ROTATED_BOUND:
+                                raise ValueError('episode lines over bound')
+                            break
             sources.append(dict(path=str(file), bytes=st.st_size))
     if not sources:
         raise ValueError('no master generation logs')
     dat = sorted({int(p.name.split('_')[-1].split('.')[0]) for p in (root / 'volume').glob(coll + '_*.dat')})
     return dict(status='SOAK_COLLECTED', collection=coll, sources=sources, dat_vids=dat,
-                rotated=[dict(vid=v, line=l) for v, l in sorted(rotated.items())])
+                rotated=[dict(vid=v, line=l) for v, l in sorted(rotated.items())], events=list(events.values()))
 
 
 def collect(config):
@@ -806,7 +818,12 @@ def collect(config):
                 resource_gate='NOT_ASSESSED_SMOKE_ONLY')
 
 
+def clock_stamp():
+    return time.time(), time.monotonic()
+
+
 def main():
+    entry = clock_stamp()  # decision 3 r6: first and last statements, so a job's residence leaves the bracket
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'soak_setup', 'soak_collect', 'collect'), required=True)
@@ -846,6 +863,9 @@ def main():
         row = soak_setup(config)
     else:
         row = collect(config)
+    if args.action in ('soak_setup', 'soak_collect'):
+        leave = clock_stamp()
+        row['clock'] = dict(boot_id=config['boot_id'], entry_epoch=entry[0], exit_epoch=leave[0], entry_mono=entry[1], exit_mono=leave[1])
     print(json.dumps(row, sort_keys=True), flush=True)
 
 

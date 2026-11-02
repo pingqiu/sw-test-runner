@@ -3,7 +3,7 @@ criterion from the run's own evidence files, never from the load's summary.
 Reuses soak_oracle (write/ack replay, Version.matches), soak_native_worker.payload
 (digests) and soak_load's strict reader, classifiers and poll format. Prints one
 bounded verdict row bound to its run; resources are NOT_OBSERVED by ruling."""
-import argparse, json, math, sys, types
+import argparse, datetime, json, math, sys, types
 from pathlib import Path
 
 if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protected sibling, which pins its own
@@ -20,6 +20,7 @@ SCHEMA = 'seaweed-soak-verdict/1'
 MANDATORY = ('wrong_reads', 'failed_sets', 'get_outcomes', 'terminal', 'fault_errors', 'misses', 'coverage', 'body',
              'client_kill', 'rotation', 'max_vid_advanced', 'routes')  # Go's soakCriteria, same set
 FILE, LINE, ROWS, OBJECT = 64 << 20, 64 << 10, 200000, 4 << 20
+CLOCK_CEILING_S, CLOCK_ANOMALY_S = 2.0, 0.1  # owner-chosen and frozen (decision 3 r6): never raised to pass misses
 COUNTERS = ('direct_dc_reads', 'direct_rc_reads', 'copied_reads')
 
 
@@ -70,27 +71,90 @@ def get_case(e):
     return case
 
 
-def miss_excused(e, version, ack, good, polls, rotated, dat):
-    """Decision 3, per miss: the latest-ACK version, and for each of its VIDs an uninterrupted writable-exit
-    candidate around the miss, no gap > 6 s, no VID reuse anywhere later, the M02 rotation line and no .dat."""
+def clock_bracket(c, s1, s2):
+    """Decision 3 r6 section 2: the M02-epoch-minus-M01-mono offset interval from paired samples in two jobs. Holds only
+    under the conditional claim: the offset moved monotonically, or within the bracket, between the samples."""
+    bounds = []
+    for row in (s1, s2):
+        typed(row, boot_id=str, run_id=str, t1=float, t4=float, entry_epoch=float, exit_epoch=float, entry_mono=float, exit_mono=float)
+        if row['boot_id'] != c['m02_boot_id'] or row['run_id'] != c['run_id']:
+            raise ValueError('clock sample is foreign')
+        residence = row['exit_mono'] - row['entry_mono']
+        d = row['t4'] - row['t1'] - residence
+        if not (row['t1'] < row['t4'] and row['entry_epoch'] <= row['exit_epoch'] and residence >= 0 and d > 0):
+            raise ValueError('clock sample is unordered')
+        if abs(row['exit_epoch'] - row['entry_epoch'] - residence) > CLOCK_ANOMALY_S:
+            raise ValueError('M02 epoch and mono disagree during a sample')
+        bounds += [row['entry_epoch'] - row['t1'] - d, row['entry_epoch'] - row['t1']]
+    if not s1['t4'] < s2['t1']:
+        raise ValueError('clock samples do not bracket the body')
+    if abs(s2['entry_epoch'] - s1['entry_epoch'] - (s2['entry_mono'] - s1['entry_mono'])) > CLOCK_ANOMALY_S:
+        raise ValueError('M02 epoch and mono disagree between samples')
+    lo, hi = min(bounds), max(bounds)
+    if hi - lo > CLOCK_CEILING_S:
+        raise ValueError('clock bracket over the ceiling')
+    return lo, hi
+
+
+def log_instants(stamp, begin, end):
+    """A year-less glog stamp: the distinct instants, under the samples' years, inside the samples' span."""
+    out = set()
+    for moment in (begin, end):
+        year = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).year
+        t = datetime.datetime.strptime('%d%s' % (year, stamp), '%Y%m%d %H:%M:%S.%f').replace(tzinfo=datetime.timezone.utc).timestamp()
+        if begin <= t <= end:
+            out.add(t)
+    return sorted(out)
+
+
+def rotation_starts(events, begin, end):
+    """Per VID, M02 epoch of the last distinct unwritable line of its one matched episode. A VID with any ambiguous,
+    out-of-order or reused history is left out, so its misses refuse. The line is generic, not a rotation dispatch."""
+    by_line, refused = {}, set()
+    for e in events:
+        typed(e, kind=str, vid=int, stamp=str, gen=int, line=str)
+        seen = by_line.setdefault(e['line'], e)
+        if (seen['kind'], seen['vid'], seen['stamp']) != (e['kind'], e['vid'], e['stamp']):
+            refused.add(e['vid'])
+    per = {}
+    for e in by_line.values():
+        instants = log_instants(e['stamp'], begin, end)
+        if len(instants) != 1 or e['kind'] not in ('birth', 'unwritable', 'success'):
+            refused.add(e['vid'])
+            continue
+        per.setdefault(e['vid'], []).append((instants[0], e['gen'], e['kind']))
+    starts = {}
+    for vid, rows in per.items():
+        rows.sort()
+        kinds = [k for _, _, k in rows]
+        if vid in refused or kinds.count('success') != 1 or kinds[-1] != 'success' or 'unwritable' not in kinds:
+            continue  # an event after the success, including a birth (VID reuse), lands here too
+        at = [t for t, _, _ in rows]
+        gens = [g for _, g, _ in rows]
+        if len(set(at)) != len(at) or gens != sorted(gens):
+            continue
+        last = kinds.index('birth') if kinds.count('birth') == 1 else None
+        if kinds.count('birth') > 1 or (last is not None and kinds[0] != 'birth'):
+            continue
+        starts[vid] = max(t for t, _, k in rows if k == 'unwritable')
+    return starts
+
+
+def miss_excused(e, version, ack, good, starts, lo, hi, dat):
+    """Decision 3 r6, per miss: qualified observed ordering in M01 mono, not a retirement proof and not parity."""
     for vid in {int(fid.split(',')[0]) for fid in version.fids}:
-        w = [p for p in good if p['req'] >= ack['completed'] and vid in p['writables']]
-        if not w:
+        if vid not in starts or vid in dat:
             return False
-        after = [p for p in good if w[-1]['req'] < p['req'] <= e['submitted'] + 25]
-        unw = next((p for p in after if vid in p['present'] and vid not in p['writables']), None)
-        if not unw or unw['done'] > e['submitted']:
+        early, late = starts[vid] - hi, starts[vid] - lo
+        if not ack['completed'] < early or not e['submitted'] > late:  # J3, J4
             return False
-        tail = [p for p in polls if w[-1]['req'] <= p['req'] <= e['completed'] + 25]
-        if any(not p['ok'] for p in tail) or any(vid in p['writables'] for p in tail if p['ok'] and p['req'] > unw['req']):
+        after = [p for p in good if p['req'] > late]
+        if any(vid in p['writables'] for p in after):  # J5
             return False
-        gone = next((p for p in tail if p['ok'] and vid not in p['present']), None)
-        stamps = [p['req'] for p in tail if p['ok']]
-        if not gone or gone['done'] > e['completed'] + 25 or any(b - a > 6 for a, b in zip(stamps, stamps[1:])):
+        gone = next((p for p in after if vid not in p['present']), None)
+        if not gone or gone['done'] > e['completed'] + 25:  # J6: successful polls only; a failed reply is no evidence
             return False
-        if any(vid in p['present'] for p in good if p['req'] > gone['req']):  # VID reuse: never excusable
-            return False
-        if vid not in rotated or vid in dat:
+        if any(vid in p['present'] for p in after if p['req'] > gone['req']):  # J7
             return False
     return True
 
@@ -205,14 +269,22 @@ def assess(c):
             bad.append(e['op'])
     mark('fault_errors', not bad, 'uncredited %s' % bad[:10])
 
-    # Misses: the accepted per-miss causal join (decision 3), never a global retirement set.
+    # Misses: the accepted per-miss join (decision 3 r6), never a global retirement set.
     rotated = {typed(r, vid=int)['vid'] for r in m02['rotated']}
     dat = set(m02['dat_vids'])
+    try:
+        s1, s2 = obj(root, 'soak-clock-s1.json'), obj(root, 'soak-clock-s2.json')
+        lo, hi = clock_bracket(c, s1, s2)
+        starts = rotation_starts(typed(m02, events=list)['events'], s1['entry_epoch'], s2['exit_epoch'])
+        starts = {v: t for v, t in starts.items() if v in rotated}
+        clock_error = ''
+    except (ValueError, OSError) as error:  # no usable clock evidence: every miss stays unexcused
+        lo, hi, starts, clock_error = 0, 0, {}, '; clock: %s' % str(error)[:120]
     def excused(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
-        return bool(v) and latest == v and miss_excused(e, v, a, good, polls, rotated, dat)
+        return bool(v) and latest == v and miss_excused(e, v, a, good, starts, lo, hi, dat)
     unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
-    mark('misses', not unexcused, '%d misses, unexcused %s' % (len(misses), unexcused[:10]))
+    mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
     writers, keys = {}, {}

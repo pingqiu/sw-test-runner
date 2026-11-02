@@ -2,6 +2,7 @@
 run, then negatives. Each negative is a PLAUSIBLE fake PASS (codex01's method):
 evidence that looks whole but lies about one criterion, and must fail exactly it."""
 import copy
+import datetime
 import hashlib
 import json
 import os
@@ -17,7 +18,29 @@ from soak_native_worker import payload
 from soak_stats import boot_id
 
 ROT = list(range(20, 31))  # 11 rotated volumes
+M02_BOOT = 'm02-boot'
+EPOCH = 1793610000.0  # M02 wall clock at M01 mono 0 in the fixture: offset M02 epoch minus M01 mono
+
+
+def stamp(mono, offset=EPOCH):
+    t = datetime.datetime.fromtimestamp(mono + offset, datetime.timezone.utc)
+    return t.strftime('%m%d %H:%M:%S.%f')
+
+
+def line(kind, vid, mono, gen=0, offset=EPOCH):
+    text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'success': 'rotated non-replicated cache Volume %d collection=lmcache'}[kind]
+    return dict(kind=kind, vid=vid, stamp=stamp(mono, offset), gen=gen, line=stamp(mono, offset) + ' ' + text % vid)
+
+
+def sample(t1, t4, entry_mono, residence, offset=EPOCH):
+    return dict(boot_id=M02_BOOT, run_id='run-1', t1=t1, t4=t4, entry_epoch=entry_mono + offset, exit_epoch=entry_mono + residence + offset,
+                entry_mono=5000.0 + entry_mono, exit_mono=5000.0 + entry_mono + residence)
 HERE = Path(__file__).resolve().parent
+
+
+class MissVersion:
+    def __init__(self, fids):
+        self.fids = fids
 
 
 def digest(seed, length):
@@ -70,7 +93,10 @@ def evidence():
              'fault-ack-E1.json': dict(run_id='run-1', boot_id=boot, episode='E1', role='volume', observed_mono=1479,
                                        pending_gets=[dict(op=g9['op'], submitted=g9['dispatched'])]),
              'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[],
-                                      rotated=[dict(vid=v, line='rotated non-replicated cache Volume %d' % v) for v in ROT]),
+                                      rotated=[dict(vid=v, line='rotated non-replicated cache Volume %d' % v) for v in ROT],
+                                      events=[e for v in ROT for e in (line('birth', v, 995), line('unwritable', v, unw[v]), line('success', v, unw[v] + 10))]),
+             # S1 wraps a 10 s setup: paired capture removes its residence from the width.
+             'soak-clock-s1.json': sample(980, 990.2, 980.1, 10), 'soak-clock-s2.json': sample(2870, 2870.2, 2870.1, 0),
              'workers.json': {str(i): dict(pid=10 + i, starttime=1, transport='http' if i == 3 else 'dc') for i in range(4)}}
     stats = {}
     for pid, dc in ((10, True), (11, True), (12, True), (13, False), (77, True)):
@@ -81,7 +107,7 @@ def evidence():
 
 
 def config(root):
-    return dict(schema=soak_assess.SCHEMA, root=str(root), run_id='run-1', boot_id=boot_id(), duration_s=1800,
+    return dict(schema=soak_assess.SCHEMA, root=str(root), run_id='run-1', boot_id=boot_id(), m02_boot_id=M02_BOOT, duration_s=1800,
                 quiescence_s=60, client_kill_at_s=1320, collection='lmcache')
 
 
@@ -194,26 +220,259 @@ class SoakAssess(unittest.TestCase):
             p['writables'] = sorted(set(p['writables']) | {20})
         self.mutate(ch, 'misses')
 
-    def test_a_fresh_candidate_after_an_earlier_return_to_writable_still_excuses(self):
-        ev = evidence()  # writable again at 1156, unwritable again at 1158, miss at 1160: a fresh candidate
-        p = next(p for p in ev['polls'] if p['req'] == 1156)
-        p['writables'] = sorted(set(p['writables']) | {20})
+    def collected(self, ev):
+        return ev['files']['m02-collect.json']
+
+    def passes(self, change):
+        ev = evidence()
+        change(ev)
         row = self.run_on(ev)
         self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
 
-    def test_miss_with_a_failed_poll_in_its_window(self):
+    def test_a_later_unwritable_line_after_a_return_to_writable_still_excuses(self):
+        def ch(ev):  # writable again at 1156, a new unwritable line at 1157, miss at 1160
+            p = next(p for p in ev['polls'] if p['req'] == 1156)
+            p['writables'] = sorted(set(p['writables']) | {20})
+            self.collected(ev)['events'].append(line('unwritable', 20, 1157))
+        self.passes(ch)
+
+    def test_a_failed_poll_is_no_evidence_either_way(self):
         def ch(ev):
             p = next(p for p in ev['polls'] if p['req'] == 1162)
             p.update(ok=False)
             del p['present'], p['writables']
+        self.passes(ch)
+
+    def test_a_poll_gap_alone_does_not_refuse_under_the_clock_rule(self):
+        self.passes(lambda ev: ev.update(polls=[p for p in ev['polls'] if not 1150 < p['req'] < 1160]))
+
+    # Decision 3 r6, section 5.
+    def test_ack_at_or_after_the_selected_transition(self):
+        def ch(ev):
+            a = next(a for a in ev['acks'] if a['key'] == 'm')
+            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
+            a.update(submitted=1150.5, completed=1151)
+            e.update(dispatched=1150.4, submitted=1150.5, completed=1151)
         self.mutate(ch, 'misses')
 
-    def test_miss_with_a_poll_gap(self):
-        self.mutate(lambda ev: ev.update(polls=[p for p in ev['polls'] if not 1150 < p['req'] < 1160]), 'misses')
+    def test_ack_inside_the_bracket(self):
+        def ch(ev):
+            a = next(a for a in ev['acks'] if a['key'] == 'm')
+            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
+            a.update(submitted=1149.95, completed=1150.0)
+            e.update(dispatched=1149.9, submitted=1149.95, completed=1150.0)
+        self.mutate(ch, 'misses')
+
+    def test_miss_inside_the_bracket(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1149.99, submitted=1150.0, completed=1150.1), 'misses')
+
+    def test_a_straddling_get_submitted_before_and_completed_after_the_start(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1148.9, submitted=1149, completed=1151), 'misses')
+
+    def test_miss_between_two_unwritable_lines(self):  # volume 19's shape in r5: an earlier line must not excuse it
+        self.mutate(lambda ev: self.collected(ev)['events'].append(line('unwritable', 20, 1165)), 'misses')
+
+    def test_no_start_line(self):
+        def ch(ev):
+            c = self.collected(ev)
+            c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == 'unwritable')]
+        self.mutate(ch, 'misses')
+
+    def test_no_success_line(self):
+        def ch(ev):
+            c = self.collected(ev)
+            c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == 'success')]
+        self.mutate(ch, 'misses')
+
+    def test_an_event_after_the_success(self):
+        self.mutate(lambda ev: self.collected(ev)['events'].append(line('unwritable', 20, 1170)), 'misses')
+
+    def test_equal_time_start_and_success(self):
+        def ch(ev):
+            c = self.collected(ev)
+            for e in c['events']:
+                if e['vid'] == 20 and e['kind'] == 'success':
+                    e.update(line('success', 20, 1150))
+        self.mutate(ch, 'misses')
+
+    def test_vid_reuse_by_a_birth_after_the_success(self):
+        self.mutate(lambda ev: self.collected(ev)['events'].append(line('birth', 20, 1400)), 'misses')
+
+    def test_a_generation_out_of_time_order(self):
+        def ch(ev):
+            c = self.collected(ev)
+            for e in c['events']:
+                if e['vid'] == 20:
+                    e['gen'] = 1 if e['kind'] == 'unwritable' else 0
+        self.mutate(ch, 'misses')
+
+    def test_a_line_in_two_sources_counts_once(self):
+        def ch(ev):
+            c = self.collected(ev)
+            c['events'] += [dict(e) for e in c['events'] if e['vid'] == 20]
+        self.passes(ch)
+
+    def test_a_differing_duplicate_is_refused(self):
+        def ch(ev):
+            c = self.collected(ev)
+            e = next(e for e in c['events'] if e['vid'] == 20 and e['kind'] == 'unwritable')
+            c['events'].append(dict(e, stamp=stamp(1149)))
+        self.mutate(ch, 'misses')
+
+    def test_success_with_the_glog_tail_lost_only_needs_one_source(self):  # volume 21's shape in r5
+        self.passes(lambda ev: self.collected(ev)['events'].sort(key=lambda e: e['vid']))
+
+    def test_a_log_date_outside_the_samples(self):
+        def ch(ev):
+            c = self.collected(ev)
+            for e in c['events']:
+                if e['vid'] == 20 and e['kind'] == 'unwritable':
+                    e['stamp'] = '0101 00:00:00.000000'
+        self.mutate(ch, 'misses')
+
+    def test_year_crossover_has_one_instant(self):
+        self.assertEqual(soak_assess.log_instants('0101 00:00:01.000000', 1798761600.0 - 60, 1798761600.0 + 60), [1798761601.0])
+
+    def test_same_year_at_both_samples_is_one_instant_not_ambiguity(self):
+        self.assertEqual(len(soak_assess.log_instants(stamp(1000), EPOCH + 900, EPOCH + 2900)), 1)
+
+    def test_distinct_candidate_instants_are_ambiguous(self):  # a window over a year wide: not a real run
+        begin = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+        end = datetime.datetime(2027, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(len(soak_assess.log_instants('0301 00:00:00.000000', begin, end)), 2)
+
+    def test_a_failed_reply_is_not_absence(self):
+        def ch(ev):
+            for p in ev['polls']:  # the only absent replies inside miss+25 s fail, so absence is first proven too late
+                if 1170 <= p['req'] <= 1186:
+                    p.update(ok=False)
+                    del p['present'], p['writables']
+        self.mutate(ch, 'misses')
+
+    def test_absence_too_late(self):
+        def ch(ev):
+            for p in ev['polls']:
+                if p['req'] <= 1190 and p['req'] > 1150:
+                    p['present'] = sorted(set(p['present']) | {20})
+        self.mutate(ch, 'misses')
+
+    def test_reappearance_after_absence(self):
+        def ch(ev):
+            p = next(p for p in ev['polls'] if p['req'] == 1300)
+            p['present'] = sorted(set(p['present']) | {20})
+        self.mutate(ch, 'misses')
+
+    def test_a_later_failed_poll_after_absence_does_not_refuse(self):
+        def ch(ev):
+            p = next(p for p in ev['polls'] if p['req'] == 1902)
+            p.update(ok=False)
+            del p['present'], p['writables']
+        self.passes(ch)
+
+    # Clock evidence (section 2): any of these leaves every miss unexcused.
+    def test_s2_missing(self):
+        self.mutate(lambda ev: ev['files'].pop('soak-clock-s2.json'), 'misses')
+
+    def test_s1_only_is_r9s_shape(self):
+        self.mutate(lambda ev: ev['files'].update({'soak-clock-s2.json': ev['files']['soak-clock-s1.json']}), 'misses')
+
+    def test_bracket_over_the_ceiling(self):
+        self.mutate(lambda ev: ev['files'].update({'soak-clock-s2.json': sample(2870, 2873, 2871, 0)}), 'misses')
+
+    def test_long_setup_residence_without_the_pair_is_refused_by_the_ceiling(self):
+        self.mutate(lambda ev: ev['files'].update({'soak-clock-s1.json': sample(980, 990.2, 985, 0)}), 'misses')
+
+    def test_foreign_m02_boot(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s1.json'].update(boot_id='other'), 'misses')
+
+    def test_foreign_run(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s2.json'].update(run_id='other'), 'misses')
+
+    def test_an_unordered_pair(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s1.json'].update(t4=970), 'misses')
+
+    def test_epoch_vs_mono_skew_during_a_job(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s1.json'].update(exit_epoch=ev['files']['soak-clock-s1.json']['exit_epoch'] + 0.5), 'misses')
+
+    def test_a_net_step_between_samples(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s2.json'].update(entry_mono=ev['files']['soak-clock-s2.json']['entry_mono'] + 0.5,
+                                                                       exit_mono=ev['files']['soak-clock-s2.json']['exit_mono'] + 0.5), 'misses')
+
+    def test_an_epoch_value_in_a_mono_field(self):
+        self.mutate(lambda ev: ev['files']['soak-clock-s1.json'].update(t1=EPOCH), 'misses')
+
+    # Each of these is the only check that can refuse (mutation-verified).
+    def test_dat_still_on_disk_refuses_the_miss(self):  # J8; vid 20 stays out of rotation's proven set via its own margin
+        def ch(ev):
+            c = self.collected(ev)
+            c['dat_vids'] = [20]
+        ev = evidence()
+        ch(ev)
+        self.assertIn('misses', self.failing(self.run_on(ev)))
+        self.assertFalse(soak_assess.miss_excused(dict(submitted=1160, completed=1160.1), MissVersion(['20,ab']), dict(completed=1100),
+                                                  [dict(req=1170, done=1170.1, writables=[], present=[])], {20: EPOCH + 1150}, EPOCH - .1, EPOCH + .1, {20}))
+        self.assertTrue(soak_assess.miss_excused(dict(submitted=1160, completed=1160.1), MissVersion(['20,ab']), dict(completed=1100),
+                                                 [dict(req=1170, done=1170.1, writables=[], present=[])], {20: EPOCH + 1150}, EPOCH - .1, EPOCH + .1, set()))
+
+    def ledger(self, *rows, begin=EPOCH + 900, end=EPOCH + 2900):
+        return soak_assess.rotation_starts(list(rows), begin, end)
+
+    def test_ledger_positive(self):
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('unwritable', 20, 1150), line('success', 20, 1160)), {20: EPOCH + 1150})
+
+    def test_ledger_no_unwritable_line_leaves_the_vid_out(self):
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('success', 20, 1160)), {})
+
+    def test_ledger_an_event_after_the_success_leaves_the_vid_out(self):
+        self.assertEqual(self.ledger(line('unwritable', 20, 1150), line('success', 20, 1160), line('unwritable', 20, 1161)), {})
+
+    def test_ledger_equal_times_leave_the_vid_out(self):
+        self.assertEqual(self.ledger(line('birth', 20, 1150), line('unwritable', 20, 1150), line('success', 20, 1160)), {})
+
+    def test_ledger_an_ambiguous_date_leaves_the_vid_out(self):
+        begin = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+        end = datetime.datetime(2027, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
+        row = dict(kind='unwritable', vid=20, stamp='0301 00:00:00.000000', gen=0, line='a')
+        done = dict(kind='success', vid=20, stamp='1001 00:00:00.000000', gen=0, line='b')
+        self.assertEqual(self.ledger(row, done, begin=begin, end=end), {})
+
+    def test_clock_an_unordered_sample_alone_refuses(self):
+        s2 = sample(2870, 2870.2, 2870.1, 0)
+        c = dict(m02_boot_id=M02_BOOT, run_id='run-1')
+        self.assertEqual(soak_assess.clock_bracket(c, sample(980, 980.2, 980.1, 0), s2)[1] > 0, True)
+        with self.assertRaisesRegex(ValueError, 'unordered'):
+            soak_assess.clock_bracket(c, sample(980, 979.9, 980, 0), s2)
+
+    def test_clock_samples_must_bracket_the_body(self):
+        s1 = sample(980, 980.2, 980.1, 0)
+        with self.assertRaisesRegex(ValueError, 'bracket the body'):
+            soak_assess.clock_bracket(dict(m02_boot_id=M02_BOOT, run_id='run-1'), s1, s1)
+
+    # Documented, NOT refused: known limits of the qualified observed ordering (decision 3 r6 sections 0 and 5).
+    def test_LIMIT_an_out_and_back_offset_excursion_is_accepted(self):
+        def ch(ev):  # the true start is 1160.5 on M01, logged 1 s early as 1159.5: the miss at 1160 falsely appears after it
+            c = self.collected(ev)
+            for e in c['events']:
+                if e['vid'] == 20 and e['kind'] == 'unwritable':
+                    e.update(line('unwritable', 20, 1159.5))
+            for p in ev['polls']:
+                if p['req'] == 1158:
+                    p['writables'] = sorted(set(p['writables']) | {20})
+        self.passes(ch)
+
+    def test_LIMIT_an_ack_after_an_earlier_actual_rotation_is_accepted(self):
+        def ch(ev):  # rotation really began at 1140 (no line), ACK 1149, selected unwritable line 1150, miss 1160
+            a = next(a for a in ev['acks'] if a['key'] == 'm')
+            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
+            a.update(submitted=1148.9, completed=1149)
+            e.update(dispatched=1148.8, submitted=1148.9, completed=1149)
+        self.passes(ch)
 
     def test_miss_without_the_m02_rotation_line(self):
         def ch(ev):
-            ev['files']['m02-collect.json']['rotated'] = [r for r in ev['files']['m02-collect.json']['rotated'] if r['vid'] != 20] + [dict(vid=31, line='x')]
+            c = ev['files']['m02-collect.json']
+            c['rotated'] = [r for r in c['rotated'] if r['vid'] != 20] + [dict(vid=31, line='x')]
+            c['events'] = [e for e in c['events'] if e['vid'] != 20]
         self.mutate(ch, 'misses')
 
     def test_miss_of_a_stale_version(self):

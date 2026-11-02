@@ -596,6 +596,23 @@ class SoakCollect(unittest.TestCase):
         self.assertEqual(row['dat_vids'], [3, 7])
         self.assertEqual(len(row['sources']), 4)
 
+    def test_episode_events_read_both_streams_and_count_a_line_once(self):
+        stamped = 'I1102 09:25:16.146813 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 21 collection=lmcache bytes=1\n'
+        start = 'I1102 09:24:16.000001 volume_layout.go:1270 Volume 21 becomes unwritable\n'
+        birth = 'I1102 09:10:16.000002 x.go:1 Created Volume 21 on topo\n'
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write(birth + start + stamped)
+        with (self.root / 'master-replacement.stderr').open('a') as f:
+            f.write(start)  # a later copy of one physical line: one event
+        ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 21]
+        self.assertEqual(sorted((e['kind'], e['stamp'], e['gen']) for e in ev), [
+            ('birth', '1102 09:10:16.000002', 0), ('success', '1102 09:25:16.146813', 0), ('unwritable', '1102 09:24:16.000001', 0)])
+
+    def test_a_line_without_a_stamp_is_no_episode_event(self):
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write('Volume 22 becomes unwritable\n')
+        self.assertEqual([e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 22], [])
+
     def test_a_foreign_symlinked_or_unbounded_log_fails_closed(self):
         (self.root / 'master.stderr').rename(self.root / 'real.stderr')
         (self.root / 'master.stderr').symlink_to(self.root / 'real.stderr')

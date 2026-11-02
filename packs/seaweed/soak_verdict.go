@@ -56,7 +56,11 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID,
+	m02 := observedBoot(d, "m02")
+	if m02 == "" {
+		return nil, errors.New("soak assessor needs the admitted M02 boot")
+	}
+	raw, err := json.Marshal(map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID, "m02_boot_id": m02,
 		"duration_s": x.DurationS, "quiescence_s": int(QuiescenceReserve.Seconds()), "client_kill_at_s": x.ClientKillAtS,
 		"collection": x.Layout.Collection})
 	return []string{"-I", path.Join(s.HelperDir, "soak_assess.py"), "--config", string(raw)}, err
@@ -169,7 +173,15 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err != nil {
 		return v, err
 	}
+	t1, err := controllerMono()
+	if err != nil {
+		return v, err
+	}
 	_, e, err := a.RunApprovedPackJob(ctx, p.Soak.Evidence.Job, false)
+	if err != nil {
+		return v, err
+	}
+	t4, err := controllerMono()
 	if err != nil {
 		return v, err
 	}
@@ -181,6 +193,9 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 		return v, errors.New("soak M02 evidence failed, truncated or malformed")
 	}
 	if err = publishEvidence(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
+		return v, err
+	}
+	if err = publishClock(want.Root, "soak-clock-s2.json", want.RunID, m02, t1, t4); err != nil {
 		return v, err
 	}
 	if _, e, err = a.RunApprovedPackJob(ctx, p.Soak.Assess.Job, false); err != nil {
