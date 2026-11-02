@@ -777,6 +777,17 @@ def soak_collect(config):
         streams = sorted(Path(x).suffix for x in gen['logs'])
         if streams != ['.stderr', '.stdout'] or any(Path(x).parent != root for x in gen['logs']):
             raise ValueError('master generation must list its own stdout and stderr')
+        # Bind by content: launch() printed this generation's exact identity into its own capture before exec.
+        stdout = next(x for x in gen['logs'] if x.endswith('.stdout'))
+        fd = os.open(stdout, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as f:
+            row = f.readline(1 << 20)
+        try:
+            row = json.loads(row)
+        except ValueError:
+            raise ValueError('master capture has no exec row') from None
+        if not isinstance(row, dict) or row.get('event') != 'PRODUCT_EXEC' or any(row.get(k) != gen.get(k) for k in ('pid', 'role', 'boot_id', 'logs')):
+            raise ValueError('master capture belongs to another generation')
         glogs = sorted(p for p in (root / 'tmp').iterdir() if '.log.INFO.' in p.name and p.name.endswith('.%d' % pid))
         if not glogs:  # one generation's sources cannot stand in for another's
             raise ValueError('master generation has no glog')

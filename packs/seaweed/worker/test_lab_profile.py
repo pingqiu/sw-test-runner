@@ -589,8 +589,12 @@ class SoakCollect(unittest.TestCase):
             (self.root / 'volume' / name).write_bytes(b'')
         self.config = dict(root=str(self.root), boot_id='boot-m02', soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2))
 
-    def gen(self, name, pid, logs, **kw):
-        (self.root / name).write_text(json.dumps(dict(dict(pid=pid, logs=[str(self.root / x) for x in logs], role='master', boot_id='boot-m02'), **kw)))
+    def gen(self, name, pid, logs, exec_row=True, **kw):
+        record = dict(dict(pid=pid, logs=[str(self.root / x) for x in logs], role='master', boot_id='boot-m02'), **kw)
+        (self.root / name).write_text(json.dumps(record))
+        out = [x for x in logs if x.endswith('.stdout')]
+        if exec_row and out and (self.root / out[0]).parent == self.root:  # the row launch() prints into its own capture
+            (self.root / out[0]).write_text(json.dumps(dict(event='PRODUCT_EXEC', **record)) + '\n')
 
     def test_rotations_of_this_runs_master_generations_and_dat_ids(self):
         row = profile.soak_collect(self.config)
@@ -646,6 +650,32 @@ class SoakCollect(unittest.TestCase):
 
     def test_a_generation_of_another_boot_fails_the_collect(self):
         self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'], boot_id='other')
+        self.refused_collect()
+
+    # codex01 review 9d2eab42: a generation's capture is bound by the PRODUCT_EXEC row it printed there.
+    def test_a_replacement_listing_the_originals_captures_fails_the_collect(self):
+        self.gen('master-replacement-generation.json', 4343, ['master.stdout', 'master.stderr'], exec_row=False)
+        self.refused_collect()
+
+    def test_same_root_files_of_no_generation_fail_the_collect(self):
+        for n in ('fs-configure.stdout', 'fs-configure.stderr'):
+            (self.root / n).write_text('')
+        self.gen('master-replacement-generation.json', 4343, ['fs-configure.stdout', 'fs-configure.stderr'], exec_row=False)
+        self.refused_collect()
+
+    def test_a_foreign_stderr_beside_the_right_stdout_fails_the_collect(self):
+        record = json.loads((self.root / 'master-replacement-generation.json').read_text())
+        record['logs'][1] = str(self.root / 'master.stderr')
+        (self.root / 'master-replacement-generation.json').write_text(json.dumps(record))
+        self.refused_collect()
+
+    def test_an_exec_row_of_another_role_fails_the_collect(self):
+        record = json.loads((self.root / 'master-generation.json').read_text())
+        (self.root / 'master.stdout').write_text(json.dumps(dict(record, event='PRODUCT_EXEC', role='filer')) + '\n')
+        self.refused_collect()
+
+    def test_a_stdout_without_an_exec_row_fails_the_collect(self):
+        (self.root / 'master.stdout').write_text('noise\n')
         self.refused_collect()
 
     def test_a_missing_replacement_generation_fails_the_collect(self):
