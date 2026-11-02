@@ -78,9 +78,9 @@ def child(pipe,config):
     conn=SeaweedKVConnector(config['filer_grpc'],backing,4,json.dumps(config['native_options']))
     import threading
     from pathlib import Path
-    from soak_series import native_stats
+    from soak_stats import native_stats
     recorder_stop=threading.Event()
-    recorder=threading.Thread(target=native_stats,args=(conn,Path(config['root']),recorder_stop),daemon=True)
+    recorder=threading.Thread(target=native_stats,args=(conn,Path(config['root']),recorder_stop,config['stats_horizon_s']),daemon=True)
     recorder.start()
     pipe.send(dict(event='ready',pid=os.getpid(),stats=json.loads(conn.stats_json()),backing=backing))
     try:

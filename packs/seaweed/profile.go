@@ -35,6 +35,7 @@ type ProfileConfig struct {
 	// Soak plans only (lab_profile.py master_toml / ready_assign); absent otherwise.
 	Rotation    *Rotation     `json:"rotation,omitempty"`
 	ReadyAssign *AssignLayout `json:"ready_assign,omitempty"`
+	SoakSetup   *SoakSetup    `json:"soak_setup,omitempty"`
 }
 
 func checkProfile(j tr.JobPin, in tr.PackInputs, d *inventory.Document, host, action, role string, s SmokeSettings) error {
@@ -67,7 +68,7 @@ func checkProfile(j tr.JobPin, in tr.PackInputs, d *inventory.Document, host, ac
 }
 
 func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettings, files map[string]string) ([]string, error) {
-	if d == nil || d.State != "resolved" || d.Transport != "dc" || d.Observation == nil || len(d.Hosts) != 2 || !slices.Contains([]string{"preflight", "deploy", "ready", "collect"}, action) {
+	if d == nil || d.State != "resolved" || d.Transport != "dc" || d.Observation == nil || len(d.Hosts) != 2 || !slices.Contains([]string{"preflight", "deploy", "ready", "collect", "soak_setup"}, action) || (action == "soak_setup" && (host != "m02" || s.soakSetup == nil)) {
 		return nil, errors.New("M01/M02 DC profile only")
 	}
 	release := path.Dir(s.HelperDir)
@@ -94,6 +95,9 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 		return nil, errors.New("profile host/role/device mismatch")
 	}
 	c := ProfileConfig{Host: host, Root: h.RunRoot, Deadline: d.Deadlines.Work, Device: h.RDMA.Device, Port: h.RDMA.Port, GIDIndex: *h.RDMA.GIDIndex, Address: h.Data.Address, NIC: h.Data.NIC, MTU: h.Data.MTU, ActiveMTU: h.RDMA.ActiveMTU, Roles: h.Roles, Services: map[string]int{}, ServerServices: map[string]int{}, ServerAddress: server.Data.Address, Release: release, Products: map[string]string{}, Rotation: s.rotation, ReadyAssign: s.readyAssign}
+	if action == "soak_setup" {
+		c.SoakSetup = s.soakSetup
+	}
 	// Fixed M01/M02 profile identity from the sealed bbb01f8 packet's
 	// observations/{m01,m02}-fabric-evidence.json, manifest 60f4f17f.
 	// A replacement requires a new reviewed profile, never historical credit.

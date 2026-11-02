@@ -231,8 +231,8 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 				}
 				var err error
 				if p.Soak != nil {
-					// The soak worker's exact admission is step 3; until then the
-					// whole plan refuses below (ErrSoakWorkerUnadmitted).
+					want, e := SoakLoadArgs(d, p.Smoke, p.Soak)
+					err = checkSoakTask(j, in, s.Host, want, e, p.Smoke, []string{"kv_smoke.py", "soak_load.py", "soak_native_worker.py", "soak_oracle.py", "soak_stats.py"}, true)
 				} else if p.Restart != nil {
 					err = checkReadTask(j, in, d, s.Host, p.Smoke, "seed", "dc")
 				} else {

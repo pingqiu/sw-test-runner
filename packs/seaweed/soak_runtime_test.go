@@ -31,6 +31,9 @@ type fakeSoak struct {
 	restarts     []string
 	readies      []string
 	readyDL      []time.Time
+	pauses       []float64
+	closes       []string
+	ackMode      string
 	badMono      bool
 	readyLag     float64                          // ready_mono - client_mono in READY rows
 	regressAfter int                              // After call whose return steps the clock back
@@ -121,6 +124,47 @@ func (f *fakeSoak) RunJob(ctx context.Context, label string) (tr.ExitInfo, error
 	raw, _ := json.Marshal(row)
 	return captured(raw), nil
 }
+func (f *fakeSoak) Pause(episode, role string, pauseMono float64) error {
+	f.pauses = append(f.pauses, pauseMono)
+	return nil
+}
+func (f *fakeSoak) Ack(ctx context.Context, episode string) (SoakAck, error) {
+	if f.ackMode == "timeout" {
+		return SoakAck{}, context.DeadlineExceeded
+	}
+	pause := f.pauses[len(f.pauses)-1]
+	switch f.ackMode {
+	case "slow ack": // a valid ack, 6 s after the pause (codex01 R3)
+		f.advance(6 * time.Second)
+	case "expired ctx": // a valid ack returned only after the 5 s AckWait expired
+		<-ctx.Done()
+		f.advance(300 * time.Millisecond)
+	default:
+		f.advance(300 * time.Millisecond)
+	}
+	a := SoakAck{PauseMono: pause, ObservedMono: pause + 0.1, AckMono: pause + 0.2}
+	a.PendingGETs = append(a.PendingGETs, struct {
+		Op        string  `json:"op"`
+		Submitted float64 `json:"submitted"`
+	}{"41", pause - 1})
+	switch f.ackMode {
+	case "stale pause":
+		a.PauseMono -= 1
+	case "sets in flight":
+		a.InflightSets = 1
+	case "duplicate op":
+		a.PendingGETs = append(a.PendingGETs, a.PendingGETs[0])
+	case "op after observe":
+		a.PendingGETs[0].Submitted = a.ObservedMono + 0.05
+	case "NaN ack time":
+		a.AckMono = math.NaN()
+	}
+	return a, nil
+}
+func (f *fakeSoak) Close(episode string, endMono float64) error {
+	f.closes = append(f.closes, episode)
+	return nil
+}
 func (f *fakeSoak) LoadStart(ctx context.Context) (float64, error) {
 	if f.noWit {
 		<-ctx.Done()
@@ -164,7 +208,7 @@ func soakTestPlan() (Plan, tr.PackInputs) {
 	p.Soak = &SoakPlan{DurationS: 1800, PacingS: 2,
 		ReadyAssign: &AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"},
 		FaultReady:  []Step{{Host: "m01", Job: "fault-ready-m01"}, {Host: "m02", Job: "fault-ready-m02"}},
-		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}}}
+		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}}, ClientKillAtS: 1320}
 	in := tr.PackInputs{
 		Restarts: map[string]tr.GenerationRestartPlan{"E1": {Victim: "deploy-volume", Replacement: "replacement-volume"}, "E2": {Victim: "deploy-master", Replacement: "replacement-master"}},
 		Files:    map[string]map[string]string{"m02": {"/opt/profile/bin/weed": strings.Repeat("d", 64), "/opt/profile/bin/weed-volume": strings.Repeat("d", 64)}},
@@ -433,5 +477,35 @@ func TestSoakReadyTimeIsTheSuccessfulObservation(t *testing.T) {
 	g.readyLag = -1 // a "ready" time before the probe even started
 	if _, _, err := runFake(t, g); err == nil || len(g.restarts) != 1 {
 		t.Fatalf("err=%v restarts=%v", err, g.restarts)
+	}
+}
+
+// Fault window r4: a missing, stale or malformed acknowledgement means no
+// Kill; every Kill follows an exact ack; a close follows only a live READY.
+func TestSoakFaultWindowAckGatesTheKill(t *testing.T) {
+	for _, mode := range []string{"timeout", "stale pause", "sets in flight", "duplicate op", "op after observe", "NaN ack time", "slow ack", "expired ctx"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFakeSoak(t)
+			f.ackMode = mode
+			_, _, err := runFake(t, f)
+			if err == nil || len(f.restarts) != 0 || len(f.closes) != 0 {
+				t.Fatalf("err=%v restarts=%v closes=%v", err, f.restarts, f.closes)
+			}
+		})
+	}
+	f := newFakeSoak(t)
+	records, _, err := runFake(t, f)
+	if err != nil || len(f.closes) != 2 || records[0].Ack == nil || records[0].DispatchMono < records[0].Ack.AckMono {
+		t.Fatalf("positive: err=%v closes=%v records=%+v", err, f.closes, records)
+	}
+}
+
+// Cancel after the Kill: no close is ever written (WORK not live).
+func TestSoakNoCloseAfterCancel(t *testing.T) {
+	f := newFakeSoak(t)
+	f.hooks["restart:E1"] = func(context.Context) { f.cancel() }
+	_, _, err := runFake(t, f)
+	if err == nil || len(f.closes) != 0 {
+		t.Fatalf("err=%v closes=%v", err, f.closes)
 	}
 }
