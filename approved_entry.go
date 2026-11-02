@@ -19,7 +19,7 @@ func RunApprovedRequest(ctx context.Context, request, profile string, register f
 	if err != nil {
 		return nil, "", err
 	}
-	lease, workCtx, err := beginWorkerLease(ctx, request, policy)
+	lease, workCtx, err := beginWorkerLease(ctx, request, policy, register)
 	if err != nil {
 		return nil, "", err
 	}

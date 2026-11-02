@@ -10,6 +10,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"gopkg.in/yaml.v3"
 )
 
 // ErrS0bUnavailable refuses any caller without the exact ApprovedRun context.
@@ -58,6 +59,29 @@ func RegisterPack(r *tr.Registry) {
 	}
 	r.RegisterMutatingFunc("seaweed_read_restart", tr.TierChaos, runtime.run)
 	r.RegisterMutatingFunc(tr.SoakAction, tr.TierChaos, runtime.run)
+	r.RegisterLeaseEnvelope(leaseEnvelope)
+}
+
+// leaseEnvelope lets a worker-owned run hold the lab past ten minutes only when
+// its pinned scenario is a valid KV soak plan under the same bind every phase
+// runs (here against the declared pins and boots that readback must later
+// equal). Anything else, including a soak label on another plan, is refused.
+func leaseEnvelope(in tr.PackInputs) (time.Duration, error) {
+	var sealed tr.Scenario
+	if err := yaml.Unmarshal(in.Scenario, &sealed); err != nil {
+		return 0, err
+	}
+	p, d, err := decodePlan(sealed.Metadata["seaweed_plan"])
+	if err != nil {
+		return 0, err
+	}
+	if p.Soak == nil {
+		return 0, errors.New("not a KV soak plan")
+	}
+	if err = bind(p, d, in, clock()); err != nil {
+		return 0, err
+	}
+	return tr.SoakHorizon, nil
 }
 func invalid(action string, err error) (map[string]string, error) {
 	const hint = "correct inventory against seaweed.inventory/v1 and preserve requested scope"

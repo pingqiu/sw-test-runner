@@ -344,15 +344,10 @@ func TestCollectAfterTheElapsedSoakStillBinds(t *testing.T) {
 	}
 }
 
-// The parity plan comes from the builder, not from test code: the soak bundle
-// BuildProfile emits (plan, jobs, restart plans, scenario timeouts) binds on the
-// strict entry and, with the soak controller stood in, runs through collect to
-// the verdict.
-func TestTheBuilderSoakBundleBindsAndRunsToTheVerdict(t *testing.T) {
-	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
-		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
-	}
-	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+// builderSoakFixture is the soak fixture whose plan, jobs, restart plans and
+// scenario actions are exactly the builder's (BuildProfile) bundle.
+func builderSoakFixture(t *testing.T) (*cpuFixture, ProfileBundle) {
+	t.Helper()
 	var bundle ProfileBundle
 	f := soakProfile(t, 45*time.Minute, nil, func(f *cpuFixture, d *inventory.Document) {
 		settings := *f.plan.Soak
@@ -379,6 +374,19 @@ func TestTheBuilderSoakBundleBindsAndRunsToTheVerdict(t *testing.T) {
 			}
 		}
 	})
+	return f, bundle
+}
+
+// The parity plan comes from the builder, not from test code: the soak bundle
+// BuildProfile emits (plan, jobs, restart plans, scenario timeouts) binds on the
+// strict entry and, with the soak controller stood in, runs through collect to
+// the verdict.
+func TestTheBuilderSoakBundleBindsAndRunsToTheVerdict(t *testing.T) {
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+	f, bundle := builderSoakFixture(t)
 	if a := bundle.Plan.Soak; a == nil || a.Assess.Job != "soak-assess-m01" || len(a.FaultReady) != 2 || len(bundle.Restarts) != 2 || !strings.Contains(bundle.ScenarioYAML, "seaweed_kv_soak") || !strings.Contains(bundle.ScenarioYAML, "1990s") {
 		t.Fatalf("builder soak bundle incomplete: %+v restarts %v\n%s", bundle.Plan.Soak, bundle.Restarts, bundle.ScenarioYAML)
 	}
@@ -386,4 +394,65 @@ func TestTheBuilderSoakBundleBindsAndRunsToTheVerdict(t *testing.T) {
 	if strings.Contains(out, "BINDING_REFUSED") || !strings.Contains(out, "SOAK_VERDICT_FAIL") {
 		t.Fatalf("builder bundle did not bind and reach the verdict: %s | %.2000s", refusalLines(out), out)
 	}
+}
+
+// declaredInputs are the PackInputs core hands the lease-envelope judgement
+// before any readback: the published policy's declared files and boots.
+func declaredInputs(t *testing.T, f *cpuFixture) tr.PackInputs {
+	t.Helper()
+	scenario, err := os.ReadFile(f.binding.Scenario.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := tr.PackInputs{Scenario: scenario, Binding: f.binding, Jobs: f.policy.Jobs, Restarts: f.policy.GenerationRestarts, Boots: map[string]string{}, Scripts: map[string][]byte{}, Files: map[string]map[string]string{}}
+	for _, d := range f.policy.Deployments {
+		in.Files[d.NodeID], in.Boots[d.NodeID] = map[string]string{}, d.ExpectedBootID
+		for _, file := range d.Files {
+			in.Files[d.NodeID][file.Path] = file.SHA256
+		}
+	}
+	for _, pin := range f.policy.Scripts {
+		if in.Scripts[pin.Path], err = os.ReadFile(pin.Path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return in
+}
+
+// #65: the worker envelope past ten minutes is the pack's full bind of a valid
+// KV soak plan over the declared pins, never a label. The builder's parity
+// bundle earns SoakHorizon; every other shape is refused, so core keeps ten
+// minutes and writes no acquire (core's lease-lifetime test proves that order).
+func TestLeaseEnvelopeIsThePackBindOfAValidSoak(t *testing.T) {
+	f, _ := builderSoakFixture(t)
+	if d, err := leaseEnvelope(declaredInputs(t, f)); err != nil || d != tr.SoakHorizon {
+		t.Fatalf("builder soak bundle not granted SoakHorizon: %v %v", d, err)
+	}
+	refuse := func(name string, in tr.PackInputs) {
+		t.Run(name, func(t *testing.T) {
+			if d, err := leaseEnvelope(in); err == nil {
+				t.Fatalf("granted %v", d)
+			}
+		})
+	}
+	plain := cpuProfile(t)
+	refuse("non-soak plan", declaredInputs(t, plain))
+	labelled := cpuProfile(t)
+	labelled.editScenario = func(s *tr.Scenario) { s.Phases[2].Actions[0].Action = tr.SoakAction }
+	labelled.publish(t, nil)
+	refuse("soak label on a non-soak plan", declaredInputs(t, labelled))
+	shaped := declaredInputs(t, f)
+	var sc tr.Scenario
+	if err := yaml.Unmarshal(shaped.Scenario, &sc); err != nil {
+		t.Fatal(err)
+	}
+	sc.Phases = append([]tr.Phase{{Name: "first", Actions: []tr.Action{{Action: "approved_job"}}}}, sc.Phases...)
+	shaped.Scenario, _ = yaml.Marshal(sc)
+	refuse("approved_job before the soak phases", shaped)
+	nonKV := declaredInputs(t, f)
+	nonKV.Binding.Workload = "s3"
+	refuse("non-KV binding", nonKV)
+	short := declaredInputs(t, f)
+	short.Binding.WorkDeadline = time.Now().Add(20 * time.Minute)
+	refuse("soak that does not fit its work deadline", short)
 }

@@ -43,7 +43,7 @@ func (b lostLeaseReceipt) Wait(ctx context.Context, id string) (ExitInfo, error)
 }
 
 func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
-	modes := []string{"valid", "cancel", "unknown", "missing-go", "wrong-go", "revoked-go", "foreign-request", "foreign-lease", "existing-id", "long-envelope", "soak-envelope", "soak-over-horizon", "missing-fd", "wrong-fd", "quarantine-m01", "quarantine-m02", "quarantine-cleared", "quarantine-missing", "quarantine-not-directory", "quarantine-marker-symlink", "quarantine-marker-directory"}
+	modes := []string{"valid", "cancel", "unknown", "missing-go", "wrong-go", "revoked-go", "foreign-request", "foreign-lease", "existing-id", "long-envelope", "soak-label-only", "soak-hook-refused", "soak-hook-valid", "soak-hook-over", "missing-fd", "wrong-fd", "quarantine-m01", "quarantine-m02", "quarantine-cleared", "quarantine-missing", "quarantine-not-directory", "quarantine-marker-symlink", "quarantine-marker-directory"}
 	if os.Getenv("S0B_RENEW_REAL_WAIT") == "1" {
 		modes = []string{"renew"}
 	}
@@ -103,15 +103,15 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 			if mode == "cancel" || mode == "renew" {
 				scenario = []byte(strings.Replace(string(scenario), "approved_job", "lease_hold_job", 1))
 			}
-			if strings.HasPrefix(mode, "soak-") { // a soak scenario: the envelope is SoakHorizon, not ten minutes
+			if mode == "soak-label-only" || mode == "soak-hook-refused" { // an approved_job first, then a soak LABEL
 				scenario = append(scenario, []byte("  - name: soak\n    actions:\n      - action: "+SoakAction+"\n")...)
 			}
 			if err = os.WriteFile(f.binding.Scenario.Path, scenario, 0600); err != nil {
 				t.Fatal(err)
 			}
 			f.binding.Scenario.SHA256 = fmt.Sprintf("%x", sha256.Sum256(scenario))
-			if mode == "soak-envelope" || mode == "soak-over-horizon" {
-				f.binding.WorkDeadline = time.Now().Add(map[string]time.Duration{"soak-envelope": 50 * time.Minute, "soak-over-horizon": 61 * time.Minute}[mode])
+			if strings.HasPrefix(mode, "soak-") {
+				f.binding.WorkDeadline = time.Now().Add(map[bool]time.Duration{true: 61 * time.Minute, false: 50 * time.Minute}[mode == "soak-hook-over"])
 				f.binding.HardDeadline = f.binding.WorkDeadline.Add(5 * time.Second)
 				f.binding.CleanupReserveMS = 5000
 			}
@@ -296,7 +296,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 			}
 			t.Logf("%s: %s", mode, logs)
 			wantAuthorized := "0"
-			if (mode == "valid" || mode == "quarantine-cleared") || mode == "cancel" || mode == "renew" || mode == "unknown" {
+			if (mode == "valid" || mode == "quarantine-cleared") || mode == "cancel" || mode == "renew" || mode == "unknown" || mode == "soak-hook-valid" {
 				wantAuthorized = "1"
 			}
 			if !strings.Contains(string(logs), "CPU actual_custodian_authorized_jobs="+wantAuthorized+"\n") {
@@ -319,15 +319,20 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 				if e != nil || len(files) != 0 {
 					t.Fatal("existing lease authorized custody")
 				}
-			case "soak-over-horizon":
-				if !strings.Contains(string(logs), "envelope mismatch") || started || released {
-					t.Fatalf("soak scenario beyond SoakHorizon not refused at the envelope: %s", logs)
+			case "soak-hook-valid":
+				// Only a pack judgement extends the envelope: 50 min admitted, the
+				// job runs, and the lease is acquired and released.
+				if !started || !released {
+					t.Fatalf("pack-judged soak envelope not admitted: started=%t released=%t: %s", started, released, logs)
 				}
-			case "soak-envelope":
-				// Past the worker envelope (50 min, soak scenario): the refusal comes from
-				// pack admission (no seaweed pack here), and the lease is acquired and released.
-				if strings.Contains(string(logs), "envelope mismatch") || !strings.Contains(string(logs), `unknown action "`+SoakAction+`"`) || !started || !released {
-					t.Fatalf("soak scenario not admitted past the worker envelope: started=%t released=%t: %s", started, released, logs)
+			case "soak-label-only", "soak-hook-refused", "soak-hook-over":
+				// A soak label without a pack judgement, a refused judgement (codex01's
+				// composed control: approved_job first, late soak handler), or a
+				// judgement past SoakHorizon: refused at the envelope, before any
+				// acquire or job.
+				children, e := os.ReadDir(f.binding.OutputDir)
+				if !strings.Contains(string(logs), "envelope mismatch") || started || released || e != nil || len(children) != 0 {
+					t.Fatalf("soak envelope not refused before custody: started=%t released=%t: %s", started, released, logs)
 				}
 			case "unknown":
 				if !started || released {
@@ -395,10 +400,11 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					t.Logf("%s record: %s", kind, raw)
 				}
 			}
-			if (mode == "valid" || mode == "quarantine-cleared") && !exists(filepath.Join(f.dir, "done/r1.env")) {
+			passes := mode == "valid" || mode == "quarantine-cleared" || mode == "soak-hook-valid"
+			if passes && !exists(filepath.Join(f.dir, "done/r1.env")) {
 				t.Fatalf("valid run refused: %s", logs)
 			}
-			if mode != "valid" && mode != "quarantine-cleared" && !exists(filepath.Join(f.dir, "failed/r1.env")) {
+			if !passes && !exists(filepath.Join(f.dir, "failed/r1.env")) {
 				t.Fatalf("refusal/cancellation reported pass: %s", logs)
 			}
 		})

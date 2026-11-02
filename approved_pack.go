@@ -35,28 +35,43 @@ func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
 	a := c.approved
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	p := PackInputs{Binding: a.request.Binding, Jobs: maps.Clone(a.runPolicy.Jobs), Restarts: maps.Clone(a.runPolicy.GenerationRestarts), Boots: map[string]string{}, Scripts: map[string][]byte{}}
+	files, boots := map[string]map[string]string{}, map[string]string{}
+	for node, r := range a.readbacks {
+		files[node], boots[node] = maps.Clone(r.Files), r.BootID
+	}
+	return a.packInputs(files, boots), nil
+}
+
+// declaredPackInputs are the same inputs before any readback: the policy's
+// declared deployment files and expected boots, which readback must later equal.
+func (a *ApprovedRun) declaredPackInputs() PackInputs {
+	files, boots := map[string]map[string]string{}, map[string]string{}
+	for _, d := range a.runPolicy.Deployments {
+		files[d.NodeID] = map[string]string{}
+		for _, f := range d.Files {
+			files[d.NodeID][f.Path] = f.SHA256
+		}
+		boots[d.NodeID] = d.ExpectedBootID
+	}
+	return a.packInputs(files, boots)
+}
+
+func (a *ApprovedRun) packInputs(files map[string]map[string]string, boots map[string]string) PackInputs {
+	p := PackInputs{Binding: a.request.Binding, Jobs: maps.Clone(a.runPolicy.Jobs), Restarts: maps.Clone(a.runPolicy.GenerationRestarts), Boots: boots, Scripts: map[string][]byte{}, Files: files}
 	if a.runPolicy.ProcessPause != nil {
 		copy := *a.runPolicy.ProcessPause
 		p.Pause = &copy
 	}
 	p.Scenario = append([]byte(nil), a.inputs.Scenario...)
-	p.Files = map[string]map[string]string{}
-	for node, r := range a.readbacks {
-		p.Files[node] = maps.Clone(r.Files)
-	}
 	p.Binding.Hosts = append([]ApprovedHost(nil), p.Binding.Hosts...)
 	for k, v := range p.Jobs {
 		v.Argv = append([]string(nil), v.Argv...)
 		p.Jobs[k] = v
 	}
-	for k, v := range a.readbacks {
-		p.Boots[k] = v.BootID
-	}
 	for k, v := range a.inputs.Scripts {
 		p.Scripts[k] = append([]byte(nil), v...)
 	}
-	return p, nil
+	return p
 }
 
 // RunApprovedPackJob resolves an exact independently approved label. It never
