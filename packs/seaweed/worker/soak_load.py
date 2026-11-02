@@ -172,7 +172,7 @@ def run(config):
                 raise OracleError('failed SET ' + str(row.get('error')))  # any failed SET is fatal (r9)
             v = oracle.acknowledge(key, cmd['sequence'], cmd['length'], row['fids'])
             seeds[key] = cmd['seed']
-            log('ack-journal.jsonl', dict(key=key, writer=i, submitted=row['submitted'], completed=row['completed'], **vars(v)))
+            log('ack-journal.jsonl', dict(key=key, writer=i, seed=cmd['seed'], submitted=row['submitted'], completed=row['completed'], **vars(v)))
             writers[i] += 1
             key_writers.setdefault(key, set()).add(i)
             counts['acks'] += 1
@@ -235,6 +235,7 @@ def run(config):
         for i in range(4):
             start_worker(i)
         poller.start()
+        publish(root / 'workers.json', {str(i): dict(w['identity'], transport='http' if i == 3 else 'dc') for i, w in workers.items()})
         begin = time.monotonic()  # the witness is written before the first operation
         publish(root / WITNESS, dict(boot_id=boot_id(), mono=begin))
         end, pace, next_write, owner, cursor = begin + config['duration_s'], config['pacing_s'], begin, 0, 0
@@ -250,6 +251,7 @@ def run(config):
                 continue  # paused: no new dispatch of any kind until the exact close
             if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
                 kills.append(client_kill(now))
+                log('op-events.jsonl', dict(event='client_kill', **kills[-1]))
             for i in range(4):
                 if i in commands or now < available.get(i, 0):
                     continue
@@ -271,6 +273,7 @@ def run(config):
                         send(i, 'get', key, oracle.latest[key].length)
             time.sleep(.002)
         body_end = time.monotonic()
+        log('op-events.jsonl', dict(event='body_end', mono=body_end))
         while time.monotonic() < end + config['quiescence_s']:  # drain, admit nothing
             for i in range(4):
                 pump(i)
