@@ -33,7 +33,7 @@ class ReplacementControls(unittest.TestCase):
     def test_client_ack_is_probe_entry_not_post_readiness(self):
         c=dict(deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=100)).isoformat(),
                server_address='127.0.0.1',server_services=dict(master_http=1,volume_http=2,filer_http=3))
-        with patch.object(profile.time,'monotonic',side_effect=[100.,101.,102.]),patch.object(profile,'services',return_value={}),patch.object(profile,'http_json',return_value={'IsLeader':True}),patch.object(profile,'topology_contains',return_value=True):
+        with patch.object(profile.time,'monotonic',side_effect=[100.,101.,102.,103.]),patch.object(profile,'services',return_value={}),patch.object(profile,'http_json',return_value={'IsLeader':True}),patch.object(profile,'topology_contains',return_value=True):
             self.assertEqual(profile.ready(c)['client_mono'],100.)
     def test_services_uses_replacement_exact_generation_ports_and_logs(self):
         for mode in ('good','wrong-generation','missing-port','missing-cm','missing-dc'):
