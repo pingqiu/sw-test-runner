@@ -83,6 +83,10 @@ func ReadClaimedRequest(name, runningDir string, owner uint32) (ClaimedRequest, 
 // atomically may retry it.
 var errRecordReplaced = errors.New("record replaced")
 
+// errRecordChanged: the same file's metadata or size moved during the capture (on CIFS a fresh record's mtime/ctime
+// can still settle about a second after it was written).
+var errRecordChanged = errors.New("record changed during capture")
+
 // recordCaptured runs between a record's read and its re-check; tests use it to replace a record mid-capture.
 var recordCaptured = func(string) {}
 
@@ -146,7 +150,7 @@ func snapshotRecord(name string, owner *uint32, protected bool) ([]byte, error) 
 		return nil, fmt.Errorf("%w during capture", errRecordReplaced)
 	}
 	if err != nil || len(raw) > 1<<20 || !sameRecord(before, after) {
-		return nil, errors.New("record changed during capture")
+		return nil, errRecordChanged
 	}
 	return raw, nil
 }
