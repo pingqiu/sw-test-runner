@@ -13,7 +13,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
 from soak_native_worker import payload
 from soak_oracle import Oracle
-from soak_load import MISS, TRANSIENT, read_bound, read_evidence
+from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
 
 SCHEMA = 'seaweed-soak-verdict/1'
@@ -61,6 +61,8 @@ def get_case(e):
             typed(e, sequence=int, fids=list)
             if not e['ok']:  # r9: an ok=False miss only in the DC status-1 shape; ok=True not-hit is a candidate
                 case = case if MISS.search(typed(e, error=str)['error']) else 'unknown'
+            elif classify_get(dict(ok=True, results=typed(e, results=list)['results']), False) != 'miss':
+                case = 'unknown'  # an ok=True miss needs the worker's non-hit results shape, never None/[True]/absent
         elif case == 'fault':
             typed(e, sequence=int, episode=str)
     except ValueError:
