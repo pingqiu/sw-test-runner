@@ -745,6 +745,47 @@ def soak_setup(config):
     raise TimeoutError('layout not exactly %d writable and live within 60 s: %r' % (n, last))
 
 
+ROTATED = re.compile(r'rotated non-replicated cache Volume (\d+) collection=(\S+) ')  # r9 soak_server
+LOG_BOUND, ROTATED_BOUND = 256 << 20, 4000
+
+
+def soak_collect(config):
+    """M02, after the soak: the rotation lines of THIS run's own master
+    generations (stdout/stderr, and glog INFO files in the private tmp/ named
+    by each generation's pid) and the collection's .dat volume ids still on
+    disk (r9's rule). Any unreadable, foreign or over-bound source fails the
+    whole collect: never a partial answer."""
+    layout, _ = soak_layout(config)
+    coll, root = layout['collection'], private_root(config)
+    sources, rotated = [], {}
+    for name in ('master-generation.json', 'master-replacement-generation.json'):
+        if not (root / name).exists():
+            continue
+        gen = json.loads((root / name).read_text())
+        pid = int(gen['pid'])
+        glogs = sorted(p for p in (root / 'tmp').iterdir() if '.log.INFO.' in p.name and p.name.endswith('.%d' % pid))
+        for file in [Path(x) for x in gen['logs']] + glogs:
+            if file.parent not in (root, root / 'tmp') or file.resolve() != file:
+                raise ValueError('master log outside the owned output root')
+            fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, 'rb') as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_size > LOG_BOUND:
+                    raise ValueError('master log type/bound: ' + file.name)
+                for raw in f:
+                    m = ROTATED.search(raw.decode('utf-8', 'replace'))
+                    if m and m.group(2) == coll:
+                        rotated.setdefault(int(m.group(1)), raw.decode('utf-8', 'replace').strip()[:300])
+                        if len(rotated) > ROTATED_BOUND:
+                            raise ValueError('rotation lines over bound')
+            sources.append(dict(path=str(file), bytes=st.st_size))
+    if not sources:
+        raise ValueError('no master generation logs')
+    dat = sorted({int(p.name.split('_')[-1].split('.')[0]) for p in (root / 'volume').glob(coll + '_*.dat')})
+    return dict(status='SOAK_COLLECTED', collection=coll, sources=sources, dat_vids=dat,
+                rotated=[dict(vid=v, line=l) for v, l in sorted(rotated.items())])
+
+
 def collect(config):
     root = private_root(config)
     facts = services(config)
@@ -765,7 +806,7 @@ def collect(config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'soak_setup', 'collect'), required=True)
+    parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'soak_setup', 'soak_collect', 'collect'), required=True)
     parser.add_argument('--role', default='')
     parser.add_argument('--replacement-volume', action='store_true')
     parser.add_argument('--replacement-filer', action='store_true')
@@ -792,6 +833,10 @@ def main():
         raise AssertionError('exec returned')
     elif args.action == 'ready':
         row = ready(config)
+    elif args.action == 'soak_collect':
+        if args.role:
+            raise ValueError('soak_collect takes no role')
+        row = soak_collect(config)
     elif args.action == 'soak_setup':
         if args.role:
             raise ValueError('soak_setup takes no role')

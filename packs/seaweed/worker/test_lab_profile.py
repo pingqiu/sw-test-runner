@@ -565,6 +565,60 @@ ns['main']()
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux fd exec of the pinned product')
+class SoakCollect(unittest.TestCase):
+    """M02 rotation evidence from this run's own master generations only."""
+
+    def setUp(self):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        self.root = base / 'run'
+        for d in ('tmp', 'volume'):
+            (self.root / d).mkdir(parents=True)
+        self.root.chmod(0o700)
+        line = 'I1102 00:10:{0:02d}.0 rotation.go:1] rotated non-replicated cache Volume {1} collection={2} size=33554432\n'
+        (self.root / 'master.stderr').write_text(line.format(1, 2, 'lmcache') + line.format(2, 5, 'other') + 'noise\n')
+        (self.root / 'master.stdout').write_text('')
+        (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000000.4242').write_text(line.format(3, 4, 'lmcache'))
+        (self.root / 'tmp' / 'weed.m02.testdev.log.INFO.20261102-000000.999').write_text(line.format(4, 6, 'lmcache'))  # foreign pid
+        (self.root / 'master-replacement.stderr').write_text(line.format(5, 9, 'lmcache'))
+        self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'])
+        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stderr'])
+        for name in ('lmcache_3.dat', 'lmcache_x_7.dat', 'other_5.dat'):
+            (self.root / 'volume' / name).write_bytes(b'')
+        self.config = dict(root=str(self.root), soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4))
+
+    def gen(self, name, pid, logs):
+        (self.root / name).write_text(json.dumps(dict(pid=pid, logs=[str(self.root / x) for x in logs])))
+
+    def test_rotations_of_this_runs_master_generations_and_dat_ids(self):
+        row = profile.soak_collect(self.config)
+        self.assertEqual([r['vid'] for r in row['rotated']], [2, 4, 9])  # not 5 (other), not 6 (foreign pid)
+        self.assertEqual(row['dat_vids'], [3, 7])
+        self.assertEqual(len(row['sources']), 4)
+
+    def test_a_foreign_symlinked_or_unbounded_log_fails_closed(self):
+        (self.root / 'master.stderr').rename(self.root / 'real.stderr')
+        (self.root / 'master.stderr').symlink_to(self.root / 'real.stderr')
+        with self.assertRaises((ValueError, OSError)):
+            profile.soak_collect(self.config)
+        self.setUp()
+        self.gen('master-generation.json', 4242, ['../outside.log'])
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            profile.soak_collect(self.config)
+        self.setUp()
+        saved = profile.LOG_BOUND
+        profile.LOG_BOUND = 10
+        self.addCleanup(setattr, profile, 'LOG_BOUND', saved)
+        with self.assertRaisesRegex(ValueError, 'bound'):
+            profile.soak_collect(self.config)
+
+    def test_no_master_generation_fails_closed(self):
+        (self.root / 'master-generation.json').unlink()
+        (self.root / 'master-replacement-generation.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'no master generation'):
+            profile.soak_collect(self.config)
+
+
 class SoakSetup(unittest.TestCase):
     """soak_setup against a fake master and a fake pinned weed product."""
     SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4)
