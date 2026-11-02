@@ -9,6 +9,7 @@ from soak_oracle import Oracle, OracleError
 from soak_stats import WITNESS, boot_id, identity
 
 MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)')
+TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
 EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl')
 
 
@@ -71,7 +72,10 @@ def read_bound(path, binding):
     except FileNotFoundError:
         return None
     with os.fdopen(fd, 'rb') as f:
-        row = json.loads(f.read(4097)[:4096])
+        raw = f.read(4097)
+    if len(raw) > 4096:
+        raise ValueError('fault-window file over 4096 bytes: ' + path.name)
+    row = json.loads(raw)
     if any(row.get(k) != v for k, v in binding.items()):
         raise ValueError('fault-window file binding differs: ' + path.name)
     return row
@@ -101,7 +105,9 @@ def run(config):
                 if ep in window['done'] or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', ep):
                     continue
                 row = read_bound(path, dict(bind, episode=ep))
-                if row['role'] not in ('volume', 'master') or not math.isfinite(row['pause_mono']):
+                pm = row.get('pause_mono')
+                if row.get('role') not in ('volume', 'master') or isinstance(pm, bool) or not isinstance(pm, (int, float)) \
+                        or not math.isfinite(pm) or pm <= 0:
                     raise ValueError('fault pause malformed')
                 window.update(episode=ep, acked=False, pause=row, observed=time.monotonic())
                 window['done'].add(ep)
@@ -112,14 +118,19 @@ def run(config):
             pending = [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values()]
             window['allowed'].update((g['op'], window['episode']) for g in pending)
             p = window['pause']
+            window['ack_mono'] = time.monotonic()
             publish(root / ('fault-ack-%s.json' % window['episode']),
                     dict(bind, role=p['role'], episode=window['episode'], pause_mono=p['pause_mono'],
-                         observed_mono=window['observed'], ack_mono=time.monotonic(), inflight_sets=0,
+                         observed_mono=window['observed'], ack_mono=window['ack_mono'], inflight_sets=0,
                          pending_gets=pending))
             window['acked'] = True
         else:
-            ep = window['episode']
-            if read_bound(root / ('fault-close-%s.json' % ep), dict(bind, episode=ep)) is not None:
+            ep, role = window['episode'], window['pause']['role']
+            close = read_bound(root / ('fault-close-%s.json' % ep), dict(bind, episode=ep, role=role))
+            if close is not None:
+                end = close.get('end_mono')
+                if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end < window['ack_mono']:
+                    raise ValueError('fault close malformed or before the ack')
                 window['episode'] = None
     log = lambda name, row: files[name].write(json.dumps(row) + '\n')
 
@@ -174,7 +185,7 @@ def run(config):
             elif row['results'] == [False] and row.get('untouched') is True and MISS.search(row.get('error') or ''):
                 event.update(miss=True, fids=list(v.fids))  # judged in 3b by the decision-3 join
                 counts['misses'] += 1
-            elif cmd['operation_id'] in window['allowed']:  # only ever filled at an ack; kept after resume (r9)
+            elif cmd['operation_id'] in window['allowed'] and TRANSIENT.search(row.get('error') or ''):  # acked + r9 kind
                 event.update(fault_error=True, episode=window['allowed'][cmd['operation_id']])  # credited only by 3b, within [P, P+60]
             else:
                 raise OracleError('unexpected GET error ' + str(row.get('error')))

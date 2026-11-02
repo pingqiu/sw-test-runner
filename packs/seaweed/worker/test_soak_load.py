@@ -92,6 +92,19 @@ class Publish(unittest.TestCase):
         self.assertEqual(json.loads((root / 'a.json').read_text()), dict(x=1))
 
 
+class ReadBound(unittest.TestCase):  # codex01 R4
+    def test_oversized_file_is_refused_not_truncated(self):
+        import tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        valid = json.dumps(dict(run_id='r', pad='x' * 4000))
+        (root / 'f.json').write_text(valid + ' ' * (4096 - len(valid)) + 'garbage beyond the bound')
+        with self.assertRaisesRegex(ValueError, 'over 4096'):
+            soak_load.read_bound(root / 'f.json', dict(run_id='r'))
+        (root / 'g.json').write_text(valid)
+        self.assertEqual(soak_load.read_bound(root / 'g.json', dict(run_id='r'))['run_id'], 'r')
+
+
 class FaultWindowWorker(unittest.TestCase):
     """The real run() with a fake native child (spawned processes) and a test
     thread acting as the controller of the fault-window handshake (r4)."""
@@ -119,19 +132,23 @@ class FaultWindowWorker(unittest.TestCase):
     def write(self, name, row):  # the controller publishes atomically, like the Go adapter must
         soak_load.publish(self.root / name, dict(dict(run_id='run-1', boot_id=self.boot), **row))
 
-    def controller(self, at, close=True, fail_after_ack=False, fail_after_close=False):
+    def controller(self, at, close=True, fail_after_ack=False, fail_after_close=False, close_row=None, error=''):
         def run():
+            # Like the real controller: the fault clock starts at the load-start
+            # witness, never at enrollment (spawning 4 workers can take seconds).
+            while not (self.root / 'soak-load-start.json').exists():
+                time.sleep(0.01)
             time.sleep(at)
             self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=time.monotonic()))
             ack = self.root / 'fault-ack-E1.json'
             while not ack.exists():
                 time.sleep(0.01)
-            if fail_after_ack:  # every acknowledged pending GET (1.5 s each) now completes with a timeout
-                (self.root / 'fake-fail').touch()
+            if fail_after_ack:  # every acknowledged pending GET (1.5 s each) now completes with an error
+                (self.root / 'fake-fail').write_text(error)
                 time.sleep(1.7)
                 (self.root / 'fake-fail').unlink()
             if close:
-                self.write('fault-close-E1.json', dict(episode='E1', end_mono=time.monotonic()))
+                self.write('fault-close-E1.json', close_row or dict(episode='E1', role='volume', end_mono=time.monotonic()))
             if fail_after_close:
                 time.sleep(1.7)  # every old pending GET is done; the next ones are post-close
                 (self.root / 'fake-fail').touch()
@@ -179,6 +196,28 @@ class FaultWindowWorker(unittest.TestCase):
                               dict(run_id='other-run', boot_id=self.boot, episode='E1', role='volume', pause_mono=1.0))
         threading.Thread(target=foreign, daemon=True).start()
         with self.assertRaisesRegex(ValueError, 'binding differs'):
+            soak_load.run(self.config)
+
+    def malformed_close(self, row):  # codex01 R1: a malformed close fails, it never resumes
+        self.controller(1.0, close_row=row)
+        with self.assertRaises(ValueError):
+            soak_load.run(self.config)
+
+    def test_a_close_with_the_wrong_role_fails(self):
+        self.malformed_close(dict(episode='E1', role='master', end_mono=10 ** 6))
+
+    def test_a_close_without_a_time_fails(self):
+        self.malformed_close(dict(episode='E1', role='volume'))
+
+    def test_a_close_with_a_nan_time_fails(self):
+        self.malformed_close(dict(episode='E1', role='volume', end_mono=float('nan')))
+
+    def test_a_close_before_the_ack_fails(self):
+        self.malformed_close(dict(episode='E1', role='volume', end_mono=1.0))
+
+    def test_a_non_transient_error_on_an_acked_get_ends_the_load(self):  # codex01 R2
+        self.controller(1.0, fail_after_ack=True, error='permission denied')
+        with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
             soak_load.run(self.config)
 
     def test_without_a_close_the_worker_never_resumes(self):

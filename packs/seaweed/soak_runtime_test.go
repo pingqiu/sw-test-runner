@@ -133,7 +133,15 @@ func (f *fakeSoak) Ack(ctx context.Context, episode string) (SoakAck, error) {
 		return SoakAck{}, context.DeadlineExceeded
 	}
 	pause := f.pauses[len(f.pauses)-1]
-	f.advance(300 * time.Millisecond)
+	switch f.ackMode {
+	case "slow ack": // a valid ack, 6 s after the pause (codex01 R3)
+		f.advance(6 * time.Second)
+	case "expired ctx": // a valid ack returned only after the 5 s AckWait expired
+		<-ctx.Done()
+		f.advance(300 * time.Millisecond)
+	default:
+		f.advance(300 * time.Millisecond)
+	}
 	a := SoakAck{PauseMono: pause, ObservedMono: pause + 0.1, AckMono: pause + 0.2}
 	a.PendingGETs = append(a.PendingGETs, struct {
 		Op        string  `json:"op"`
@@ -475,7 +483,7 @@ func TestSoakReadyTimeIsTheSuccessfulObservation(t *testing.T) {
 // Fault window r4: a missing, stale or malformed acknowledgement means no
 // Kill; every Kill follows an exact ack; a close follows only a live READY.
 func TestSoakFaultWindowAckGatesTheKill(t *testing.T) {
-	for _, mode := range []string{"timeout", "stale pause", "sets in flight", "duplicate op", "op after observe", "NaN ack time"} {
+	for _, mode := range []string{"timeout", "stale pause", "sets in flight", "duplicate op", "op after observe", "NaN ack time", "slow ack", "expired ctx"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFakeSoak(t)
 			f.ackMode = mode

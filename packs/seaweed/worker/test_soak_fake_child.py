@@ -27,8 +27,8 @@ def child(pipe, cfg):
                    completed=time.monotonic(), ok=True, error=None, results=None)
         if cmd['action'] == 'set':
             row['fids'] = ['3,0a1b2c']
-        elif (root / 'fake-fail').exists():
-            row.update(ok=False, error='operation timed out')
+        elif (root / 'fake-fail').exists():  # its content, if any, is the error text
+            row.update(ok=False, error=(root / 'fake-fail').read_text() or 'operation timed out')
         else:
             row.update(length=cmd['length'], sha256=hashlib.sha256(payload(cmd['seed'], cmd['length'])).hexdigest(),
                        untouched=False)

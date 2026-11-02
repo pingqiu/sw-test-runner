@@ -87,8 +87,11 @@ func pauseAndAck(ctx context.Context, ops soakOps, clk *soakClock, f SoakFault) 
 	defer cancel()
 	a, err := ops.Ack(actx, f.Episode)
 	now, nerr := clk.now()
-	if err = errors.Join(err, nerr); err != nil {
+	if err = errors.Join(err, nerr, actx.Err()); err != nil {
 		return a, err
+	}
+	if now-pause > AckWait.Seconds() { // a late ack never earns a Kill (codex01 R3)
+		return a, errors.New("soak: fault-window ack later than AckWait; no Kill")
 	}
 	seen := map[string]bool{}
 	ok := a.PauseMono == pause && pause <= a.ObservedMono && a.ObservedMono <= a.AckMono && a.AckMono <= now && a.InflightSets == 0
