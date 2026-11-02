@@ -60,6 +60,23 @@ func (l *loadLatch) completed() bool {
 	}
 }
 
+// ended is nil while the wait is open. A settled exit receipt (zero or not) is the load's completion; a wait that
+// returned without one proves no exit, so it fails with its own cause and is never reported as completion (r3).
+func (l *loadLatch) ended() error {
+	if !l.completed() {
+		return nil
+	}
+	if l.exit.Settled {
+		return errLoadCompleted
+	}
+	return l.waitFailure()
+}
+
+func (l *loadLatch) waitFailure() error {
+	return fmt.Errorf("soak: load task wait failed with no exit receipt; the load's end is unknown: %w",
+		errors.Join(l.err, errors.New("no settled exit")))
+}
+
 // SoakAck is the worker's fault-window acknowledgement (addendum r4).
 type SoakAck struct {
 	PauseMono    float64 `json:"pause_mono"`
@@ -181,8 +198,8 @@ func waitOrComplete(ctx context.Context, ops soakOps, l *loadLatch, d time.Durat
 			return ctx.Err()
 		}
 	}
-	if l.completed() {
-		return errLoadCompleted
+	if err := l.ended(); err != nil {
+		return err
 	}
 	return ctx.Err()
 }
@@ -237,8 +254,8 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if !(start >= enrolled && start <= acquired) {
 		return nil, exit, errors.New("soak: load-start witness outside its enrollment bracket")
 	}
-	if latch.completed() {
-		return nil, exit, errLoadCompleted
+	if err = latch.ended(); err != nil {
+		return nil, exit, err
 	}
 	for i, f := range x.Faults {
 		due := start + float64(f.AtS)
@@ -281,8 +298,8 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if err != nil { // no valid ack: no Kill
 			return records, exit, err
 		}
-		if latch.completed() { // the last observation before Kill
-			return records, exit, errLoadCompleted
+		if err = latch.ended(); err != nil { // the last observation before Kill
+			return records, exit, err
 		}
 		if now, err = clk.now(); err != nil { // P: immediately before the Kill
 			return records, exit, err
@@ -325,6 +342,9 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		}
 	case <-ctx.Done():
 		return records, exit, ctx.Err()
+	}
+	if !latch.exit.Settled {
+		return records, latch.exit, latch.waitFailure()
 	}
 	if latch.err != nil {
 		return records, latch.exit, latch.err
