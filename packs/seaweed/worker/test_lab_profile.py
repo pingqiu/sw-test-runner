@@ -861,11 +861,13 @@ class VolumeNofile(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'Linux CLI/product fixture')
     def test_actual_cli_runs_the_volume_with_the_declared_soft_limit(self):
         import resource
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
         want = min(hard, profile.PRODUCT_NOFILE)
-        if want == soft or want < 1024:
-            self.skipTest('need a hard limit above the soft one')
-        root, child = self.deploy_volume(dict(volume_nofile=want))
+        if want <= 1024:
+            self.skipTest('need a hard open-file limit above 1024')
+        # The child starts at soft 1024 (hard unchanged), as a lab shell does,
+        # so the raise is observable even where soft already equals hard (CI).
+        root, child = self.deploy_volume(dict(volume_nofile=want), hard=hard)
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(self.limits(root), (want, hard))
         row = json.loads((root / 'volume-generation.json').read_text())
