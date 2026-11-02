@@ -65,18 +65,22 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 		elapsed  time.Duration
 		err      error
 	}
+	var clock time.Time
+	var onSleep func()
 	run := func(on func(n int)) outcome {
 		write(filepath.Join(dir, id+"-acquire.json"), map[string]any{"lease_id": id, "agent": "claude02", "started": now - 240})
 		if err := os.WriteFile(renew, fresh(now-200), 0600); err != nil {
 			t.Fatal(err)
 		}
-		clock := time.Unix(1000, 0)
+		clock = time.Unix(1000, 0)
+		onSleep = func() {}
 		ledgerNow = func() time.Time { return clock }
 		ledgerSleep = func(d time.Duration) {
-			if d <= 0 || d > 250*time.Millisecond {
+			if d != 250*time.Millisecond {
 				t.Fatal("invalid re-capture pause", d)
 			}
 			clock = clock.Add(d)
+			onSleep()
 		}
 		n := 0
 		recordCaptured = func(name string) {
@@ -125,11 +129,11 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 		t.Fatalf("a replace followed by CIFS metadata settling must pass: %+v", o)
 	}
 	o = run(settle)
-	if o.err == nil || !errors.Is(o.err, errRecordChanged) || o.captures < 2 || o.elapsed > 6*time.Second {
+	if o.err == nil || !errors.Is(o.err, errRecordChanged) || o.captures != 24 || o.elapsed != 5750*time.Millisecond {
 		t.Fatalf("metadata that never settles must fail within the 6 s bound: %+v", o)
 	}
 	o = run(func(n int) { replace(fresh(now - float64(n))) })
-	if o.err == nil || !errors.Is(o.err, errRecordReplaced) || o.captures < 2 || o.elapsed > 6*time.Second {
+	if o.err == nil || !errors.Is(o.err, errRecordReplaced) || o.captures != 24 || o.elapsed != 5750*time.Millisecond {
 		t.Fatalf("a record replaced on every capture must fail within the 6 s bound: %+v", o)
 	}
 	o = run(func(n int) {
@@ -148,6 +152,47 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 	})
 	if o.err == nil || o.captures != 2 {
 		t.Fatalf("a torn record behind the change must still be refused, without further retries: %+v", o)
+	}
+
+	// codex01 R1: a record that vanished after its read is unprovable, never "settling", even if it comes back.
+	moved := renew + ".moved"
+	o = run(func(n int) {
+		if n == 1 {
+			if err := os.Rename(renew, moved); err != nil {
+				t.Fatal(err)
+			}
+			onSleep = func() { os.Rename(moved, renew) }
+		}
+	})
+	if o.err == nil || errors.Is(o.err, errRecordChanged) || errors.Is(o.err, errRecordReplaced) || o.captures != 1 || o.elapsed != 0 {
+		t.Fatalf("a failed post-read stat must be terminal: %+v", o)
+	}
+	os.Remove(moved)
+	acquired, err := os.Lstat(filepath.Join(dir, id+"-acquire.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := recordChangeError(acquired, acquired, nil, 1<<20+1); e == nil || errors.Is(e, errRecordChanged) || errors.Is(e, errRecordReplaced) {
+		t.Fatalf("an oversized read must be terminal: %v", e)
+	}
+	if e := recordChangeError(acquired, nil, os.ErrNotExist, 1); e == nil || errors.Is(e, errRecordChanged) || errors.Is(e, errRecordReplaced) {
+		t.Fatalf("a failed stat must be terminal: %v", e)
+	}
+	if e := recordChangeError(acquired, acquired, nil, 1); e != nil {
+		t.Fatalf("an unchanged record is no change: %v", e)
+	}
+
+	// codex01 R2: nothing is accepted, and no capture starts, past the settle deadline.
+	o = run(func(n int) { clock = clock.Add(7 * time.Second) })
+	if o.err == nil || !strings.Contains(o.err.Error(), "settle bound") || o.captures != 1 {
+		t.Fatalf("an unchanged capture that ended past the deadline must not be accepted: %+v", o)
+	}
+	o = run(func(n int) {
+		settle(n)
+		onSleep = func() { clock = clock.Add(7 * time.Second) }
+	})
+	if o.err == nil || !strings.Contains(o.err.Error(), "settle bound") || !errors.Is(o.err, errRecordChanged) || o.captures != 1 {
+		t.Fatalf("an overslept pause must not start another capture: %+v", o)
 	}
 
 	// Every other caller keeps the strict capture: one change is one refusal.
