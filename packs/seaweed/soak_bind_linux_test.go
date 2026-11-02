@@ -327,3 +327,18 @@ func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
 		t.Fatalf("want this run's FAIL row (empty evidence, foreign boot), got %+v %v", v, err)
 	}
 }
+
+// R1 round 2: collect after the real elapsed load + quiescence. The admission
+// clock jumps past duration + quiescence inside the soak stand-in; collect must
+// still bind (the budget was charged once, at admission) and reach the verdict.
+func TestCollectAfterTheElapsedSoakStillBinds(t *testing.T) {
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		clock = func() time.Time { return time.Now().Add(31 * time.Minute) } // 1800 s load + 60 s quiescence
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase, clock = (*runtimePack).soak, time.Now })
+	out := runEntry(t, soakProfile(t, 45*time.Minute, nil, nil))
+	if strings.Contains(out, "does not fit") || !strings.Contains(out, "SOAK_VERDICT_FAIL") {
+		t.Fatalf("collect after the elapsed soak did not reach the verdict: %s | %.1500s", refusalLines(out), out)
+	}
+}

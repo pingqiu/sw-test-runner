@@ -54,11 +54,15 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		"duplicate status, last PASS": strings.Replace(fail, `"status":"FAIL"`, `"status":"FAIL","status":"PASS"`, 1),
 		"duplicate nested outcome":    strings.Replace(pass, `"routes":{"outcome":"PASS"`, `"routes":{"outcome":"FAIL","outcome":"PASS"`, 1),
 		"two rows":                    pass + "\n" + pass,
-		"another run":                 passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{SoakVerdictSchema, "run-2", "boot-1", "/run/run-1"} }),
-		"another boot":                passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{SoakVerdictSchema, "run-1", "boot-2", "/run/run-1"} }),
-		"another schema":              passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{"v0", "run-1", "boot-1", "/run/run-1"} }),
-		"no binding":                  passRow(t, func(r map[string]any) { delete(r, "binding") }),
-		"unknown criterion":           passRow(t, func(r map[string]any) { r["criteria"].(map[string]any)["vibes"] = map[string]any{"outcome": "PASS"} }),
+		// codex01 round 2: case-folded aliases the struct decoder merges, last value winning.
+		"outcome FAIL then Outcome PASS": strings.Replace(pass, `"routes":{"outcome":"PASS"`, `"routes":{"outcome":"FAIL","Outcome":"PASS"`, 1),
+		"run_id foreign then RUN_ID":     strings.Replace(pass, `"run_id":"run-1"`, `"run_id":"run-2","RUN_ID":"run-1"`, 1),
+		"status FAIL then long-s alias":  strings.Replace(fail, `"status":"FAIL"`, `"status":"FAIL","ſtatus":"PASS"`, 1),
+		"another run":                    passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{SoakVerdictSchema, "run-2", "boot-1", "/run/run-1"} }),
+		"another boot":                   passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{SoakVerdictSchema, "run-1", "boot-2", "/run/run-1"} }),
+		"another schema":                 passRow(t, func(r map[string]any) { r["binding"] = SoakBinding{"v0", "run-1", "boot-1", "/run/run-1"} }),
+		"no binding":                     passRow(t, func(r map[string]any) { delete(r, "binding") }),
+		"unknown criterion":              passRow(t, func(r map[string]any) { r["criteria"].(map[string]any)["vibes"] = map[string]any{"outcome": "PASS"} }),
 		"unknown outcome": passRow(t, func(r map[string]any) {
 			r["status"] = "FAIL"
 			r["criteria"].(map[string]any)["routes"] = map[string]any{"outcome": "MAYBE"}

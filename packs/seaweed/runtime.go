@@ -137,7 +137,7 @@ func uniqueJSON(d *json.Decoder, depth int) error {
 	return err
 }
 func hash(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
-func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
+func bind(p Plan, d *inventory.Document, in tr.PackInputs, now time.Time) error {
 	var scenario tr.Scenario
 	if err := yaml.Unmarshal(in.Scenario, &scenario); err != nil {
 		return err
@@ -165,7 +165,6 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		}
 	}
 	b := in.Binding
-	now := time.Now()
 	// The ten-minute rule stays for every non-soak plan; a soak plan's ceiling
 	// is SoakHorizon, checked in bindSoak (contract r3, R3).
 	if p.Profile == "m01-m02-v1" && p.Soak == nil && b.HardDeadline.Sub(now) > 10*time.Minute {
@@ -303,7 +302,11 @@ type session struct {
 	terminal   error
 	cleanupErr error
 	jobs       map[string]tr.JobHandle
+	admitted   time.Time // the first phase's admission: the one clock every budget is charged against
 }
+
+// clock is the admission clock; CPU controls advance it to prove elapsed phases.
+var clock = time.Now
 
 // soakPhase is the seaweed_kv_soak controller; CPU controls replace it only to
 // prove the phase transition into collect (the real one needs the M01 clock).
@@ -333,17 +336,24 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		return refusal(act.Action, "PLAN_INVALID", err)
 	}
 	raw := sealed.Metadata["seaweed_plan"]
+	r.mu.Lock()
+	s := r.sessions[a.Safety]
+	r.mu.Unlock()
+	admitted := clock()
+	if s != nil {
+		admitted = s.admitted // budgets are charged once, at the session's first admission; later phases rebind identity and shape
+	}
 	p, d, err := decodePlan(raw)
 	if err == nil {
-		err = bind(p, d, in)
+		err = bind(p, d, in, admitted)
 	}
 	if err != nil {
 		return refusal(act.Action, "BINDING_REFUSED", err)
 	}
 	r.mu.Lock()
-	s := r.sessions[a.Safety]
+	s = r.sessions[a.Safety]
 	if s == nil {
-		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}}
+		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}, admitted: admitted}
 		r.sessions[a.Safety] = s
 	}
 	r.mu.Unlock()

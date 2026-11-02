@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -78,7 +79,12 @@ type SoakVerdict struct {
 	Error     string           `json:"error,omitempty"`
 }
 
-// oneStrictValue admits exactly one JSON value with no duplicate object keys.
+// verdictFields are the decoded field names. encoding/json matches struct
+// fields case-insensitively, so a key that folds to one of them must be it.
+var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root"}
+
+// oneStrictValue admits exactly one JSON value with no duplicate object keys
+// and no case-folded alias of a decoded field.
 func oneStrictValue(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if err := uniqueKeys(dec); err != nil {
@@ -102,10 +108,15 @@ func uniqueKeys(dec *json.Decoder) error {
 			if err != nil {
 				return err
 			}
-			if key := k.(string); seen[key] {
+			key := k.(string)
+			if seen[key] {
 				return fmt.Errorf("duplicate JSON key %q", key)
-			} else {
-				seen[key] = true
+			}
+			seen[key] = true
+			for _, f := range verdictFields {
+				if key != f && strings.EqualFold(key, f) {
+					return fmt.Errorf("JSON key %q aliases %q", key, f)
+				}
 			}
 		}
 		if err = uniqueKeys(dec); err != nil {
