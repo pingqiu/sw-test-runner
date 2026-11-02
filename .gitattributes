@@ -4,6 +4,9 @@
 *.yml   text eol=lf
 *.go    text eol=lf
 
+# Parser fixtures are compared byte for byte with their golden views.
+actions/testdata/** text eol=lf
+
 # These example resolutions bind the exact requested JSON bytes.
 examples/inventory/*.json text eol=lf
 inventory/*.json text eol=lf
