@@ -47,6 +47,21 @@ func TestClockEvidenceRefusesAnIncompleteCapture(t *testing.T) {
 	}
 }
 
+func TestClockAliasesAreRefused(t *testing.T) { // codex01 review b954b275
+	for name, row := range map[string]string{
+		"clock": `{"clock":{"boot_id":"bad"},"Clock":{"boot_id":"m02","entry_epoch":1793610000.5,"exit_epoch":1793610010.5,"entry_mono":7000.5,"exit_mono":7010.5}}`,
+		"entry": `{"clock":{"boot_id":"m02","entry_epoch":1,"Entry_Epoch":1793610000.5,"exit_epoch":1793610010.5,"entry_mono":7000.5,"exit_mono":7010.5}}`,
+		"exit":  `{"clock":{"boot_id":"m02","entry_epoch":1,"exit_epoch":2,"EXIT_EPOCH":3,"entry_mono":7000.5,"exit_mono":7010.5}}`,
+		"mono":  `{"clock":{"boot_id":"m02","entry_epoch":1,"exit_epoch":2,"entry_mono":7000.5,"Entry_Mono":7,"exit_mono":7010.5}}`,
+		"emono": `{"clock":{"boot_id":"m02","entry_epoch":1,"exit_epoch":2,"entry_mono":7000.5,"exit_mono":7010.5,"Exit_Mono":7}}`,
+		"boot":  `{"clock":{"boot_id":"m02","Boot_ID":"x","entry_epoch":1,"exit_epoch":2,"entry_mono":7000.5,"exit_mono":7010.5}}`,
+	} {
+		if _, err := clockEvidence([]byte(row), "run-1", 100.25, 110.75); err == nil {
+			t.Fatalf("%s: ambiguous clock fields admitted", name)
+		}
+	}
+}
+
 func TestPublishClockWritesTheRealEvidenceFile(t *testing.T) {
 	defer func(f func(string, []byte) error) { clockPublish = f }(clockPublish)
 	clockPublish = publishEvidence

@@ -23,7 +23,7 @@ type clockSample struct {
 	ExitMono   float64 `json:"exit_mono"`
 }
 
-// clockPublish is publishEvidence; the CPU fixtures have no M01 run root.
+// clockPublish is publishEvidence, for the M02 evidence and clock files; the CPU fixtures have no M01 run root.
 var clockPublish = publishEvidence
 
 // clockEvidence builds a sample from the job's strict one-row output.

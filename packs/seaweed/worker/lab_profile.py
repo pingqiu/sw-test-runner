@@ -663,8 +663,8 @@ def ready(config):
 def soak_layout(config):
     """The plan's soak setup block: the cache layout plus how many volumes to grow."""
     s = config.get('soak_setup')
-    if not isinstance(s, dict) or set(s) != {'collection', 'replication', 'ttl', 'grow_count'}:
-        raise ValueError('soak_setup keys must be exactly collection,replication,ttl,grow_count')
+    if not isinstance(s, dict) or set(s) != {'collection', 'replication', 'ttl', 'grow_count', 'master_generations'} or s['master_generations'] not in (1, 2):
+        raise ValueError('soak_setup keys must be exactly collection,replication,ttl,grow_count,master_generations')
     layout = {k: s[k] for k in ('collection', 'replication', 'ttl')}
     if assign_probe_url(dict(ready_assign=layout), 'http://0.0.0.0:1') is None:  # same layout rules as ready_assign
         raise ValueError('soak_setup layout')
@@ -763,12 +763,17 @@ def soak_collect(config):
     whole collect: never a partial answer."""
     layout, _ = soak_layout(config)
     coll, root = layout['collection'], private_root(config)
-    sources, rotated, events = [], {}, {}
-    for order, name in enumerate(('master-generation.json', 'master-replacement-generation.json')):
-        if not (root / name).exists():
-            continue
+    sources, rotated, events, pids = [], {}, {}, set()
+    want = config['soak_setup']['master_generations']
+    names = ('master-generation.json', 'master-replacement-generation.json')
+    if (root / names[1]).exists() != (want == 2):  # a partial or surplus history must not pass as complete
+        raise ValueError('master generations differ from the admitted fault schedule')
+    for order, name in enumerate(names[:want]):
         gen = json.loads((root / name).read_text())
         pid = int(gen['pid'])
+        if pid <= 0 or pid in pids:
+            raise ValueError('master generation identity')
+        pids.add(pid)
         glogs = sorted(p for p in (root / 'tmp').iterdir() if '.log.INFO.' in p.name and p.name.endswith('.%d' % pid))
         for file in [Path(x) for x in gen['logs']] + glogs:
             if file.parent not in (root, root / 'tmp') or file.resolve() != file:
@@ -786,10 +791,11 @@ def soak_collect(config):
                         if len(rotated) > ROTATED_BOUND:
                             raise ValueError('rotation lines over bound')
                     when = STAMP.match(text)
+                    identity = hashlib.sha256(raw.rstrip(b'\r\n')).hexdigest()
                     for pattern, kind in EPISODE if when else ():
                         m = pattern.search(text)
                         if m:  # one physical line in stderr and glog is one event (decision 3 r6 section 3)
-                            events.setdefault(text[:300], dict(kind=kind, vid=int(m.group(1)), stamp=when.group(1), gen=order, line=text[:300]))
+                            events.setdefault(identity, dict(kind=kind, vid=int(m.group(1)), stamp=when.group(1), gen=order, line=text[:300], sha256=identity))
                             if len(events) > ROTATED_BOUND:
                                 raise ValueError('episode lines over bound')
                             break

@@ -585,7 +585,7 @@ class SoakCollect(unittest.TestCase):
         self.gen('master-replacement-generation.json', 4343, ['master-replacement.stderr'])
         for name in ('lmcache_3.dat', 'lmcache_x_7.dat', 'other_5.dat'):
             (self.root / 'volume' / name).write_bytes(b'')
-        self.config = dict(root=str(self.root), soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4))
+        self.config = dict(root=str(self.root), soak_setup=dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2))
 
     def gen(self, name, pid, logs):
         (self.root / name).write_text(json.dumps(dict(pid=pid, logs=[str(self.root / x) for x in logs])))
@@ -607,6 +607,36 @@ class SoakCollect(unittest.TestCase):
         ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 21]
         self.assertEqual(sorted((e['kind'], e['stamp'], e['gen']) for e in ev), [
             ('birth', '1102 09:10:16.000002', 0), ('success', '1102 09:25:16.146813', 0), ('unwritable', '1102 09:24:16.000001', 0)])
+
+    def test_a_missing_replacement_generation_fails_the_collect(self):
+        (self.root / 'master-replacement-generation.json').unlink()
+        with self.assertRaises((ValueError, OSError)):
+            profile.soak_collect(self.config)
+
+    def test_an_undeclared_replacement_generation_fails_the_collect(self):
+        self.config['soak_setup']['master_generations'] = 1
+        with self.assertRaises(ValueError):
+            profile.soak_collect(self.config)
+
+    def test_no_master_fault_needs_only_the_original_generation(self):
+        (self.root / 'master-replacement-generation.json').unlink()
+        self.config['soak_setup']['master_generations'] = 1
+        self.assertTrue(profile.soak_collect(self.config)['sources'])
+
+    def test_generations_sharing_a_pid_fail_the_collect(self):
+        self.gen('master-replacement-generation.json', 4242, ['master-replacement.stderr'])
+        with self.assertRaises(ValueError):
+            profile.soak_collect(self.config)
+
+    def test_long_lines_with_one_prefix_stay_distinct_events(self):
+        pad = 'x' * 400
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write('I1102 09:24:16.000001 %s Volume 23 becomes unwritable\n' % pad)
+            f.write('I1102 09:24:16.000001 %s Volume 24 becomes unwritable\n' % pad)
+        ev = profile.soak_collect(self.config)['events']
+        self.assertEqual(sorted(e['vid'] for e in ev if e['vid'] in (23, 24)), [23, 24])
+        self.assertEqual(len({e['sha256'] for e in ev if e['vid'] in (23, 24)}), 2)
+        self.assertTrue(all(len(e['line']) <= 300 for e in ev))
 
     def test_a_line_without_a_stamp_is_no_episode_event(self):
         with (self.root / 'master.stderr').open('a') as f:
@@ -632,13 +662,13 @@ class SoakCollect(unittest.TestCase):
     def test_no_master_generation_fails_closed(self):
         (self.root / 'master-generation.json').unlink()
         (self.root / 'master-replacement-generation.json').unlink()
-        with self.assertRaisesRegex(ValueError, 'no master generation'):
+        with self.assertRaisesRegex(ValueError, 'master generation'):
             profile.soak_collect(self.config)
 
 
 class SoakSetup(unittest.TestCase):
     """soak_setup against a fake master and a fake pinned weed product."""
-    SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4)
+    SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2)
 
     def build(self, shell_rc=0, grow_count=None, settle=True, grow_delay=0):
         base = Path(tempfile.mkdtemp())

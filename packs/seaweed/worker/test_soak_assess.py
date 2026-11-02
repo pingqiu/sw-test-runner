@@ -29,7 +29,8 @@ def stamp(mono, offset=EPOCH):
 
 def line(kind, vid, mono, gen=0, offset=EPOCH):
     text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'success': 'rotated non-replicated cache Volume %d collection=lmcache'}[kind]
-    return dict(kind=kind, vid=vid, stamp=stamp(mono, offset), gen=gen, line=stamp(mono, offset) + ' ' + text % vid)
+    raw = stamp(mono, offset) + ' ' + text % vid
+    return dict(kind=kind, vid=vid, stamp=stamp(mono, offset), gen=gen, line=raw, sha256=hashlib.sha256(raw.encode()).hexdigest())
 
 
 def sample(t1, t4, entry_mono, residence, offset=EPOCH):
@@ -424,17 +425,17 @@ class SoakAssess(unittest.TestCase):
         self.assertEqual(self.ledger(line('birth', 20, 995), line('success', 20, 1160)), {})
 
     def test_ledger_an_event_after_the_success_leaves_the_vid_out(self):
-        self.assertEqual(self.ledger(line('unwritable', 20, 1150), line('success', 20, 1160), line('unwritable', 20, 1161)), {})
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('unwritable', 20, 1150), line('success', 20, 1160), line('unwritable', 20, 1161)), {})
 
     def test_ledger_equal_times_leave_the_vid_out(self):
         self.assertEqual(self.ledger(line('birth', 20, 1150), line('unwritable', 20, 1150), line('success', 20, 1160)), {})
 
-    def test_ledger_an_ambiguous_date_leaves_the_vid_out(self):
-        begin = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
-        end = datetime.datetime(2027, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
-        row = dict(kind='unwritable', vid=20, stamp='0301 00:00:00.000000', gen=0, line='a')
-        done = dict(kind='success', vid=20, stamp='1001 00:00:00.000000', gen=0, line='b')
-        self.assertEqual(self.ledger(row, done, begin=begin, end=end), {})
+    def test_ledger_an_ambiguous_date_leaves_the_vid_out(self):  # all three lines fit both years, in a valid order
+        begin = datetime.datetime(2026, 2, 1, tzinfo=datetime.timezone.utc).timestamp()
+        end = datetime.datetime(2027, 3, 15, tzinfo=datetime.timezone.utc).timestamp()
+        rows = [dict(kind=k, vid=20, stamp=t + ' 00:00:00.000000', gen=0, line=k, sha256=k)
+                for k, t in (('birth', '0210'), ('unwritable', '0220'), ('success', '0301'))]
+        self.assertEqual(self.ledger(*rows, begin=begin, end=end), {})
 
     def test_clock_an_unordered_sample_alone_refuses(self):
         s2 = sample(2870, 2870.2, 2870.1, 0)
@@ -447,6 +448,54 @@ class SoakAssess(unittest.TestCase):
         s1 = sample(980, 980.2, 980.1, 0)
         with self.assertRaisesRegex(ValueError, 'bracket the body'):
             soak_assess.clock_bracket(dict(m02_boot_id=M02_BOOT, run_id='run-1'), s1, s1)
+
+    # codex01 review b954b275.
+    def test_a_birthless_episode_is_refused(self):
+        def ch(ev):
+            c = self.collected(ev)
+            c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == 'birth')]
+        self.mutate(ch, 'misses')
+
+    def test_ledger_exactly_one_birth_before_the_start(self):
+        self.assertEqual(self.ledger(line('unwritable', 20, 1150), line('success', 20, 1160)), {})
+        self.assertEqual(self.ledger(line('unwritable', 20, 990), line('birth', 20, 995), line('success', 20, 1160)), {})
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('birth', 20, 996), line('unwritable', 20, 1150), line('success', 20, 1160)), {})
+
+    def test_a_conflicting_line_refuses_every_implicated_vid(self):
+        def ch(ev):
+            c = self.collected(ev)
+            original = next(e for e in c['events'] if e['vid'] == 20 and e['kind'] == 'unwritable')
+            c['events'].append(dict(original, vid=999))
+        self.mutate(ch, 'misses')
+
+    def test_long_lines_with_one_shared_prefix_stay_distinct(self):
+        a, b = line('birth', 20, 995), line('unwritable', 20, 1150)
+        c = line('success', 20, 1160)
+        for e in (a, b, c):
+            e['line'] = 'same presentation prefix'
+        self.assertEqual(self.ledger(a, b, c), {20: EPOCH + 1150})
+
+    def test_a_miss_reporting_foreign_fids_is_refused(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(fids=['3,ab']), 'misses')
+
+    def test_a_miss_reporting_no_fids_is_refused(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(fids=[]), 'misses')
+
+    def in_flight(self, ev, submitted, completed):
+        m = next(a for a in ev['acks'] if a['key'] == 'm')
+        ev['acks'].append(dict(m, seed='newer', sequence=98, submitted=submitted, completed=completed, digest=digest('newer', 64), writer=0, fids=['3,ab']))
+        q = ev['events'][-1]
+        q['dispatched'] += 1
+        ev['events'].insert(0, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=submitted - .01, submitted=submitted, completed=completed, ok=True))
+
+    def test_an_ack_completing_while_the_get_is_in_flight_is_not_its_latest(self):
+        self.passes(lambda ev: self.in_flight(ev, 1160.01, 1160.05))
+
+    def test_an_ack_completed_exactly_at_submission_does_not_precede_it(self):
+        self.passes(lambda ev: self.in_flight(ev, 1159.9, 1160))
+
+    def test_an_ack_completed_before_submission_is_the_latest(self):
+        self.mutate(lambda ev: self.in_flight(ev, 1159.8, 1159.9), 'misses')
 
     # Documented, NOT refused: known limits of the qualified observed ordering (decision 3 r6 sections 0 and 5).
     def test_LIMIT_an_out_and_back_offset_excursion_is_accepted(self):

@@ -112,10 +112,10 @@ def rotation_starts(events, begin, end):
     out-of-order or reused history is left out, so its misses refuse. The line is generic, not a rotation dispatch."""
     by_line, refused = {}, set()
     for e in events:
-        typed(e, kind=str, vid=int, stamp=str, gen=int, line=str)
-        seen = by_line.setdefault(e['line'], e)
-        if (seen['kind'], seen['vid'], seen['stamp']) != (e['kind'], e['vid'], e['stamp']):
-            refused.add(e['vid'])
+        typed(e, kind=str, vid=int, stamp=str, gen=int, line=str, sha256=str)
+        seen = by_line.setdefault(e['sha256'], e)  # identity is the full raw line; `line` is presentation only
+        if (seen['kind'], seen['vid'], seen['stamp'], seen['gen']) != (e['kind'], e['vid'], e['stamp'], e['gen']):
+            refused |= {seen['vid'], e['vid']}  # never trust the first of a conflicting pair
     per = {}
     for e in by_line.values():
         instants = log_instants(e['stamp'], begin, end)
@@ -133,8 +133,7 @@ def rotation_starts(events, begin, end):
         gens = [g for _, g, _ in rows]
         if len(set(at)) != len(at) or gens != sorted(gens):
             continue
-        last = kinds.index('birth') if kinds.count('birth') == 1 else None
-        if kinds.count('birth') > 1 or (last is not None and kinds[0] != 'birth'):
+        if kinds.count('birth') != 1 or kinds[0] != 'birth':
             continue
         starts[vid] = max(t for t, _, k in rows if k == 'unwritable')
     return starts
@@ -215,7 +214,7 @@ def assess(c):
         raise ValueError('workers.json is not the accepted 3 DC + 1 HTTP set')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
-    oracle, by_seq, wrong, misses, unknown = Oracle(), {}, [], [], []
+    oracle, by_seq, wrong, misses, unknown, acked = Oracle(), {}, [], [], [], {}
     gets = [e for e in ops if e['action'] == 'get']
     for kind, _, r in sorted([('ack', a['completed'], a) for a in acks] + [('get', e['completed'], e) for e in gets], key=lambda x: x[1]):
         if kind == 'ack':
@@ -224,12 +223,14 @@ def assess(c):
             if v.digest != r['digest']:
                 wrong.append(('ack', r['key']))
             by_seq[(r['key'], r['sequence'])] = (v, r)
+            acked.setdefault(r['key'], []).append((r['completed'], v))
             continue
         case, latest = get_case(r), oracle.latest.get(r['key'])
         if case == 'hit' and (latest is None or not latest.matches(r['length'], r['sha256'])):
             wrong.append(('get', r['op']))
         elif case == 'miss':
-            misses.append((r, latest))  # the latest ACK at the time of THIS miss
+            # J1: the latest ACK completed before THIS miss was submitted, not one landing while it was in flight.
+            misses.append((r, next((v for done, v in reversed(acked.get(r['key'], [])) if done < r['submitted']), None)))
         elif case == 'unknown':
             unknown.append(r['op'])
     mark('wrong_reads', not wrong, '%d wrong' % len(wrong))
@@ -282,7 +283,7 @@ def assess(c):
         lo, hi, starts, clock_error = 0, 0, {}, '; clock: %s' % str(error)[:120]
     def excused(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
-        return bool(v) and latest == v and miss_excused(e, v, a, good, starts, lo, hi, dat)
+        return bool(v) and latest == v and list(e['fids']) == list(v.fids) and miss_excused(e, v, a, good, starts, lo, hi, dat)
     unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
 

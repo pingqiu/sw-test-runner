@@ -16,6 +16,8 @@ type SoakSetup struct {
 	Replication string `json:"replication"`
 	TTL         string `json:"ttl"`
 	GrowCount   int    `json:"grow_count"`
+	// MasterGenerations is what the admitted fault schedule produces; collect refuses any other history.
+	MasterGenerations int `json:"master_generations"`
 }
 
 // soakLoadKeyPrefix is r9's LMCache-shaped key form; each run has a fresh cluster.
@@ -73,6 +75,12 @@ func checkSoakTask(j tr.JobPin, in tr.PackInputs, host string, want []string, er
 func (p Plan) setupSettings() SmokeSettings {
 	s := p.profileSettings(false)
 	l := p.Soak.Layout
-	s.soakSetup = &SoakSetup{Collection: l.Collection, Replication: l.Replication, TTL: l.TTL, GrowCount: p.Soak.GrowCount}
+	generations := 1
+	for _, f := range p.Soak.Faults {
+		if f.Role == "master" {
+			generations = 2
+		}
+	}
+	s.soakSetup = &SoakSetup{Collection: l.Collection, Replication: l.Replication, TTL: l.TTL, GrowCount: p.Soak.GrowCount, MasterGenerations: generations}
 	return s
 }

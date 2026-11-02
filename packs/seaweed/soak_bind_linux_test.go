@@ -306,6 +306,47 @@ func TestASuccessfulSoakReachesCollectAndTheVerdict(t *testing.T) {
 	}
 }
 
+// codex01 review b954b275: one composed successful path through the real collect wiring: M02 row, m02-collect and S2
+// publication, assessor dispatch, verdict decoding. Rows are stand-ins; the job dispatch and joins are the product's.
+func TestACollectJoinsS2TheAssessorAndAPassVerdict(t *testing.T) {
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+	defer func(f func(string, []byte) error) { clockPublish = f }(clockPublish)
+	published := map[string][]byte{}
+	clockPublish = func(p string, body []byte) error {
+		published[filepath.Base(p)] = body
+		return nil
+	}
+	f := soakProfile(t, 45*time.Minute, nil, nil)
+	f.node.soakPass = true
+	result, bundle, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
+	var text strings.Builder
+	fmt.Fprint(&text, err, " ", result)
+	_ = filepath.WalkDir(string(bundle), func(p string, e fs.DirEntry, werr error) error {
+		if werr == nil && !e.IsDir() {
+			if b, rerr := os.ReadFile(p); rerr == nil {
+				text.Write(b)
+			}
+		}
+		return nil
+	})
+	if strings.Contains(text.String(), "SOAK_VERDICT_FAIL") || strings.Contains(text.String(), "OWNED_JOB_FAILED") {
+		t.Fatalf("the successful collect path refused: %.2500s", text.String())
+	}
+	for _, name := range []string{"soak-clock-s1.json", "m02-collect.json", "soak-clock-s2.json"} {
+		if len(published[name]) == 0 {
+			t.Fatalf("%s not published; have %v", name, published)
+		}
+	}
+	var s1, s2 clockSample
+	if json.Unmarshal(published["soak-clock-s1.json"], &s1) != nil || json.Unmarshal(published["soak-clock-s2.json"], &s2) != nil ||
+		s1.T1 <= 0 || s1.T1 >= s1.T4 || s2.T1 < s1.T4 || s2.T1 >= s2.T4 || s2.EntryEpoch != 1793612000 || s1.EntryEpoch != 1793610000 {
+		t.Fatalf("samples: %+v %+v", s1, s2)
+	}
+}
+
 // R2: the assessor exactly as admitted (python -I <helper> --config) imports its
 // pinned siblings from a foreign cwd and emits one row Go decodes for this run.
 func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
