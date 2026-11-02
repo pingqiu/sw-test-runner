@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
-	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
 // soakOps is the narrow set of existing ActionContext mechanisms the fault
@@ -411,10 +410,4 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 		return errors.New("soak: client readiness observation missing")
 	}
 	return nil
-}
-
-// soak is the seaweed_kv_soak phase. Until step 3 admits the worker it refuses
-// before any effect, in addition to bind() refusing every soak plan.
-func (r *runtimePack) soak(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
-	return refusal("seaweed_kv_soak", "SOAK_WORKER_UNADMITTED", ErrSoakWorkerUnadmitted)
 }

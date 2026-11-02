@@ -30,6 +30,9 @@ type SoakPlan struct {
 	GrowCount     int          `json:"grow_count"`
 	ClientKillAtS int          `json:"client_kill_at_s"`
 	Setup         Step         `json:"setup"`
+	// Step 3b: the M02 evidence job and the M01 verdict job, run at collect.
+	Evidence Step `json:"evidence"`
+	Assess   Step `json:"assess"`
 }
 
 type SoakFault struct {
@@ -77,9 +80,6 @@ var (
 	soakName        = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 	soakReplication = regexp.MustCompile(`^[0-9]{3}$`)
 	soakTTL         = regexp.MustCompile(`^([1-9][0-9]{0,4}[mhdwMy])?$`)
-	// ErrSoakWorkerUnadmitted keeps every soak plan inert until step 3 lands
-	// exact worker admission: no phase of a soak plan binds, so nothing runs.
-	ErrSoakWorkerUnadmitted = errors.New("SOAK_WORKER_UNADMITTED: the soak worker has no exact admission yet")
 )
 
 func (r *Rotation) validate() error {
@@ -243,6 +243,23 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 	}
 	labels[x.Setup.Job] = true
 	if err := checkProfile(in.Jobs[x.Setup.Job], in, d, "m02", "soak_setup", "", p.setupSettings()); err != nil {
+		return err
+	}
+	// The verdict jobs: M02 evidence (lab_profile soak_collect) and the M01 assessor.
+	for _, s := range []Step{x.Evidence, x.Assess} {
+		if s.Role != "" || used[s.Job] || labels[s.Job] {
+			return errors.New("soak evidence/assess step not exact")
+		}
+		labels[s.Job] = true
+	}
+	if x.Evidence.Host != "m02" || x.Assess.Host != "m01" {
+		return errors.New("soak evidence runs on M02 and the verdict on M01")
+	}
+	if err := checkProfile(in.Jobs[x.Evidence.Job], in, d, "m02", "soak_collect", "", p.setupSettings()); err != nil {
+		return err
+	}
+	assess, err := SoakAssessArgs(d, p.Smoke, x)
+	if err := checkSoakTask(in.Jobs[x.Assess.Job], in, "m01", assess, err, p.Smoke, soakAssessHelpers, false); err != nil {
 		return err
 	}
 	// Fault ready probes: one per host, distinct from every other job label,

@@ -57,7 +57,11 @@ func (p Plan) steps(phase string) []Step {
 	case phases[0]:
 		return p.Preflight
 	case phases[1]:
-		return append(append([]Step{}, p.Deploy...), p.Ready...)
+		steps := append(append([]Step{}, p.Deploy...), p.Ready...)
+		if p.Soak != nil { // the cache layout, once every service is READY
+			steps = append(steps, p.Soak.Setup)
+		}
+		return steps
 	case phases[2], "seaweed_read_restart", "seaweed_kv_soak":
 		return p.Workload
 	case phases[3]:
@@ -133,7 +137,7 @@ func uniqueJSON(d *json.Decoder, depth int) error {
 	return err
 }
 func hash(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
-func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
+func bind(p Plan, d *inventory.Document, in tr.PackInputs, now time.Time) error {
 	var scenario tr.Scenario
 	if err := yaml.Unmarshal(in.Scenario, &scenario); err != nil {
 		return err
@@ -161,7 +165,6 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		}
 	}
 	b := in.Binding
-	now := time.Now()
 	// The ten-minute rule stays for every non-soak plan; a soak plan's ceiling
 	// is SoakHorizon, checked in bindSoak (contract r3, R3).
 	if p.Profile == "m01-m02-v1" && p.Soak == nil && b.HardDeadline.Sub(now) > 10*time.Minute {
@@ -279,12 +282,7 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		return bindRestart(p, d, in, used)
 	}
 	if p.Soak != nil {
-		if err := bindSoak(p, d, in, used, now); err != nil {
-			return err
-		}
-		// Staging refusal (contract r3, R2): no phase of a soak plan binds until
-		// step 3 admits the exact worker, so a soak plan has zero effects.
-		return ErrSoakWorkerUnadmitted
+		return bindSoak(p, d, in, used, now)
 	}
 	return nil
 }
@@ -304,7 +302,16 @@ type session struct {
 	terminal   error
 	cleanupErr error
 	jobs       map[string]tr.JobHandle
+	admitted   time.Time // the first phase's admission: the one clock every budget is charged against
 }
+
+// clock is the admission clock; CPU controls advance it to prove elapsed phases.
+var clock = time.Now
+
+// soakPhase is the seaweed_kv_soak controller; CPU controls replace it only to
+// prove the phase transition into collect (the real one needs the M01 clock).
+var soakPhase = (*runtimePack).soak
+
 type runtimePack struct {
 	mu       sync.Mutex
 	sessions map[*tr.RunScope]*session
@@ -329,17 +336,24 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		return refusal(act.Action, "PLAN_INVALID", err)
 	}
 	raw := sealed.Metadata["seaweed_plan"]
+	r.mu.Lock()
+	s := r.sessions[a.Safety]
+	r.mu.Unlock()
+	admitted := clock()
+	if s != nil {
+		admitted = s.admitted // budgets are charged once, at the session's first admission; later phases rebind identity and shape
+	}
 	p, d, err := decodePlan(raw)
 	if err == nil {
-		err = bind(p, d, in)
+		err = bind(p, d, in, admitted)
 	}
 	if err != nil {
 		return refusal(act.Action, "BINDING_REFUSED", err)
 	}
 	r.mu.Lock()
-	s := r.sessions[a.Safety]
+	s = r.sessions[a.Safety]
 	if s == nil {
-		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}}
+		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}, admitted: admitted}
 		r.sessions[a.Safety] = s
 	}
 	r.mu.Unlock()
@@ -357,13 +371,12 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || sealed.Phases[s.next].Actions[0].Action != act.Action {
 		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
 	}
-	if act.Action == "seaweed_kv_soak" {
-		out, err = r.soak(ctx, a, p, d, in, s)
-		s.terminal = err
-		return out, err
-	}
-	if act.Action == "seaweed_read_restart" {
-		out, err = r.restart(ctx, a, p, d, in, s)
+	if act.Action == "seaweed_kv_soak" || act.Action == "seaweed_read_restart" {
+		phase := (*runtimePack).restart
+		if act.Action == "seaweed_kv_soak" {
+			phase = soakPhase
+		}
+		out, err = phase(r, ctx, a, p, d, in, s)
 		s.terminal = err
 		if err == nil {
 			s.next++
@@ -383,6 +396,13 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		}
 		if background {
 			s.jobs[step.Job] = h
+		}
+	}
+	if act.Action == phases[3] && p.Soak != nil {
+		v, err := r.soakVerdict(ctx, a, p, d)
+		if err != nil {
+			s.terminal = err
+			return refusal(act.Action, "SOAK_VERDICT_FAIL", fmt.Errorf("%w (verdict %+v)", err, v))
 		}
 	}
 	s.next++

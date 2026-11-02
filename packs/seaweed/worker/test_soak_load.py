@@ -156,8 +156,8 @@ class FaultWindowWorker(unittest.TestCase):
         t.start()
         return t
 
-    def events(self):
-        return [json.loads(l) for l in (self.root / 'op-events.jsonl').read_text().splitlines()]
+    def events(self):  # operation events only (body_end/client_kill markers carry no op)
+        return [e for e in (json.loads(l) for l in (self.root / 'op-events.jsonl').read_text().splitlines()) if 'op' in e]
 
     def test_pause_stops_dispatch_acks_pending_gets_and_credits_their_errors(self):
         self.controller(1.5, fail_after_ack=True)
