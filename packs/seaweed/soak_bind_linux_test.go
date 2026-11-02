@@ -19,6 +19,7 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"gopkg.in/yaml.v3"
 )
 
 // soakProfile is the strict-entry CPU profile (same fake transport) carrying a
@@ -340,5 +341,49 @@ func TestCollectAfterTheElapsedSoakStillBinds(t *testing.T) {
 	out := runEntry(t, soakProfile(t, 45*time.Minute, nil, nil))
 	if strings.Contains(out, "does not fit") || !strings.Contains(out, "SOAK_VERDICT_FAIL") {
 		t.Fatalf("collect after the elapsed soak did not reach the verdict: %s | %.1500s", refusalLines(out), out)
+	}
+}
+
+// The parity plan comes from the builder, not from test code: the soak bundle
+// BuildProfile emits (plan, jobs, restart plans, scenario timeouts) binds on the
+// strict entry and, with the soak controller stood in, runs through collect to
+// the verdict.
+func TestTheBuilderSoakBundleBindsAndRunsToTheVerdict(t *testing.T) {
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+	var bundle ProfileBundle
+	f := soakProfile(t, 45*time.Minute, nil, func(f *cpuFixture, d *inventory.Document) {
+		settings := *f.plan.Soak
+		settings.Setup, settings.Evidence, settings.Assess, settings.FaultReady = Step{}, Step{}, Step{}, nil
+		in := ProfileInput{Requested: f.plan.Requested, Resolved: f.plan.Resolved, Smoke: f.plan.Smoke, Files: map[string]map[string]string{}, Soak: &settings}
+		for _, dep := range f.policy.Deployments {
+			in.Files[dep.NodeID] = map[string]string{}
+			for _, file := range dep.Files {
+				in.Files[dep.NodeID][file.Path] = file.SHA256
+			}
+		}
+		var err error
+		if bundle, err = BuildProfile(in); err != nil {
+			t.Fatal(err)
+		}
+		f.plan, f.policy.Jobs, f.policy.GenerationRestarts = bundle.Plan, bundle.Jobs, bundle.Restarts
+		var built tr.Scenario
+		if err = yaml.Unmarshal([]byte(bundle.ScenarioYAML), &built); err != nil {
+			t.Fatal(err)
+		}
+		f.editScenario = func(s *tr.Scenario) {
+			for i := range s.Phases {
+				s.Phases[i].Actions = built.Phases[i].Actions
+			}
+		}
+	})
+	if a := bundle.Plan.Soak; a == nil || a.Assess.Job != "soak-assess-m01" || len(a.FaultReady) != 2 || len(bundle.Restarts) != 2 || !strings.Contains(bundle.ScenarioYAML, "seaweed_kv_soak") || !strings.Contains(bundle.ScenarioYAML, "1990s") {
+		t.Fatalf("builder soak bundle incomplete: %+v restarts %v\n%s", bundle.Plan.Soak, bundle.Restarts, bundle.ScenarioYAML)
+	}
+	out := runEntry(t, f)
+	if strings.Contains(out, "BINDING_REFUSED") || !strings.Contains(out, "SOAK_VERDICT_FAIL") {
+		t.Fatalf("builder bundle did not bind and reach the verdict: %s | %.2000s", refusalLines(out), out)
 	}
 }
