@@ -32,7 +32,7 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 	// Step 3 helpers deployed, read back and pinned (M01 load).
 	for i := range f.policy.Deployments {
 		dep := &f.policy.Deployments[i]
-		names := map[string][]string{"m01": {"soak_load.py", "soak_stats.py"}}[dep.NodeID]
+		names := map[string][]string{"m01": {"soak_load.py", "soak_stats.py", "soak_assess.py"}}[dep.NodeID]
 		for _, name := range names {
 			body, _ := workerFiles.ReadFile("worker/" + name)
 			dep.Files = append(dep.Files, infra.DeploymentFile{Path: "/opt/seaweed/worker/" + name, SHA256: hash(body), Size: int64(len(body)), Roles: []string{"adapter"}})
@@ -65,7 +65,7 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 		FaultReady:  []Step{{Host: "m01", Job: "fault-ready-m01"}, {Host: "m02", Job: "fault-ready-m02"}},
 		Faults:      []SoakFault{{AtS: 480, Role: "volume", Episode: "E1"}, {AtS: 900, Role: "master", Episode: "E2"}},
 		Layout:      AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"}, GrowCount: 8, ClientKillAtS: 1320,
-		Setup: Step{Host: "m02", Job: "soak-setup"}}
+		Setup: Step{Host: "m02", Job: "soak-setup"}, Evidence: Step{Host: "m02", Job: "soak-evidence"}, Assess: Step{Host: "m01", Job: "soak-assess"}}
 	if pre != nil { // before the pins, so every job stays consistent with the plan
 		pre(f.plan.Soak)
 	}
@@ -133,6 +133,10 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 	task(f.plan.Soak.Setup.Job, "m02", setup, e)
 	load, e := SoakLoadArgs(d, f.plan.Smoke, f.plan.Soak)
 	task(f.plan.Workload[0].Job, "m01", load, e)
+	evidence, e := ProfileArgs(d, "m02", "soak_collect", "", f.plan.setupSettings(), files("m02"))
+	task(f.plan.Soak.Evidence.Job, "m02", evidence, e)
+	assess, e := SoakAssessArgs(d, f.plan.Smoke, f.plan.Soak)
+	task(f.plan.Soak.Assess.Job, "m01", assess, e)
 	f.editScenario = func(s *tr.Scenario) { s.Phases[2].Actions[0].Action = "seaweed_kv_soak" }
 	if mutate != nil {
 		mutate(f, d)
@@ -141,14 +145,11 @@ func soakProfile(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), mutate
 	return f
 }
 
-func runSoakEntry(t *testing.T, f *cpuFixture) string {
+func runEntry(t *testing.T, f *cpuFixture) string {
 	t.Helper()
 	result, bundle, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
 	if err == nil && result != nil && result.Status == tr.StatusPass {
-		t.Fatal("soak plan passed while its worker is unadmitted")
-	}
-	if f.node.authorized != 0 {
-		t.Fatalf("soak plan dispatched %d jobs", f.node.authorized)
+		t.Fatal("a CPU-fixture soak plan cannot pass: there is no real load")
 	}
 	// The refusal text lives in the result files, not in the bundle path.
 	var text strings.Builder
@@ -161,18 +162,34 @@ func runSoakEntry(t *testing.T, f *cpuFixture) string {
 		}
 		return nil
 	})
-	if !strings.Contains(text.String(), "BINDING_REFUSED") {
-		t.Fatalf("no binding refusal recorded: %.2000s", text.String())
-	}
 	return text.String()
 }
 
-// A complete, valid soak plan binds every rule, then refuses at the staging
-// gate: SOAK_WORKER_UNADMITTED, and zero jobs of any phase are dispatched.
-func TestSoakPlanIsInertUntilWorkerAdmitted(t *testing.T) {
-	out := runSoakEntry(t, soakProfile(t, 45*time.Minute, nil, nil))
-	if !strings.Contains(out, "SOAK_WORKER_UNADMITTED") {
-		t.Fatalf("valid soak plan refused for another reason: %s", refusalLines(out))
+// runSoakEntry expects a binding refusal with zero jobs dispatched.
+func runSoakEntry(t *testing.T, f *cpuFixture) string {
+	t.Helper()
+	out := runEntry(t, f)
+	if f.node.authorized != 0 {
+		t.Fatalf("refused soak plan dispatched %d jobs", f.node.authorized)
+	}
+	if !strings.Contains(out, "BINDING_REFUSED") {
+		t.Fatalf("no binding refusal recorded: %.2000s", out)
+	}
+	return out
+}
+
+// The gate is gone (step 3b): a complete valid soak plan binds, runs its
+// preflight, deploy, READY and layout-setup jobs, and reaches the soak phase,
+// whose controller refuses here only because the CPU fixture's M01 boot is
+// synthetic (a real M01 run is the separately reviewed parity run).
+func TestSoakPlanBindsAndRunsToTheSoakPhase(t *testing.T) {
+	f := soakProfile(t, 45*time.Minute, nil, nil)
+	out := runEntry(t, f)
+	if strings.Contains(out, "BINDING_REFUSED: soak") || f.node.authorized == 0 {
+		t.Fatalf("soak plan did not bind/run (jobs %d): %s", f.node.authorized, refusalLines(out))
+	}
+	if !strings.Contains(out, "not the admitted M01 clock") {
+		t.Fatalf("soak phase not reached: %.1500s", out)
 	}
 }
 
@@ -235,17 +252,24 @@ func TestSoakPlanBindRefusals(t *testing.T) {
 			j.Argv = append(append([]string{}, j.Argv[:3]...), strings.Replace(j.Argv[3], `"pacing_s":2`, `"pacing_s":3`, 1))
 			f.policy.Jobs[f.plan.Workload[0].Job] = j
 		}, "soak task argv"},
-		"setup grow count drift":     {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.GrowCount = 9 }, "profile argv"},
-		"collection mismatch":        {45 * time.Minute, func(s *SoakPlan) { s.Layout.Collection = "other" }, nil, "collection coherence"},
-		"client kill near a fault":   {45 * time.Minute, func(s *SoakPlan) { s.ClientKillAtS = 950 }, nil, "client kill too close"},
-		"setup reuses a ready label": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Setup.Job = f.plan.Ready[1].Job }, "setup step not exact"},
+		"setup grow count drift":        {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.GrowCount = 9 }, "profile argv"},
+		"collection mismatch":           {45 * time.Minute, func(s *SoakPlan) { s.Layout.Collection = "other" }, nil, "collection coherence"},
+		"client kill near a fault":      {45 * time.Minute, func(s *SoakPlan) { s.ClientKillAtS = 950 }, nil, "client kill too close"},
+		"setup reuses a ready label":    {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Setup.Job = f.plan.Ready[1].Job }, "setup step not exact"},
+		"evidence on the wrong host":    {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Evidence.Host = "m01" }, "evidence runs on M02"},
+		"evidence reuses a ready label": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) { f.plan.Soak.Evidence.Job = f.plan.Ready[1].Job }, "evidence/assess step not exact"},
+		"assessor argv drift": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
+			j := f.policy.Jobs["soak-assess"]
+			j.Argv = append(append([]string{}, j.Argv[:3]...), strings.Replace(j.Argv[3], "1320", "1321", 1))
+			f.policy.Jobs["soak-assess"] = j
+		}, "soak task argv"},
 		"pause authority carried": {45 * time.Minute, nil, func(f *cpuFixture, _ *inventory.Document) {
 			f.policy.ProcessPause = &tr.ProcessPausePlan{Name: "P1", Victim: filer(f), Deadline: time.Now().Add(10 * time.Minute)}
 		}, "no pause authority"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := runSoakEntry(t, soakProfile(t, tc.hardIn, tc.pre, tc.mutate))
-			if strings.Contains(out, "SOAK_WORKER_UNADMITTED") || !strings.Contains(out, tc.want) {
+			if !strings.Contains(out, tc.want) {
 				t.Fatalf("want refusal %q, got: %s", tc.want, refusalLines(out))
 			}
 		})
@@ -259,7 +283,7 @@ func TestNonSoakPlanRefusesTheSoakPhase(t *testing.T) {
 	f.editScenario = func(s *tr.Scenario) { s.Phases[2].Actions[0].Action = "seaweed_kv_soak" }
 	f.publish(t, nil)
 	out := runSoakEntry(t, f)
-	if strings.Contains(out, "SOAK_WORKER_UNADMITTED") {
-		t.Fatalf("non-soak plan reached the soak gate: %s", out)
+	if !strings.Contains(out, "phase skipped") {
+		t.Fatalf("non-soak plan refused for another reason: %s", refusalLines(out))
 	}
 }

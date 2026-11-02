@@ -179,5 +179,31 @@ class SoakAssess(unittest.TestCase):
             self.run_on(ev)
 
 
+class RealWorkerFiles(unittest.TestCase):
+    """The assessor reads the files the REAL soak_load writes (fake native child,
+    no fault): the replay-based criteria must PASS on them. Routes and rotation
+    can't (no native stats, nothing rotates), which proves only the format."""
+
+    def test_assessor_reads_the_workers_own_evidence(self):
+        import test_soak_load
+        import soak_load
+        case = test_soak_load.FaultWindowWorker('test_a_future_pause_is_refused')
+        case.setUp()
+        try:
+            case.config['native'] = dict(fake_delay_get=0.05, fake_delay_set=0.02)
+            soak_load.run(case.config)
+            root = case.root
+            (root / 'faults.json').write_text('[]')
+            (root / 'm02-collect.json').write_text(json.dumps(dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[])))
+            row = soak_assess.assess(dict(root=str(root), duration_s=case.config['duration_s'], client_kill_at_s=10 ** 6,
+                                          collection='lmcache', faults=[]))
+        finally:
+            case.doCleanups()
+        c = row['criteria']
+        self.assertEqual((c['wrong_reads']['outcome'], c['failed_sets']['outcome'], c['fault_errors']['outcome'],
+                          c['misses']['outcome'], c['body']['outcome']), ('PASS',) * 5, c)
+        self.assertEqual(row['status'], 'FAIL')  # routes/rotation/client kill: not produced by this fake run
+
+
 if __name__ == '__main__':
     unittest.main()

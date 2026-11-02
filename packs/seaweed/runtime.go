@@ -57,7 +57,11 @@ func (p Plan) steps(phase string) []Step {
 	case phases[0]:
 		return p.Preflight
 	case phases[1]:
-		return append(append([]Step{}, p.Deploy...), p.Ready...)
+		steps := append(append([]Step{}, p.Deploy...), p.Ready...)
+		if p.Soak != nil { // the cache layout, once every service is READY
+			steps = append(steps, p.Soak.Setup)
+		}
+		return steps
 	case phases[2], "seaweed_read_restart", "seaweed_kv_soak":
 		return p.Workload
 	case phases[3]:
@@ -279,12 +283,7 @@ func bind(p Plan, d *inventory.Document, in tr.PackInputs) error {
 		return bindRestart(p, d, in, used)
 	}
 	if p.Soak != nil {
-		if err := bindSoak(p, d, in, used, now); err != nil {
-			return err
-		}
-		// Staging refusal (contract r3, R2): no phase of a soak plan binds until
-		// step 3 admits the exact worker, so a soak plan has zero effects.
-		return ErrSoakWorkerUnadmitted
+		return bindSoak(p, d, in, used, now)
 	}
 	return nil
 }
@@ -383,6 +382,13 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 		}
 		if background {
 			s.jobs[step.Job] = h
+		}
+	}
+	if act.Action == phases[3] && p.Soak != nil {
+		v, err := r.soakVerdict(ctx, a, p, d)
+		if err != nil {
+			s.terminal = err
+			return refusal(act.Action, "SOAK_VERDICT_FAIL", fmt.Errorf("%w (verdict %+v)", err, v))
 		}
 	}
 	s.next++

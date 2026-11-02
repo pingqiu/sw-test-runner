@@ -3,6 +3,7 @@
 package seaweed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/inventory"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,6 +55,29 @@ func (s *soakAdapter) Mono() (float64, error) {
 func (s *soakAdapter) Now() time.Time                         { return time.Now() }
 func (s *soakAdapter) After(d time.Duration) <-chan time.Time { return time.After(d) }
 func (s *soakAdapter) WorkDeadline() time.Time                { return s.deadline }
+
+// soak is the seaweed_kv_soak phase: the fault loop over the production
+// adapter, then the FaultRecords published for the verdict (also on failure).
+func (r *runtimePack) soak(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, sess *session) (map[string]string, error) {
+	boot := ""
+	for _, h := range d.Observation.Hosts {
+		if h.HostID == "m01" {
+			boot = h.BootID
+		}
+	}
+	if b, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err != nil || boot == "" || string(bytes.TrimSpace(b)) != boot {
+		return refusal("seaweed_kv_soak", "BINDING_REFUSED", errors.New("runner is not the admitted M01 clock"))
+	}
+	ops := &soakAdapter{a: a, root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, deadline: in.Binding.WorkDeadline, roles: map[string]string{}}
+	records, _, err := runSoak(ctx, ops, p, in, sess.jobs)
+	if perr := publishFile(filepath.Join(ops.root, "faults.json"), records); err == nil {
+		err = perr
+	}
+	if err != nil {
+		return refusal("seaweed_kv_soak", "SOAK_FAILED", err)
+	}
+	return admittedResult("completed", "OK", "soak load and fault schedule completed; the verdict is computed at collect", "seaweed_kv_soak", d), nil
+}
 
 // LoadStart reads the worker's witness: this boot, a finite positive clock.
 func (s *soakAdapter) LoadStart(ctx context.Context) (float64, error) {
@@ -98,20 +123,6 @@ func (s *soakAdapter) Ack(ctx context.Context, episode string) (SoakAck, error) 
 	}
 	body, _ := json.Marshal(raw)
 	return a, json.Unmarshal(body, &a)
-}
-
-// publishFile is exclusive and atomic: a reader sees the whole file or none.
-func publishFile(path string, v any) error {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
-	if err = os.WriteFile(tmp, body, 0o600); err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	return os.Link(tmp, path)
 }
 
 // readBound reads one fault-window/witness file: no symlink, a regular file,
