@@ -462,9 +462,10 @@ def launch(config, role, replacement=False):
         os.close(fd)
 
 
-def http_json(url, config, require_json=True):
+def http_json(url, config, require_json=True, read_limit=2):
     # Reuse the accepted preflight producer's absolute-deadline reader pattern:
     # a trickling header/body cannot restart a socket timeout indefinitely.
+    # read_limit caps each socket wait (2 s); the absolute deadline always applies.
     endpoint = urlsplit(url)
     if endpoint.scheme != 'http' or endpoint.username or endpoint.password or endpoint.fragment:
         raise ValueError('profile HTTP endpoint')
@@ -476,7 +477,7 @@ def http_json(url, config, require_json=True):
             return True
         def readinto(self, buffer):
             nonlocal wire_bytes
-            owned.settimeout(remaining(config))
+            owned.settimeout(remaining(config, read_limit))
             count = owned.recv_into(buffer)
             wire_bytes += count
             if wire_bytes > 128 * 1024:
@@ -726,7 +727,9 @@ def soak_setup(config):
     if shell.returncode != 0:
         raise ValueError('fs.configure failed with rc %d' % shell.returncode)
     # One grow call, no retry: a second call could grow a second batch.
-    grow = http_json(master + '/vol/grow?' + urlencode(dict(layout, count=n)), bounded(config, 120))
+    # The master answers a grow only after allocating every volume (~10 s for 8 on M02, r9 9.75 s): each read may
+    # wait up to the 120 s step budget, still bounded by the original work deadline.
+    grow = http_json(master + '/vol/grow?' + urlencode(dict(layout, count=n)), bounded(config, 120), read_limit=120)
     if grow.get('count') != n:
         raise ValueError('volume grow answered count %r, want %d' % (grow.get('count'), n))
     staged = bounded(config, 60)
