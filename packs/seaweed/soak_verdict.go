@@ -56,7 +56,11 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID,
+	m02 := observedBoot(d, "m02")
+	if m02 == "" {
+		return nil, errors.New("soak assessor needs the admitted M02 boot")
+	}
+	raw, err := json.Marshal(map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID, "m02_boot_id": m02,
 		"duration_s": x.DurationS, "quiescence_s": int(QuiescenceReserve.Seconds()), "client_kill_at_s": x.ClientKillAtS,
 		"collection": x.Layout.Collection})
 	return []string{"-I", path.Join(s.HelperDir, "soak_assess.py"), "--config", string(raw)}, err
@@ -81,7 +85,8 @@ type SoakVerdict struct {
 
 // verdictFields are the decoded field names. encoding/json matches struct
 // fields case-insensitively, so a key that folds to one of them must be it.
-var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root"}
+var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root",
+	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono"} // the clock row is decoded by encoding/json too
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -169,7 +174,15 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err != nil {
 		return v, err
 	}
+	t1, err := controllerMono()
+	if err != nil {
+		return v, err
+	}
 	_, e, err := a.RunApprovedPackJob(ctx, p.Soak.Evidence.Job, false)
+	if err != nil {
+		return v, err
+	}
+	t4, err := controllerMono()
 	if err != nil {
 		return v, err
 	}
@@ -180,7 +193,10 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err != nil || e.Code != 0 || oneStrictValue(m02) != nil || json.Unmarshal(m02, &probe) != nil || probe.Status != "SOAK_COLLECTED" {
 		return v, errors.New("soak M02 evidence failed, truncated or malformed")
 	}
-	if err = publishEvidence(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
+	if err = clockPublish(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
+		return v, err
+	}
+	if err = publishClock(want.Root, "soak-clock-s2.json", want.RunID, m02, t1, t4); err != nil {
 		return v, err
 	}
 	if _, e, err = a.RunApprovedPackJob(ctx, p.Soak.Assess.Job, false); err != nil {

@@ -306,13 +306,85 @@ func TestASuccessfulSoakReachesCollectAndTheVerdict(t *testing.T) {
 	}
 }
 
+// codex01 reviews b954b275, db5d4589: one composed path through the real collect wiring: M02 row, m02-collect and S2
+// publication, assessor dispatch, verdict decoding. Rows are stand-ins; the dispatch and joins are the product's. The
+// FAIL twin is what proves the row is decoded: a bypass of the assessor or of decodeVerdict cannot refuse it.
+func composedCollect(t *testing.T, assessFail bool) (*cpuFixture, *tr.ScenarioResult, map[string][]byte, string) {
+	t.Helper()
+	soakPhase = func(r *runtimePack, ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
+		return admittedResult("completed", "OK", "CPU stand-in for the M01 soak", "seaweed_kv_soak", d), nil
+	}
+	t.Cleanup(func() { soakPhase = (*runtimePack).soak })
+	publish := clockPublish
+	t.Cleanup(func() { clockPublish = publish })
+	published := map[string][]byte{}
+	clockPublish = func(p string, body []byte) error {
+		published[filepath.Base(p)] = body
+		return nil
+	}
+	f := soakProfile(t, 45*time.Minute, nil, nil)
+	f.node.soakPass, f.node.assessFail = true, assessFail
+	result, bundle, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
+	var text strings.Builder
+	fmt.Fprint(&text, err, " ", result)
+	_ = filepath.WalkDir(string(bundle), func(p string, e fs.DirEntry, werr error) error {
+		if werr == nil && !e.IsDir() {
+			if b, rerr := os.ReadFile(p); rerr == nil {
+				text.Write(b)
+			}
+		}
+		return nil
+	})
+	return f, result, published, text.String()
+}
+
+func collectStatus(t *testing.T, r *tr.ScenarioResult) tr.ResultStatus {
+	t.Helper()
+	if r != nil {
+		for _, p := range r.Phases {
+			if p.Name == "seaweed_collect" {
+				return p.Status
+			}
+		}
+	}
+	t.Fatalf("no collect phase in %+v", r)
+	return ""
+}
+
+func TestACollectJoinsS2TheAssessorAndAPassVerdict(t *testing.T) {
+	f, result, published, text := composedCollect(t, false)
+	if f.node.assessRuns != 1 || collectStatus(t, result) != tr.StatusPass || strings.Contains(text, "SOAK_VERDICT_FAIL") || strings.Contains(text, "OWNED_JOB_FAILED") {
+		t.Fatalf("the successful collect path: assessor runs %d: %.2500s", f.node.assessRuns, text)
+	}
+	for _, name := range []string{"soak-clock-s1.json", "m02-collect.json", "soak-clock-s2.json"} {
+		if len(published[name]) == 0 {
+			t.Fatalf("%s not published; have %v", name, published)
+		}
+	}
+	var s1, s2 clockSample
+	if json.Unmarshal(published["soak-clock-s1.json"], &s1) != nil || json.Unmarshal(published["soak-clock-s2.json"], &s2) != nil ||
+		s1.T1 <= 0 || s1.T1 >= s1.T4 || s2.T1 < s1.T4 || s2.T1 >= s2.T4 || s2.EntryEpoch != 1793612000 || s1.EntryEpoch != 1793610000 {
+		t.Fatalf("samples: %+v %+v", s1, s2)
+	}
+}
+
+func TestACollectRefusesTheDecodedFailVerdict(t *testing.T) {
+	f, result, published, text := composedCollect(t, true)
+	if f.node.assessRuns != 1 || collectStatus(t, result) == tr.StatusPass || !strings.Contains(text, "SOAK_VERDICT_FAIL") {
+		t.Fatalf("a FAIL row was not decoded and refused: assessor runs %d: %.2500s", f.node.assessRuns, text)
+	}
+	if len(published["soak-clock-s2.json"]) == 0 {
+		t.Fatal("S2 must be published before the assessor reads it")
+	}
+}
+
 // R2: the assessor exactly as admitted (python -I <helper> --config) imports its
 // pinned siblings from a foreign cwd and emits one row Go decodes for this run.
 func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
 	helpers, _ := filepath.Abs("worker")
 	root := t.TempDir()
 	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: root}},
-		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "boot-1"}}}}
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "boot-1"}, {HostID: "m02", BootID: "boot-2"}}}}
 	argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: helpers}, &SoakPlan{DurationS: 1800, ClientKillAtS: 1320, Layout: AssignLayout{Collection: "lmcache"}})
 	if err != nil {
 		t.Fatal(err)

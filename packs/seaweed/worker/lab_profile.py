@@ -663,8 +663,8 @@ def ready(config):
 def soak_layout(config):
     """The plan's soak setup block: the cache layout plus how many volumes to grow."""
     s = config.get('soak_setup')
-    if not isinstance(s, dict) or set(s) != {'collection', 'replication', 'ttl', 'grow_count'}:
-        raise ValueError('soak_setup keys must be exactly collection,replication,ttl,grow_count')
+    if not isinstance(s, dict) or set(s) != {'collection', 'replication', 'ttl', 'grow_count', 'master_generations'} or s['master_generations'] not in (1, 2):
+        raise ValueError('soak_setup keys must be exactly collection,replication,ttl,grow_count,master_generations')
     layout = {k: s[k] for k in ('collection', 'replication', 'ttl')}
     if assign_probe_url(dict(ready_assign=layout), 'http://0.0.0.0:1') is None:  # same layout rules as ready_assign
         raise ValueError('soak_setup layout')
@@ -749,6 +749,9 @@ def soak_setup(config):
 
 
 ROTATED = re.compile(r'rotated non-replicated cache Volume (\d+) collection=(\S+) ')  # r9 soak_server
+EPISODE = ((re.compile(r'Created Volume (\d+) on'), 'birth'), (re.compile(r'Volume (\d+) becomes unwritable'), 'unwritable'),
+           (ROTATED, 'success'))
+STAMP = re.compile(r'[IWEF](\d{4} \d\d:\d\d:\d\d\.\d+)')
 LOG_BOUND, ROTATED_BOUND = 256 << 20, 4000
 
 
@@ -760,13 +763,34 @@ def soak_collect(config):
     whole collect: never a partial answer."""
     layout, _ = soak_layout(config)
     coll, root = layout['collection'], private_root(config)
-    sources, rotated = [], {}
-    for name in ('master-generation.json', 'master-replacement-generation.json'):
-        if not (root / name).exists():
-            continue
+    sources, rotated, events, pids = [], {}, {}, set()
+    want = config['soak_setup']['master_generations']
+    names = ('master-generation.json', 'master-replacement-generation.json')
+    if (root / names[1]).exists() != (want == 2):  # a partial or surplus history must not pass as complete
+        raise ValueError('master generations differ from the admitted fault schedule')
+    for order, name in enumerate(names[:want]):
         gen = json.loads((root / name).read_text())
         pid = int(gen['pid'])
+        if pid <= 0 or pid in pids or gen.get('role') != 'master' or gen.get('boot_id') != config['boot_id']:
+            raise ValueError('master generation identity')
+        pids.add(pid)
+        streams = sorted(Path(x).suffix for x in gen['logs'])
+        if streams != ['.stderr', '.stdout'] or any(Path(x).parent != root for x in gen['logs']):
+            raise ValueError('master generation must list its own stdout and stderr')
+        # Bind by content: launch() printed this generation's exact identity into its own capture before exec.
+        stdout = next(x for x in gen['logs'] if x.endswith('.stdout'))
+        fd = os.open(stdout, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as f:
+            row = f.readline(1 << 20)
+        try:
+            row = json.loads(row)
+        except ValueError:
+            raise ValueError('master capture has no exec row') from None
+        if not isinstance(row, dict) or row.get('event') != 'PRODUCT_EXEC' or any(row.get(k) != gen.get(k) for k in ('pid', 'role', 'boot_id', 'logs')):
+            raise ValueError('master capture belongs to another generation')
         glogs = sorted(p for p in (root / 'tmp').iterdir() if '.log.INFO.' in p.name and p.name.endswith('.%d' % pid))
+        if not glogs:  # one generation's sources cannot stand in for another's
+            raise ValueError('master generation has no glog')
         for file in [Path(x) for x in gen['logs']] + glogs:
             if file.parent not in (root, root / 'tmp') or file.resolve() != file:
                 raise ValueError('master log outside the owned output root')
@@ -776,17 +800,27 @@ def soak_collect(config):
                 if not stat.S_ISREG(st.st_mode) or st.st_size > LOG_BOUND:
                     raise ValueError('master log type/bound: ' + file.name)
                 for raw in f:
-                    m = ROTATED.search(raw.decode('utf-8', 'replace'))
+                    text = raw.decode('utf-8', 'replace').strip()
+                    m = ROTATED.search(text)
                     if m and m.group(2) == coll:
-                        rotated.setdefault(int(m.group(1)), raw.decode('utf-8', 'replace').strip()[:300])
+                        rotated.setdefault(int(m.group(1)), text[:300])
                         if len(rotated) > ROTATED_BOUND:
                             raise ValueError('rotation lines over bound')
+                    when = STAMP.match(text)
+                    identity = hashlib.sha256(raw.rstrip(b'\r\n')).hexdigest()
+                    for pattern, kind in EPISODE if when else ():
+                        m = pattern.search(text)
+                        if m:  # one physical line in stderr and glog is one event (decision 3 r6 section 3)
+                            events.setdefault(identity, dict(kind=kind, vid=int(m.group(1)), stamp=when.group(1), gen=order, line=text[:300], sha256=identity))
+                            if len(events) > ROTATED_BOUND:
+                                raise ValueError('episode lines over bound')
+                            break
             sources.append(dict(path=str(file), bytes=st.st_size))
     if not sources:
         raise ValueError('no master generation logs')
     dat = sorted({int(p.name.split('_')[-1].split('.')[0]) for p in (root / 'volume').glob(coll + '_*.dat')})
     return dict(status='SOAK_COLLECTED', collection=coll, sources=sources, dat_vids=dat,
-                rotated=[dict(vid=v, line=l) for v, l in sorted(rotated.items())])
+                rotated=[dict(vid=v, line=l) for v, l in sorted(rotated.items())], events=list(events.values()))
 
 
 def collect(config):
@@ -806,7 +840,12 @@ def collect(config):
                 resource_gate='NOT_ASSESSED_SMOKE_ONLY')
 
 
+def clock_stamp():
+    return time.time(), time.monotonic()
+
+
 def main():
+    entry = clock_stamp()  # decision 3 r6: first and last statements, so a job's residence leaves the bracket
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--action', choices=('preflight', 'deploy', 'ready', 'soak_setup', 'soak_collect', 'collect'), required=True)
@@ -846,6 +885,9 @@ def main():
         row = soak_setup(config)
     else:
         row = collect(config)
+    if args.action in ('soak_setup', 'soak_collect'):
+        leave = clock_stamp()
+        row['clock'] = dict(boot_id=config['boot_id'], entry_epoch=entry[0], exit_epoch=leave[0], entry_mono=entry[1], exit_mono=leave[1])
     print(json.dumps(row, sort_keys=True), flush=True)
 
 

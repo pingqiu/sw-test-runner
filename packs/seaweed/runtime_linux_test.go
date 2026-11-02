@@ -4,10 +4,12 @@ package seaweed
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +23,42 @@ import (
 
 // Fake only at the transport boundary: no SSH, native import, host or network.
 // The strict records, lease, GO, readback qualification and Engine are real.
+func init() { clockPublish = func(string, []byte) error { return nil } }
+
+// soakRow answers the collect and assessor jobs on the composed successful path.
+func (n *cpuNode) soakRow(argv []string) []byte {
+	if !n.soakPass {
+		return nil
+	}
+	if slices.Contains(argv, "soak_collect") {
+		return []byte(`{"status":"SOAK_COLLECTED","collection":"lmcache","rotated":[],"dat_vids":[],"events":[],"clock":{"boot_id":"b","entry_epoch":1793612000,"exit_epoch":1793612001,"entry_mono":9000,"exit_mono":9001}}` + "\n")
+	}
+	i := slices.Index(argv, "--config")
+	if i < 0 || !strings.HasSuffix(argv[1], "soak_assess.py") {
+		return nil
+	}
+	n.assessRuns++
+	var b SoakBinding
+	if json.Unmarshal([]byte(argv[i+1]), &b) != nil {
+		return nil
+	}
+	criteria := map[string]any{}
+	for _, c := range soakCriteria {
+		criteria[c] = map[string]string{"outcome": "PASS", "reason": "stand-in"}
+	}
+	status := "PASS"
+	if n.assessFail {
+		status, criteria["misses"] = "FAIL", map[string]string{"outcome": "FAIL", "reason": "stand-in"}
+	}
+	row, _ := json.Marshal(map[string]any{"status": status, "criteria": criteria, "k7": []any{}, "resources": "NOT_OBSERVED",
+		"binding": map[string]string{"schema": b.Schema, "run_id": b.RunID, "boot_id": b.BootID, "root": b.Root}})
+	return append(row, '\n')
+}
+
 type cpuNode struct {
+	soakPass       bool // answer the soak collect and assessor jobs with a successful row
+	assessFail     bool // the assessor row says FAIL instead
+	assessRuns     int
 	mu             sync.Mutex
 	ids            map[string]tr.ProcessIdentity
 	specs          map[string]tr.JobSpec
@@ -80,6 +117,13 @@ func (n *cpuNode) Wait(_ context.Context, id string) (tr.ExitInfo, error) {
 	exit := tr.ExitInfo{Identity: n.ids[id], Code: 0, Settled: true, StdoutPath: s.StdoutPath, StderrPath: s.StderrPath}
 	if s.CaptureOutput && !n.dropOutput {
 		exit.Output = tr.CapturedOutput{Complete: true, StdoutBase64: "e30K", StderrBase64: "", StdoutSHA256: hash([]byte("{}\n")), StderrSHA256: hash(nil), ReadStart: time.Now(), ReadEnd: time.Now()}
+		if row := n.soakRow(s.Argv); row != nil {
+			exit.Output.StdoutBase64, exit.Output.StdoutSHA256 = base64.StdEncoding.EncodeToString(row), hash(row)
+		}
+		if slices.Contains(s.Argv, "soak_setup") { // the real job's row carries its paired clock capture
+			row := []byte(`{"clock":{"boot_id":"b","entry_epoch":1793610000,"exit_epoch":1793610001,"entry_mono":7000,"exit_mono":7001}}` + "\n")
+			exit.Output.StdoutBase64, exit.Output.StdoutSHA256 = base64.StdEncoding.EncodeToString(row), hash(row)
+		}
 	}
 	if n.cleanupStopped[id] {
 		exit.Code, exit.Signal, exit.CleanupStopped = -1, 9, true
