@@ -109,7 +109,10 @@ def run(config):
                 if row.get('role') not in ('volume', 'master') or isinstance(pm, bool) or not isinstance(pm, (int, float)) \
                         or not math.isfinite(pm) or pm <= 0:
                     raise ValueError('fault pause malformed')
-                window.update(episode=ep, acked=False, pause=row, observed=time.monotonic())
+                observed = time.monotonic()  # captured once; a pause from the future is refused
+                if pm > observed:
+                    raise ValueError('fault pause dated after its observation')
+                window.update(episode=ep, acked=False, pause=row, observed=observed)
                 window['done'].add(ep)
                 return
         elif not window['acked']:

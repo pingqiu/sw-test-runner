@@ -220,6 +220,17 @@ class FaultWindowWorker(unittest.TestCase):
         with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
             soak_load.run(self.config)
 
+    def test_a_future_pause_is_refused(self):  # codex01 R1 remainder: pause <= observed
+        def future():
+            while not (self.root / 'soak-load-start.json').exists():
+                time.sleep(0.01)
+            time.sleep(1.0)
+            self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=time.monotonic() + 60))
+        threading.Thread(target=future, daemon=True).start()
+        with self.assertRaisesRegex(ValueError, 'dated after'):
+            soak_load.run(self.config)
+        self.assertFalse((self.root / 'fault-ack-E1.json').exists())
+
     def test_without_a_close_the_worker_never_resumes(self):
         self.controller(1.0, close=False)
         soak_load.run(self.config)
