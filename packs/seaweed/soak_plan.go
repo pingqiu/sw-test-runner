@@ -69,6 +69,7 @@ const (
 	FaultBudget       = AckWait + KillSettleBound + ReplacementEnroll + ReadyBound
 	RecoveryMargin    = 60 * time.Second
 	QuiescenceReserve = 60 * time.Second
+	LoadExitGrace     = 30 * time.Second // after quiescence: the load's terminal row, joins and exit
 	CollectReserve    = 120 * time.Second
 	CleanupReserve    = 120 * time.Second
 	DeployReserve     = 300 * time.Second
@@ -193,7 +194,7 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 	if b.HardDeadline.Sub(b.WorkDeadline) < CleanupReserve {
 		return errors.New("soak needs the cleanup reserve between work and hard deadlines")
 	}
-	if DeployReserve+secs(x.DurationS)+QuiescenceReserve+CollectReserve > b.WorkDeadline.Sub(now) {
+	if DeployReserve+secs(x.DurationS)+QuiescenceReserve+LoadExitGrace+CollectReserve > b.WorkDeadline.Sub(now) {
 		return errors.New("soak does not fit the admitted work deadline")
 	}
 	if b.HardDeadline.Sub(now) > SoakHorizon {

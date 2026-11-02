@@ -53,7 +53,7 @@ type fakeSoak struct {
 const fakeReplacementPID = 4242
 
 func newFakeSoak(t *testing.T) *fakeSoak {
-	f := &fakeSoak{t: t, mono: 1000, wall: time.Unix(1_800_000_000, 0), start: 1000.5, exitAt: 1000.5 + 1800, exited: make(chan struct{}), waitFails: make(chan struct{}), hooks: map[string]func(context.Context){}}
+	f := &fakeSoak{t: t, mono: 1000, wall: time.Unix(1_800_000_000, 0), start: 1000.5, exitAt: 1000.5 + 1860.01, exited: make(chan struct{}), waitFails: make(chan struct{}), hooks: map[string]func(context.Context){}}
 	f.deadline = f.wall.Add(45 * time.Minute)
 	f.readyLag = 0.5
 	return f
@@ -312,6 +312,39 @@ func TestSoakWaitFailureIsNotLoadCompletion(t *testing.T) {
 	}
 }
 
+// r5 (11-02): the load drains until exactly start+duration+quiescence and only then exits (terminal row at +1860.010 s),
+// so a complete run must not be judged at that same instant. It may finish within LoadExitGrace and no later.
+func TestSoakCompleteLoadExitsWithinTheGrace(t *testing.T) {
+	last := 1860 + LoadExitGrace.Seconds()
+	for _, c := range []struct {
+		at float64
+		ok bool
+	}{{1860.01, true}, {last - 1, true}, {last + 1, false}} {
+		f := newFakeSoak(t)
+		f.exitAt = f.start + c.at
+		records, exit, err := runFake(t, f)
+		if c.ok && (err != nil || exit.Code != 0 || len(records) != 2) {
+			t.Fatalf("exit at +%v: err=%v exit=%+v records=%d", c.at, err, exit, len(records))
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "overran")) {
+			t.Fatalf("exit at +%v must overrun: %v", c.at, err)
+		}
+	}
+}
+
+// The grace has to fit the phase's own timeout and be paid for at admission, leaving collection its reserve.
+func TestSoakExitGraceFitsThePhaseBudget(t *testing.T) {
+	if LoadExitGrace <= 0 || LoadExitGrace+WitnessWait >= 2*time.Minute {
+		t.Fatalf("grace %v + witness %v must fit the 2 min phase margin", LoadExitGrace, WitnessWait)
+	}
+	f := newFakeSoak(t)
+	f.deadline = f.wall.Add(1800*time.Second + QuiescenceReserve + LoadExitGrace + CollectReserve - time.Second)
+	_, _, err := runFake(t, f)
+	if err == nil || !strings.Contains(err.Error(), "not enough work time") || f.started != 0 {
+		t.Fatalf("admission must pay for the grace: err=%v started=%d", err, f.started)
+	}
+}
+
 // After the last fault the wait for the load is bounded: an overrun fails.
 func TestSoakLoadOverrunFails(t *testing.T) {
 	f := newFakeSoak(t)
@@ -360,7 +393,7 @@ func TestSoakInsufficientWorkTimeBeforeKillSendsNoKill(t *testing.T) {
 	f := newFakeSoak(t)
 	// Admits the load exactly; fault 1 fits, but fault 2's budget plus the rest
 	// of the load and collect does not, so its Kill is never sent.
-	f.deadline = f.wall.Add(1800*time.Second + QuiescenceReserve + CollectReserve)
+	f.deadline = f.wall.Add(1800*time.Second + QuiescenceReserve + LoadExitGrace + CollectReserve)
 	_, _, err := runFake(t, f)
 	expectNoFurtherFaults(t, f, err, "not enough work time left for this fault", 1)
 }
