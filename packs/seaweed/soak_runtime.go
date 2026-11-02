@@ -224,8 +224,9 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		return nil, exit, err
 	}
 	duration := secs(x.DurationS)
-	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline.
-	if ops.WorkDeadline().Sub(ops.Now()) < duration+QuiescenceReserve+CollectReserve {
+	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline. The load's end is not known
+	// until its start witness, up to WitnessWait away.
+	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+CollectReserve {
 		return nil, exit, errors.New("soak: not enough work time left to admit the load")
 	}
 	clk := &soakClock{ops: ops}
@@ -257,6 +258,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if err = latch.ended(); err != nil {
 		return nil, exit, err
 	}
+	endpoint := start + float64(x.DurationS) + QuiescenceReserve.Seconds() + LoadExitGrace.Seconds()
 	for i, f := range x.Faults {
 		due := start + float64(f.AtS)
 		now, e := clk.now()
@@ -283,7 +285,11 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if now > due+OverdueTolerance.Seconds() {
 			return records, exit, errors.New("soak: fault overdue; no catch-up")
 		}
-		post := start + float64(x.DurationS) + QuiescenceReserve.Seconds() - now
+		tail, e := checkedSpan(endpoint - now)
+		if e != nil {
+			return records, exit, e
+		}
+		post := endpoint - now
 		if i+1 < len(x.Faults) {
 			post = start + float64(x.Faults[i+1].AtS) - now
 		}
@@ -291,7 +297,9 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if e != nil {
 			return records, exit, e
 		}
-		if ops.WorkDeadline().Sub(ops.Now()) < FaultBudget+postSpan+CollectReserve {
+		// Two separate needs: this fault's spacing, and the whole load tail plus collection.
+		left := ops.WorkDeadline().Sub(ops.Now())
+		if left < FaultBudget+postSpan+CollectReserve || left < tail+CollectReserve {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
 		}
 		ack, err := pauseAndAck(ctx, ops, clk, f)
@@ -324,13 +332,14 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 			return records, exit, err
 		}
 	}
-	// The load must end by its duration plus the quiescence reserve; an overrun
+	// The load drains until exactly its duration plus quiescence and only then exits,
+	// so it must end within LoadExitGrace of that instant; an overrun
 	// fails instead of waiting without bound on the work deadline.
 	now, err := clk.now()
 	if err != nil {
 		return records, exit, err
 	}
-	final, err := checkedSpan(start + float64(x.DurationS) + QuiescenceReserve.Seconds() - now)
+	final, err := checkedSpan(endpoint - now)
 	if err != nil {
 		return records, exit, err
 	}
@@ -343,8 +352,21 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	case <-ctx.Done():
 		return records, exit, ctx.Err()
 	}
+	// Neither notice proves when the load ended: revalidate before accepting its receipt.
+	if err = ctx.Err(); err != nil {
+		return records, exit, err
+	}
+	if now, err = clk.now(); err != nil {
+		return records, exit, err
+	}
+	if !ops.Now().Before(ops.WorkDeadline()) {
+		return records, exit, errors.New("soak: WORK ended before the load's receipt was accepted")
+	}
 	if !latch.exit.Settled {
 		return records, latch.exit, latch.waitFailure()
+	}
+	if now > endpoint {
+		return records, exit, errors.New("soak: load overran its duration plus quiescence")
 	}
 	if latch.err != nil {
 		return records, latch.exit, latch.err
