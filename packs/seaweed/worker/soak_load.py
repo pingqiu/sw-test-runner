@@ -28,7 +28,7 @@ from soak_stats import WITNESS, boot_id, identity
 
 MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)')
 TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
-EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl')
+EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'completions.jsonl')
 
 
 def volume_ids(topology):
@@ -70,6 +70,22 @@ def poll_topology(config, stop, out):
         row['done'] = time.monotonic()
         out.write(json.dumps(row) + '\n')
         stop.wait(max(0, row['req'] + 2 - time.monotonic()))
+
+
+def classify_get(row, acked_pending):
+    """r9's GET rule, ported exactly (archived soak_workload.py sha 6a4bbb6b, lines 54-64 and 74-99): a hit is ok with
+    results None or [True]; ok=True with any other results is a MISS CANDIDATE (r9: the not-hit branch, judged by
+    retirement proof; here by the decision-3 join in 3b); ok=False is a miss only in the DC push-read status-1 shape
+    (results [False], untouched, r9's error text), else a credited fault-window error, else fatal."""
+    if row['ok'] and row['results'] in (None, [True]):
+        return 'hit'
+    if row['ok'] is True:
+        return 'miss'
+    if row['results'] == [False] and row.get('untouched') is True and MISS.search(row.get('error') or ''):
+        return 'miss'
+    if acked_pending and TRANSIENT.search(row.get('error') or ''):
+        return 'fault'
+    return 'unexpected'
 
 
 def publish(path, row):
@@ -215,6 +231,7 @@ def run(config):
     def complete(i, row):
         cmd = commands.pop(i)
         key = cmd['key']
+        log('completions.jsonl', dict(worker=i, op=cmd['operation_id'], action=cmd['action'], row=row))  # raw, BEFORE judging (r9 line 53)
         busy.pop(key)
         if row['operation_id'] != cmd['operation_id']:
             raise OracleError('completion identity')
@@ -233,15 +250,16 @@ def run(config):
         else:
             v = oracle.reading.pop(key)
             event.update(sequence=v.sequence, length=row.get('length'), sha256=row.get('sha256'))
-            if row['ok'] and row['results'] in (None, [True]):
+            case = classify_get(row, cmd['operation_id'] in window['allowed'])
+            if case == 'hit':
                 if not v.matches(row['length'], row['sha256']):
                     counts['wrong_bytes'] += 1
                     raise OracleError('WRONG_BYTES latest ACK')
                 counts['hits'] += 1
-            elif row['results'] == [False] and row.get('untouched') is True and MISS.search(row.get('error') or ''):
-                event.update(miss=True, fids=list(v.fids))  # judged in 3b by the decision-3 join
+            elif case == 'miss':
+                event.update(miss=True, fids=list(v.fids), results=row['results'])  # judged in 3b by the decision-3 join
                 counts['misses'] += 1
-            elif cmd['operation_id'] in window['allowed'] and TRANSIENT.search(row.get('error') or ''):  # acked + r9 kind
+            elif case == 'fault':  # acked + r9 kind
                 event.update(fault_error=True, episode=window['allowed'][cmd['operation_id']])  # credited only by 3b, within [P, P+60]
             else:
                 raise OracleError('unexpected GET error ' + str(row.get('error')))

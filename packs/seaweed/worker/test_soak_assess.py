@@ -226,6 +226,27 @@ class SoakAssess(unittest.TestCase):
                                         completed=1105, ok=True))
         self.mutate(ch, 'misses')
 
+    def test_an_ok_not_hit_miss_candidate_is_judged_like_any_miss(self):
+        # r9 (soak_workload.py sha 6a4bbb6b l.74-99): ok=True with results != [True] is a miss candidate, no error text.
+        ev = evidence()
+        self.ev(ev, 'g2').update(ok=True, error='', results=[False])
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+
+    # codex01 review abacdf35: an ok=True row labelled miss whose results are hit-shaped or absent must not earn
+    # retirement credit (same shape rule as the worker's classify_get).
+    def test_an_ok_true_miss_with_hit_results(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(ok=True, error='', results=[True], length=1, sha256='wrong'), 'get_outcomes')
+
+    def test_an_ok_true_miss_with_none_results(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(ok=True, error='', results=None, length=1, sha256='wrong'), 'get_outcomes')
+
+    def test_an_ok_true_miss_without_results(self):
+        def ch(ev):
+            self.ev(ev, 'g2').update(ok=True, error='', length=1, sha256='wrong')
+            self.ev(ev, 'g2').pop('results', None)
+        self.mutate(ch, 'get_outcomes')
+
     def test_a_miss_without_the_miss_error(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(error='permission denied'), 'get_outcomes')
 

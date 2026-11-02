@@ -175,6 +175,38 @@ class FaultWindowWorker(unittest.TestCase):
         ops = [int(e['op']) for e in self.events()]
         self.assertEqual(sorted(ops), list(range(1, len(ops) + 1)))
 
+    def toggle(self, name, at, length):
+        def run():  # timed from the load-start witness, like the controller (spawning workers takes seconds)
+            while not (self.root / 'soak-load-start.json').exists():
+                time.sleep(0.01)
+            time.sleep(at)
+            (self.root / name).touch()
+            time.sleep(length)
+            (self.root / name).unlink()
+        threading.Thread(target=run, daemon=True).start()
+
+    def completions(self):
+        return [json.loads(l) for l in (self.root / 'completions.jsonl').read_text().splitlines()]
+
+    def test_an_ok_get_without_the_key_is_a_miss_candidate_as_in_r9(self):
+        # r9 soak_workload.py (sha 6a4bbb6b) l.74-99: ok=True with results != [True] is a miss judged by retirement.
+        self.toggle('fake-notfound', 1.0, 2.0)
+        summary = soak_load.run(self.config)
+        misses = [e for e in self.events() if e.get('miss')]
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        self.assertTrue(misses and all(e['ok'] is True and e['results'] == [False] and e['fids'] for e in misses), misses)
+
+    def test_a_failed_get_with_an_empty_error_is_still_fatal_and_its_row_is_kept(self):
+        self.toggle('fake-fail-empty', 1.5, 10)
+        with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
+            soak_load.run(self.config)
+        last = self.completions()[-1]  # the stop is attributable: its raw row was written first
+        self.assertEqual((last['action'], last['row']['ok'], last['row']['error']), ('get', False, ''))
+
+    def test_every_completion_is_written_raw(self):
+        soak_load.run(self.config)
+        self.assertEqual(sorted(c['op'] for c in self.completions()), sorted(e['op'] for e in self.events()))
+
     def test_a_get_error_without_a_fault_window_is_fatal(self):
         def fail():
             time.sleep(1.5)
