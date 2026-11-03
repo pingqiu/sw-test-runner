@@ -20,5 +20,5 @@ else:
     if not c['master'].startswith('127.0.0.1:'):raise ValueError('M02 loopback master only')
     m=json.loads(pathlib.Path(c['manifest']).read_bytes());volumes=sorted({o['fid'].split(',')[0] for o in m['objects']})
     if not volumes or any(not x.isdigit() for x in volumes):raise ValueError('volume id not canonical numeric')
-    command='ec.encode -volumeIds='+','.join(volumes)+' -batchSize=0 -shardReplicaPlacement=001\n'
+    command='lock\nec.encode -volumeIds='+','.join(volumes)+' -batchSize=0 -shardReplicaPlacement=001\nunlock\n'
     subprocess.run([c['weed'],'shell','-master='+c['master']],input=command,text=True,check=True,timeout=180)

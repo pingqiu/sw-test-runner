@@ -4,6 +4,16 @@ worker=pathlib.Path(__file__).parent
 def load(name):
  s=importlib.util.spec_from_file_location(name,worker/(name+'.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 class Regressions(unittest.TestCase):
+ @unittest.skipUnless(sys.platform=='linux','Linux shell-session child fixture')
+ def test_encoder_uses_one_locked_shell_session(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=pathlib.Path(tmp);manifest=root/'manifest.json'
+   manifest.write_text(json.dumps({'objects':[{'fid':'2,abc'},{'fid':'1,def'}]}))
+   child=root/'weed';child.write_text('#!'+sys.executable+'\nimport json,sys\nprint(json.dumps(sys.stdin.read().splitlines()))\n');child.chmod(0o700)
+   c=dict(root=str(root),stage='encode',weed=str(child),master='127.0.0.1:12345',manifest=str(manifest))
+   r=subprocess.run([sys.executable,'-I',str(worker/'ec_setup.py'),json.dumps(c)],capture_output=True,text=True,timeout=5)
+   self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+   self.assertEqual(json.loads(r.stdout),['lock','ec.encode -volumeIds=1,2 -batchSize=0 -shardReplicaPlacement=001','unlock'])
  @unittest.skipUnless(sys.platform=='linux','Linux child executable fixture')
  def test_encoder_child_private_root(self):
   with tempfile.TemporaryDirectory() as tmp:
