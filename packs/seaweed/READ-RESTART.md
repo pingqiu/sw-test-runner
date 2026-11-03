@@ -116,7 +116,7 @@ operation IDs/keys/interval joins, wrong-byte and unknown-completion rules stay.
 `Plan.Restart` with `role: master` and `writes: true` replaces the read load with
 `ReadLoadArgs(..., "write-load", "dc")` for 120 s on one connector: SETs on fresh keys
 started every 250 ms, up to 4 at once, and one GET of an ACKed key at the same pace, no
-retry. The load starts before the kill and no probe gates it. The filer runs at `-v=1`,
+retry. Every other GET reads a fresh key, reported apart; the rest reread one key. The load starts before the kill and no probe gates it. The filer runs at `-v=1`,
 which logs its assign retry schedule.
 The plan's ready steps carry no Assign probe, so writes meet the master's warm-up.
 

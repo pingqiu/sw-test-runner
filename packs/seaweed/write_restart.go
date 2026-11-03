@@ -33,6 +33,7 @@ type WriteReport struct {
 	Verdict            string         `json:"verdict"`
 	Sets               [3]WriteWindow `json:"sets_before_outage_after"`
 	Gets               [3]WriteWindow `json:"gets_before_outage_after"`
+	FreshGets          [3]WriteWindow `json:"fresh_gets_before_outage_after"`
 	KillToReadyS       float64        `json:"kill_to_ready_s"`
 	FirstAckAfterKillS float64        `json:"first_ack_after_kill_s"`
 	Errors             []WriteError   `json:"errors"`
@@ -50,8 +51,14 @@ const (
 type writeRow struct {
 	Event, Key, Error string
 	OperationID       *int `json:"operation_id"`
-	Started, Ended    float64
+	Started, Ended    *float64
 	OK                *bool
+	Fresh             bool
+}
+
+type writeGet struct {
+	key     string
+	started float64
 }
 
 type writeEnd struct {
@@ -60,7 +67,7 @@ type writeEnd struct {
 	Sets, Gets, Acked, Failed              int
 	ReadbackExact                          int `json:"readback_exact"`
 	ReadbackMissing                        int `json:"readback_missing"`
-	Started, Ended                         float64
+	Started, Ended                         *float64
 }
 
 // writeRows strictly decodes the stdout: unique fields, every row bound by
@@ -111,53 +118,72 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 	if end == nil || end.Status != "OBSERVED" || end.Stage != "write-load" || end.Transport != "dc" || end.RunID != c.RunID || end.Client != c.Client || end.Root != c.Root {
 		return r, errors.New("write load terminal binding differs")
 	}
-	if end.Ended-end.Started < writeLoadSeconds || end.Sets < 1 || end.Gets < 0 || end.ReadbackExact < 0 || end.ReadbackMissing < 0 {
+	if end.Started == nil || end.Ended == nil || *end.Started <= 0 {
+		return r, errors.New("write load terminal times missing")
+	}
+	spanStart, spanEnd := *end.Started, *end.Ended
+	if spanEnd-spanStart < writeLoadSeconds || end.Sets < 1 || end.Gets < 0 || end.ReadbackExact < 0 || end.ReadbackMissing < 0 {
 		return r, errors.New("write load phase or totals out of bounds")
 	}
 	seen := map[string]map[int]float64{"SET": {}, "GET": {}}
+	ackedAt := map[string]float64{}
+	getKeys := []writeGet{}
 	acked, failed := 0, 0
 	first, last := math.Inf(1), math.Inf(-1)
-	var lat [2][3][]float64
+	var lat [3][3][]float64
+	freshKeys := map[string]bool{}
 	for _, row := range rows {
 		kind := 0
 		if row.Event == "GET" {
 			kind = 1
+			if row.Fresh {
+				kind = 2
+				if freshKeys[row.Key] {
+					return r, errors.New("fresh GET of a key already read")
+				}
+				freshKeys[row.Key] = true
+			}
 		}
 		if row.OperationID == nil || row.OK == nil || *row.OperationID < 0 {
 			return r, errors.New("load row binding differs")
 		}
-		id := *row.OperationID
+		if row.Started == nil || row.Ended == nil {
+			return r, errors.New("load row times missing")
+		}
+		id, started, ended := *row.OperationID, *row.Started, *row.Ended
 		if _, dup := seen[row.Event][id]; dup {
 			return r, errors.New("load row operation reused")
 		}
-		seen[row.Event][id] = row.Started
+		seen[row.Event][id] = started
 		if row.Event == "SET" && row.Key != c.Client+"-w"+strconv.Itoa(id) {
 			return r, errors.New("SET row key differs")
 		}
-		if row.Started < end.Started || row.Ended < row.Started || row.Ended > end.Ended {
+		if kind > 0 {
+			getKeys = append(getKeys, writeGet{row.Key, started})
+		}
+		if started < spanStart || ended < started || ended > spanEnd {
 			return r, errors.New("load row outside the terminal span")
 		}
 		w := 0
-		if row.Started >= preKill {
+		if started >= preKill {
 			w = 1
 		}
-		if row.Started >= ready {
+		if started >= ready {
 			w = 2
 		}
-		window := &r.Sets[w]
-		if kind == 1 {
-			window = &r.Gets[w]
-		}
+		windows := [3]*[3]WriteWindow{&r.Sets, &r.Gets, &r.FreshGets}
+		window := &windows[kind][w]
 		window.Ops++
-		lat[kind][w] = append(lat[kind][w], row.Ended-row.Started)
+		lat[kind][w] = append(lat[kind][w], ended-started)
 		if kind == 0 {
-			first, last = math.Min(first, row.Ended), math.Max(last, row.Started)
+			first, last = math.Min(first, ended), math.Max(last, started)
 		}
 		if *row.OK {
 			if kind == 0 {
 				acked++
-				if row.Ended >= preKill {
-					at := row.Ended - preKill
+				ackedAt[row.Key] = ended
+				if ended >= preKill {
+					at := ended - preKill
 					if r.FirstAckAfterKillS < 0 || at < r.FirstAckAfterKillS {
 						r.FirstAckAfterKillS = at
 					}
@@ -173,7 +199,13 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 			r.ErrorsDropped++
 			continue
 		}
-		r.Errors = append(r.Errors, WriteError{row.Event, id, row.Started - preKill, row.Error})
+		r.Errors = append(r.Errors, WriteError{row.Event, id, started - preKill, row.Error})
+	}
+	// A GET reads only a key whose SET was ACKed before the GET was submitted.
+	for _, g := range getKeys {
+		if at, ok := ackedAt[g.key]; !ok || at > g.started {
+			return r, errors.New("GET of a key with no earlier ACK")
+		}
 	}
 	for name, n := range map[string]int{"SET": end.Sets, "GET": end.Gets} {
 		if len(seen[name]) != n {
@@ -203,10 +235,8 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 				continue
 			}
 			slices.Sort(l)
-			window := &r.Sets[i]
-			if kind == 1 {
-				window = &r.Gets[i]
-			}
+			windows := [3]*[3]WriteWindow{&r.Sets, &r.Gets, &r.FreshGets}
+			window := &windows[kind][i]
 			window.P50S, window.MaxS = l[len(l)/2], l[len(l)-1]
 		}
 	}

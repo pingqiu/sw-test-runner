@@ -1,5 +1,5 @@
 """CPU controls of the pack CLI; accepted worker/oracle leaves stay unchanged."""
-import copy, hashlib, json, pathlib, sys, unittest, contextlib, io, types, os
+import copy, hashlib, json, pathlib, sys, time, unittest, contextlib, io, types, os
 from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
 import kv_smoke
@@ -155,6 +155,80 @@ class WriteLoadControls(unittest.TestCase):
         end,rows,_=self.load('miss')
         self.assertEqual(end['readback_exact'],0);self.assertEqual(end['readback_missing'],end['acked'])
         self.assertTrue(any(r['event']=='GET' and not r['ok'] for r in rows))
+    def test_fresh_gets_read_each_key_once_and_rereads_stay_on_one_key(self):
+        end,rows,_=self.load(duration=.2)
+        gets=[r for r in rows if r['event']=='GET']
+        fresh=[r['key'] for r in gets if r.get('fresh')];again={r['key'] for r in gets if not r.get('fresh')}
+        self.assertGreater(len(fresh),0);self.assertEqual(len(set(fresh)),len(fresh))
+        self.assertEqual(len(again),1);self.assertFalse(again&set(fresh))
+    def test_building_a_get_buffer_is_fast_and_exact(self):
+        expected=bytearray(b'a'*1048576)
+        begun=time.perf_counter();built=kv_smoke.inverted(expected);took=time.perf_counter()-begun
+        self.assertEqual(built,bytearray(v^255 for v in expected));self.assertLess(took,.01)
+    def test_completions_are_read_before_a_get_is_submitted(self):
+        waiting=[]
+        class Order(FakeConnector):
+            def submit_batch_get(self,keys,buffers):
+                waiting.append(len(self.pending))
+                return super().submit_batch_get(keys,buffers)
+        self.load(conn=Order())
+        self.assertGreater(len(waiting),0);self.assertEqual(set(waiting),{0})
+    def retained(self):
+        return sys.modules['_seaweed_pinned_soak_native_worker'].UNSETTLED_BUFFERS
+    def test_wrong_get_retains_every_outstanding_buffer(self):
+        class Late(HeldSets):
+            def submit_batch_get(self,keys,buffers):
+                self.mode='wrong' if len(self.held)>=2 else 'good'
+                return super().submit_batch_get(keys,buffers)
+        conn=Late(10**6)
+        with self.assertRaisesRegex(AssertionError,'wrong'):self.load(duration=.2,conn=conn)
+        self.assertGreater(len(conn.held),0)
+        self.assertEqual(len(self.retained()),len(conn.held)+1)  # the held SETs and the failing GET's own buffer
+    def test_emitter_failure_retains_outstanding_buffers(self):
+        conn=HeldSets(10**6);rows=[]
+        def emit(row):
+            if row['event']=='GET' and len(conn.held)>=2:raise OSError('stdout gone')
+        try:
+            with self.assertRaisesRegex(OSError,'stdout'):kv_smoke.write_load(conn,self.C,emit,duration=.2,pace=.005)
+            self.assertEqual(len(self.retained()),len(conn.held));self.assertGreater(len(conn.held),0)
+        finally:conn.close()
+    def test_future_collision_refuses_and_retains_both(self):
+        class Same(FakeConnector):
+            def submit_batch_set(self,keys,buffers):
+                self.sets+=1;self.values[keys[0]]=bytes(buffers[0]);return 7
+        conn=Same()
+        with self.assertRaisesRegex(RuntimeError,'collision'):self.load(duration=.2,conn=conn)
+        self.assertEqual(len(self.retained()),2)
+    def test_submit_failure_retains_its_buffer(self):
+        class Boom(FakeConnector):
+            def submit_batch_set(self,keys,buffers):raise OSError('submit lost')
+        with self.assertRaisesRegex(OSError,'submit lost'):self.load(conn=Boom())
+        self.assertEqual(len(self.retained()),1)
+    def test_full_duration_stdout_fits_the_capture_cap(self):
+        """The real 120 s on a virtual clock, serialized as main serializes it."""
+        for mode in ('good','miss','ambiguous'):
+            class Clock:
+                t=1000000.0
+                @classmethod
+                def monotonic(k):
+                    k.t+=.0005
+                    return k.t
+                @staticmethod
+                def sleep(_):pass
+            conn=FakeConnector(mode);rows=[]
+            try:
+                with patch.object(kv_smoke,'time',Clock):
+                    end=kv_smoke.write_load(conn,self.C,rows.append)
+            finally:conn.close()
+            size=sum(len(kv_smoke.compact(r))+1 for r in rows+[dict(end,code='OK',remedy='inspect ACK/exact/transport records')])
+            self.assertGreaterEqual(end['sets'],400)
+            self.assertLess(size,131072,mode)
+            self.assertEqual(sum(r['event']=='SET' for r in rows),end['sets'])
+            self.assertEqual(sum(r['event']=='GET' for r in rows),end['gets'])
+    def test_evidence_over_the_budget_is_fatal_not_truncated(self):
+        class Loud(FakeConnector):
+            def complete(self,ok,results,error):return super().complete(False,None,'x'*2000)
+        with self.assertRaisesRegex(AssertionError,'write-load evidence'):self.load('good',duration=20,conn=Loud())
     def test_stage_needs_dc(self):
         self.assertEqual(kv_smoke.read_stage_args('write-load','dc'),('write-load','dc'))
         for route,transport in (('http','dc'),('http','http')):

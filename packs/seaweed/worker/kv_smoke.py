@@ -153,45 +153,86 @@ def read_only(conn, c, stage, route):
         before=before,after=after,run_id=c['run_id'],client=c['client'],root=c['root'])
 
 
+def compact(row):
+    return json.dumps(row,allow_nan=False,separators=(',',':'))
+
+
+INVERT = bytes(255-i for i in range(256))
+
+
+def inverted(expected):
+    # Under 1 ms for 1 MiB, so building a GET buffer doesn't delay completion stamps.
+    return expected.translate(INVERT)
+
+
+WRITE_EVIDENCE_BYTES = 120000  # under the core's 131,072-byte stream capture, with room for the terminal
+
+
 def write_load(conn, c, emit, duration=120, pace=.25, writers=4):
     """Report-only load across a master restart, gated on no probe. Up to `writers` SETs on fresh keys and one GET of an
     ACKed key run at once on this connector, each started on its own pace, so a stalled SET can be seen holding the pool.
-    A completed failure is recorded, never fatal or credited; no retry. An unknown completion or wrong bytes is fatal."""
+    Every other GET takes a fresh key, one not yet read, whose lookup can't be served by earlier reads; the rest reread one key.
+    A completed failure is recorded, never fatal or credited; no retry. An unknown completion or wrong bytes is fatal.
+    Evidence past its byte budget is fatal too, never truncated. Any exit with work in flight retains its buffers."""
     read_stage_args('write-load','dc',c['transport'])
     helper=exact_helper('soak_native_worker')
     helper.validate_api(type(conn))
     before=json.loads(conn.stats_json());started=time.monotonic()
-    acked=[];pending={};sets=gets=0;next_set=next_get=started
-    def submit(action,key,operation_id):
+    acked=[];unread=[];pending={};sets=gets=written=0;next_set=next_get=started
+    def submit(action,key,operation_id,fresh=False):
         seed=c['run_id']+'/'+key;expected=helper.payload(seed,c['length'])
-        buf=expected if action=='set' else bytearray(v^255 for v in expected)
+        buf=expected if action=='set' else inverted(expected)
         begun=time.monotonic()
-        pending[int(getattr(conn,'submit_batch_'+action)([key],[memoryview(buf)]))]=dict(action=action,key=key,operation_id=operation_id,buf=buf,expected=expected,begun=begun)
+        try:future=int(getattr(conn,'submit_batch_'+action)([key],[memoryview(buf)]))
+        except BaseException:
+            helper.UNSETTLED_BUFFERS.append(buf)
+            raise
+        if future in pending:
+            helper.UNSETTLED_BUFFERS.append(buf)
+            raise RuntimeError('native future collision')
+        pending[future]=dict(action=action,key=key,operation_id=operation_id,buf=buf,expected=expected,begun=begun,fresh=fresh)
+    def record(row):
+        nonlocal written
+        written+=len(compact(row))+1
+        if written>WRITE_EVIDENCE_BYTES:raise AssertionError('bounded write-load evidence exceeded')
+        emit(row)
     def drain(wait):
         if not pending:
             if wait>0:time.sleep(wait)
             return
-        if time.monotonic()-min(p['begun'] for p in pending.values())>30:
-            helper.UNSETTLED_BUFFERS.extend(p['buf'] for p in pending.values())
-            raise TimeoutError('native completion deadline')
+        if time.monotonic()-min(p['begun'] for p in pending.values())>30:raise TimeoutError('native completion deadline')
         if not select.select([conn.event_fd()],[],[],max(wait,0))[0]:return
         for future,ok,error,results in conn.drain_completions():
-            p=pending.pop(int(future));ended=time.monotonic()
-            good=bool(ok) and results in (None,[True]) and (results is None or list(results)==[True])
+            if int(future) not in pending:raise RuntimeError('unowned completion')
+            p=pending[int(future)];ended=time.monotonic()
+            good=bool(ok) and (results is None or list(results)==[True])
             if p['action']=='get' and good and p['buf']!=p['expected']:raise AssertionError('GET wrong bytes of an ACKed write')
-            if p['action']=='set' and good:acked.append(p['key'])
-            emit(dict(event=p['action'].upper(),operation_id=p['operation_id'],key=p['key'],started=p['begun'],ended=ended,ok=good,error=str(error)))
-    while time.monotonic()-started<duration:
-        now=time.monotonic()
-        running=[p['action'] for p in pending.values()]
-        if now>=next_set and running.count('set')<writers:
-            if sets>=1024:raise AssertionError('bounded SET evidence exceeded')
-            submit('set',c['client']+'-w'+str(sets),sets);sets+=1;next_set=now+pace
-        if now>=next_get and 'get' not in running and acked:
-            if gets>=1024:raise AssertionError('bounded GET evidence exceeded')
-            submit('get',acked[-1],gets);gets+=1;next_get=now+pace
-        drain(min(pace,.01))
-    while pending:drain(.05)
+            del pending[int(future)]
+            if p['action']=='set' and good:
+                if acked:unread.append(p['key'])
+                acked.append(p['key'])
+            row=dict(event=p['action'].upper(),operation_id=p['operation_id'],key=p['key'],started=round(p['begun'],6),ended=round(ended,6),ok=good)
+            if p['fresh']:row['fresh']=True
+            if not good:row['error']=str(error)
+            record(row)
+    try:
+        while time.monotonic()-started<duration:
+            now=time.monotonic()
+            running=[p['action'] for p in pending.values()]
+            if now>=next_set and running.count('set')<writers:
+                if sets>=1024:raise AssertionError('bounded SET evidence exceeded')
+                submit('set',c['client']+'-w'+str(sets),sets);sets+=1;next_set=now+pace
+            drain(0)  # stamp what has completed before spending time on the next op
+            running=[p['action'] for p in pending.values()]
+            if now>=next_get and 'get' not in running and acked:
+                if gets>=1024:raise AssertionError('bounded GET evidence exceeded')
+                fresh=gets%2==0 and bool(unread)
+                submit('get',unread.pop(0) if fresh else acked[0],gets,fresh);gets+=1;next_get=now+pace
+            drain(min(pace,.01))
+        while pending:drain(.05)
+    except BaseException:
+        helper.UNSETTLED_BUFFERS.extend(p['buf'] for p in pending.values())
+        raise
     ended_load=time.monotonic()
     exact=missing=0
     for i,key in enumerate(acked):
@@ -205,7 +246,7 @@ def write_load(conn, c, emit, duration=120, pace=.25, writers=4):
     for s in (before,after):
         if s['loader']['transport']!='rdma' or s['loader']['http_fallback_allowed'] is not False:raise AssertionError('wrong write transport')
     return dict(status='OBSERVED',stage='write-load',transport='dc',sets=sets,gets=gets,acked=len(acked),failed=sets-len(acked),
-        readback_exact=exact,readback_missing=missing,started=started,ended=ended_load,finished=time.monotonic(),before=before,after=after,
+        readback_exact=exact,readback_missing=missing,started=round(started,6),ended=round(ended_load,6),finished=round(time.monotonic(),6),before=before,after=after,
         run_id=c['run_id'],client=c['client'],root=c['root'])
 
 
@@ -216,7 +257,7 @@ def main():
     p.add_argument('--stage', choices=('seed','load','recovery','write-load'))
     p.add_argument('--read-path', choices=('dc','http'))
     args = p.parse_args()
-    emit = lambda obj: print(json.dumps(obj, allow_nan=False), flush=True)
+    emit = lambda obj: print(compact(obj) if args.stage=='write-load' else json.dumps(obj, allow_nan=False), flush=True)
     conn = None
     try:
         c = json.loads(args.config)

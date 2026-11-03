@@ -70,6 +70,9 @@ func TestWriteReportSplitsAroundKillAndReady(t *testing.T) {
 	if len(r.Errors) != 1 || r.Errors[0].Error != "no writable volumes" || r.Errors[0].Event != "SET" {
 		t.Fatalf("errors %+v", r.Errors)
 	}
+	if r.FreshGets[1].Ops != 0 || r.Gets[1].Ops != 1 {
+		t.Fatalf("fresh windows %+v", r.FreshGets)
+	}
 	if r.Verdict != "REPORT_ONLY" {
 		t.Fatalf("a threshold crept in: %s", r.Verdict)
 	}
@@ -83,6 +86,25 @@ func TestFirstAckUsesCompletionNotSubmission(t *testing.T) {
 	}
 	if r.FirstAckAfterKillS < 0.004 || r.FirstAckAfterKillS > 0.006 {
 		t.Fatalf("first ACK after kill %v", r.FirstAckAfterKillS)
+	}
+}
+
+func TestFreshGetsAreCountedApartAndOnlyOnce(t *testing.T) {
+	r, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		g[1]["fresh"], g[1]["key"] = true, "m01-w1"
+	}), writeCfg(), 104.5, 106.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.FreshGets[1].Ops != 1 || r.Gets[1].Ops != 0 || r.FreshGets[1].MaxS != 3 {
+		t.Fatalf("fresh %+v gets %+v", r.FreshGets, r.Gets)
+	}
+	_, err = writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		g[1]["fresh"], g[2]["fresh"] = true, true
+		g[1]["key"], g[2]["key"] = "m01-w1", "m01-w1"
+	}), writeCfg(), 104.5, 106.5)
+	if err == nil {
+		t.Fatal("a repeated fresh GET was accepted")
 	}
 }
 
@@ -115,6 +137,16 @@ func TestWriteReportRefusesEvidenceItCannotBind(t *testing.T) {
 		"set after span":    func(s, _ []map[string]any, _ map[string]any) { s[9]["ended"] = 500.0 },
 		"get outside span":  func(_, g []map[string]any, _ map[string]any) { g[2]["ended"] = 500.0 },
 		"readback":          func(_, _ []map[string]any, e map[string]any) { e["readback_exact"] = 1 },
+		"foreign get key":   func(_, g []map[string]any, _ map[string]any) { g[0]["key"] = "foreign-never-ACKed" },
+		"unacked get key":   func(_, g []map[string]any, _ map[string]any) { g[0]["key"] = "m01-w5" },
+		"get before ack":    func(_, g []map[string]any, _ map[string]any) { g[0]["key"] = "m01-w3" },
+		"null set start":    func(s, _ []map[string]any, e map[string]any) { e["started"] = nil; s[0]["started"] = nil },
+		"null set end":      func(s, _ []map[string]any, _ map[string]any) { s[1]["ended"] = nil },
+		"absent set start":  func(s, _ []map[string]any, _ map[string]any) { delete(s[1], "started") },
+		"null get start":    func(_, g []map[string]any, _ map[string]any) { g[1]["started"] = nil },
+		"null end started":  func(_, _ []map[string]any, e map[string]any) { e["started"] = nil },
+		"null end ended":    func(_, _ []map[string]any, e map[string]any) { e["ended"] = nil },
+		"zero start":        func(s, _ []map[string]any, e map[string]any) { e["started"] = 0.0; e["ended"] = 220.0 },
 		"negative readback": func(_, _ []map[string]any, e map[string]any) { e["readback_exact"] = 10; e["readback_missing"] = -1 },
 	} {
 		if _, err := writeReport(fixtureRows(t, m), writeCfg(), 104.5, 106.5); err == nil {
