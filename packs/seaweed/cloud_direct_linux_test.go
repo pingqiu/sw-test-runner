@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -173,5 +174,47 @@ func TestCloudRunRootPerTarget(t *testing.T) {
 		if got := cloudRunRoot(inventory.Document{Target: c.target, RunID: "r1"}, h); got != c.want {
 			t.Fatalf("%s/%s: %s, want %s", c.target, c.user, got, c.want)
 		}
+	}
+}
+
+// The postflight's shell is judged by running the exact command the pack sends
+// in a real sh, with stub sudo/systemctl/ss on PATH: a probe that cannot run
+// must fail the postflight, never read as zero.
+func TestDirectPostflightShellSemantics(t *testing.T) {
+	h := &directHost{}
+	if err := directRun(t, h); err != nil {
+		t.Fatal(err)
+	}
+	post := h.commands[h.index("systemctl list-units")]
+	if !strings.Contains(post, "sudo systemctl list-units") {
+		t.Fatalf("postflight lists units without sudo: %q", post)
+	}
+	for _, c := range []struct {
+		name, units, unitsRC, listen, ssRC string
+		clean                              bool
+	}{
+		{"clean", "", "0", "LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*", "0", true},
+		{"a unit left", "sw-cloud-x-master.service loaded active running", "0", "", "0", false},
+		{"a port left", "", "0", "LISTEN 0 4096 0.0.0.0:9333 0.0.0.0:*", "0", false},
+		{"systemctl fails", "", "1", "", "0", false},
+		{"ss fails", "", "0", "", "1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			bin := t.TempDir()
+			stub := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stub("sudo", `exec "$@"`)
+			stub("systemctl", "printf '%s' '"+c.units+"'; exit "+c.unitsRC)
+			stub("ss", "printf '%s\n' '"+c.listen+"'; exit "+c.ssRC)
+			cmd := exec.Command("sh", "-c", post)
+			cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
+			out, err := cmd.CombinedOutput()
+			if c.clean != (err == nil) {
+				t.Fatalf("clean=%v but err=%v, output %q", c.clean, err, out)
+			}
+		})
 	}
 }

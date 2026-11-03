@@ -345,9 +345,13 @@ func directCleanup(n *infra.Node, dir string, d inventory.Document, h inventory.
 	for _, s := range h.Services {
 		ports = append(ports, strconv.Itoa(s.Port))
 	}
-	check := "u=$(systemctl list-units --all --no-legend " + units + " | wc -l); p=0"
+	// A probe that cannot run is a failure, never a count of zero: an empty
+	// listing from a failed systemctl or ss would otherwise read as clean.
+	check := "l=$(sudo systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
+		"; u=$(printf '%s' \"$l\" | grep -c . || true); p=0"
 	if len(ports) > 0 {
-		check += "; p=$(ss -Hltn | awk '{print $4}' | grep -cE ':(" + strings.Join(ports, "|") + ")$' || true)"
+		check += "; s=$(ss -Hltn) || { echo 'postflight: ss failed'; exit 3; }" +
+			"; p=$(printf '%s\\n' \"$s\" | awk '{print $4}' | grep -cE ':(" + strings.Join(ports, "|") + ")$' || true)"
 	}
 	check += "; echo \"units=$u ports=$p\"; [ \"$u\" = 0 ] && [ \"$p\" = 0 ]"
 	out, post := cloudStep(ctx, n, dir, "cloud-postflight.json", "postflight", 30, check)
