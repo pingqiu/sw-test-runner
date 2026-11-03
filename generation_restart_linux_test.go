@@ -513,3 +513,43 @@ func TestGenerationRestartWithRealLocalCustodian(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerationHeldExitDoesNotStartReplacement(t *testing.T) {
+	f, n := generationFixture(t)
+	p := f.policy.GenerationRestarts["volume-once"]
+	p.Hold = true
+	f.policy.GenerationRestarts["volume-once"] = p
+	f.publish(t, nil)
+	var goRow ApprovedGO
+	raw, _ := os.ReadFile(filepath.Join(f.dir, "go.json"))
+	_ = json.Unmarshal(raw, &goRow)
+	goRow.AllowMutating = true
+	raw, _ = json.Marshal(goRow)
+	_ = os.WriteFile(filepath.Join(f.dir, "go.json"), raw, 0600)
+	var boot PolicyBootstrap
+	bb, _ := os.ReadFile(f.profile)
+	_ = json.Unmarshal(bb, &boot)
+	boot.Approval.SHA256 = fmt.Sprintf("%x", sha256.Sum256(raw))
+	bb, _ = json.Marshal(boot)
+	_ = os.WriteFile(f.profile, bb, 0600)
+	run, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
+		old, _, err := a.RunApprovedPackJob(ctx, "volume0", true)
+		if err != nil {
+			return err
+		}
+		next, r, err := a.RestartApprovedPackGeneration(ctx, "volume-once", old)
+		if err != nil {
+			return err
+		}
+		if next.scope != nil || r.State != "OLD_SETTLED" || !r.OldExit.Settled {
+			return fmt.Errorf("held generation unexpectedly replaced: %+v", r)
+		}
+		return nil
+	})
+	if result.Status != StatusPass {
+		t.Fatalf("hold: %+v events=%v", result, n.events)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

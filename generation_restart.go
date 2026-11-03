@@ -98,6 +98,9 @@ func (c *ActionContext) RestartApprovedPackGeneration(ctx context.Context, name 
 		return
 	}
 	receipt.State = "OLD_SETTLED"
+	if plan.Hold {
+		return
+	} // Explicit policy opt-in; retain exact exit proof, no replacement dispatch.
 	next, _, err = c.RunApprovedPackJob(ctx, plan.Replacement, true)
 	if err != nil {
 		return
