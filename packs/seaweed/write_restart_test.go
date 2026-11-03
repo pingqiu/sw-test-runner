@@ -125,6 +125,18 @@ func TestFreshGetAfterAnOrdinaryGetIsRefused(t *testing.T) {
 	}
 }
 
+// codex01: two fresh GETs identical but for their operation id are still two reads of one key.
+func TestTwoIdenticalFreshGetsAreRefused(t *testing.T) {
+	_, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		for _, i := range []int{1, 2} {
+			g[i]["fresh"], g[i]["key"], g[i]["started"], g[i]["ended"] = true, "m01-w1", 105.0, 108.0
+		}
+	}), writeCfg(), 104.5, 106.5)
+	if err == nil {
+		t.Fatal("two fresh reads of one key accepted")
+	}
+}
+
 // Reread and fresh arrays are disjoint, and named so: together they are every GET.
 func TestRereadAndFreshGetsAddUpToAllGets(t *testing.T) {
 	r, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {

@@ -198,16 +198,17 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 		r.Errors = append(r.Errors, WriteError{row.Event, id, started - preKill, row.Error})
 	}
 	// A GET reads only a key whose SET was ACKed before the GET was submitted.
-	for _, g := range getKeys {
+	for i, g := range getKeys {
 		if at, ok := ackedAt[g.key]; !ok || at > g.started {
 			return r, errors.New("GET of a key with no earlier ACK")
 		}
 		if !g.fresh {
 			continue
 		}
-		// Fresh means the key's first GET of any kind, by submission, not row order.
-		for _, other := range getKeys {
-			if other != g && other.key == g.key && (other.started <= g.started || other.fresh) {
+		// Fresh means the key's first GET of any kind, by submission, not row
+		// order. Self is excluded by position: two rows can be equal in value.
+		for j, other := range getKeys {
+			if j != i && other.key == g.key && (other.started <= g.started || other.fresh) {
 				return r, errors.New("fresh GET of a key already read")
 			}
 		}
