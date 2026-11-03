@@ -75,6 +75,7 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--config',required=True);p.add_argument('--stage',choices=('seed','read'),required=True);p.add_argument('--manifest',required=True);p.add_argument('--plant-wrong-byte',action='store_true');p.add_argument('--route',choices=('s3','volume'));p.add_argument('--journal',required=True);a=p.parse_args()
     try:
         c=json.loads(a.config)
+        if any(not c[k].startswith('http://127.0.0.1:') for k in ('s3','filer_http','volume') if k in c):raise ValueError('M02 loopback URLs only')
         if not 1<=c['keys']<=128:raise ValueError('keys outside1..128')
         result=seed(c,a.journal) if a.stage=='seed' else reads(c,json.loads(pathlib.Path(a.manifest).read_bytes()),a.route,a.journal,a.plant_wrong_byte)
         if a.stage=='seed':
