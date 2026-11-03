@@ -4,8 +4,6 @@ package seaweed
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	tr "github.com/pingqiu/sw-test-runner"
@@ -176,7 +174,7 @@ func ecFixture(t *testing.T, mode string) (*cpuFixture, *ecCPU) {
 		if label == "capture" {
 			name = "ec_capture.py"
 		}
-		cfg, _ := json.Marshal(map[string]string{"Label": label, "role": label, "root": f.binding.OutputDir})
+		cfg, _ := json.Marshal(map[string]string{"Label": label, "role": label, "root": f.binding.OutputDir, "exe": "/opt/seaweed/product", "sha256": strings.Repeat("d", 64), "weed": "/opt/seaweed/product", "stage": label})
 		j.Argv = []string{"-I", "/opt/seaweed/worker/" + name, string(cfg)}
 		if name == "ec_chaos.py" {
 			j.Argv = []string{"-I", "/opt/seaweed/worker/" + name, "--config", string(cfg)}
@@ -192,12 +190,7 @@ func ecFixture(t *testing.T, mode string) (*cpuFixture, *ecCPU) {
 		s.Metadata = map[string]string{"seaweed_ec_plan": string(raw)}
 		s.Phases = []tr.Phase{{Name: "ec", Actions: []tr.Action{{Action: "seaweed_ec_stage1"}}}}
 	}
-	block := sha256.Sum256([]byte(f.binding.RunID + "/ec-0"))
-	h := sha256.New()
-	for i := 0; i < 8192; i++ {
-		h.Write(block[:])
-	}
-	n := &ecCPU{cpuNode: f.node, mode: mode, killed: map[string]bool{}, seed: EC1aManifest{RunID: f.binding.RunID, Objects: []EC1aObject{{Key: "ec-0", FID: "1,abcdef12345678", Length: 262144, SHA256: hex.EncodeToString(h.Sum(nil)), ACK: true}}}}
+	n := &ecCPU{cpuNode: f.node, mode: mode, killed: map[string]bool{}, seed: EC1aManifest{RunID: f.binding.RunID, Objects: []EC1aObject{{Key: "ec-0", FID: "1,abcdef12345678", Length: 262144, SHA256: "55e6c21379e879882f4d8e4b0347c772a3445c59ac53b1277b4f1de481f65b8a", ACK: true}}}}
 	if mode == "helper-pin" {
 		j := f.policy.Jobs["seed"]
 		j.Argv[1] = "/opt/seaweed/worker/not-the-leaf.py"

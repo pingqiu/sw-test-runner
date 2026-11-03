@@ -101,10 +101,10 @@ func ecPin(in tr.PackInputs, label, name string) error {
 		arg = j.Argv[3]
 	}
 	var c struct {
-		Root, Role string
-		Holders    map[string]string
+		Root, Role, Exe, SHA256, Weed, Stage string
+		Holders                              map[string]string
 	}
-	if json.Unmarshal([]byte(arg), &c) != nil || c.Root != in.Binding.OutputDir || (name == "ec_service.py" && c.Role != label) {
+	if json.Unmarshal([]byte(arg), &c) != nil || c.Root != in.Binding.OutputDir || (name == "ec_service.py" && (c.Role != label || len(c.SHA256) != 64 || in.Files["m02"][c.Exe] != c.SHA256)) || (name == "ec_setup.py" && c.Stage != "ready" && len(in.Files["m02"][c.Weed]) != 64) {
 		return errors.New("EC helper not bound to owned run root/role")
 	}
 	for label, dir := range c.Holders {
@@ -168,28 +168,22 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 			return nil, errors.New("EC holder loss lacks held approved generation")
 		}
 	}
-	for _, label := range p.Services {
-		if err = ecPin(in, label, "ec_service.py"); err != nil {
-			return nil, err
+	for _, label := range labels {
+		name := "ec_chaos.py"
+		if contains(p.Services, label) {
+			name = "ec_service.py"
 		}
-	}
-	for _, label := range append(append(append([]string{}, p.S1...), p.WrongByte, p.Seed), func() []string {
-		v := []string{}
-		for _, p := range p.S2 {
-			v = append(v, p...)
+		if label == p.Capture {
+			name = "ec_capture.py"
 		}
-		return v
-	}()...) {
-		if err = ecPin(in, label, "ec_chaos.py"); err != nil {
-			return nil, err
+		if label == p.Ready || label == p.Encode {
+			name = "ec_setup.py"
 		}
-		if strings.Contains(strings.Join(in.Jobs[label].Argv, " "), "--plant-wrong-byte") != (label == p.WrongByte) {
-			return nil, errors.New("wrong-byte planting escaped its control job")
-		}
-	}
-	for label, name := range map[string]string{p.Capture: "ec_capture.py", p.Ready: "ec_setup.py", p.Encode: "ec_setup.py"} {
 		if err = ecPin(in, label, name); err != nil {
 			return nil, err
+		}
+		if name == "ec_chaos.py" && strings.Contains(strings.Join(in.Jobs[label].Argv, " "), "--plant-wrong-byte") != (label == p.WrongByte) {
+			return nil, errors.New("wrong-byte planting escaped its control job")
 		}
 	}
 	body, _ := workerFiles.ReadFile("worker/chaos_load.py")

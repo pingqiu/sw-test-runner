@@ -1,7 +1,7 @@
 """Stage1a S3-only leaf. Reuses chaos_load payloads and SUBMIT/ACK shapes.
 No fault authority, lifecycle, EC capture, status excusal or exposure claim here.
 """
-import argparse, hashlib, http.client, importlib.util, json, pathlib, sys, time
+import argparse, hashlib, http.client, importlib.util, json, pathlib, sys, time, signal
 from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -13,6 +13,11 @@ def request(url, data=None, method='GET'):
     parsed=urlsplit(url)
     if parsed.scheme!='http' or parsed.hostname!='127.0.0.1':raise ValueError('Stage1 requires M02 loopback HTTP only')
     deadline=time.monotonic()+chaos.OP_LIMIT
+    armed=hasattr(signal,'setitimer')
+    if armed:
+        if signal.getitimer(signal.ITIMER_REAL)[0]:raise RuntimeError('foreign operation alarm')
+        def expired(*_):raise TimeoutError('whole-operation30s deadline')
+        previous=signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,chaos.OP_LIMIT)
     try:
         with urlopen(Request(url,data=data,method=method),timeout=chaos.OP_LIMIT) as r:
             body=bytearray()
@@ -28,6 +33,8 @@ def request(url, data=None, method='GET'):
             return r.status,bytes(body)
     except HTTPError as e:
         e.close();return e.code,b''
+    finally:
+        if armed:signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,previous)
 
 
 def journal(path):return pathlib.Path(path).open('x',buffering=1)
