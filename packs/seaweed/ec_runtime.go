@@ -47,6 +47,10 @@ type ecSnapshot struct {
 		Job, Name, SHA256 string
 		Bytes             int64
 	} `json:"files"`
+	UnrelatedVolumes []struct {
+		Volume, Job, Name, SHA256 string
+		Bytes                     int64
+	} `json:"unrelated_volumes"`
 }
 
 func ecTask(ctx context.Context, a *tr.ActionContext, label string, v any) error {
@@ -272,6 +276,16 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 		holders[h.Job] = true
 	}
 	shardSet := map[string]map[int]bool{}
+	for _, file := range snap.UnrelatedVolumes {
+		if !holders[file.Job] || file.Volume == "" || file.Bytes < 0 || len(file.SHA256) != 64 || filepath.Base(file.Name) != file.Name {
+			return nil, errors.New("EC unrelated volume evidence invalid")
+		}
+		for _, object := range seed.Objects {
+			if strings.Split(object.FID, ",")[0] == file.Volume {
+				return nil, errors.New("EC target recorded as unrelated volume")
+			}
+		}
+	}
 	shardJobs := map[string]bool{}
 	generations := map[string]int64{}
 	if json.Unmarshal([]byte(snap.Manifest.Generation), &generations) != nil {

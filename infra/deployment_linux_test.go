@@ -34,6 +34,11 @@ func deploymentFixtureGate(t *testing.T, gate func()) (*Node, DeploymentPolicy) 
 }
 
 func deploymentFixtureCommand(t *testing.T, gate func(), rewrite func(string) string) (*Node, DeploymentPolicy) {
+	return deploymentFixtureSession(t, gate, rewrite, 15*time.Second, 1000)
+}
+
+// The local EC pack holds service channels for the whole scenario, as production does.
+func deploymentFixtureSession(t *testing.T, gate func(), rewrite func(string) string, lifetime time.Duration, uid uint32) (*Node, DeploymentPolicy) {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("local Linux root needed to model a protected installation and unprivileged SSH child")
@@ -108,7 +113,7 @@ func deploymentFixtureCommand(t *testing.T, gate func(), rewrite func(string) st
 			go func() {
 				defer workers.Done()
 				defer conn.Close()
-				conn.SetDeadline(time.Now().Add(20 * time.Second))
+				conn.SetDeadline(time.Now().Add(lifetime + 5*time.Second))
 				server, channels, requests, err := ssh.NewServerConn(conn, config)
 				if err != nil {
 					return
@@ -139,11 +144,14 @@ func deploymentFixtureCommand(t *testing.T, gate func(), rewrite func(string) st
 						if rewrite != nil {
 							payload.Command = rewrite(payload.Command)
 						}
-						ctx, cancel := context.WithTimeout(connectionCtx, 15*time.Second)
+						ctx, cancel := context.WithTimeout(connectionCtx, lifetime)
 						cmd := exec.CommandContext(ctx, "/bin/sh", "-c", payload.Command)
-						cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}
+						cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: &syscall.Credential{Uid: uid, Gid: uid}}
 						cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 						cmd.WaitDelay = time.Second
+						if uid == 1001 && strings.Contains(payload.Command, "owned-custodian") {
+							cmd.Stdin = channel
+						}
 						cmd.Stdout, cmd.Stderr = channel, channel.Stderr()
 						err := cmd.Run()
 						cancel()

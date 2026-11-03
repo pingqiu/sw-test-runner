@@ -4,6 +4,16 @@ worker=pathlib.Path(__file__).parent
 def load(name):
  s=importlib.util.spec_from_file_location(name,worker/(name+'.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 class Regressions(unittest.TestCase):
+ @unittest.skipUnless(sys.platform=='linux','Linux shell-session child fixture')
+ def test_encoder_uses_one_locked_shell_session(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=pathlib.Path(tmp);manifest=root/'manifest.json'
+   manifest.write_text(json.dumps({'objects':[{'fid':'2,abc'},{'fid':'1,def'}]}))
+   child=root/'weed';child.write_text('#!'+sys.executable+'\nimport json,sys\nprint(json.dumps(sys.stdin.read().splitlines()))\n');child.chmod(0o700)
+   c=dict(root=str(root),stage='encode',weed=str(child),master='127.0.0.1:12345',manifest=str(manifest))
+   r=subprocess.run([sys.executable,'-I',str(worker/'ec_setup.py'),json.dumps(c)],capture_output=True,text=True,timeout=5)
+   self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+   self.assertEqual(json.loads(r.stdout),['lock','ec.encode -volumeIds=1,2 -batchSize=0 -shardReplicaPlacement=001','unlock'])
  @unittest.skipUnless(sys.platform=='linux','Linux child executable fixture')
  def test_encoder_child_private_root(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -40,6 +50,19 @@ class Regressions(unittest.TestCase):
      procs.append(subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)','--dir='+str(d)]))
     c=dict(root=tmp,holders=holders,run_id='cpu',volume_exe=sys.executable,volume_sha256=hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest())
     m=dict(run_id='cpu',objects=[dict(fid='1,abc')]);cap.capture(c,m)
+    original=root/'h1/bucket_1.dat'
+    for name in ('bucket_1.dat','bucket_1.dat.backup','bucket_1.dat.backup_2.dat','bucket_1.dat_2.dat','other.active'):
+     original=root/'h1'/name;original.write_bytes(b'residual original or unsupported generation')
+     with self.assertRaises(ValueError):cap.capture(c,m)
+     original.unlink()
+    audit=root/'h1/2.dat';audit.write_bytes(b'unrelated shell audit')
+    (root/'h1/2.vif').write_text(json.dumps(dict(ecShardConfig=None)))
+    (root/'h1/2.idx').write_bytes(b'audit index')
+    snapshot=cap.capture(c,m)
+    self.assertEqual({row['volume'] for row in snapshot['unrelated_volumes']},{'2'})
+    self.assertEqual({row['name'] for row in snapshot['unrelated_volumes']},{'2.dat','2.vif','2.idx'})
+    self.assertEqual({row['volume'] for row in snapshot['unrelated_volumes']} & {o['fid'].split(',')[0] for o in m['objects']},set())
+    self.assertEqual(next(row['sha256'] for row in snapshot['unrelated_volumes'] if row['name']=='2.dat'),hashlib.sha256(audit.read_bytes()).hexdigest())
     (root/'h1/bucket_1.vif').unlink()
     with self.assertRaises(ValueError):cap.capture(c,m)
     vif=root/'h1/bucket_1.vif';good=(root/'h0/bucket_1.vif').read_bytes()

@@ -1,0 +1,8 @@
+name: ec-stage1-go-m02
+metadata:
+  seaweed_ec_plan: "{\"services\":[\"master\",\"filer\",\"s3\",\"h0\",\"h1\",\"h2\",\"h3\",\"h4\",\"h5\",\"h6\",\"h7\",\"h8\",\"h9\",\"h10\",\"h11\",\"h12\",\"h13\"],\"Seed\":\"seed\",\"Encode\":\"encode\",\"Capture\":\"capture\",\"WrongByte\":\"planted\",\"Ready\":\"ready\",\"Implementation\":\"go\",\"s1\":[\"s1-s3\",\"s1-volume\"],\"s2\":[[\"s2-0-s3\",\"s2-0-volume\"],[\"s2-1-s3\",\"s2-1-volume\"],[\"s2-2-s3\",\"s2-2-volume\"],[\"s2-3-s3\",\"s2-3-volume\"]],\"episodes\":[\"loss0\",\"loss1\",\"loss2\",\"loss3\"],\"keys\":64}"
+phases:
+  - name: ec-stage1
+    actions:
+      - action: seaweed_ec_stage1
+        timeout: 8m

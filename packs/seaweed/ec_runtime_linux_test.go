@@ -77,6 +77,13 @@ func (n *ecCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 		m := n.seed
 		m.Generation = `{"1":12345}`
 		row = map[string]any{"manifest": m, "holders": holders, "shards": shards, "original_absent": n.mode != "original", "files": []any{map[string]any{"job": "h0", "name": "1.ecx", "sha256": strings.Repeat("a", 64), "bytes": 16}}}
+		if strings.HasPrefix(n.mode, "unrelated") {
+			vid := "2"
+			if n.mode == "unrelated-target" {
+				vid = "1"
+			}
+			row.(map[string]any)["unrelated_volumes"] = []any{map[string]any{"volume": vid, "job": "h0", "name": vid + ".dat", "sha256": strings.Repeat("a", 64), "bytes": 528}}
+		}
 	case "encode", "ready":
 		row = map[string]any{"encoded": true}
 	default:
@@ -242,7 +249,7 @@ func ecFixture(t *testing.T, mode string) (*cpuFixture, *ecCPU) {
 }
 
 func TestECStage1ThroughApprovedEngine(t *testing.T) {
-	for _, mode := range []string{"positive", "wrong", "original", "missing", "late", "holder-mismatch", "lost-kill", "helper-pin"} {
+	for _, mode := range []string{"positive", "unrelated", "unrelated-target", "wrong", "original", "missing", "late", "holder-mismatch", "lost-kill", "helper-pin"} {
 		t.Run(mode, func(t *testing.T) {
 			f, n := ecFixture(t, mode)
 			result, bundle, err := tr.RunApprovedRequest(context.Background(), f.request, f.profile, RegisterPack, &f.runtime, nil)
@@ -250,13 +257,13 @@ func TestECStage1ThroughApprovedEngine(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := tr.StatusFail
-			if mode == "positive" {
+			if mode == "positive" || mode == "unrelated" {
 				want = tr.StatusPass
 			}
 			if result == nil || result.Status != want {
 				t.Fatalf("result%+v bundle%s", result, bundle)
 			}
-			if mode == "positive" {
+			if mode == "positive" || mode == "unrelated" {
 				raw, e := os.ReadFile(filepath.Join(bundle, "artifacts/ec-stage1.json"))
 				if e != nil {
 					t.Fatal(e)
@@ -264,6 +271,12 @@ func TestECStage1ThroughApprovedEngine(t *testing.T) {
 				var row map[string]any
 				if json.Unmarshal(raw, &row) != nil || row["s1"] != "PASS" || row["s2"] != "NOT_COVERED" || row["mandatory_bytes_deadlines"] != "PASS" || len(n.killed) != 4 {
 					t.Fatalf("invalid Stage1 result %s", raw)
+				}
+				if mode == "unrelated" {
+					files := row["capture"].(map[string]any)["unrelated_volumes"].([]any)
+					if len(files) != 1 || files[0].(map[string]any)["Volume"] != "2" {
+						t.Fatalf("unrelated volume evidence lost: %s", raw)
+					}
 				}
 			}
 		})

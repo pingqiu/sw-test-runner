@@ -16,11 +16,18 @@ def capture(c,manifest):
     root=pathlib.Path(c['root']);rootstat=root.lstat()
     if not root.is_absolute() or not stat.S_ISDIR(rootstat.st_mode) or rootstat.st_uid!=os.getuid() or rootstat.st_mode&0o022:raise ValueError('private owned root required')
     if not 1<=len(c['holders'])<=14 or manifest['run_id']!=c['run_id']:raise ValueError('holder/manifest scope')
-    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[]
+    volumes={o['fid'].split(',')[0] for o in manifest['objects']}
+    if not volumes or any(not re.fullmatch(r'[1-9][0-9]*',v) for v in volumes):raise ValueError('manifest volume id')
+    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[];unrelated=[]
     for label,folder in c['holders'].items():
         directory=pathlib.Path(folder)
         if directory.parent!=root or directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=os.getuid() or directory.stat().st_mode&0o022:raise ValueError('foreign holder dir')
-        if any(directory.glob('*.dat*')) or any(directory.glob('*.active')):raise ValueError('original/unsupported active generation present')
+        if any(directory.glob('*.active')):raise ValueError('unsupported active generation present')
+        for path in directory.glob('*.dat*'):
+            # Bind the original basename before examining any backup suffix.
+            match=re.fullmatch(r'(?:.*_)?([0-9]+)',path.name.partition('.dat')[0])
+            if not match or str(int(match[1])) in volumes:raise ValueError('original/unknown data volume present')
+            unrelated.append(dict(volume=str(int(match[1])),job=label,name=path.name,**stable(path)))
         matches=[]
         for p in pathlib.Path('/proc').glob('[0-9]*'):
             try:
@@ -34,6 +41,10 @@ def capture(c,manifest):
         holders.append(matches[0])
         members=[]
         for path in directory.iterdir():
+            metadata=re.fullmatch(r'(?:.*_)?([0-9]+)\.(vif|idx)',path.name)
+            if metadata and str(int(metadata[1])) not in volumes:
+                unrelated.append(dict(volume=str(int(metadata[1])),job=label,name=path.name,**stable(path)))
+                continue
             if path.suffix=='.vif':
                 vif_bytes=path.read_bytes();proof=stable(path)
                 if proof['sha256']!=hashlib.sha256(vif_bytes).hexdigest():raise ValueError('vif parse/hash changed')
@@ -56,11 +67,10 @@ def capture(c,manifest):
         if vid in indexes and indexes[vid]!=index:raise ValueError('foreign holder index')
         indexes[vid]=index
         shards[-1].update(generation=configs[vid],index_sha256=index,vif_sha256=stable(member.with_suffix('.vif'))['sha256'])
-    volumes={o['fid'].split(',')[0] for o in manifest['objects']}
     if set(configs)!=volumes or {s['volume'] for s in shards}!=volumes:raise ValueError('manifest volume set differs')
     for vid in volumes:
         if {s['shard'] for s in shards if s['volume']==vid}!=set(range(14)):raise ValueError('missing shard')
-    return dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,original_absent=True,exposure='NOT_OBSERVED')
+    return dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
 
 if __name__=='__main__':
     c=json.loads(sys.argv[1]);m=json.loads(pathlib.Path(sys.argv[2]).read_bytes())
