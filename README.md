@@ -40,6 +40,70 @@ sw-test-runner run scenario.yaml           # execute
 sw-test-runner validate-bundle results/RUN # offline result/status check
 ```
 
+## How to run `seaweed-cloud direct`
+
+Use one existing Linux host with SSH, systemd, passwordless sudo, Python 3,
+`curl`, `tar`, `sha256sum`, and `ss`. A local container reached over SSH with
+real systemd is an **onprem** host: set `target: "onprem"`, not `docker`.
+For a shared lab host, obtain its run window first and use SSH user `testdev`.
+The runner installs under the user's run directory; it does not create a VM.
+
+```sh
+go build -o seaweed-cloud ./cmd/seaweed-cloud
+cp inventory/testdata/http.requested.json direct-inventory.json
+cp direct-inventory.json ec-inventory.json
+mkdir -p results
+# Edit both inventories and prepare private controller configs as below.
+
+# Default HTTP KV smoke (local container or the allocated lab host):
+./seaweed-cloud direct --inventory direct-inventory.json \
+  --config kv-config.json --out results/direct-kv-001 --timeout 8m
+
+# EC stage 1 (local container first; fresh run_id/run_root for this run):
+./seaweed-cloud direct --inventory ec-inventory.json \
+  --config ec-config.json --out results/direct-ec-001 --timeout 8m
+```
+
+Inventory fields to edit in the template:
+
+- Keep `schema: "seaweed.inventory/v1"`, `state: "requested"`, `target: "onprem"`,
+  `transport: "http"`, and `managed_resource_ids: []`. Use one host with roles
+  `master`, `filer`, `volume`, `s3`, `client`; replace the example run ID and
+  `artifact_manifest_sha256` with your run's values.
+- Set `management.address`, `port`, `user`, and `credential_ref` for the actual
+  SSH endpoint. Set `data.address` to that host's reachable, non-loopback data IP
+  (the container's own IP for EC peer copies), not the template's example IP.
+- Set `run_root` to `/home/<user>/sw-runs/<run_id>`; for root use
+  `/root/sw-runs/<run_id>`. Declare the actual disk/mount, with
+  `format_allowed: false`; direct does not format it.
+- Keep explicit service ports; ensure they are free. EC derives fourteen
+  consecutive volume HTTP ports and fourteen gRPC ports from their first ports,
+  plus S3 gRPC = S3 HTTP + 10000: all 34 listeners must be distinct/free.
+- Set `deadlines.work` and `deadlines.hard` to canonical UTC timestamps ending
+  in `Z`, with `cleanup_reserve_ms: 60000` and hard at least 60s after work.
+
+Controller config fields (keep credentials private; do not commit configs):
+
+- `ssh_key`: operator-supplied SSH credential; `host_key`: independently verified
+  public host-key pin for that endpoint. No credential is embedded in inventory.
+- `files`: map artifact names to `{ "path": ..., "sha256": ... }`, using local
+  artifact files and their actual SHA256 values. KV requires `weed`,
+  `weed-volume`, and `native.tar` (containing `seaweedkv_native/`, compatible
+  with the target's Python ABI and system libraries).
+- For EC set `ec_stage1: true` and supply **only** `weed` in `files`. It starts
+  one Go master/filer/S3 plus 14 holders, seeds 64 keys, encodes, rejects a
+  planted wrong byte, checks both routes, then kills 1–4 holders cumulatively.
+  S1 can PASS; S2 stays `NOT_COVERED` without a reconstruction marker.
+
+Create the output parent first; `--out` itself must not already exist. The CLI
+prints one JSON result with `code`, `rows`, and `output`, and exits nonzero on
+failure. Local output includes `cloud-step-*.json` (commands and raw terminals),
+`cloud-kv.jsonl` or `ec-stage1.json`, `cloud-services.log`, and collection,
+cleanup and postflight JSON. Cleanup uses its own 30s collection + 90s teardown
+bounds even after workload failure/cancellation; budget that beyond `--timeout`.
+It stops the run's transient units and requires zero units/listeners. Run data
+remains under `run_root`; retain the local evidence before disposing of it.
+
 ## Docs and wiki
 
 Full documentation is a MkDocs wiki under `docs/` (mirrors the seaweed-block
