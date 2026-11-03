@@ -110,3 +110,16 @@ consume the same P+60 budget. Never clamp a failed interval to P or retime it.
 The 99.9-success/P100/100.1-fail/101-recovery case must pass; a failed interval
 starting before P refuses even if it completes after P. Original load membership,
 operation IDs/keys/interval joins, wrong-byte and unknown-completion rules stay.
+
+## Writes across a master restart (report only)
+
+`Plan.Restart` with `role: master` and `writes: true` replaces the read load with
+`ReadLoadArgs(..., "write-load", "dc")`: serial SETs for 120 s at 250 ms pacing, one
+fresh key per SET, no retry. The load starts before the kill and no probe gates it.
+The plan's ready steps carry no Assign probe, so writes meet the master's warm-up.
+
+A completed failure is recorded, not fatal. An unknown completion or wrong read-back
+bytes fails the run. The pack result carries the report: SET count, failures, p50 and
+max latency before the kill, from kill to READY, and after READY, plus the first ACK
+after the kill and read-back counts. Its verdict is always `REPORT_ONLY`; no threshold
+exists until real runs justify one.

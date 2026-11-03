@@ -75,7 +75,13 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 			return e, err
 		}
 		stage, route := s.Argv[5], s.Argv[7]
-		if stage == "load" {
+		if stage == "write-load" {
+			n.events = append(n.events, "write-load-wait")
+			raw = writeLoadRows(c, n.killMono, n.mode)
+			if n.mode == "load-exit" {
+				e.Code = 1
+			}
+		} else if stage == "load" {
 			n.events = append(n.events, "load-wait")
 			row := windowBody(n.t, c)
 			if n.mode == "zero-errors" {
@@ -144,7 +150,7 @@ func (n *restartCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 		if n.mode == "before-prekill" {
 			ack = n.killMono + 50
 		}
-		row := map[string]any{"status": "READY", "client_mono": ack, "processes": map[string]any{role: map[string]any{"scope_identity": i}}}
+		row := map[string]any{"status": "READY", "client_mono": ack - 5, "ready_mono": ack, "processes": map[string]any{role: map[string]any{"scope_identity": i}}}
 		if n.mode == "missing-ready" {
 			delete(row, "processes")
 		}

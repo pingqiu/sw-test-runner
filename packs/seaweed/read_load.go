@@ -83,7 +83,7 @@ func checkSeed(rows []map[string]json.RawMessage, c SmokeConfig, route string) (
 // settles before load admission; load performs GETs only for a fixed 120 s.
 func ReadLoadArgs(d *inventory.Document, client string, s SmokeSettings, stage, route string) ([]string, error) {
 	// A DC inventory seeds over DC; an HTTP (cloud) inventory reads only over HTTP.
-	if d == nil || (d.Transport != "dc" && d.Transport != "http") || !slices.Contains([]string{"seed", "load", "recovery"}, stage) || !slices.Contains([]string{"dc", "http"}, route) || (stage == "seed" && route != d.Transport) || (d.Transport == "http" && route != "http") {
+	if d == nil || (d.Transport != "dc" && d.Transport != "http") || !slices.Contains([]string{"seed", "load", "recovery", "write-load"}, stage) || !slices.Contains([]string{"dc", "http"}, route) || (stage == "seed" && route != d.Transport) || (d.Transport == "http" && route != "http") {
 		return nil, errors.New("unsupported read-only case stage/path")
 	}
 	args, err := SmokeArgs(d, client, s)

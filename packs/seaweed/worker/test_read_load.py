@@ -92,4 +92,36 @@ class ReadControls(unittest.TestCase):
                 self.assertEqual(backings,['loader-http' if route=='http' else 'loader-rdma'])
                 self.assertEqual(json.loads(output.getvalue())['status'],'OBSERVED')
 
+class WriteLoadControls(unittest.TestCase):
+    """Report-only writes across a master restart: fresh keys, no retries, no threshold."""
+    def load(self,mode='good',duration=.05):
+        c=dict(run_id='cpu',client='m01',transport='dc',keys=2,length=64,root='/testops/cpu/m01')
+        conn=FakeConnector(mode);rows=[]
+        try:return kv_smoke.write_load(conn,c,rows.append,duration=duration,pace=.005),rows,conn
+        finally:conn.close()
+    def test_every_set_is_one_fresh_key_and_read_back(self):
+        end,rows,conn=self.load()
+        sets=[r for r in rows if r['event']=='SET']
+        self.assertEqual(end['sets'],len(sets));self.assertGreater(len(sets),0)
+        self.assertEqual(len({r['key'] for r in sets}),len(sets))
+        self.assertFalse({r['key'] for r in sets}&{'m01-0','m01-1'})
+        self.assertEqual([r['operation_id'] for r in sets],list(range(len(sets))))
+        self.assertEqual((end['status'],end['stage'],end['transport']),('OBSERVED','write-load','dc'))
+        self.assertEqual((end['acked'],end['failed'],end['readback_exact'],end['readback_missing']),(len(sets),0,len(sets),0))
+        self.assertEqual(conn.sets,len(sets))
+    def test_failed_set_is_recorded_not_fatal_and_not_read_back(self):
+        end,rows,_=self.load('ambiguous')
+        sets=[r for r in rows if r['event']=='SET']
+        self.assertTrue(sets and all(not r['ok'] and r['error'] for r in sets))
+        self.assertEqual((end['acked'],end['failed'],end['readback_exact']),(0,len(sets),0))
+    def test_wrong_bytes_stay_fatal(self):
+        with self.assertRaisesRegex(AssertionError,'wrong'):self.load('wrong')
+    def test_a_miss_on_read_back_is_counted_not_excused(self):
+        end,_,_=self.load('miss')
+        self.assertEqual(end['readback_exact'],0);self.assertEqual(end['readback_missing'],end['acked'])
+    def test_stage_needs_dc(self):
+        self.assertEqual(kv_smoke.read_stage_args('write-load','dc'),('write-load','dc'))
+        for route,transport in (('http','dc'),('http','http')):
+            with self.assertRaises(ValueError):kv_smoke.read_stage_args('write-load',route,transport)
+
 if __name__=='__main__':unittest.main()

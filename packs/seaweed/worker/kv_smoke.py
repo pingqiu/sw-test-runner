@@ -96,6 +96,9 @@ def configure(c):
 
 def read_stage_args(stage, route, transport='dc'):
     # A DC inventory seeds over DC; an HTTP (cloud) inventory reads only over HTTP.
+    if stage=='write-load':
+        if route!='dc' or transport!='dc':raise ValueError('write-load is DC only')
+        return stage, route
     if stage not in ('seed','load','recovery') or route not in ('dc','http') or transport not in ('dc','http') or (stage=='seed' and route!=transport) or (transport=='http' and route!='http'):
         raise ValueError('unsupported read-only case stage/path')
     return stage, route
@@ -150,11 +153,44 @@ def read_only(conn, c, stage, route):
         before=before,after=after,run_id=c['run_id'],client=c['client'],root=c['root'])
 
 
+def write_load(conn, c, emit, duration=120, pace=.25):
+    """Report-only SETs across a master restart: one fresh key per SET, no retry, not gated on any probe. A completed
+    failure is recorded, never fatal or credited; an unknown completion raises, like every worker op. Wrong bytes are fatal."""
+    read_stage_args('write-load','dc',c['transport'])
+    helper=exact_helper('soak_native_worker')
+    helper.validate_api(type(conn))
+    before=json.loads(conn.stats_json());started=time.monotonic();acked=[];sets=0
+    while time.monotonic()-started<duration:
+        if sets>=1024:raise AssertionError('bounded SET evidence exceeded')
+        key=c['client']+'-w'+str(sets)
+        command=dict(action='set',key=key,seed=c['run_id']+'/'+key,length=c['length'],operation_id=sets)
+        row=helper.work(conn,command);sets+=1
+        ok=row['ok'] and row['results'] in (None,[True])
+        emit(dict(event='SET',operation_id=row['operation_id'],key=key,started=row['submitted'],ended=row['completed'],ok=ok,error=row['error']))
+        if ok:acked.append(command)
+        time.sleep(pace)
+    exact=missing=0
+    for i,command in enumerate(acked):
+        expected=hashlib.sha256(helper.payload(command['seed'],c['length'])).hexdigest()
+        row=helper.work(conn,dict(command,action='get',operation_id=sets+i))
+        if row['ok'] and row['results'] in (None,[True]):
+            if row['sha256']!=expected:raise AssertionError('GET wrong bytes of an ACKed write')
+            exact+=1
+        else:missing+=1
+    after=json.loads(conn.stats_json())
+    for s in (before,after):
+        if s['loader']['transport']!='rdma' or s['loader']['http_fallback_allowed'] is not False:raise AssertionError('wrong write transport')
+    ended=time.monotonic()
+    return dict(status='OBSERVED',stage='write-load',transport='dc',sets=sets,acked=len(acked),failed=sets-len(acked),
+        readback_exact=exact,readback_missing=missing,started=started,ended=ended,before=before,after=after,
+        run_id=c['run_id'],client=c['client'],root=c['root'])
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--config', required=True)
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--stage', choices=('seed','load','recovery'))
+    p.add_argument('--stage', choices=('seed','load','recovery','write-load'))
     p.add_argument('--read-path', choices=('dc','http'))
     args = p.parse_args()
     emit = lambda obj: print(json.dumps(obj, allow_nan=False), flush=True)
@@ -168,7 +204,7 @@ def main():
             if args.stage:
                 emit(dict(status='PLAN',code='OK',effects=[],stage=args.stage,read_path=args.read_path,
                     backing='loader-http' if args.read_path=='http' else 'loader-rdma',fallback=False,
-                    duration_seconds=120 if args.stage=='load' else 0,operations=None if args.stage=='load' else c['keys']*(2 if args.stage=='seed' else 1)))
+                    duration_seconds=120 if args.stage in ('load','write-load') else 0,operations=None if args.stage in ('load','write-load') else c['keys']*(2 if args.stage=='seed' else 1)))
             else:
                 emit(dict(status='PLAN', code='OK', remedy='obtain independent S0b admission', effects=[], backing=backing, fallback=False, operations=2*c['keys']))
             return 0
@@ -183,7 +219,7 @@ def main():
         def metadata(key):
             with urlopen(c['filer_http']+quote(key,safe='/')+'?metadata=true&resolveManifest=true', timeout=8) as r:
                 return json.load(r)
-        result = read_only(conn,c,args.stage,args.read_path) if args.stage in ('load','recovery') else run(conn, c, metadata, emit)
+        result = write_load(conn,c,emit) if args.stage=='write-load' else read_only(conn,c,args.stage,args.read_path) if args.stage in ('load','recovery') else run(conn, c, metadata, emit)
         conn.close()
         conn = None
         emit(dict(result, code='OK', remedy='inspect ACK/exact/transport records'))
