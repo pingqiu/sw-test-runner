@@ -130,6 +130,15 @@ func ecPin(in tr.PackInputs, label, name string) error {
 	if err := uniqueJSON(json.NewDecoder(strings.NewReader(arg)), 0); err != nil {
 		return err
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(arg), &fields); err != nil {
+		return err
+	}
+	for key := range fields {
+		if strings.IndexFunc(key, func(r rune) bool { return r > 127 }) >= 0 {
+			return errors.New("EC worker schema keys must be ASCII")
+		}
+	}
 	if json.Unmarshal([]byte(arg), &c) != nil || c.Root != in.Binding.OutputDir || (name == "ec_service.py" && (c.Role != label || len(c.SHA256) != 64 || in.Files["m02"][c.Exe] != c.SHA256)) || (name == "ec_setup.py" && c.Stage != "ready" && len(in.Files["m02"][c.Weed]) != 64) {
 		return errors.New("EC helper not bound to owned run root/role")
 	}

@@ -26,6 +26,17 @@ func TestECAmendCaseAliasesCannotSplitPinAndWorker(t *testing.T) {
 	}
 }
 
+func TestECAmendUnicodeDecisionAliasRefuses(t *testing.T) {
+	body, _ := workerFiles.ReadFile("worker/ec_service.py")
+	goodHash := strings.Repeat("d", 64)
+	config := `{"root":"/run/approved","role":"h0","exe":"/opt/product","sha256":"` + strings.Repeat("e", 64) + `","\u017fha256":"` + goodHash + `"}`
+	j := tr.JobPin{Node: "m02", Executable: "/usr/bin/python3.12", SHA256: strings.Repeat("b", 64), Argv: []string{"-I", "/opt/worker/ec_service.py", config}}
+	in := tr.PackInputs{Binding: tr.RunBinding{OutputDir: "/run/approved"}, Jobs: map[string]tr.JobPin{"h0": j}, Files: map[string]map[string]string{"m02": {"/opt/worker/ec_service.py": hash(body), j.Executable: j.SHA256, "/opt/product": goodHash}}, Scripts: map[string][]byte{"service": body}}
+	if err := ecPin(in, "h0", "ec_service.py"); err == nil {
+		t.Fatal("Unicode long-s alias split Go/Python digest pin")
+	}
+}
+
 type reviewerECReplay struct {
 	*ecCPU
 	control json.RawMessage
