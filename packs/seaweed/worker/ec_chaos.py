@@ -3,13 +3,15 @@ No fault authority, lifecycle, EC capture, status excusal or exposure claim here
 """
 import argparse, hashlib, http.client, importlib.util, json, pathlib, sys, time
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 spec=importlib.util.spec_from_file_location('ec_chaos_load',pathlib.Path(__file__).with_name('chaos_load.py'))
 chaos=importlib.util.module_from_spec(spec);spec.loader.exec_module(chaos)
 
 
 def request(url, data=None, method='GET'):
+    parsed=urlsplit(url)
+    if parsed.scheme!='http' or parsed.hostname!='127.0.0.1':raise ValueError('Stage1 requires M02 loopback HTTP only')
     deadline=time.monotonic()+chaos.OP_LIMIT
     try:
         with urlopen(Request(url,data=data,method=method),timeout=chaos.OP_LIMIT) as r:
@@ -49,7 +51,7 @@ def seed(c,path):
     return dict(run_id=c['run_id'],objects=objects,exposure='NOT_OBSERVED')
 
 
-def reads(c,manifest,route,path):
+def reads(c,manifest,route,path,plant=False):
     if manifest['run_id']!=c['run_id'] or route not in ('s3','volume'):raise ValueError('manifest/route mismatch')
     outcomes=[];wrong=0
     with journal(path) as f:
@@ -62,19 +64,24 @@ def reads(c,manifest,route,path):
             status=0;body=b'';error=''
             try:status,body=request(url)
             except (OSError,http.client.HTTPException) as e:error=type(e).__name__+': '+str(e)
+            if plant and i==0 and body:body=bytes([body[0]^1])+body[1:]
             ended=time.monotonic();bad=status==200 and body!=expected;wrong+=int(bad)
             row.update(ended=ended,exact=status==200 and body==expected and ended-row['started']<=chaos.OP_LIMIT,status=status,length=len(body),sha256=hashlib.sha256(body).hexdigest(),error=error)
             outcomes.append(row)
-    return dict(status='OBSERVED',stage='ec-read',run_id=c['run_id'],outcomes=outcomes,wrong=wrong,exposure='NOT_OBSERVED')
+    return dict(status='OBSERVED',stage='ec-read',run_id=c['run_id'],outcomes=outcomes,wrong=wrong,exposure='NOT_OBSERVED',control='WRONG_BYTE_REJECTED' if plant and wrong==1 else '')
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--config',required=True);p.add_argument('--stage',choices=('seed','read'),required=True);p.add_argument('--manifest');p.add_argument('--route',choices=('s3','volume'));p.add_argument('--journal',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--config',required=True);p.add_argument('--stage',choices=('seed','read'),required=True);p.add_argument('--manifest',required=True);p.add_argument('--plant-wrong-byte',action='store_true');p.add_argument('--route',choices=('s3','volume'));p.add_argument('--journal',required=True);a=p.parse_args()
     try:
         c=json.loads(a.config)
         if not 1<=c['keys']<=128:raise ValueError('keys outside1..128')
-        result=seed(c,a.journal) if a.stage=='seed' else reads(c,json.loads(pathlib.Path(a.manifest).read_bytes()),a.route,a.journal)
+        result=seed(c,a.journal) if a.stage=='seed' else reads(c,json.loads(pathlib.Path(a.manifest).read_bytes()),a.route,a.journal,a.plant_wrong_byte)
+        if a.stage=='seed':
+            with pathlib.Path(a.manifest).open('x') as f:
+                __import__('os').fchmod(f.fileno(),0o600);json.dump(result,f);f.flush();__import__('os').fsync(f.fileno())
         print(json.dumps(result,allow_nan=False),flush=True)
+        if a.plant_wrong_byte:return 0 if result.get('control')=='WRONG_BYTE_REJECTED' and sum(not r['exact'] for r in result['outcomes'])==1 else 1
         return 0 if a.stage=='seed' or result['wrong']==0 and all(r['exact'] for r in result['outcomes']) else 1
     except Exception as e:
         print(json.dumps(dict(status='FAIL',error=type(e).__name__+': '+str(e))),flush=True);return 1

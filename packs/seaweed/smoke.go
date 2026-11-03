@@ -13,7 +13,7 @@ import (
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
-//go:embed worker/kv_smoke.py worker/soak_native_worker.py worker/soak_oracle.py worker/soak_stats.py worker/soak_load.py worker/soak_assess.py worker/lab_profile.py worker/vf_preflight.py worker/cloud_batch.py worker/chaos_load.py
+//go:embed worker/kv_smoke.py worker/soak_native_worker.py worker/soak_oracle.py worker/soak_stats.py worker/soak_load.py worker/soak_assess.py worker/lab_profile.py worker/vf_preflight.py worker/cloud_batch.py worker/chaos_load.py worker/ec_service.py worker/ec_setup.py worker/ec_capture.py worker/ec_chaos.py
 var workerFiles embed.FS
 
 type SmokeSettings struct {

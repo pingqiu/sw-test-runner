@@ -51,6 +51,7 @@ func phase(name string) bool {
 // RegisterPack uses owned S0b jobs only; it exposes no raw shell/provider route.
 // It is opt-in registration and is not wired into the CLI.
 func RegisterPack(r *tr.Registry) {
+	r.RegisterMutatingFunc("seaweed_ec_stage1", tr.TierChaos, ecStage1)
 	runtime := &runtimePack{sessions: map[*tr.RunScope]*session{}, pause: func() <-chan time.Time { return time.After(30 * time.Second) }}
 	r.RegisterFunc("seaweed_inventory_validate", tr.TierDevOps, validateInventory)
 	r.RegisterFunc("seaweed_plan", tr.TierDevOps, plan)

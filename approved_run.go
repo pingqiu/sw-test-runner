@@ -46,6 +46,7 @@ type TrustedPolicy struct {
 
 // GenerationRestartPlan binds one episode to two independently pinned job labels.
 type GenerationRestartPlan struct {
+	Hold        bool   `json:"hold,omitempty"` // Keep the witnessed old generation down; replacement is ordinary later WORK.
 	Victim      string `json:"victim"`
 	Replacement string `json:"replacement"`
 }
