@@ -130,6 +130,10 @@ func TestDirectECMandatoryRowsAndCleanup(t *testing.T) {
 			if h.index("kv_smoke") >= 0 {
 				t.Fatal("EC ran KV phase")
 			}
+			prepare := h.commands[h.index("sudo install -d")]
+			if strings.Contains(prepare, "/master") || strings.Contains(prepare, "/filer") {
+				t.Fatal("prepare precreated exclusive EC service directories")
+			}
 		})
 	}
 }

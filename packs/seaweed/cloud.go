@@ -203,7 +203,11 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		return "", nil
 	}
-	if _, e = run("prepare", "sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
+	prepare := "sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker") + " " + q(root+"/volume") + " " + q(root+"/master") + " " + q(root+"/filer")
+	if c.ECStage1 {
+		prepare = "sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker")
+	}
+	if _, e = run("prepare", prepare); e != nil {
 		return "", e
 	}
 	for _, name := range c.artifactNames() {
