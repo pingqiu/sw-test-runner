@@ -50,6 +50,16 @@ class Regressions(unittest.TestCase):
      procs.append(subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)','--dir='+str(d)]))
     c=dict(root=tmp,holders=holders,run_id='cpu',volume_exe=sys.executable,volume_sha256=hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest())
     m=dict(run_id='cpu',objects=[dict(fid='1,abc')]);cap.capture(c,m)
+    original=root/'h1/bucket_1.dat'
+    for name in ('bucket_1.dat','bucket_1.dat.backup','other.active'):
+     original=root/'h1'/name;original.write_bytes(b'residual original or unsupported generation')
+     with self.assertRaises(ValueError):cap.capture(c,m)
+     original.unlink()
+    audit=root/'h1/2.dat';audit.write_bytes(b'unrelated shell audit')
+    snapshot=cap.capture(c,m)
+    self.assertEqual([row['volume'] for row in snapshot['unrelated_volumes']],['2'])
+    self.assertEqual({row['volume'] for row in snapshot['unrelated_volumes']} & {o['fid'].split(',')[0] for o in m['objects']},set())
+    self.assertEqual(snapshot['unrelated_volumes'][0]['sha256'],hashlib.sha256(audit.read_bytes()).hexdigest())
     (root/'h1/bucket_1.vif').unlink()
     with self.assertRaises(ValueError):cap.capture(c,m)
     vif=root/'h1/bucket_1.vif';good=(root/'h0/bucket_1.vif').read_bytes()
