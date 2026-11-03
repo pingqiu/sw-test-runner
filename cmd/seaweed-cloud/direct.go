@@ -54,6 +54,16 @@ func runDirect(args []string, w io.Writer) int {
 		inv, err = os.ReadFile(*invPath)
 	}
 	if err == nil {
+		// direct only ever reaches an existing host it then cleans up; a cloud
+		// VM is created and destroyed by plan/run/destroy, never here.
+		var target struct {
+			Target string `json:"target"`
+		}
+		if json.Unmarshal(inv, &target) != nil || target.Target != "onprem" && target.Target != "docker" {
+			err = errors.New("direct runs only an onprem or docker inventory")
+		}
+	}
+	if err == nil {
 		var raw []byte
 		if raw, err = os.ReadFile(*cfgPath); err == nil {
 			err = smoke.StrictJSON(raw, &c)

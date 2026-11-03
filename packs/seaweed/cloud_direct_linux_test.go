@@ -28,6 +28,7 @@ type directHost struct {
 	commands []string
 	failStep string
 	dirty    bool
+	hangKV   time.Duration // the kv_smoke step blocks this long before answering
 }
 
 func (h *directHost) exec(cmd string, c ssh.Channel) uint32 {
@@ -46,6 +47,7 @@ func (h *directHost) exec(cmd string, c ssh.Channel) uint32 {
 		}
 		fmt.Fprintln(c, "units=0 ports=0")
 	case strings.Contains(cmd, "kv_smoke.py"):
+		time.Sleep(h.hangKV)
 		fmt.Fprintln(c, `{"status":"PASS","ack":16,"exact":16,"wrong":0}`)
 	}
 	return 0
@@ -82,6 +84,11 @@ func directInput(t *testing.T, address string, mutate ...func(*inventory.Documen
 
 func directRun(t *testing.T, h *directHost, mutate ...func(*inventory.Document)) error {
 	t.Helper()
+	return directRunWithin(t, h, 10*time.Second, mutate...)
+}
+
+func directRunWithin(t *testing.T, h *directHost, within time.Duration, mutate ...func(*inventory.Document)) error {
+	t.Helper()
 	address, pin, key, _ := cloudSSH(t, "", h.exec)
 	cfg := CloudConfig{SSHKey: key, HostKey: pin, Output: t.TempDir(), Files: map[string]CloudFile{}}
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
@@ -89,7 +96,7 @@ func directRun(t *testing.T, h *directHost, mutate ...func(*inventory.Document))
 		os.WriteFile(p, []byte(name), 0600)
 		cfg.Files[name] = CloudFile{Path: p, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(name)))}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), within)
 	defer cancel()
 	_, err := RunCloudHTTP(ctx, directInput(t, address, mutate...), cfg)
 	return err
@@ -107,7 +114,7 @@ func TestDirectOnpremRunsWithoutCloudInitAndCleansUp(t *testing.T) {
 	if collect < 0 || stop < 0 || post < 0 || !(collect < stop && stop < post) {
 		t.Fatalf("want service logs, then unit stop, then postflight; got %d %d %d", collect, stop, post)
 	}
-	if !strings.Contains(h.commands[stop], "sw-cloud-") || !strings.Contains(h.commands[post], ":(9333|19333|8888|18888|8080|18080|8333)$") {
+	if !strings.Contains(h.commands[stop], "sw-cloud-") || !strings.Contains(h.commands[post], ":(9333|19333|8888|18888|8080|18080|8333)[[:space:]]") {
 		t.Fatalf("cleanup is not bound to this run's units and ports: %q / %q", h.commands[stop], h.commands[post])
 	}
 }
@@ -124,8 +131,26 @@ func TestDirectCleanupRunsAfterAFailedStart(t *testing.T) {
 	if err := directRun(t, h); err == nil {
 		t.Fatal("a failed service start passed")
 	}
-	if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
+	collect, stop, post := h.index("journalctl"), h.index("systemctl stop"), h.index("systemctl list-units")
+	if stop < 0 || post < 0 {
 		t.Fatal("a failed start left the host without cleanup")
+	}
+	if collect < 0 || collect > stop {
+		t.Fatalf("a failed start's logs were not read before teardown: journal %d, stop %d", collect, stop)
+	}
+}
+
+// codex01 review R1: a cancelled run's connection closes with its context, so
+// cleanup must reach the host on its own connection, never read as clean.
+func TestDirectCleanupReachesTheHostAfterCancellation(t *testing.T) {
+	h := &directHost{hangKV: 3 * time.Second}
+	err := directRunWithin(t, h, 1500*time.Millisecond)
+	if err == nil {
+		t.Fatal("a cancelled run passed")
+	}
+	stop, post := h.index("systemctl stop"), h.index("systemctl list-units")
+	if stop < 0 || post < 0 || stop < h.index("kv_smoke.py") {
+		t.Fatalf("cleanup did not reach the host after cancellation: stop %d, postflight %d", stop, post)
 	}
 }
 
@@ -198,6 +223,8 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 		{"a port left", "", "0", "LISTEN 0 4096 0.0.0.0:9333 0.0.0.0:*", "0", false},
 		{"systemctl fails", "", "1", "", "0", false},
 		{"ss fails", "", "0", "", "1", false},
+		{"awk fails", "", "0", "LISTEN 0 4096 0.0.0.0:9333 0.0.0.0:*", "0", false},
+		{"grep fails", "", "0", "", "0", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			bin := t.TempDir()
@@ -209,6 +236,12 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 			stub("sudo", `exec "$@"`)
 			stub("systemctl", "printf '%s' '"+c.units+"'; exit "+c.unitsRC)
 			stub("ss", "printf '%s\n' '"+c.listen+"'; exit "+c.ssRC)
+			if c.name == "awk fails" {
+				stub("awk", "exit 2")
+			}
+			if c.name == "grep fails" {
+				stub("grep", "exit 2")
+			}
 			cmd := exec.Command("sh", "-c", post)
 			cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 			out, err := cmd.CombinedOutput()
