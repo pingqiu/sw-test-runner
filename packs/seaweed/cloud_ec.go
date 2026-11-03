@@ -182,6 +182,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 			return
 		}
 		report["holders_killed"] = i + 1
+		config["volume"] = fmt.Sprintf("http://127.0.0.1:%d", servicePort(h, "volume_http")+i+1)
 		for _, route := range []string{"s3", "volume"} {
 			if err = read(fmt.Sprintf("ec-s2-%d-%s", i+1, route), route, false); err != nil {
 				return

@@ -21,10 +21,14 @@ import (
 type ecDirectHost struct {
 	directHost
 	seed EC1aManifest
+	lost int
 	mode string
 }
 
 func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
+	if strings.Contains(cmd, "systemctl kill") {
+		h.lost++
+	}
 	if strings.HasPrefix(cmd, "cat >") {
 		io.Copy(io.Discard, c)
 		return 0
@@ -40,6 +44,9 @@ func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
 		return 0
 	}
 	if strings.Contains(cmd, "ec_chaos.py") {
+		if h.lost > 0 && strings.Contains(cmd, "--route volume") && !strings.Contains(cmd, fmt.Sprintf(":%d", 8080+h.lost)) {
+			return 1
+		}
 		if strings.Contains(cmd, "--stage seed") {
 			json.NewEncoder(c).Encode(h.seed)
 			return 0
