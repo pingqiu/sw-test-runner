@@ -56,6 +56,8 @@ func (b *SSHJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSp
 	b.mu.Lock()
 	if b.jobs == nil {
 		b.jobs = make(map[string]*custodyChannel)
+	}
+	if b.slots == nil {
 		b.slots = make(chan struct{}, 8)
 	}
 	if b.jobs[id] != nil {

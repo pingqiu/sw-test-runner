@@ -159,9 +159,7 @@ func OpenApprovedRun(ctx context.Context, requestPath string, p TrustedPolicy, p
 		for _, deployment := range a.runPolicy.Deployments {
 			nodes[deployment.NodeID] = &infra.Node{Host: deployment.Host, User: deployment.User, HostKey: deployment.HostKey, KeyFile: p.bootstrap.KeyFiles[deployment.NodeID]}
 		}
-		a.runtime = ApprovedRuntime{Jobs: &SSHJobs{Nodes: nodes, Runner: a.runPolicy.Runner}, Readback: func(ctx context.Context, p infra.DeploymentPolicy) (infra.DeploymentReceipt, error) {
-			return nodes[p.NodeID].VerifyDeployment(ctx, p)
-		}}
+		a.runtime = approvedSSHRuntime(a.runPolicy, a.approval.Cleanup, nodes)
 	} else {
 		a.runtime = *provided
 	}
@@ -185,6 +183,15 @@ func OpenApprovedRun(ctx context.Context, requestPath string, p TrustedPolicy, p
 	a.scope = s
 	a.startWatch()
 	return a, nil
+}
+
+func approvedSSHRuntime(policy ApprovedRunPolicy, cleanup []CleanupGrant, nodes map[string]*infra.Node) ApprovedRuntime {
+	// Already validated, independently pinned declarations (<=1024+128).
+	// Never shrink the old floor; retain each slot until custody settlement.
+	slots := make(chan struct{}, max(8, len(policy.Jobs)+len(cleanup)))
+	return ApprovedRuntime{Jobs: &SSHJobs{Nodes: nodes, Runner: policy.Runner, slots: slots}, Readback: func(ctx context.Context, p infra.DeploymentPolicy) (infra.DeploymentReceipt, error) {
+		return nodes[p.NodeID].VerifyDeployment(ctx, p)
+	}}
 }
 
 func (a *ApprovedRun) capture() error {
