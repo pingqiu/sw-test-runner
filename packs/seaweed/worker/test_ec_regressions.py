@@ -4,6 +4,17 @@ worker=pathlib.Path(__file__).parent
 def load(name):
  s=importlib.util.spec_from_file_location(name,worker/(name+'.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 class Regressions(unittest.TestCase):
+ @unittest.skipUnless(sys.platform=='linux','Linux child executable fixture')
+ def test_encoder_child_private_root(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   base=pathlib.Path(tmp);root=base/'owned';foreign=base/'inherited';root.mkdir(mode=0o700);foreign.mkdir(mode=0o700)
+   manifest=root/'manifest.json';manifest.write_text(json.dumps({'objects':[{'fid':'1,abc'}]}))
+   child=base/'weed';child.write_text('#!'+sys.executable+'\nimport json,os,pathlib\np=pathlib.Path(os.environ["TMPDIR"])/"fixture-child.log"\np.write_text("fixture")\nprint(json.dumps(dict(home=os.environ["HOME"],tmp=os.environ["TMPDIR"],cwd=os.getcwd())))\n');child.chmod(0o700)
+   c=dict(root=str(root),stage='encode',weed=str(child),master='127.0.0.1:12345',manifest=str(manifest))
+   r=subprocess.run([sys.executable,'-I',str(worker/'ec_setup.py'),json.dumps(c)],cwd=foreign,env=dict(os.environ,HOME=str(foreign),TMPDIR=str(foreign)),capture_output=True,text=True,timeout=5)
+   self.assertEqual(r.returncode,0,r.stdout+r.stderr);row=json.loads(r.stdout)
+   self.assertEqual(row,dict(home=str(root),tmp=str(root),cwd=str(root)))
+   self.assertTrue((root/'fixture-child.log').exists());self.assertFalse((foreign/'fixture-child.log').exists())
  def test_R3_terminal_rows_survive_before_next_operation(self):
   leaf=load('ec_chaos');c=dict(run_id='cpu',s3='http://127.0.0.1:1',keys=2)
   objects=[]

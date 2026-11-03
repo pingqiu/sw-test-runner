@@ -1,7 +1,8 @@
 """Run the pinned product's existing ec.encode, then the existing bounded readiness gates."""
-import json,pathlib,subprocess,sys,time
+import json,os,pathlib,subprocess,sys,time
 from urllib.request import urlopen
 c=json.loads(sys.argv[1])
+os.environ.update(HOME=c['root'],TMPDIR=c['root']);os.chdir(c['root'])
 if c['stage']=='ready':
     deadline=time.monotonic()+30
     for url in c['urls']:
