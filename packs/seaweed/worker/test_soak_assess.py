@@ -68,8 +68,9 @@ def evidence():
         ack('shared', w, t)
     a = ack('k2', 1, 1050)
     get('g1', 'k2', 1060, 1060.1, a, ok=True, length=64, sha256=a['digest'])
-    m = ack('m', 2, 1100, vid=20)  # its volume rotates: unwritable at 1150, gone at 1170
-    get('g2', 'm', 1160, 1160.1, m, ok=False, miss=True, fids=m['fids'], error='DC batch push-read response status 1')
+    m = ack('m', 2, 1100, vid=20)  # its volume rotates: unwritable at 1150, gone at 1170, success line S at 1175
+    get('g1m', 'm', 1110, 1110.1, m, ok=True, length=64, sha256=m['digest'])  # C5: this version read exactly before S
+    get('g2', 'm', 1180, 1180.1, m, ok=False, miss=True, fids=m['fids'], error='DC batch push-read response status 1')
     get('g9', 'k2', 1478, 1490, a, ok=False, fault_error=True, episode='E1', error='operation timed out')
     kill = dict(event='client_kill', kind='client_kill', worker=1, started=2320, killed=2321, finished=2330,
                 witness=dict(event='submitted', action='get', pid=11),
@@ -95,7 +96,7 @@ def evidence():
                                        pending_gets=[dict(op=g9['op'], submitted=g9['dispatched'])]),
              'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[],
                                       rotated=[dict(vid=v, line='rotated non-replicated cache Volume %d' % v) for v in ROT],
-                                      events=[e for v in ROT for e in (line('birth', v, 995), line('unwritable', v, unw[v]), line('success', v, unw[v] + 10))]),
+                                      events=[e for v in ROT for e in (line('birth', v, 995), line('unwritable', v, unw[v]), line('success', v, unw[v] + 25))]),
              # S1 wraps a 10 s setup: paired capture removes its residence from the width.
              'soak-clock-s1.json': sample(980, 990.2, 980.1, 10), 'soak-clock-s2.json': sample(2870, 2870.2, 2870.1, 0),
              'workers.json': {str(i): dict(pid=10 + i, starttime=1, transport='http' if i == 3 else 'dc') for i in range(4)}}
@@ -215,12 +216,6 @@ class SoakAssess(unittest.TestCase):
     def test_miss_before_the_volume_left_the_write_set(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(submitted=1140, completed=1140.1, dispatched=1139.9), 'misses')
 
-    def test_miss_on_a_volume_writable_again_before_it_vanished(self):
-        def ch(ev):
-            p = next(p for p in ev['polls'] if p['req'] == 1162)
-            p['writables'] = sorted(set(p['writables']) | {20})
-        self.mutate(ch, 'misses')
-
     def collected(self, ev):
         return ev['files']['m02-collect.json']
 
@@ -247,38 +242,6 @@ class SoakAssess(unittest.TestCase):
     def test_a_poll_gap_alone_does_not_refuse_under_the_clock_rule(self):
         self.passes(lambda ev: ev.update(polls=[p for p in ev['polls'] if not 1150 < p['req'] < 1160]))
 
-    # Decision 3 r6, section 5.
-    def test_ack_at_or_after_the_selected_transition(self):
-        def ch(ev):
-            a = next(a for a in ev['acks'] if a['key'] == 'm')
-            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
-            a.update(submitted=1150.5, completed=1151)
-            e.update(dispatched=1150.4, submitted=1150.5, completed=1151)
-        self.mutate(ch, 'misses')
-
-    def test_ack_inside_the_bracket(self):
-        def ch(ev):
-            a = next(a for a in ev['acks'] if a['key'] == 'm')
-            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
-            a.update(submitted=1149.95, completed=1150.0)
-            e.update(dispatched=1149.9, submitted=1149.95, completed=1150.0)
-        self.mutate(ch, 'misses')
-
-    def test_miss_inside_the_bracket(self):
-        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1149.99, submitted=1150.0, completed=1150.1), 'misses')
-
-    def test_a_straddling_get_submitted_before_and_completed_after_the_start(self):
-        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1148.9, submitted=1149, completed=1151), 'misses')
-
-    def test_miss_between_two_unwritable_lines(self):  # volume 19's shape in r5: an earlier line must not excuse it
-        self.mutate(lambda ev: self.collected(ev)['events'].append(line('unwritable', 20, 1165)), 'misses')
-
-    def test_no_start_line(self):
-        def ch(ev):
-            c = self.collected(ev)
-            c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == 'unwritable')]
-        self.mutate(ch, 'misses')
-
     def test_no_success_line(self):
         def ch(ev):
             c = self.collected(ev)
@@ -286,15 +249,7 @@ class SoakAssess(unittest.TestCase):
         self.mutate(ch, 'misses')
 
     def test_an_event_after_the_success(self):
-        self.mutate(lambda ev: self.collected(ev)['events'].append(line('unwritable', 20, 1170)), 'misses')
-
-    def test_equal_time_start_and_success(self):
-        def ch(ev):
-            c = self.collected(ev)
-            for e in c['events']:
-                if e['vid'] == 20 and e['kind'] == 'success':
-                    e.update(line('success', 20, 1150))
-        self.mutate(ch, 'misses')
+        self.mutate(lambda ev: self.collected(ev)['events'].append(line('unwritable', 20, 1190)), 'misses')
 
     def test_vid_reuse_by_a_birth_after_the_success(self):
         self.mutate(lambda ev: self.collected(ev)['events'].append(line('birth', 20, 1400)), 'misses')
@@ -345,7 +300,7 @@ class SoakAssess(unittest.TestCase):
     def test_a_failed_reply_is_not_absence(self):
         def ch(ev):
             for p in ev['polls']:  # the only absent replies inside miss+25 s fail, so absence is first proven too late
-                if 1170 <= p['req'] <= 1186:
+                if 1170 <= p['req'] <= 1206:
                     p.update(ok=False)
                     del p['present'], p['writables']
         self.mutate(ch, 'misses')
@@ -410,25 +365,26 @@ class SoakAssess(unittest.TestCase):
         ev = evidence()
         ch(ev)
         self.assertIn('misses', self.failing(self.run_on(ev)))
-        self.assertFalse(soak_assess.miss_excused(dict(submitted=1160, completed=1160.1), MissVersion(['20,ab']), dict(completed=1100),
-                                                  [dict(req=1170, done=1170.1, writables=[], present=[])], {20: EPOCH + 1150}, EPOCH - .1, EPOCH + .1, {20}))
-        self.assertTrue(soak_assess.miss_excused(dict(submitted=1160, completed=1160.1), MissVersion(['20,ab']), dict(completed=1100),
-                                                 [dict(req=1170, done=1170.1, writables=[], present=[])], {20: EPOCH + 1150}, EPOCH - .1, EPOCH + .1, set()))
+        hit = [dict(submitted=1110, completed=1110.1)]
+        args = (dict(submitted=1180, completed=1180.1), MissVersion(['20,ab']), dict(completed=1100),
+                [dict(req=1178, done=1178.1, writables=[], present=[])], {20: EPOCH + 1175}, EPOCH - .1, EPOCH + .1)
+        self.assertFalse(soak_assess.miss_excused(*args, {20}, hit))
+        self.assertTrue(soak_assess.miss_excused(*args, set(), hit))
 
     def ledger(self, *rows, begin=EPOCH + 900, end=EPOCH + 2900):
-        return soak_assess.rotation_starts(list(rows), begin, end)
+        return soak_assess.rotation_boundaries(list(rows), begin, end)
 
     def test_ledger_positive(self):
-        self.assertEqual(self.ledger(line('birth', 20, 995), line('unwritable', 20, 1150), line('success', 20, 1160)), {20: EPOCH + 1150})
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('unwritable', 20, 1150), line('success', 20, 1160)), {20: EPOCH + 1160})
 
-    def test_ledger_no_unwritable_line_leaves_the_vid_out(self):
-        self.assertEqual(self.ledger(line('birth', 20, 995), line('success', 20, 1160)), {})
+    def test_ledger_no_unwritable_line_still_has_its_boundary(self):  # rotation of an already-full volume logs none
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('success', 20, 1160)), {20: EPOCH + 1160})
 
     def test_ledger_an_event_after_the_success_leaves_the_vid_out(self):
         self.assertEqual(self.ledger(line('birth', 20, 995), line('unwritable', 20, 1150), line('success', 20, 1160), line('unwritable', 20, 1161)), {})
 
     def test_ledger_equal_times_leave_the_vid_out(self):
-        self.assertEqual(self.ledger(line('birth', 20, 1150), line('unwritable', 20, 1150), line('success', 20, 1160)), {})
+        self.assertEqual(self.ledger(line('birth', 20, 1160), line('success', 20, 1160)), {})
 
     def test_ledger_an_ambiguous_date_leaves_the_vid_out(self):  # all three lines fit both years, in a valid order
         begin = datetime.datetime(2026, 2, 1, tzinfo=datetime.timezone.utc).timestamp()
@@ -456,8 +412,9 @@ class SoakAssess(unittest.TestCase):
             c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == 'birth')]
         self.mutate(ch, 'misses')
 
-    def test_ledger_exactly_one_birth_before_the_start(self):
+    def test_ledger_exactly_one_birth_before_the_success(self):
         self.assertEqual(self.ledger(line('unwritable', 20, 1150), line('success', 20, 1160)), {})
+        self.assertEqual(self.ledger(line('birth', 20, 995), line('birth', 20, 996), line('success', 20, 1160)), {})
         self.assertEqual(self.ledger(line('unwritable', 20, 990), line('birth', 20, 995), line('success', 20, 1160)), {})
         self.assertEqual(self.ledger(line('birth', 20, 995), line('birth', 20, 996), line('unwritable', 20, 1150), line('success', 20, 1160)), {})
 
@@ -473,7 +430,7 @@ class SoakAssess(unittest.TestCase):
         c = line('success', 20, 1160)
         for e in (a, b, c):
             e['line'] = 'same presentation prefix'
-        self.assertEqual(self.ledger(a, b, c), {20: EPOCH + 1150})
+        self.assertEqual(self.ledger(a, b, c), {20: EPOCH + 1160})
 
     def test_a_miss_reporting_foreign_fids_is_refused(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(fids=['3,ab']), 'misses')
@@ -489,33 +446,13 @@ class SoakAssess(unittest.TestCase):
         ev['events'].insert(0, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=submitted - .01, submitted=submitted, completed=completed, ok=True))
 
     def test_an_ack_completing_while_the_get_is_in_flight_is_not_its_latest(self):
-        self.passes(lambda ev: self.in_flight(ev, 1160.01, 1160.05))
+        self.passes(lambda ev: self.in_flight(ev, 1180.01, 1180.05))
 
     def test_an_ack_completed_exactly_at_submission_does_not_precede_it(self):
-        self.passes(lambda ev: self.in_flight(ev, 1159.9, 1160))
+        self.passes(lambda ev: self.in_flight(ev, 1179.9, 1180))
 
     def test_an_ack_completed_before_submission_is_the_latest(self):
-        self.mutate(lambda ev: self.in_flight(ev, 1159.8, 1159.9), 'misses')
-
-    # Documented, NOT refused: known limits of the qualified observed ordering (decision 3 r6 sections 0 and 5).
-    def test_LIMIT_an_out_and_back_offset_excursion_is_accepted(self):
-        def ch(ev):  # the true start is 1160.5 on M01, logged 1 s early as 1159.5: the miss at 1160 falsely appears after it
-            c = self.collected(ev)
-            for e in c['events']:
-                if e['vid'] == 20 and e['kind'] == 'unwritable':
-                    e.update(line('unwritable', 20, 1159.5))
-            for p in ev['polls']:
-                if p['req'] == 1158:
-                    p['writables'] = sorted(set(p['writables']) | {20})
-        self.passes(ch)
-
-    def test_LIMIT_an_ack_after_an_earlier_actual_rotation_is_accepted(self):
-        def ch(ev):  # rotation really began at 1140 (no line), ACK 1149, selected unwritable line 1150, miss 1160
-            a = next(a for a in ev['acks'] if a['key'] == 'm')
-            e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
-            a.update(submitted=1148.9, completed=1149)
-            e.update(dispatched=1148.8, submitted=1148.9, completed=1149)
-        self.passes(ch)
+        self.mutate(lambda ev: self.in_flight(ev, 1179.8, 1179.9), 'misses')
 
     def test_miss_without_the_m02_rotation_line(self):
         def ch(ev):
@@ -527,11 +464,11 @@ class SoakAssess(unittest.TestCase):
     def test_miss_of_a_stale_version(self):
         def ch(ev):
             m = next(a for a in ev['acks'] if a['key'] == 'm')
-            ev['acks'].append(dict(m, seed='newer', sequence=99, submitted=1104, completed=1105, digest=digest('newer', 64), writer=0))
+            ev['acks'].append(dict(m, seed='newer', sequence=99, submitted=1111, completed=1112, digest=digest('newer', 64), writer=0))
             q = ev['events'][-1]
             q['dispatched'] += 1
-            ev['events'].insert(0, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1103.9, submitted=1104,
-                                        completed=1105, ok=True))
+            ev['events'].insert(0, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1110.9, submitted=1111,
+                                        completed=1112, ok=True))
         self.mutate(ch, 'misses')
 
     def test_an_ok_not_hit_miss_candidate_is_judged_like_any_miss(self):
@@ -635,6 +572,196 @@ class SoakAssess(unittest.TestCase):
 
     def test_an_unknown_event_kind(self):
         self.refused(lambda ev: ev['events'].insert(-1, dict(event='surprise')))
+
+    # Decision 3 revision (e45019f9, codex01 8c56cca4), section 3: the pre-registered counterexamples, by number.
+    # S is vid 20's success line at 1175; m is ACKed at 1100, read exactly at 1110, missed at 1180.
+    def m_ack(self, ev, at):
+        a = next(a for a in ev['acks'] if a['key'] == 'm')
+        e = next(e for e in ev['events'] if e.get('key') == 'm' and e.get('action') == 'set')
+        a.update(submitted=at - 0.05, completed=at)
+        e.update(dispatched=at - 0.06, submitted=at - 0.05, completed=at)
+
+    def vid20(self, ev, kind):
+        c = self.collected(ev)
+        c['events'] = [e for e in c['events'] if not (e['vid'] == 20 and e['kind'] == kind)]
+
+    def test_cx01_already_full_no_new_unwritable_line_is_excused(self):
+        self.passes(lambda ev: self.vid20(ev, 'unwritable'))
+
+    def test_cx02_ack_just_after_the_capacity_line_is_excused(self):
+        def ch(ev):
+            self.collected(ev)['events'] = [line('unwritable', 20, 1099.9) if e['vid'] == 20 and e['kind'] == 'unwritable' else e
+                                            for e in self.collected(ev)['events']]
+        self.passes(ch)
+
+    def test_cx03_ack_during_the_seal_grace_is_excused(self):
+        def ch(ev):
+            self.m_ack(ev, 1160)
+            self.ev(ev, 'g1m').update(dispatched=1164.99, submitted=1165, completed=1165.1)
+        self.passes(ch)
+
+    def test_cx04_resumed_rotation_without_grace_is_excused(self):
+        def ch(ev):
+            self.vid20(ev, 'unwritable')
+            self.collected(ev)['events'] = [line('success', 20, 1175, gen=1) if e['vid'] == 20 and e['kind'] == 'success' else e
+                                            for e in self.collected(ev)['events']]
+        self.passes(ch)
+
+    def test_cx05_dispatch_inferred_from_an_unwritable_line_and_elapsed_time_is_refused(self):
+        self.mutate(lambda ev: self.vid20(ev, 'success'), 'misses')
+
+    def test_cx06_failed_rotation_without_a_success_line_is_refused(self):
+        def ch(ev):
+            self.vid20(ev, 'success')
+            self.vid20(ev, 'unwritable')
+        self.mutate(ch, 'misses')
+
+    def test_cx07_miss_during_the_grace_before_s_is_refused(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1170.9, submitted=1171, completed=1171.1), 'misses')
+
+    def test_cx08_straddling_get_is_refused(self):
+        self.mutate(lambda ev: self.ev(ev, 'g2').update(dispatched=1174.8, submitted=1174.9, completed=1176), 'misses')
+
+    def test_cx09_ack_inside_the_clock_bracket_of_s_is_refused(self):
+        def ch(ev):
+            self.m_ack(ev, 1174.95)
+            self.ev(ev, 'g1m').update(dispatched=1174.96, submitted=1174.97, completed=1174.98)
+        self.mutate(ch, 'misses')
+
+    def test_cx10_two_success_lines_are_refused(self):
+        self.mutate(lambda ev: self.collected(ev)['events'].append(line('success', 20, 1176)), 'misses')
+
+    def test_cx11_a_second_vid_without_s_is_refused(self):
+        def ch(ev):
+            m = next(a for a in ev['acks'] if a['key'] == 'm')
+            m['fids'] = ['20,ab', '3,cd']
+            self.ev(ev, 'g2')['fids'] = list(m['fids'])
+        self.mutate(ch, 'misses')
+
+    def test_cx12_never_read_back_before_s_is_refused(self):
+        def ch(ev):
+            g = self.ev(ev, 'g1m')
+            g.update(ok=False, miss=True, error='DC batch push-read response status 1')
+            del g['sha256'], g['length']
+            g['fids'] = list(next(a for a in ev['acks'] if a['key'] == 'm')['fids'])
+            g.update(dispatched=1184.99, submitted=1185, completed=1185.1)  # the only other read is itself a miss after S
+        self.mutate(ch, 'misses')
+
+    def test_cx13_wrong_bytes_before_s_fail_the_run(self):
+        ev = evidence()
+        self.ev(ev, 'g1m').update(sha256='0' * 64)
+        self.assertIn('wrong_reads', self.failing(self.run_on(ev)))
+
+    def test_cx14_an_exact_read_of_an_older_version_only_is_refused(self):
+        def ch(ev):  # v1 ACKed 1100 and read exactly at 1110; v2 ACKed 1120, never read; the miss is of v2
+            n = max(a['sequence'] for a in ev['acks']) + 1
+            m = next(a for a in ev['acks'] if a['key'] == 'm')
+            ev['acks'].append(dict(m, sequence=n, submitted=1119.95, completed=1120, seed='seed-v2', digest=digest('seed-v2', 64), writer=0))
+            q = ev['events'][-1]
+            q['dispatched'] += 1
+            ev['events'].insert(-3, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1119.94, submitted=1119.95,
+                                         completed=1120, ok=True))
+            self.ev(ev, 'g2')['sequence'] = n
+        self.mutate(ch, 'misses')
+
+    def test_cx15_vid_present_after_s_is_refused(self):
+        def ch(ev):
+            p = next(p for p in ev['polls'] if p['req'] == 1178)
+            p['present'] = sorted(set(p['present']) | {20})
+        self.mutate(ch, 'misses')
+
+    def test_cx16_dat_present_at_collect_is_refused(self):
+        ev = evidence()
+        self.collected(ev)['dat_vids'] = [20]
+        self.assertIn('misses', self.failing(self.run_on(ev)))
+
+    def test_cx17_master_restart_between_ack_and_s_is_excused(self):
+        def ch(ev):
+            self.collected(ev)['events'] = [line(e['kind'], 20, {'birth': 995, 'unwritable': 1150, 'success': 1175}[e['kind']],
+                                                 gen=0 if e['kind'] == 'birth' else 1) if e['vid'] == 20 else e
+                                            for e in self.collected(ev)['events']]
+        self.passes(ch)
+
+    def test_cx18_miss_of_an_older_version_after_a_newer_ack_is_refused(self):
+        def ch(ev):
+            n = max(a['sequence'] for a in ev['acks']) + 1
+            m = next(a for a in ev['acks'] if a['key'] == 'm')
+            ev['acks'].append(dict(m, sequence=n, submitted=1130 - 0.05, completed=1130, seed='seed-new', digest=digest('seed-new', 64), writer=0))
+            q = ev['events'][-1]
+            q['dispatched'] += 1
+            ev['events'].insert(-3, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1129.94, submitted=1129.95,
+                                         completed=1130, ok=True))
+        ev = evidence()
+        ch(ev)
+        self.assertIn('misses', self.failing(self.run_on(ev)))
+
+    def test_cx19_a_get_submitted_before_the_ack_is_no_read_back(self):
+        self.mutate(lambda ev: self.ev(ev, 'g1m').update(dispatched=1099.9, submitted=1099.97, completed=1100.2), 'misses')
+
+    def test_cx20_absence_only_before_birth_with_failed_polls_after_s_is_refused(self):
+        def ch(ev):
+            for p in ev['polls']:
+                if p['req'] > 1170:
+                    p.update(ok=False)
+                    del p['present'], p['writables']
+            ev['polls'].insert(0, dict(req=990, done=990.05, ok=True, writables=[], present=[1, 2, 3]))
+        ev = evidence()
+        ch(ev)
+        self.assertIn('misses', self.failing(self.run_on(ev)))
+
+    # codex01 review f94b5c19: the read-back is bound to the GET's own recorded version, not relabelled as the latest.
+    def test_c5_a_hit_with_an_unknown_sequence_is_no_read_back(self):
+        self.mutate(lambda ev: self.ev(ev, 'g1m').update(sequence=999), 'misses')
+
+    def test_c5_a_hit_of_an_older_version_with_the_same_bytes_is_no_read_back(self):
+        def ch(ev):  # v2 has v1's bytes on another FID; the only exact read is recorded against v1
+            n = max(a['sequence'] for a in ev['acks']) + 1
+            m = next(a for a in ev['acks'] if a['key'] == 'm')
+            ev['acks'].append(dict(m, sequence=n, submitted=1104.95, completed=1105, fids=['20,cd'], writer=0))
+            q = ev['events'][-1]
+            q['dispatched'] += 1
+            ev['events'].insert(-3, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1104.94, submitted=1104.95,
+                                         completed=1105, ok=True))
+            self.ev(ev, 'g2').update(sequence=n, fids=['20,cd'])
+        self.mutate(ch, 'misses')
+
+    # codex01 review f490de8a: raw worker sequences, not the replay's ACK-order ordinals.
+    def raw_m(self, ev, raw):
+        a = next(a for a in ev['acks'] if a['key'] == 'm')
+        a['sequence'] = raw
+        for e in ev['events']:
+            if e.get('key') == 'm' and e.get('action') in ('get',):
+                e['sequence'] = raw
+
+    def test_c5_a_raw_sequence_out_of_ack_order_still_counts(self):
+        self.passes(lambda ev: self.raw_m(ev, 99))  # m's intent began after later-ACKed keys: raw 99, replay ordinal lower
+
+    def test_c5_a_hit_recorded_against_an_unacknowledged_raw_sequence_credits_nothing(self):
+        def ch(ev):
+            self.raw_m(ev, 99)
+            self.ev(ev, 'g1m')['sequence'] = 98  # never ACKed for m
+        self.mutate(ch, 'misses')
+
+    def test_the_emitted_verdict_states_its_qualification(self):
+        row = self.run_on(evidence())
+        q = row.get('misses_qualification') or {}
+        self.assertIn('qualified observed ordering under the stated limit', q.get('method', ''))
+        self.assertIn('no parity claim', q.get('method', ''))
+        self.assertIn('paired clock samples', q.get('clock', ''))
+        self.assertIn('constant offset between the samples', q.get('clock', ''))
+        self.assertIn('out-and-back', q.get('clock', ''))
+        self.assertIn('last exact read', q.get('limit', ''))
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        out = subprocess.run([sys.executable, str(HERE / 'soak_assess.py'), '--config', json.dumps(dict(config(root), schema='wrong'))],
+                             capture_output=True, text=True)
+        failed = json.loads(out.stdout.splitlines()[-1])
+        self.assertEqual(failed['status'], 'FAIL')
+        self.assertEqual(failed.get('misses_qualification'), q)
+
+    def test_cx21_known_limit_latent_loss_between_last_exact_read_and_s_is_excused(self):
+        """Recorded, not refused, by Ping's acceptance: ACK 1100, exact read 1110, a loss in between, S 1175, miss 1180."""
+        self.passes(lambda ev: None)
 
 
 class StrictReader(unittest.TestCase):

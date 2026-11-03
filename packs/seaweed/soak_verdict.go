@@ -81,12 +81,19 @@ type SoakVerdict struct {
 	Resources string           `json:"resources"`
 	Binding   SoakBinding      `json:"binding"`
 	Error     string           `json:"error,omitempty"`
+	// What an excused miss means (decision 3 revision): carried on every row.
+	MissesQualification struct {
+		Method string `json:"method"`
+		Clock  string `json:"clock"`
+		Limit  string `json:"limit"`
+	} `json:"misses_qualification"`
 }
 
 // verdictFields are the decoded field names. encoding/json matches struct
 // fields case-insensitively, so a key that folds to one of them must be it.
 var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root",
-	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono"} // the clock row is decoded by encoding/json too
+	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono", // the clock row is decoded by encoding/json too
+	"misses_qualification", "method", "limit"}
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -147,6 +154,9 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding) (SoakVerdict, error) {
 	dec.DisallowUnknownFields()
 	if err = dec.Decode(&v); err != nil || (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" {
 		return v, errors.New("soak verdict malformed")
+	}
+	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
+		return v, errors.New("soak verdict without its misses qualification")
 	}
 	if v.Binding != want {
 		return v, fmt.Errorf("soak verdict is bound to %+v, not this run", v.Binding)

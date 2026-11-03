@@ -107,9 +107,12 @@ def log_instants(stamp, begin, end):
     return sorted(out)
 
 
-def rotation_starts(events, begin, end):
-    """Per VID, M02 epoch of the last distinct unwritable line of its one matched episode. A VID with any ambiguous,
-    out-of-order or reused history is left out, so its misses refuse. The line is generic, not a rotation dispatch."""
+def rotation_boundaries(events, begin, end):
+    """Per VID, M02 epoch S of its one rotation success line (master_cache_volume_rotation.go:279, logged after the
+    delete): the witnessed, VID-bound boundary of decision 3's revision, a conservative observed post-rotation point,
+    not causal proof. A VID with any ambiguous, out-of-order or reused history, no birth first or not exactly one
+    success last is left out, so its misses refuse. Unwritable lines are read only for that history: rotation of an
+    already-full volume logs none, and normal ACKs follow the capacity line."""
     by_line, refused = {}, set()
     for e in events:
         typed(e, kind=str, vid=int, stamp=str, gen=int, line=str, sha256=str)
@@ -127,7 +130,7 @@ def rotation_starts(events, begin, end):
     for vid, rows in per.items():
         rows.sort()
         kinds = [k for _, _, k in rows]
-        if vid in refused or kinds.count('success') != 1 or kinds[-1] != 'success' or 'unwritable' not in kinds:
+        if vid in refused or kinds.count('success') != 1 or kinds[-1] != 'success':
             continue  # an event after the success, including a birth (VID reuse), lands here too
         at = [t for t, _, _ in rows]
         gens = [g for _, g, _ in rows]
@@ -135,25 +138,27 @@ def rotation_starts(events, begin, end):
             continue
         if kinds.count('birth') != 1 or kinds[0] != 'birth':
             continue
-        starts[vid] = max(t for t, _, k in rows if k == 'unwritable')
+        starts[vid] = rows[-1][0]
     return starts
 
 
-def miss_excused(e, version, ack, good, starts, lo, hi, dat):
-    """Decision 3 r6, per miss: qualified observed ordering in M01 mono, not a retirement proof and not parity."""
+def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits):
+    """Decision 3 revision (e45019f9 + codex01 8c56cca4), per miss: qualified observed ordering under the stated limit,
+    in M01 mono; not a retirement or durability proof and not parity. The stated limit, accepted by Ping: a real loss
+    between the version's last exact read and S is excused. `hits` are exact GETs of this same version."""
     for vid in {int(fid.split(',')[0]) for fid in version.fids}:
-        if vid not in starts or vid in dat:
+        if vid not in bounds or vid in dat:  # C2 (ledger), C8
             return False
-        early, late = starts[vid] - hi, starts[vid] - lo
-        if not ack['completed'] < early or not e['submitted'] > late:  # J3, J4
+        early, late = bounds[vid] - hi, bounds[vid] - lo
+        if not ack['completed'] < early or not e['submitted'] > late:  # C3, C4: submission, so a straddling GET refuses
             return False
-        after = [p for p in good if p['req'] > late]
-        if any(vid in p['writables'] for p in after):  # J5
+        if not any(h['submitted'] > ack['completed'] and h['completed'] < early for h in hits):  # C5
+            return False
+        after = [p for p in good if p['req'] > late]  # successful polls only; a failed reply is no evidence
+        if any(vid in p['writables'] or vid in p['present'] for p in after):  # C6
             return False
         gone = next((p for p in after if vid not in p['present']), None)
-        if not gone or gone['done'] > e['completed'] + 25:  # J6: successful polls only; a failed reply is no evidence
-            return False
-        if any(vid in p['present'] for p in after if p['req'] > gone['req']):  # J7
+        if not gone or gone['done'] > e['completed'] + 25:  # C7: requested after late(S)
             return False
     return True
 
@@ -214,7 +219,7 @@ def assess(c):
         raise ValueError('workers.json is not the accepted 3 DC + 1 HTTP set')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
-    oracle, by_seq, wrong, misses, unknown, acked = Oracle(), {}, [], [], [], {}
+    oracle, by_seq, wrong, misses, unknown, acked, hits, latest_raw = Oracle(), {}, [], [], [], {}, {}, {}
     gets = [e for e in ops if e['action'] == 'get']
     for kind, _, r in sorted([('ack', a['completed'], a) for a in acks] + [('get', e['completed'], e) for e in gets], key=lambda x: x[1]):
         if kind == 'ack':
@@ -223,11 +228,17 @@ def assess(c):
             if v.digest != r['digest']:
                 wrong.append(('ack', r['key']))
             by_seq[(r['key'], r['sequence'])] = (v, r)
+            latest_raw[r['key']] = r['sequence']  # the worker's own sequence; the replay's v.sequence is an ACK-order ordinal
             acked.setdefault(r['key'], []).append((r['completed'], v))
             continue
         case, latest = get_case(r), oracle.latest.get(r['key'])
         if case == 'hit' and (latest is None or not latest.matches(r['length'], r['sha256'])):
             wrong.append(('get', r['op']))
+        elif case == 'hit' and r['sequence'] == latest_raw.get(r['key']):
+            # C5's read-back evidence: exact bytes of the version the GET itself recorded, by the worker's raw
+            # sequence, resolved through the ACK journal, and that version is the latest. A hit recorded against
+            # another, an unacknowledged or an unknown version, even with the same bytes, credits nothing.
+            hits.setdefault((r['key'], r['sequence']), []).append(r)
         elif case == 'miss':
             # J1: the latest ACK completed before THIS miss was submitted, not one landing while it was in flight.
             misses.append((r, next((v for done, v in reversed(acked.get(r['key'], [])) if done < r['submitted']), None)))
@@ -270,20 +281,21 @@ def assess(c):
             bad.append(e['op'])
     mark('fault_errors', not bad, 'uncredited %s' % bad[:10])
 
-    # Misses: the accepted per-miss join (decision 3 r6), never a global retirement set.
+    # Misses: the accepted per-miss join (decision 3 revision), never a global retirement set.
     rotated = {typed(r, vid=int)['vid'] for r in m02['rotated']}
     dat = set(m02['dat_vids'])
     try:
         s1, s2 = obj(root, 'soak-clock-s1.json'), obj(root, 'soak-clock-s2.json')
         lo, hi = clock_bracket(c, s1, s2)
-        starts = rotation_starts(typed(m02, events=list)['events'], s1['entry_epoch'], s2['exit_epoch'])
-        starts = {v: t for v, t in starts.items() if v in rotated}
+        bounds = rotation_boundaries(typed(m02, events=list)['events'], s1['entry_epoch'], s2['exit_epoch'])
+        bounds = {v: t for v, t in bounds.items() if v in rotated}
         clock_error = ''
     except (ValueError, OSError) as error:  # no usable clock evidence: every miss stays unexcused
-        lo, hi, starts, clock_error = 0, 0, {}, '; clock: %s' % str(error)[:120]
+        lo, hi, bounds, clock_error = 0, 0, {}, '; clock: %s' % str(error)[:120]
     def excused(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
-        return bool(v) and latest == v and list(e['fids']) == list(v.fids) and miss_excused(e, v, a, good, starts, lo, hi, dat)
+        return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
+            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []))
     unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
 
@@ -322,7 +334,18 @@ def assess(c):
             k7.append(dict(episode=f['episode'], role=f['role'], dt_after_ready_s=first['submitted'] - f['ready_mono'],
                            latency_s=lat, at_rc_timeout=lat >= 4.9))
     status = 'PASS' if all(v['outcome'] == 'PASS' for v in crit.values()) else 'FAIL'
-    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED')
+    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
+
+
+# Emitted with every verdict, PASS or FAIL: what an excused miss does and doesn't mean.
+QUALIFICATION = dict(
+    method='qualified observed ordering under the stated limit (decision 3 revision); not a retirement or durability '
+           'proof; no parity claim',
+    clock='conditional on the paired clock samples S1/S2: ordering is judged across their bracket, assuming a '
+          'constant offset between the samples; an out-and-back offset excursion between them is not excluded; '
+          'without usable samples no miss is excused',
+    limit='accepted by Ping: a real loss between a version\'s last exact read and its volume\'s rotation success line '
+          'is excused')
 
 
 def binding(c):
@@ -338,7 +361,7 @@ def main():
             raise ValueError('assessor config schema differs')
         row = assess(config)
     except Exception as error:  # any unreadable or malformed evidence fails closed
-        row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED')
+        row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
     row['binding'] = binding(config)
     print(json.dumps(row, sort_keys=True), flush=True)
 
