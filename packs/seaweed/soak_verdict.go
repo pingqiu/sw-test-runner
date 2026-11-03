@@ -206,7 +206,7 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err = clockPublish(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
 		return v, err
 	}
-	auth, err := authorizeT1(a, h, e)
+	auth, err := authorizeT1(ctx, a, h, e)
 	if err != nil {
 		return v, err
 	}

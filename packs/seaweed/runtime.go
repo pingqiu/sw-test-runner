@@ -410,7 +410,7 @@ func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Actio
 				var row []byte
 				var auth float64
 				if row, _, err = e.Output.Decode(); err == nil {
-					if auth, err = authorizeT1(a, h, e); err == nil {
+					if auth, err = authorizeT1(ctx, a, h, e); err == nil {
 						err = publishSoakClock(runRoot(d, "m01"), "soak-clock-s1.json", d.RunID, row, t1, auth, t4)
 					}
 				}

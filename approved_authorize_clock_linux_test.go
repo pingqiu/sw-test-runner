@@ -61,15 +61,15 @@ func TestApprovedAuthorizeStampAfterFinalReadbackBeforeAuthorize(t *testing.T) {
 		// Identity binding: an unsettled exit or another process identity gets no stamp (and does not consume it).
 		unsettled := e
 		unsettled.Settled = false
-		if _, err := a.ApprovedAuthorizeMono(h, unsettled); err == nil {
+		if _, err := a.ApprovedAuthorizeMono(ctx, h, unsettled); err == nil {
 			t.Error("unsettled exit got an authorize stamp")
 		}
 		other := e
 		other.Identity.PID++
-		if _, err := a.ApprovedAuthorizeMono(h, other); err == nil {
+		if _, err := a.ApprovedAuthorizeMono(ctx, h, other); err == nil {
 			t.Error("another process identity got an authorize stamp")
 		}
-		m, err := a.ApprovedAuthorizeMono(h, e)
+		m, err := a.ApprovedAuthorizeMono(ctx, h, e)
 		if err != nil {
 			return err
 		}
@@ -80,7 +80,7 @@ func TestApprovedAuthorizeStampAfterFinalReadbackBeforeAuthorize(t *testing.T) {
 		if !(last <= m && m <= entry) {
 			t.Errorf("stamp %.9f not after final readback %.9f and before Authorize entry %.9f", m, last, entry)
 		}
-		if _, err := a.ApprovedAuthorizeMono(h, e); err == nil {
+		if _, err := a.ApprovedAuthorizeMono(ctx, h, e); err == nil {
 			t.Error("authorize stamp was not consumed")
 		}
 		return nil
@@ -137,5 +137,67 @@ func TestApprovedAuthorizeStampSecondAuthorizePoisons(t *testing.T) {
 	g.stampAuthorize("two", i)
 	if m, err := g.takeAuthorize("two", i); err != nil || m <= 0 {
 		t.Fatalf("single authorization lost its stamp: %v %v", m, err)
+	}
+}
+
+// codex01 review 6ae9daff (red control, adopted): a caller-set Settled flag on a killed task, with no stored
+// terminal receipt, gets no stamp, and the refusal leaves the stamp in place.
+func TestApprovedAuthorizeStampNeedsTheStoredSettledReceipt(t *testing.T) {
+	f, node, _, _ := authorizeClockFixture(t)
+	node.release = make(chan struct{})
+	completed := false // the run recovers an action panic; reaching the end is part of the assertion
+	_, _ = runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
+		defer close(node.release)
+		h, err := a.StartApprovedPackTask(ctx, "volume0")
+		if err != nil {
+			return err
+		}
+		w, err := a.Safety.Kill(ctx, h)
+		if err != nil {
+			return err
+		}
+		if h.job.exit != nil {
+			t.Fatal("control: the job already has a recorded exit")
+		}
+		claimed := ExitInfo{Identity: w.Identity, Settled: true}
+		if stamp, err := a.ApprovedAuthorizeMono(ctx, h, claimed); err == nil {
+			t.Errorf("stamp %.9f returned for a caller-set Settled flag without a stored receipt", stamp)
+		}
+		g := a.Safety.backend.(*approvedJobs)
+		g.mu.Lock()
+		_, kept := g.authorized[h.id]
+		g.mu.Unlock()
+		if !kept {
+			t.Error("a refused claim consumed the stamp")
+		}
+		completed = true
+		return nil
+	})
+	if !completed {
+		t.Fatal("the control action did not run to completion")
+	}
+}
+
+// A genuine wait's receipt, altered in any field, is not that receipt: refused, stamp kept, then the exact receipt
+// gets it once.
+func TestApprovedAuthorizeStampRefusesAnAlteredReceipt(t *testing.T) {
+	f, _, _, _ := authorizeClockFixture(t)
+	_, result := runGenerationCase(t, f, func(ctx context.Context, a *ActionContext) error {
+		h, e, err := a.RunApprovedPackJob(ctx, "volume0", false)
+		if err != nil {
+			return err
+		}
+		altered := e
+		altered.Code = 1
+		if _, err := a.ApprovedAuthorizeMono(ctx, h, altered); err == nil {
+			t.Error("an altered exit receipt got the stamp")
+		}
+		if _, err := a.ApprovedAuthorizeMono(ctx, h, e); err != nil {
+			t.Errorf("the exact stored receipt lost its stamp after a refused claim: %v", err)
+		}
+		return nil
+	})
+	if result.Status != StatusPass {
+		t.Fatalf("run failed: %+v", result)
 	}
 }

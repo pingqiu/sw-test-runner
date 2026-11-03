@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -60,8 +61,8 @@ func publishClock(root, name, runID string, row []byte, t1, t4 float64) error {
 
 // authorizeT1 is the soak sample's t1 (plan r2 step 2): the controller clock immediately before this job's
 // underlying Authorize, after its final successful readback, bound to the job's settled exit identity.
-var authorizeT1 = func(a *tr.ActionContext, h tr.JobHandle, e tr.ExitInfo) (float64, error) {
-	return a.ApprovedAuthorizeMono(h, e)
+var authorizeT1 = func(ctx context.Context, a *tr.ActionContext, h tr.JobHandle, e tr.ExitInfo) (float64, error) {
+	return a.ApprovedAuthorizeMono(ctx, h, e)
 }
 
 // publishSoakClock publishes the sample the assessor reads, with t1 at authorization, and beside it the same
