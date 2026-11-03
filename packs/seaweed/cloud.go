@@ -386,7 +386,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		defer n.Close()
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
 		if c.ECStage1 {
-			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} \\;"
+			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
 		}
 		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second), command)
 		return errors.Join(err, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))

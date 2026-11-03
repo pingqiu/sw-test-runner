@@ -291,3 +291,71 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 		})
 	}
 }
+
+// Run the exact capture shell with real find: a failed cat must fail capture,
+// while the independent SSH teardown still stops units and checks all ports.
+func TestDirectECJournalReadFailureStillTearsDown(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint("failed-cat-", fail), func(t *testing.T) {
+			bin, root := t.TempDir(), t.TempDir()
+			for name, body := range map[string]string{
+				"sudo":       `exec "$@"`,
+				"journalctl": "echo service-journal",
+				"cat": func() string {
+					if fail {
+						return "echo unreadable >&2; exit 23"
+					}
+					return `exec /bin/cat "$@"`
+				}(),
+			} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(root, "journal space.jsonl"), []byte("outcome\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h := &directHost{}
+			execute := func(command string, channel ssh.Channel) uint32 {
+				if !strings.Contains(command, "journalctl") {
+					return h.exec(command, channel)
+				}
+				h.mu.Lock()
+				h.commands = append(h.commands, command)
+				h.mu.Unlock()
+				cmd := exec.Command("sh", "-c", command)
+				cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
+				out, err := cmd.CombinedOutput()
+				channel.Write(out)
+				if err != nil {
+					if exit, ok := err.(*exec.ExitError); ok {
+						return uint32(exit.ExitCode())
+					}
+					return 255
+				}
+				return 0
+			}
+			address, pin, key, _ := cloudSSH(t, "", execute)
+			var d inventory.Document
+			if err := json.Unmarshal(directInput(t, address), &d); err != nil {
+				t.Fatal(err)
+			}
+			d.Hosts[0].RunRoot = root // disposable tree, otherwise unchanged exact shell
+			out := t.TempDir()
+			err := directCleanup(CloudConfig{ECStage1: true, SSHKey: key, HostKey: pin, Output: out}, d, d.Hosts[0])
+			if (err != nil) != fail {
+				t.Fatalf("failed cat=%v, capture error=%v", fail, err)
+			}
+			collect, stop, post := h.index("journalctl"), h.index("systemctl stop"), h.index("systemctl list-units")
+			if collect < 0 || stop <= collect || post <= stop {
+				t.Fatalf("teardown lost: %d %d %d", collect, stop, post)
+			}
+			if fail {
+				raw, readErr := os.ReadFile(filepath.Join(out, "cloud-collect.json"))
+				if readErr != nil || !strings.Contains(string(raw), "unreadable") || !strings.Contains(string(raw), `"exit_code": 1`) {
+					t.Fatalf("failed cat evidence missing: %s %v", raw, readErr)
+				}
+			}
+		})
+	}
+}
