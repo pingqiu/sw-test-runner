@@ -725,12 +725,31 @@ class SoakAssess(unittest.TestCase):
             self.ev(ev, 'g2').update(sequence=n, fids=['20,cd'])
         self.mutate(ch, 'misses')
 
+    # codex01 review f490de8a: raw worker sequences, not the replay's ACK-order ordinals.
+    def raw_m(self, ev, raw):
+        a = next(a for a in ev['acks'] if a['key'] == 'm')
+        a['sequence'] = raw
+        for e in ev['events']:
+            if e.get('key') == 'm' and e.get('action') in ('get',):
+                e['sequence'] = raw
+
+    def test_c5_a_raw_sequence_out_of_ack_order_still_counts(self):
+        self.passes(lambda ev: self.raw_m(ev, 99))  # m's intent began after later-ACKed keys: raw 99, replay ordinal lower
+
+    def test_c5_a_hit_recorded_against_an_unacknowledged_raw_sequence_credits_nothing(self):
+        def ch(ev):
+            self.raw_m(ev, 99)
+            self.ev(ev, 'g1m')['sequence'] = 98  # never ACKed for m
+        self.mutate(ch, 'misses')
+
     def test_the_emitted_verdict_states_its_qualification(self):
         row = self.run_on(evidence())
         q = row.get('misses_qualification') or {}
         self.assertIn('qualified observed ordering under the stated limit', q.get('method', ''))
         self.assertIn('no parity claim', q.get('method', ''))
         self.assertIn('paired clock samples', q.get('clock', ''))
+        self.assertIn('constant offset between the samples', q.get('clock', ''))
+        self.assertIn('out-and-back', q.get('clock', ''))
         self.assertIn('last exact read', q.get('limit', ''))
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)

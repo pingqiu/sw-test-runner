@@ -219,7 +219,7 @@ def assess(c):
         raise ValueError('workers.json is not the accepted 3 DC + 1 HTTP set')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
-    oracle, by_seq, wrong, misses, unknown, acked, hits = Oracle(), {}, [], [], [], {}, {}
+    oracle, by_seq, wrong, misses, unknown, acked, hits, latest_raw = Oracle(), {}, [], [], [], {}, {}, {}
     gets = [e for e in ops if e['action'] == 'get']
     for kind, _, r in sorted([('ack', a['completed'], a) for a in acks] + [('get', e['completed'], e) for e in gets], key=lambda x: x[1]):
         if kind == 'ack':
@@ -228,14 +228,16 @@ def assess(c):
             if v.digest != r['digest']:
                 wrong.append(('ack', r['key']))
             by_seq[(r['key'], r['sequence'])] = (v, r)
+            latest_raw[r['key']] = r['sequence']  # the worker's own sequence; the replay's v.sequence is an ACK-order ordinal
             acked.setdefault(r['key'], []).append((r['completed'], v))
             continue
         case, latest = get_case(r), oracle.latest.get(r['key'])
         if case == 'hit' and (latest is None or not latest.matches(r['length'], r['sha256'])):
             wrong.append(('get', r['op']))
-        elif case == 'hit' and r['sequence'] == latest.sequence:
-            # C5's read-back evidence: exact bytes of the version the GET itself recorded, which is the latest one.
-            # A hit recorded against another or an unknown version, even with the same bytes, credits nothing.
+        elif case == 'hit' and r['sequence'] == latest_raw.get(r['key']):
+            # C5's read-back evidence: exact bytes of the version the GET itself recorded, by the worker's raw
+            # sequence, resolved through the ACK journal, and that version is the latest. A hit recorded against
+            # another, an unacknowledged or an unknown version, even with the same bytes, credits nothing.
             hits.setdefault((r['key'], r['sequence']), []).append(r)
         elif case == 'miss':
             # J1: the latest ACK completed before THIS miss was submitted, not one landing while it was in flight.
@@ -293,7 +295,7 @@ def assess(c):
     def excused(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
         return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
-            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], v.sequence), []))
+            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []))
     unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
 
@@ -339,8 +341,9 @@ def assess(c):
 QUALIFICATION = dict(
     method='qualified observed ordering under the stated limit (decision 3 revision); not a retirement or durability '
            'proof; no parity claim',
-    clock='conditional on the paired clock samples S1/S2: ordering is judged across their bracket, and without usable '
-          'samples no miss is excused',
+    clock='conditional on the paired clock samples S1/S2: ordering is judged across their bracket, assuming a '
+          'constant offset between the samples; an out-and-back offset excursion between them is not excluded; '
+          'without usable samples no miss is excused',
     limit='accepted by Ping: a real loss between a version\'s last exact read and its volume\'s rotation success line '
           'is excused')
 
