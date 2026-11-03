@@ -78,3 +78,32 @@ func TestPublishClockWritesTheRealEvidenceFile(t *testing.T) {
 		t.Fatal("a second capture of one sample replaced the first")
 	}
 }
+
+// Plan r2 step 2: the authorize stamp must lie inside the same job's envelope [envelope t1, t4); otherwise
+// nothing is published, neither the sample nor its envelope.
+func TestPublishSoakClockRefusesAStampOutsideTheEnvelope(t *testing.T) {
+	defer func(f func(string, []byte) error) { clockPublish = f }(clockPublish)
+	clockPublish = publishEvidence
+	row := []byte(`{"status":"SOAK_SETUP","clock":{"boot_id":"m02","entry_epoch":1793610000.5,"exit_epoch":1793610010.5,"entry_mono":7000.5,"exit_mono":7010.5}}`)
+	for _, c := range []struct {
+		env, auth, t4 float64
+		ok            bool
+	}{{100, 100.5, 110, true}, {100, 100, 110, true}, {100, 99.9, 110, false}, {100, 110, 110, false}, {100, 111, 110, false}} {
+		root := t.TempDir()
+		err := publishSoakClock(root, "soak-clock-s1.json", "run-1", row, c.env, c.auth, c.t4)
+		_, main := os.Stat(filepath.Join(root, "soak-clock-s1.json"))
+		_, env := os.Stat(filepath.Join(root, "soak-clock-s1-envelope.json"))
+		if c.ok != (err == nil) || c.ok != (main == nil) || c.ok != (env == nil) {
+			t.Fatalf("%+v: err %v, sample %v, envelope %v", c, err, main, env)
+		}
+		if !c.ok {
+			continue
+		}
+		var got, envelope clockSample
+		a, _ := os.ReadFile(filepath.Join(root, "soak-clock-s1.json"))
+		b, _ := os.ReadFile(filepath.Join(root, "soak-clock-s1-envelope.json"))
+		if json.Unmarshal(a, &got) != nil || json.Unmarshal(b, &envelope) != nil || got.T1 != c.auth || envelope.T1 != c.env || got.T4 != c.t4 || envelope.T4 != c.t4 {
+			t.Fatalf("%+v: published %+v and %+v", c, got, envelope)
+		}
+	}
+}

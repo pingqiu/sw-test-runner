@@ -2,10 +2,14 @@ package seaweed
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
 	"path"
+	"strings"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // clockSample is one paired M01/M02 clock capture around an existing M02 job
@@ -53,4 +57,24 @@ func publishClock(root, name, runID string, row []byte, t1, t4 float64) error {
 		return err
 	}
 	return clockPublish(path.Join(root, name), body)
+}
+
+// authorizeT1 is the soak sample's t1 (plan r2 step 2): the controller clock immediately before this job's
+// underlying Authorize, after its final successful readback, bound to the job's settled exit identity.
+var authorizeT1 = func(ctx context.Context, a *tr.ActionContext, h tr.JobHandle, e tr.ExitInfo) (float64, error) {
+	return a.ApprovedAuthorizeMono(ctx, h, e)
+}
+
+// publishSoakClock publishes the sample the assessor reads, with t1 at authorization, and beside it the same
+// exchange's job-envelope sample (t1 before the whole job call, as through r8b). Both come from one exchange, so
+// the authorize sample's interval lies inside the envelope's by construction; the envelope is kept as the
+// pre-registered old/new comparison, never clipped or substituted.
+func publishSoakClock(root, name, runID string, row []byte, envelopeT1, authT1, t4 float64) error {
+	if !(envelopeT1 <= authT1 && authT1 < t4) {
+		return errors.New("authorize stamp outside the job envelope")
+	}
+	if err := publishClock(root, strings.TrimSuffix(name, ".json")+"-envelope.json", runID, row, envelopeT1, t4); err != nil {
+		return err
+	}
+	return publishClock(root, name, runID, row, authT1, t4)
 }

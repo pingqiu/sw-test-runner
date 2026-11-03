@@ -188,7 +188,7 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err != nil {
 		return v, err
 	}
-	_, e, err := a.RunApprovedPackJob(ctx, p.Soak.Evidence.Job, false)
+	h, e, err := a.RunApprovedPackJob(ctx, p.Soak.Evidence.Job, false)
 	if err != nil {
 		return v, err
 	}
@@ -206,7 +206,11 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if err = clockPublish(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
 		return v, err
 	}
-	if err = publishClock(want.Root, "soak-clock-s2.json", want.RunID, m02, t1, t4); err != nil {
+	auth, err := authorizeT1(ctx, a, h, e)
+	if err != nil {
+		return v, err
+	}
+	if err = publishSoakClock(want.Root, "soak-clock-s2.json", want.RunID, m02, t1, auth, t4); err != nil {
 		return v, err
 	}
 	if _, e, err = a.RunApprovedPackJob(ctx, p.Soak.Assess.Job, false); err != nil {

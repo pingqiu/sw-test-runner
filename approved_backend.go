@@ -34,11 +34,21 @@ func (a *ApprovedRun) jobReceipts() map[string]ApprovedJobReceipt {
 }
 
 type approvedJobs struct {
-	mu       sync.Mutex
-	run      *ApprovedRun
-	jobs     map[string]approvedJob
-	faults   map[string]registeredFault
-	receipts map[string]ApprovedJobReceipt
+	mu         sync.Mutex
+	run        *ApprovedRun
+	jobs       map[string]approvedJob
+	faults     map[string]registeredFault
+	receipts   map[string]ApprovedJobReceipt
+	authorized map[string]authorizeStamp
+}
+
+// authorizeStamp is the controller clock read after this job's last successful work/readback check and
+// immediately before its one underlying Authorize, which releases the enrolled child's exec gate. A second
+// Authorize for the same id poisons it: an ambiguous authorization never gets a later replacement stamp.
+type authorizeStamp struct {
+	mono     float64
+	identity ProcessIdentity
+	poisoned bool
 }
 
 // Final custody observations survive pruning live indexes. No evidence row is
@@ -175,6 +185,7 @@ func (b *approvedJobs) Authorize(ctx context.Context, id string, i ProcessIdenti
 		b.run.revoke(err)
 		return err
 	}
+	b.stampAuthorize(id, i)
 	err := b.run.runtime.Jobs.Authorize(ctx, id, i)
 	state := "AUTHORIZED"
 	if err != nil {
@@ -183,6 +194,36 @@ func (b *approvedJobs) Authorize(ctx context.Context, id string, i ProcessIdenti
 	b.observe(id, state, i, nil, err)
 	return err
 }
+func (b *approvedJobs) stampAuthorize(id string, i ProcessIdentity) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.authorized == nil {
+		b.authorized = map[string]authorizeStamp{}
+	}
+	if prev, seen := b.authorized[id]; seen {
+		prev.poisoned = true
+		b.authorized[id] = prev
+		return
+	}
+	if m, err := authorizeMono(); err == nil {
+		b.authorized[id] = authorizeStamp{mono: m, identity: i}
+	} else {
+		b.authorized[id] = authorizeStamp{identity: i, poisoned: true} // no clock: no usable stamp, ever
+	}
+}
+
+// takeAuthorize returns and consumes the stamp for exactly this job and process identity.
+func (b *approvedJobs) takeAuthorize(id string, i ProcessIdentity) (float64, error) {
+	b.mu.Lock()
+	st, ok := b.authorized[id]
+	delete(b.authorized, id)
+	b.mu.Unlock()
+	if !ok || st.poisoned || st.identity != i || st.mono <= 0 {
+		return 0, errors.New("no single authorize stamp for this job identity")
+	}
+	return st.mono, nil
+}
+
 func (b *approvedJobs) Settle(ctx context.Context, id string) error {
 	b.mu.Lock()
 	_, ok := b.jobs[id]

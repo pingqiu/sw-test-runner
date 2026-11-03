@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 )
 
 // PackInputs is an immutable COPY of independently admitted inputs. No value of
@@ -24,6 +25,31 @@ func (c *ActionContext) boundPackContext() error {
 		return errors.New("no bound approved pack context")
 	}
 	return nil
+}
+
+// ApprovedAuthorizeMono returns the controller CLOCK_MONOTONIC read after the job's final successful approved
+// work/readback check and immediately before its one underlying Authorize (soak clock-bracket plan r2, step 2).
+// Exec follows authorization, so it precedes the job's first statement; already-completed validation leaves the
+// bracket, nothing is subtracted or assumed. Under the job's gate it requires the scope's own stored, validated
+// terminal receipt for this handle, and the supplied exit must be exactly that receipt; only then is the stamp
+// consumed. A caller-built or otherwise unproven exit is refused and leaves the stamp in place.
+func (c *ActionContext) ApprovedAuthorizeMono(ctx context.Context, h JobHandle, e ExitInfo) (float64, error) {
+	if err := c.boundPackContext(); err != nil {
+		return 0, err
+	}
+	g, ok := c.Safety.backend.(*approvedJobs)
+	if !ok {
+		return 0, errors.New("no approved job backend")
+	}
+	j, unlock, err := c.Safety.lockJob(ctx, h)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	if j.exit == nil || j.outcomeErr != nil || !j.exit.Settled || j.exit.Identity != j.identity || !reflect.DeepEqual(*j.exit, e) {
+		return 0, errors.New("authorize stamp needs this job's stored settled exit receipt")
+	}
+	return g.takeAuthorize(h.id, j.exit.Identity)
 }
 
 // ApprovedPackInputs only succeeds inside this ApprovedRun's exact Engine

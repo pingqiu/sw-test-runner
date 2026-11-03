@@ -366,6 +366,22 @@ func TestACollectJoinsS2TheAssessorAndAPassVerdict(t *testing.T) {
 		s1.T1 <= 0 || s1.T1 >= s1.T4 || s2.T1 < s1.T4 || s2.T1 >= s2.T4 || s2.EntryEpoch != 1793612000 || s1.EntryEpoch != 1793610000 {
 		t.Fatalf("samples: %+v %+v", s1, s2)
 	}
+	// Plan r2 step 2: each published sample's t1 is the job's authorize stamp; beside it the same exchange's
+	// job-envelope sample, t1 before the whole job call. Same exchange: identical stamps except an earlier t1.
+	for _, s := range []struct {
+		name string
+		got  clockSample
+	}{{"soak-clock-s1", s1}, {"soak-clock-s2", s2}} {
+		var env clockSample
+		if json.Unmarshal(published[s.name+"-envelope.json"], &env) != nil {
+			t.Fatalf("%s-envelope.json not published; have %v", s.name, published)
+		}
+		same := env
+		same.T1 = s.got.T1
+		if same != s.got || !(env.T1 < s.got.T1) {
+			t.Fatalf("%s: authorize sample %+v is not the envelope %+v with a later t1", s.name, s.got, env)
+		}
+	}
 }
 
 func TestACollectRefusesTheDecodedFailVerdict(t *testing.T) {
