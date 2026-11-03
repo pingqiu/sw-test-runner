@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +39,9 @@ type ecSnapshot struct {
 		Shard       int
 		Job, SHA256 string
 		Bytes       int64
+		Generation  int64
+		IndexSHA256 string `json:"index_sha256"`
+		VifSHA256   string `json:"vif_sha256"`
 	} `json:"shards"`
 	Files []struct {
 		Job, Name, SHA256 string
@@ -58,25 +60,46 @@ func ecTask(ctx context.Context, a *tr.ActionContext, label string, v any) error
 	}
 	return json.Unmarshal(bytes.TrimSpace(raw), v)
 }
-func ecRead(ctx context.Context, a *tr.ActionContext, label, route string, m EC1aManifest) error {
+
+type ecOutcome struct {
+	chaosOp
+	Route          string
+	Status, Length int
+	SHA256         string
+	Original       *ecOutcome
+}
+
+func ecPayload(run, key string) []byte {
+	block := sha256.Sum256([]byte(run + "/" + key))
+	return bytes.Repeat(block[:], 8192)
+}
+func ecRead(ctx context.Context, a *tr.ActionContext, label, route string, m EC1aManifest, plant bool) error {
 	var body struct {
 		RunID    string `json:"run_id"`
 		Wrong    int
-		Outcomes []struct {
-			chaosOp
-			Route          string
-			Status, Length int
-			SHA256         string
-		}
+		Control  string
+		Outcomes []ecOutcome
 	}
 	if err := ecTask(ctx, a, label, &body); err != nil {
 		return err
 	}
-	if body.RunID != m.RunID || body.Wrong != 0 {
+	if body.RunID != m.RunID || (!plant && (body.Wrong != 0 || body.Control != "")) || (plant && (body.Wrong != 1 || body.Control != "WRONG_BYTE_REJECTED")) {
 		return errors.New("EC read scope/wrong bytes")
 	}
 	rows := make([]EC1aRead, len(body.Outcomes))
 	for i, v := range body.Outcomes {
+		if plant && i == 0 {
+			expected := ecPayload(m.RunID, v.Key)
+			expected[0] ^= 1
+			op := v.chaosOp
+			op.Exact = true
+			if v.Original == nil || v.Exact || v.SHA256 != hash(expected) || v.Status != v.Original.Status || v.Length != v.Original.Length || v.Route != v.Original.Route || v.Original.chaosOp != op || v.Original.Original != nil {
+				return errors.New("EC planted mutation/original join invalid")
+			}
+			v = *v.Original
+		} else if v.Original != nil {
+			return errors.New("EC unexpected original-control evidence")
+		}
 		if v.Route != route {
 			return errors.New("EC route mismatch")
 		}
@@ -103,6 +126,9 @@ func ecPin(in tr.PackInputs, label, name string) error {
 	var c struct {
 		Root, Role, Exe, SHA256, Weed, Stage string
 		Holders                              map[string]string
+	}
+	if err := uniqueJSON(json.NewDecoder(strings.NewReader(arg)), 0); err != nil {
+		return err
 	}
 	if json.Unmarshal([]byte(arg), &c) != nil || c.Root != in.Binding.OutputDir || (name == "ec_service.py" && (c.Role != label || len(c.SHA256) != 64 || in.Files["m02"][c.Exe] != c.SHA256)) || (name == "ec_setup.py" && c.Stage != "ready" && len(in.Files["m02"][c.Weed]) != 64) {
 		return errors.New("EC helper not bound to owned run root/role")
@@ -140,7 +166,7 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 	if err = dec.Decode(&p); err != nil {
 		return nil, err
 	}
-	if (p.Implementation != "go" && p.Implementation != "rust") || p.Keys < 1 || p.Keys > 128 || len(p.Services) < 5 || len(p.Services) > 17 || len(p.S1) != 2 || len(p.S2) != 4 || len(p.Episodes) != 4 {
+	if (p.Implementation != "go" && p.Implementation != "rust") || p.Keys < 1 || p.Keys > 128 || len(p.Services) != 17 || len(p.S1) != 2 || len(p.S2) != 4 || len(p.Episodes) != 4 {
 		return nil, errors.New("EC Stage1 shape")
 	}
 	seen := map[string]bool{}
@@ -159,14 +185,16 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 		}
 		seen[label] = true
 	}
-	if !seen["master"] || !seen["filer"] || !seen["s3"] {
+	if !contains(p.Services, "master") || !contains(p.Services, "filer") || !contains(p.Services, "s3") {
 		return nil, errors.New("EC metadata services missing")
 	}
+	victims := map[string]bool{}
 	for _, episode := range p.Episodes {
 		g, ok := in.Restarts[episode]
-		if !ok || !g.Hold || !contains(p.Services, g.Victim) || g.Victim == "master" || g.Victim == "filer" || g.Victim == "s3" {
+		if !ok || !g.Hold || victims[g.Victim] || !contains(p.Services, g.Victim) || g.Victim == "master" || g.Victim == "filer" || g.Victim == "s3" {
 			return nil, errors.New("EC holder loss lacks held approved generation")
 		}
+		victims[g.Victim] = true
 	}
 	for _, label := range labels {
 		name := "ec_chaos.py"
@@ -213,12 +241,7 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 		return nil, errors.New("EC seed count/run mismatch")
 	}
 	for _, obj := range seed.Objects {
-		block := sha256.Sum256([]byte(b.RunID + "/" + obj.Key))
-		want := sha256.New()
-		for i := 0; i < 8192; i++ {
-			want.Write(block[:])
-		}
-		if obj.Length != 262144 || hex.EncodeToString(want.Sum(nil)) != obj.SHA256 {
+		if obj.Length != 262144 || hash(ecPayload(b.RunID, obj.Key)) != obj.SHA256 {
 			return nil, errors.New("EC seed digest not independently generated")
 		}
 	}
@@ -229,7 +252,7 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 	if err = ecTask(ctx, a, p.Capture, &snap); err != nil {
 		return nil, err
 	}
-	if !snap.OriginalAbsent || !reflect.DeepEqual(seed.Objects, snap.Manifest.Objects) || snap.Manifest.RunID != b.RunID || snap.Manifest.Generation == "" || len(snap.Holders) != len(p.Services)-3 || len(snap.Shards) > 256 || len(snap.Files) == 0 {
+	if !snap.OriginalAbsent || !reflect.DeepEqual(seed.Objects, snap.Manifest.Objects) || snap.Manifest.RunID != b.RunID || snap.Manifest.Generation == "" || len(snap.Holders) != 14 || len(snap.Shards) != 14 || len(snap.Files) == 0 {
 		return nil, errors.New("EC frozen capture invalid")
 	}
 	holders := map[string]bool{}
@@ -240,10 +263,16 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 		holders[h.Job] = true
 	}
 	shardSet := map[string]map[int]bool{}
+	shardJobs := map[string]bool{}
+	generations := map[string]int64{}
+	if json.Unmarshal([]byte(snap.Manifest.Generation), &generations) != nil {
+		return nil, errors.New("EC generation map malformed")
+	}
 	for _, s := range snap.Shards {
-		if !holders[s.Job] || s.Shard < 0 || s.Shard >= 14 || len(s.SHA256) != 64 || s.Bytes <= 0 {
+		if !holders[s.Job] || shardJobs[s.Job] || s.Shard < 0 || s.Shard >= 14 || len(s.SHA256) != 64 || s.Bytes <= 0 || s.Generation <= 0 || s.Generation != generations[s.Volume] || len(s.IndexSHA256) != 64 || len(s.VifSHA256) != 64 {
 			return nil, errors.New("EC shard capture invalid")
 		}
+		shardJobs[s.Job] = true
 		if shardSet[s.Volume] == nil {
 			shardSet[s.Volume] = map[int]bool{}
 		}
@@ -266,18 +295,12 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 		return os.WriteFile(filepath.Join(a.Bundle.ArtifactsDir(), "ec-stage1.json"), raw, 0600)
 	}
 	defer func() { err = errors.Join(err, save()) }()
-	var planted struct {
-		Control string `json:"control"`
-	}
-	if err = ecTask(ctx, a, p.WrongByte, &planted); err != nil {
+	if err = ecRead(ctx, a, p.WrongByte, "s3", snap.Manifest, true); err != nil {
 		return nil, err
 	}
-	if planted.Control != "WRONG_BYTE_REJECTED" {
-		return nil, errors.New("planted wrong byte not rejected")
-	}
-	report["wrong_byte_control"] = planted.Control
+	report["wrong_byte_control"] = "WRONG_BYTE_REJECTED"
 	for i, job := range p.S1 {
-		if err = ecRead(ctx, a, job, []string{"s3", "volume"}[i], snap.Manifest); err != nil {
+		if err = ecRead(ctx, a, job, []string{"s3", "volume"}[i], snap.Manifest, false); err != nil {
 			return nil, err
 		}
 	}
@@ -315,7 +338,7 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 			return nil, err
 		}
 		for route, job := range p.S2[i] {
-			if err = ecRead(ctx, a, job, []string{"s3", "volume"}[route], snap.Manifest); err != nil {
+			if err = ecRead(ctx, a, job, []string{"s3", "volume"}[route], snap.Manifest, false); err != nil {
 				return nil, err
 			}
 			report["reads"] = append(report["reads"].([]string), job)

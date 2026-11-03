@@ -11,6 +11,8 @@ class Capture(unittest.TestCase):
     for i in range(14):
      d=root/('h%d'%i);d.mkdir(mode=0o700);holders[d.name]=str(d)
      (d/('bucket_1.ec%02d'%i)).write_bytes(b'reference shard bytes')
+     (d/'bucket_1.ecx').write_bytes(b'index')
+     (d/'bucket_1.vif').write_text(json.dumps({'ecShardConfig':{'dataShards':10,'parityShards':4,'encodeTsNs':'12345'}}))
      procs.append(subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)','--dir='+str(d)]))
     (root/'h0/bucket_1.ecx').write_bytes(b'index')
     (root/'h0/bucket_1.vif').write_text(json.dumps({'ecShardConfig':{'dataShards':10,'parityShards':4,'encodeTsNs':'12345'}}))

@@ -72,15 +72,13 @@ func (n *ecCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 			}
 		}
 		for i := 0; i < 14; i++ {
-			shards = append(shards, map[string]any{"volume": "1", "shard": i, "job": fmt.Sprint("h", i), "sha256": strings.Repeat("a", 64), "bytes": 1048576})
+			shards = append(shards, map[string]any{"volume": "1", "shard": i, "job": fmt.Sprint("h", i), "sha256": strings.Repeat("a", 64), "bytes": 1048576, "generation": 12345, "index_sha256": strings.Repeat("b", 64), "vif_sha256": strings.Repeat("c", 64)})
 		}
 		m := n.seed
-		m.Generation = "encode-1"
+		m.Generation = `{"1":12345}`
 		row = map[string]any{"manifest": m, "holders": holders, "shards": shards, "original_absent": n.mode != "original", "files": []any{map[string]any{"job": "h0", "name": "1.ecx", "sha256": strings.Repeat("a", 64), "bytes": 16}}}
 	case "encode", "ready":
 		row = map[string]any{"encoded": true}
-	case "planted":
-		row = map[string]string{"control": "WRONG_BYTE_REJECTED"}
 	default:
 		route := "s3"
 		if strings.HasSuffix(label, "volume") {
@@ -92,6 +90,19 @@ func (n *ecCPU) Wait(ctx context.Context, id string) (tr.ExitInfo, error) {
 			digest = strings.Repeat("0", 64)
 		}
 		row = map[string]any{"run_id": n.seed.RunID, "wrong": 0, "outcomes": []any{map[string]any{"op": 0, "kind": "s3_get", "key": object.Key, "started": 1, "ended": 2, "exact": true, "route": route, "status": 200, "length": 262144, "sha256": digest}}}
+		if label == "planted" {
+			m := row.(map[string]any)
+			r := m["outcomes"].([]any)[0].(map[string]any)
+			original := map[string]any{}
+			for k, v := range r {
+				original[k] = v
+			}
+			r["original"] = original
+			payload := ecPayload(n.seed.RunID, object.Key)
+			payload[0] ^= 1
+			r["exact"], r["sha256"] = false, hash(payload)
+			m["wrong"], m["control"] = 1, "WRONG_BYTE_REJECTED"
+		}
 	}
 	if m, ok := row.(map[string]any); ok {
 		if reads, ok := m["outcomes"].([]any); ok {
@@ -174,10 +185,39 @@ func ecFixture(t *testing.T, mode string) (*cpuFixture, *ecCPU) {
 		if label == "capture" {
 			name = "ec_capture.py"
 		}
-		cfg, _ := json.Marshal(map[string]string{"Label": label, "role": label, "root": f.binding.OutputDir, "exe": "/opt/seaweed/product", "sha256": strings.Repeat("d", 64), "weed": "/opt/seaweed/product", "stage": label})
+		root := f.binding.OutputDir
+		config := map[string]any{"label": label, "role": label, "root": root, "exe": "/opt/seaweed/product", "sha256": strings.Repeat("d", 64), "weed": "/opt/seaweed/product", "stage": label, "run_id": f.binding.RunID, "keys": 1, "s3": "http://127.0.0.1:18000", "filer_http": "http://127.0.0.1:18001", "volume": "http://127.0.0.1:18002", "master": "127.0.0.1:18003", "manifest": root + "/manifest.json", "urls": []string{"http://127.0.0.1:18000/"}}
+		args := []string{"--dir=" + root + "/" + label}
+		if label == "master" {
+			args = []string{"master", "-mdir=" + root + "/master", "-peers=none"}
+		}
+		if label == "filer" {
+			args = []string{"filer", "-localSocket=" + root + "/filer.sock", "-config_dir=" + root}
+		}
+		if label == "s3" {
+			args = []string{"s3", "-filer=127.0.0.1:18001"}
+		}
+		config["args"] = args
+		holders := map[string]string{}
+		for i := 0; i < 14; i++ {
+			h := fmt.Sprint("h", i)
+			holders[h] = root + "/" + h
+		}
+		config["holders"], config["volume_exe"], config["volume_sha256"] = holders, "/opt/seaweed/product", strings.Repeat("d", 64)
+		cfg, _ := json.Marshal(config)
 		j.Argv = []string{"-I", "/opt/seaweed/worker/" + name, string(cfg)}
 		if name == "ec_chaos.py" {
-			j.Argv = []string{"-I", "/opt/seaweed/worker/" + name, "--config", string(cfg)}
+			stage, route := "read", "s3"
+			if label == "seed" {
+				stage = "seed"
+			}
+			if strings.HasSuffix(label, "volume") {
+				route = "volume"
+			}
+			j.Argv = []string{"-I", "/opt/seaweed/worker/" + name, "--config", string(cfg), "--stage", stage, "--manifest", root + "/manifest.json", "--journal", root + "/" + label + ".jsonl", "--route", route}
+		}
+		if name == "ec_capture.py" {
+			j.Argv = append(j.Argv, root+"/manifest.json")
 		}
 		if label == "planted" {
 			j.Argv = append(j.Argv, "--plant-wrong-byte")

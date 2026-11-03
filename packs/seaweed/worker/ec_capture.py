@@ -16,7 +16,7 @@ def capture(c,manifest):
     root=pathlib.Path(c['root']);rootstat=root.lstat()
     if not root.is_absolute() or not stat.S_ISDIR(rootstat.st_mode) or rootstat.st_uid!=os.getuid() or rootstat.st_mode&0o022:raise ValueError('private owned root required')
     if not 1<=len(c['holders'])<=14 or manifest['run_id']!=c['run_id']:raise ValueError('holder/manifest scope')
-    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};shards=[];files=[]
+    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[]
     for label,folder in c['holders'].items():
         directory=pathlib.Path(folder)
         if directory.parent!=root or directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=os.getuid() or directory.stat().st_mode&0o022:raise ValueError('foreign holder dir')
@@ -32,6 +32,7 @@ def capture(c,manifest):
             except (FileNotFoundError,ProcessLookupError,PermissionError):continue
         if len(matches)!=1:raise ValueError('holder identity absent/ambiguous')
         holders.append(matches[0])
+        members=[]
         for path in directory.iterdir():
             if path.suffix=='.vif':
                 vif_bytes=path.read_bytes();proof=stable(path)
@@ -43,10 +44,18 @@ def capture(c,manifest):
                 configs[vid]=generation
             match=re.fullmatch(r'.*?(\d+)\.ec(\d\d)',path.name)
             if match:
+                members.append(path)
                 vid,number=match.group(1),int(match.group(2))
                 if number>=14:raise ValueError('foreign shard id')
                 shards.append(dict(volume=vid,shard=number,job=label,**stable(path)))
             elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path)))
+        if len(members)!=1:raise ValueError('one shard per holder required')
+        member=members[0];vid=re.fullmatch(r'.*?(\d+)\.ec(\d\d)',member.name).group(1)
+        if not member.with_suffix('.vif').is_file() or not member.with_suffix('.ecx').is_file():raise ValueError('holder-local metadata/index missing')
+        index=stable(member.with_suffix('.ecx'))['sha256']
+        if vid in indexes and indexes[vid]!=index:raise ValueError('foreign holder index')
+        indexes[vid]=index
+        shards[-1].update(generation=configs[vid],index_sha256=index,vif_sha256=stable(member.with_suffix('.vif'))['sha256'])
     volumes={o['fid'].split(',')[0] for o in manifest['objects']}
     if set(configs)!=volumes or {s['volume'] for s in shards}!=volumes:raise ValueError('manifest volume set differs')
     for vid in volumes:

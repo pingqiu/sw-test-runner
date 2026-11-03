@@ -24,8 +24,7 @@ def request(url, data=None, method='GET'):
             while len(body)<=chaos.S3_LENGTH:
                 remaining=deadline-time.monotonic()
                 if remaining<=0:raise TimeoutError('whole-operation30s deadline')
-                # read1 performs one underlying read; bound it by the REMAINING budget.
-                r.fp.raw._sock.settimeout(remaining)
+                # Linux's operation alarm also bounds headers, EOF and chunk framing.
                 chunk=r.read1(min(65536,chaos.S3_LENGTH+1-len(body)))
                 if not chunk:break
                 body.extend(chunk)
@@ -60,7 +59,7 @@ def seed(c,path):
 
 def reads(c,manifest,route,path,plant=False):
     if manifest['run_id']!=c['run_id'] or route not in ('s3','volume'):raise ValueError('manifest/route mismatch')
-    outcomes=[];wrong=0
+    outcomes=[];wrong=0;planted=False
     with journal(path) as f:
         for i,obj in enumerate(manifest['objects']):
             key=obj['key'];expected=chaos.s3_body(c,key)
@@ -71,11 +70,17 @@ def reads(c,manifest,route,path,plant=False):
             status=0;body=b'';error=''
             try:status,body=request(url)
             except (OSError,http.client.HTTPException) as e:error=type(e).__name__+': '+str(e)
-            if plant and i==0 and body:body=bytes([body[0]^1])+body[1:]
-            ended=time.monotonic();bad=status==200 and body!=expected;wrong+=int(bad)
+            ended=time.monotonic()
             row.update(ended=ended,exact=status==200 and body==expected and ended-row['started']<=chaos.OP_LIMIT,status=status,length=len(body),sha256=hashlib.sha256(body).hexdigest(),error=error)
+            if plant and i==0:
+                row['original']=dict(row)
+                if row['exact']:
+                    body=bytes([body[0]^1])+body[1:];planted=True
+                    row.update(exact=False,sha256=hashlib.sha256(body).hexdigest())
+            emit(f,dict(event='OUTCOME',**row))
+            wrong+=int(status==200 and body!=expected)
             outcomes.append(row)
-    return dict(status='OBSERVED',stage='ec-read',run_id=c['run_id'],outcomes=outcomes,wrong=wrong,exposure='NOT_OBSERVED',control='WRONG_BYTE_REJECTED' if plant and wrong==1 else '')
+    return dict(status='OBSERVED',stage='ec-read',run_id=c['run_id'],outcomes=outcomes,wrong=wrong,exposure='NOT_OBSERVED',control='WRONG_BYTE_REJECTED' if planted and wrong==1 else '')
 
 
 def main():

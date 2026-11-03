@@ -1,0 +1,205 @@
+{
+  "cases": [
+    {
+      "mode": "exact",
+      "plant": true,
+      "exit": 0,
+      "output": {
+        "status": "OBSERVED",
+        "stage": "ec-read",
+        "run_id": "pack-cpu",
+        "outcomes": [
+          {
+            "op": 0,
+            "kind": "s3_get",
+            "key": "ec-0",
+            "started": 83495.263576913,
+            "route": "s3",
+            "ended": 83495.267530045,
+            "exact": false,
+            "status": 200,
+            "length": 262144,
+            "sha256": "d4dd1db513108773a4de4ee95432c3cd6828bec231b34ba1c000cb6e79f6cba9",
+            "error": ""
+          }
+        ],
+        "wrong": 1,
+        "exposure": "NOT_OBSERVED",
+        "control": "WRONG_BYTE_REJECTED"
+      },
+      "journal": [
+        {
+          "event": "SUBMIT",
+          "op": 0,
+          "kind": "s3_get",
+          "key": "ec-0",
+          "started": 83495.263576913,
+          "route": "s3"
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "corrupt",
+      "plant": true,
+      "exit": 0,
+      "output": {
+        "status": "OBSERVED",
+        "stage": "ec-read",
+        "run_id": "pack-cpu",
+        "outcomes": [
+          {
+            "op": 0,
+            "kind": "s3_get",
+            "key": "ec-0",
+            "started": 83495.327345332,
+            "route": "s3",
+            "ended": 83495.332491233,
+            "exact": false,
+            "status": 200,
+            "length": 262144,
+            "sha256": "1105bacc032c3dd6c93c9f26751085acdbdc561b37f7160fc7c4d41aca9bb0db",
+            "error": ""
+          }
+        ],
+        "wrong": 1,
+        "exposure": "NOT_OBSERVED",
+        "control": "WRONG_BYTE_REJECTED"
+      },
+      "journal": [
+        {
+          "event": "SUBMIT",
+          "op": 0,
+          "kind": "s3_get",
+          "key": "ec-0",
+          "started": 83495.327345332,
+          "route": "s3"
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "short",
+      "plant": true,
+      "exit": 0,
+      "output": {
+        "status": "OBSERVED",
+        "stage": "ec-read",
+        "run_id": "pack-cpu",
+        "outcomes": [
+          {
+            "op": 0,
+            "kind": "s3_get",
+            "key": "ec-0",
+            "started": 83495.392199209,
+            "route": "s3",
+            "ended": 83495.394685879,
+            "exact": false,
+            "status": 200,
+            "length": 5,
+            "sha256": "b4e2e1fbff851ea3a1dc6d7295e765c784b6dc0c35de9ded28ccc77f03272056",
+            "error": ""
+          }
+        ],
+        "wrong": 1,
+        "exposure": "NOT_OBSERVED",
+        "control": "WRONG_BYTE_REJECTED"
+      },
+      "journal": [
+        {
+          "event": "SUBMIT",
+          "op": 0,
+          "kind": "s3_get",
+          "key": "ec-0",
+          "started": 83495.392199209,
+          "route": "s3"
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "corrupt",
+      "plant": false,
+      "exit": 1,
+      "output": {
+        "status": "OBSERVED",
+        "stage": "ec-read",
+        "run_id": "pack-cpu",
+        "outcomes": [
+          {
+            "op": 0,
+            "kind": "s3_get",
+            "key": "ec-0",
+            "started": 83495.451888394,
+            "route": "s3",
+            "ended": 83495.455640947,
+            "exact": false,
+            "status": 200,
+            "length": 262144,
+            "sha256": "cf7319131b1f1cc36831d4b13a06d7ee5afae8d2f0a39a170eb79672edba74b4",
+            "error": ""
+          }
+        ],
+        "wrong": 1,
+        "exposure": "NOT_OBSERVED",
+        "control": ""
+      },
+      "journal": [
+        {
+          "event": "SUBMIT",
+          "op": 0,
+          "kind": "s3_get",
+          "key": "ec-0",
+          "started": 83495.451888394,
+          "route": "s3"
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "exact",
+      "plant": false,
+      "exit": 0,
+      "output": {
+        "status": "OBSERVED",
+        "stage": "ec-read",
+        "run_id": "pack-cpu",
+        "outcomes": [
+          {
+            "op": 0,
+            "kind": "s3_get",
+            "key": "ec-0",
+            "started": 83495.513679139,
+            "route": "s3",
+            "ended": 83495.51746212,
+            "exact": true,
+            "status": 200,
+            "length": 262144,
+            "sha256": "55e6c21379e879882f4d8e4b0347c772a3445c59ac53b1277b4f1de481f65b8a",
+            "error": ""
+          }
+        ],
+        "wrong": 0,
+        "exposure": "NOT_OBSERVED",
+        "control": ""
+      },
+      "journal": [
+        {
+          "event": "SUBMIT",
+          "op": 0,
+          "kind": "s3_get",
+          "key": "ec-0",
+          "started": 83495.513679139,
+          "route": "s3"
+        }
+      ],
+      "stderr": ""
+    }
+  ],
+  "findings": {
+    "corrupt_original_accepted_as_control": true,
+    "short_original_accepted_as_control": true,
+    "ordinary_corrupt_refused": true,
+    "normal_exact_has_only_submit_in_journal": true
+  }
+}
