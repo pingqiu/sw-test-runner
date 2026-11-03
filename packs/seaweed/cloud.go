@@ -67,8 +67,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if d.Target != "azure" || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
-		return "", errors.New("one newly created Azure HTTP host and three artifacts required")
+	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
+		return "", errors.New("one Azure, onprem or docker HTTP host and three artifacts required")
+	}
+	if directTarget(d.Target) && len(d.Hosts) != 1 {
+		return "", errors.New("a direct ssh target runs one host")
 	}
 	if c.Replication != "" && c.Replication != "001" {
 		return "", errors.New("replication must be absent or 001")
@@ -99,7 +102,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			meta = candidate
 		}
 	}
-	if h.RunRoot != "/data/seaweed-runs/"+d.RunID {
+	if h.RunRoot != cloudRunRoot(d, h) {
 		return "", errors.New("unexpected cloud run root")
 	}
 	q := cloudQuote
@@ -157,7 +160,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return nil
 	}
 	root := h.RunRoot
-	if phase == "" || phase == "prepare" {
+	if (phase == "" || phase == "prepare") && !directTarget(d.Target) { // an existing host has no cloud-init
 		command := "timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'"
 		out, stderr, rc, runErr := n.Run(ctx, command)
 		gateErr := errors.Join(runErr, qualifyCloudInit(out, rc))
@@ -221,6 +224,13 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
+	}
+	if directTarget(d.Target) && phase == "" {
+		// An existing host outlives the run, unlike a destroyed VM: stop every
+		// unit this run started and require a clean postflight. Registered before
+		// any start, so it also runs after a failed start; it runs after the
+		// service-log collection below (defers are LIFO).
+		defer func() { failure = errors.Join(failure, directCleanup(n, c.Output, d, h)) }()
 	}
 	service := func(role, cmd string) error {
 		_, e := run("start-"+role, cloudStart(d, root, role, cmd))
@@ -303,6 +313,48 @@ func cloudHelpers(phase, chaosSet string) []string {
 		helpers = append(helpers, "chaos_load.py")
 	}
 	return helpers
+}
+
+// directTarget is an existing host reached over plain ssh: no cloud lifecycle,
+// no cloud-init, and the run cleans up after itself.
+func directTarget(target string) bool { return target == "onprem" || target == "docker" }
+
+// cloudRunRoot is the only run root a host may declare: the VM's data path, or
+// for a direct target a directory under the ssh user's home.
+func cloudRunRoot(d inventory.Document, h inventory.Host) string {
+	if !directTarget(d.Target) {
+		return "/data/seaweed-runs/" + d.RunID
+	}
+	home := "/home/" + h.Management.User
+	if h.Management.User == "root" {
+		home = "/root"
+	}
+	return home + "/sw-runs/" + d.RunID
+}
+
+// directCleanup stops this run's transient units and checks that none remain
+// and that no declared service port still listens. It has its own bound so it
+// still runs when the phase context has expired.
+func directCleanup(n *infra.Node, dir string, d inventory.Document, h inventory.Host) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	units := cloudQuote("sw-cloud-" + d.RunID + "-*")
+	_, stop := cloudStep(ctx, n, dir, "cloud-cleanup.json", "cleanup",
+		60, "sudo systemctl stop "+units+"; sudo systemctl reset-failed "+units+" 2>/dev/null || true")
+	ports := []string{}
+	for _, s := range h.Services {
+		ports = append(ports, strconv.Itoa(s.Port))
+	}
+	check := "u=$(systemctl list-units --all --no-legend " + units + " | wc -l); p=0"
+	if len(ports) > 0 {
+		check += "; p=$(ss -Hltn | awk '{print $4}' | grep -cE ':(" + strings.Join(ports, "|") + ")$' || true)"
+	}
+	check += "; echo \"units=$u ports=$p\"; [ \"$u\" = 0 ] && [ \"$p\" = 0 ]"
+	out, post := cloudStep(ctx, n, dir, "cloud-postflight.json", "postflight", 30, check)
+	if post != nil {
+		post = fmt.Errorf("postflight not clean (%s): %w", strings.TrimSpace(out), post)
+	}
+	return errors.Join(stop, post)
 }
 
 func cloudNode(h inventory.Host, key, pin string) *infra.Node {
