@@ -28,6 +28,8 @@ type SmokeSettings struct {
 	rotation    *Rotation
 	readyAssign *AssignLayout
 	soakSetup   *SoakSetup
+	// Master-writes plans only, set by Plan.profileSettings from Plan.Restart.
+	filerVerbose bool
 }
 
 // SmokeConfig is emitted by the common inventory consumer, never a cloud driver.

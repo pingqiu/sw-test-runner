@@ -92,12 +92,35 @@ class ReadControls(unittest.TestCase):
                 self.assertEqual(backings,['loader-http' if route=='http' else 'loader-rdma'])
                 self.assertEqual(json.loads(output.getvalue())['status'],'OBSERVED')
 
+class HeldSets(FakeConnector):
+    """SET completions wait until `release` GETs have run: the pool-holding stall."""
+    def __init__(self,release):
+        super().__init__();self.release=release;self.held=[];self.peak=0;self.gets=0
+    def submit_batch_set(self,keys,buffers):
+        self.sets+=1;self.values[keys[0]]=bytes(buffers[0])
+        s=self.stats['loader'];s['write_bytes']+=len(buffers[0]);s['write_objects']+=1
+        self.future+=1;self.held.append(self.future);self.peak=max(self.peak,len(self.held))
+        if self.gets>=self.release:
+            for f in self.held:
+                self.pending.append((f,True,"",[True]));os.write(self.w,b"x")
+            self.held=[];return self.future
+        if self.sets==1:
+            self.pending.append((self.future,True,'',[True]));self.held.pop();os.write(self.w,b'x')  # one ACK, so GETs have a key
+        return self.future
+    def submit_batch_get(self,keys,buffers):
+        self.gets+=1
+        if self.gets>=self.release:
+            for f in self.held:
+                self.pending.append((f,True,'',[True]));os.write(self.w,b'x')
+            self.held=[]
+        return super().submit_batch_get(keys,buffers)
+
 class WriteLoadControls(unittest.TestCase):
-    """Report-only writes across a master restart: fresh keys, no retries, no threshold."""
-    def load(self,mode='good',duration=.05):
-        c=dict(run_id='cpu',client='m01',transport='dc',keys=2,length=64,root='/testops/cpu/m01')
-        conn=FakeConnector(mode);rows=[]
-        try:return kv_smoke.write_load(conn,c,rows.append,duration=duration,pace=.005),rows,conn
+    """Report-only load across a master restart: fresh keys, no retries, no threshold."""
+    C=dict(run_id='cpu',client='m01',transport='dc',keys=2,length=64,root='/testops/cpu/m01')
+    def load(self,mode='good',duration=.05,conn=None):
+        conn=conn or FakeConnector(mode);rows=[]
+        try:return kv_smoke.write_load(conn,self.C,rows.append,duration=duration,pace=.005),rows,conn
         finally:conn.close()
     def test_every_set_is_one_fresh_key_and_read_back(self):
         end,rows,conn=self.load()
@@ -105,20 +128,33 @@ class WriteLoadControls(unittest.TestCase):
         self.assertEqual(end['sets'],len(sets));self.assertGreater(len(sets),0)
         self.assertEqual(len({r['key'] for r in sets}),len(sets))
         self.assertFalse({r['key'] for r in sets}&{'m01-0','m01-1'})
-        self.assertEqual([r['operation_id'] for r in sets],list(range(len(sets))))
+        self.assertEqual(sorted(r['operation_id'] for r in sets),list(range(len(sets))))
         self.assertEqual((end['status'],end['stage'],end['transport']),('OBSERVED','write-load','dc'))
         self.assertEqual((end['acked'],end['failed'],end['readback_exact'],end['readback_missing']),(len(sets),0,len(sets),0))
         self.assertEqual(conn.sets,len(sets))
+    def test_gets_run_on_the_same_connector_during_the_load(self):
+        end,rows,_=self.load()
+        gets=[r for r in rows if r['event']=='GET']
+        self.assertEqual(end['gets'],len(gets));self.assertGreater(len(gets),0)
+        self.assertTrue(all(r['ok'] for r in gets))
+    def test_held_sets_stop_at_four_and_gets_keep_going(self):
+        conn=HeldSets(5)
+        end,rows,_=self.load(duration=.2,conn=conn)
+        self.assertEqual(conn.peak,4)
+        order=[r['event'] for r in rows]
+        self.assertGreaterEqual(order[:order.index('SET',1)].count('GET'),4)
+        self.assertEqual(end['failed'],0)
     def test_failed_set_is_recorded_not_fatal_and_not_read_back(self):
         end,rows,_=self.load('ambiguous')
         sets=[r for r in rows if r['event']=='SET']
         self.assertTrue(sets and all(not r['ok'] and r['error'] for r in sets))
-        self.assertEqual((end['acked'],end['failed'],end['readback_exact']),(0,len(sets),0))
+        self.assertEqual((end['acked'],end['failed'],end['readback_exact'],end['gets']),(0,len(sets),0,0))
     def test_wrong_bytes_stay_fatal(self):
         with self.assertRaisesRegex(AssertionError,'wrong'):self.load('wrong')
-    def test_a_miss_on_read_back_is_counted_not_excused(self):
-        end,_,_=self.load('miss')
+    def test_a_miss_is_counted_not_excused(self):
+        end,rows,_=self.load('miss')
         self.assertEqual(end['readback_exact'],0);self.assertEqual(end['readback_missing'],end['acked'])
+        self.assertTrue(any(r['event']=='GET' and not r['ok'] for r in rows))
     def test_stage_needs_dc(self):
         self.assertEqual(kv_smoke.read_stage_args('write-load','dc'),('write-load','dc'))
         for route,transport in (('http','dc'),('http','http')):

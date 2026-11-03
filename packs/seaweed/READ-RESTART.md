@@ -114,12 +114,18 @@ operation IDs/keys/interval joins, wrong-byte and unknown-completion rules stay.
 ## Writes across a master restart (report only)
 
 `Plan.Restart` with `role: master` and `writes: true` replaces the read load with
-`ReadLoadArgs(..., "write-load", "dc")`: serial SETs for 120 s at 250 ms pacing, one
-fresh key per SET, no retry. The load starts before the kill and no probe gates it.
+`ReadLoadArgs(..., "write-load", "dc")` for 120 s on one connector: SETs on fresh keys
+started every 250 ms, up to 4 at once, and one GET of an ACKed key at the same pace, no
+retry. The load starts before the kill and no probe gates it. The filer runs at `-v=1`,
+which logs its assign retry schedule.
 The plan's ready steps carry no Assign probe, so writes meet the master's warm-up.
 
 A completed failure is recorded, not fatal. An unknown completion or wrong read-back
-bytes fails the run. The pack result carries the report: SET count, failures, p50 and
-max latency before the kill, from kill to READY, and after READY, plus the first ACK
-after the kill and read-back counts. Its verdict is always `REPORT_ONLY`; no threshold
+bytes fails the run. The pack result carries the report: for SETs and GETs, count,
+failures, p50 and max latency before the kill, from kill to READY, and after READY, plus
+the first ACK completing after the kill and read-back counts. Its verdict is always `REPORT_ONLY`; no threshold
 exists until real runs justify one.
+
+Each scenario run has one kill, so the two-host plan is at least three runs, with and
+without the assign retry hint. Retry steps should show in the filer log; GET latency
+above about 1 s during warm-up would mean queueing behind stalled SETs.

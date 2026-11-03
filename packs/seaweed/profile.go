@@ -36,6 +36,8 @@ type ProfileConfig struct {
 	Rotation    *Rotation     `json:"rotation,omitempty"`
 	ReadyAssign *AssignLayout `json:"ready_assign,omitempty"`
 	SoakSetup   *SoakSetup    `json:"soak_setup,omitempty"`
+	// Master-writes plans only: the filer logs its assign retry schedule at V(1).
+	FilerVerbose bool `json:"filer_verbose,omitempty"`
 }
 
 func checkProfile(j tr.JobPin, in tr.PackInputs, d *inventory.Document, host, action, role string, s SmokeSettings) error {
@@ -98,6 +100,7 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 	if strings.HasPrefix(action, "soak_") {
 		c.SoakSetup = s.soakSetup
 	}
+	c.FilerVerbose = s.filerVerbose
 	// Fixed M01/M02 profile identity from the sealed bbb01f8 packet's
 	// observations/{m01,m02}-fabric-evidence.json, manifest 60f4f17f.
 	// A replacement requires a new reviewed profile, never historical credit.

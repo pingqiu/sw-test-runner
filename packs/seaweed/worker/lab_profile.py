@@ -112,7 +112,7 @@ def product_command(config, role):
                 '-port.grpc=' + str(ports['master_grpc']),
                 '-volumeSizeLimitMB=32', '-defaultReplication=000']
     elif role == 'filer':
-        argv = [str(binary / 'weed'), 'filer', '-master=' + master,
+        argv = [str(binary / 'weed')] + (['-v=1'] if config.get('filer_verbose') is True else []) + ['filer', '-master=' + master,
                 '-ip=' + address, '-port=' + str(ports['filer_http']),
                 '-port.grpc=' + str(ports['filer_grpc']),
                 '-defaultStoreDir=' + str(root / 'filer'),

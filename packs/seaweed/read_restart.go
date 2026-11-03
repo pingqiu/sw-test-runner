@@ -90,7 +90,7 @@ func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[strin
 		victim = victim || s.Job == ep.Victim && s.Role == role && s.Host == "m02"
 	}
 	j := in.Jobs[ep.Replacement]
-	want, e := ProfileArgs(d, "m02", "deploy", role, p.Smoke, in.Files["m02"])
+	want, e := ProfileArgs(d, "m02", "deploy", role, p.profileSettings(false), in.Files["m02"])
 	if !victim || (!x.Freeze && (used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256)) {
 		return errors.New("replacement not exact private volume helper")
 	}
