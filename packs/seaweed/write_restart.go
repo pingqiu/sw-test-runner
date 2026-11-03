@@ -32,7 +32,7 @@ type WriteError struct {
 type WriteReport struct {
 	Verdict            string         `json:"verdict"`
 	Sets               [3]WriteWindow `json:"sets_before_outage_after"`
-	Gets               [3]WriteWindow `json:"gets_before_outage_after"`
+	RereadGets         [3]WriteWindow `json:"reread_gets_before_outage_after"` // disjoint from FreshGets
 	FreshGets          [3]WriteWindow `json:"fresh_gets_before_outage_after"`
 	KillToReadyS       float64        `json:"kill_to_ready_s"`
 	FirstAckAfterKillS float64        `json:"first_ack_after_kill_s"`
@@ -59,6 +59,7 @@ type writeRow struct {
 type writeGet struct {
 	key     string
 	started float64
+	fresh   bool
 }
 
 type writeEnd struct {
@@ -131,17 +132,12 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 	acked, failed := 0, 0
 	first, last := math.Inf(1), math.Inf(-1)
 	var lat [3][3][]float64
-	freshKeys := map[string]bool{}
 	for _, row := range rows {
 		kind := 0
 		if row.Event == "GET" {
 			kind = 1
 			if row.Fresh {
 				kind = 2
-				if freshKeys[row.Key] {
-					return r, errors.New("fresh GET of a key already read")
-				}
-				freshKeys[row.Key] = true
 			}
 		}
 		if row.OperationID == nil || row.OK == nil || *row.OperationID < 0 {
@@ -159,7 +155,7 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 			return r, errors.New("SET row key differs")
 		}
 		if kind > 0 {
-			getKeys = append(getKeys, writeGet{row.Key, started})
+			getKeys = append(getKeys, writeGet{row.Key, started, kind == 2})
 		}
 		if started < spanStart || ended < started || ended > spanEnd {
 			return r, errors.New("load row outside the terminal span")
@@ -171,7 +167,7 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 		if started >= ready {
 			w = 2
 		}
-		windows := [3]*[3]WriteWindow{&r.Sets, &r.Gets, &r.FreshGets}
+		windows := [3]*[3]WriteWindow{&r.Sets, &r.RereadGets, &r.FreshGets}
 		window := &windows[kind][w]
 		window.Ops++
 		lat[kind][w] = append(lat[kind][w], ended-started)
@@ -206,6 +202,15 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 		if at, ok := ackedAt[g.key]; !ok || at > g.started {
 			return r, errors.New("GET of a key with no earlier ACK")
 		}
+		if !g.fresh {
+			continue
+		}
+		// Fresh means the key's first GET of any kind, by submission, not row order.
+		for _, other := range getKeys {
+			if other != g && other.key == g.key && (other.started <= g.started || other.fresh) {
+				return r, errors.New("fresh GET of a key already read")
+			}
+		}
 	}
 	for name, n := range map[string]int{"SET": end.Sets, "GET": end.Gets} {
 		if len(seen[name]) != n {
@@ -235,7 +240,7 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 				continue
 			}
 			slices.Sort(l)
-			windows := [3]*[3]WriteWindow{&r.Sets, &r.Gets, &r.FreshGets}
+			windows := [3]*[3]WriteWindow{&r.Sets, &r.RereadGets, &r.FreshGets}
 			window := &windows[kind][i]
 			window.P50S, window.MaxS = l[len(l)/2], l[len(l)-1]
 		}

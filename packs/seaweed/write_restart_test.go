@@ -61,8 +61,8 @@ func TestWriteReportSplitsAroundKillAndReady(t *testing.T) {
 	if r.Sets[2].MaxS < 0.89 || r.Sets[2].MaxS > 0.91 {
 		t.Fatalf("max %+v", r.Sets[2])
 	}
-	if r.Gets[0].Ops != 1 || r.Gets[1].Ops != 1 || r.Gets[2].Ops != 1 || r.Gets[1].MaxS != 3 {
-		t.Fatalf("get windows %+v", r.Gets)
+	if r.RereadGets[0].Ops != 1 || r.RereadGets[1].Ops != 1 || r.RereadGets[2].Ops != 1 || r.RereadGets[1].MaxS != 3 {
+		t.Fatalf("get windows %+v", r.RereadGets)
 	}
 	if r.FirstAckAfterKillS < 1.50 || r.FirstAckAfterKillS > 1.52 {
 		t.Fatalf("first ACK after kill %v", r.FirstAckAfterKillS)
@@ -70,7 +70,7 @@ func TestWriteReportSplitsAroundKillAndReady(t *testing.T) {
 	if len(r.Errors) != 1 || r.Errors[0].Error != "no writable volumes" || r.Errors[0].Event != "SET" {
 		t.Fatalf("errors %+v", r.Errors)
 	}
-	if r.FreshGets[1].Ops != 0 || r.Gets[1].Ops != 1 {
+	if r.FreshGets[1].Ops != 0 || r.RereadGets[1].Ops != 1 {
 		t.Fatalf("fresh windows %+v", r.FreshGets)
 	}
 	if r.Verdict != "REPORT_ONLY" {
@@ -96,8 +96,8 @@ func TestFreshGetsAreCountedApartAndOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.FreshGets[1].Ops != 1 || r.Gets[1].Ops != 0 || r.FreshGets[1].MaxS != 3 {
-		t.Fatalf("fresh %+v gets %+v", r.FreshGets, r.Gets)
+	if r.FreshGets[1].Ops != 1 || r.RereadGets[1].Ops != 0 || r.FreshGets[1].MaxS != 3 {
+		t.Fatalf("fresh %+v gets %+v", r.FreshGets, r.RereadGets)
 	}
 	_, err = writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
 		g[1]["fresh"], g[2]["fresh"] = true, true
@@ -105,6 +105,44 @@ func TestFreshGetsAreCountedApartAndOnlyOnce(t *testing.T) {
 	}), writeCfg(), 104.5, 106.5)
 	if err == nil {
 		t.Fatal("a repeated fresh GET was accepted")
+	}
+}
+
+// codex01: a fresh GET is the key's first GET of any kind, whatever order the rows arrive in.
+func TestFreshGetAfterAnOrdinaryGetIsRefused(t *testing.T) {
+	_, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		g[1]["fresh"] = true // g[0] already read this key
+	}), writeCfg(), 104.5, 106.5)
+	if err == nil {
+		t.Fatal("fresh credit for a key already read")
+	}
+	_, err = writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		g[1]["fresh"], g[1]["key"] = true, "m01-w1"
+		g[2]["key"] = "m01-w1" // an ordinary reread after the fresh read is fine
+	}), writeCfg(), 104.5, 106.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Reread and fresh arrays are disjoint, and named so: together they are every GET.
+func TestRereadAndFreshGetsAddUpToAllGets(t *testing.T) {
+	r, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
+		g[1]["fresh"], g[1]["key"] = true, "m01-w1"
+	}), writeCfg(), 104.5, 106.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for i := range r.RereadGets {
+		total += r.RereadGets[i].Ops + r.FreshGets[i].Ops
+	}
+	if total != 3 {
+		t.Fatalf("reread %+v fresh %+v", r.RereadGets, r.FreshGets)
+	}
+	b, _ := json.Marshal(r)
+	if !strings.Contains(string(b), "reread_gets_before_outage_after") || strings.Contains(string(b), `"gets_before`) {
+		t.Fatalf("report names: %s", b)
 	}
 }
 
