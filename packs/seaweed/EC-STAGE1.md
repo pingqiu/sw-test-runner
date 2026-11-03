@@ -9,6 +9,12 @@ Without the product reconstruction marker, S2 remains `NOT_COVERED` and exposure
 
 ## Repeatable local stage 1
 
+Legacy exact-byte GO packets/tokens and protected lab releases are historical
+requirements only. Stage 1 uses the current local path; any future lab stage
+uses the manager's window plus direct execution/log collection/postflight.
+The integration entry below is temporary: the normal local entry converges
+with #81, without building another EC execution path or custody proof.
+
 On Linux/WSL, from the runner checkout, as root:
 
 ```sh

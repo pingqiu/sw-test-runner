@@ -24,7 +24,8 @@ def capture(c,manifest):
         if directory.parent!=root or directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=os.getuid() or directory.stat().st_mode&0o022:raise ValueError('foreign holder dir')
         if any(directory.glob('*.active')):raise ValueError('unsupported active generation present')
         for path in directory.glob('*.dat*'):
-            match=re.fullmatch(r'(?:.*_)?([0-9]+)\.dat.*',path.name)
+            # Bind the original basename before examining any backup suffix.
+            match=re.fullmatch(r'(?:.*_)?([0-9]+)',path.name.partition('.dat')[0])
             if not match or str(int(match[1])) in volumes:raise ValueError('original/unknown data volume present')
             unrelated.append(dict(volume=str(int(match[1])),job=label,name=path.name,**stable(path)))
         matches=[]

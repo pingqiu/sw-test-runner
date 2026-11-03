@@ -51,7 +51,7 @@ class Regressions(unittest.TestCase):
     c=dict(root=tmp,holders=holders,run_id='cpu',volume_exe=sys.executable,volume_sha256=hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest())
     m=dict(run_id='cpu',objects=[dict(fid='1,abc')]);cap.capture(c,m)
     original=root/'h1/bucket_1.dat'
-    for name in ('bucket_1.dat','bucket_1.dat.backup','other.active'):
+    for name in ('bucket_1.dat','bucket_1.dat.backup','bucket_1.dat.backup_2.dat','bucket_1.dat_2.dat','other.active'):
      original=root/'h1'/name;original.write_bytes(b'residual original or unsupported generation')
      with self.assertRaises(ValueError):cap.capture(c,m)
      original.unlink()
