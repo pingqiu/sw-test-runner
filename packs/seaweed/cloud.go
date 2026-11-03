@@ -111,7 +111,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
 	}
 	defer func() {
-		if failure != nil && phase == "" {
+		// A direct target's cleanup already captured the service journal before
+		// its teardown; a second fetch after teardown would overwrite it.
+		if failure != nil && phase == "" && !directTarget(d.Target) {
 			if e := collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q); e != nil {
 				failure = errors.Join(failure, fmt.Errorf("save failure-log fetch: %w", e))
 			}
@@ -336,23 +338,38 @@ func cloudRunRoot(d inventory.Document, h inventory.Host) string {
 	return home + "/sw-runs/" + d.RunID
 }
 
+// Controller-side bounds of a direct run's cleanup: the diagnostic capture,
+// then the teardown (stop and postflight), each with its own connection.
+var directCollectBound, directTeardownBound = 30 * time.Second, 90 * time.Second
+
 // directCleanup collects this run's service logs, then stops its transient
 // units, then checks that none remain and no declared service port listens.
 // It opens its own connection under its own deadline: the run's connection
 // closes when the run's context is cancelled, and a cleanup that cannot reach
 // the host is a failure, never a clean result.
 func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	units := cloudQuote("sw-cloud-" + d.RunID + "-*")
+	// Diagnostics first, on their own connection and controller-side deadline,
+	// so a stalled journal can never spend the teardown's time or connection.
+	collect := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), directCollectBound)
+		defer cancel()
+		n := cloudNode(h, c.SSHKey, c.HostKey)
+		if err := n.ConnectContext(ctx); err != nil {
+			return fmt.Errorf("service-log capture did not reach the host: %w", err)
+		}
+		defer n.Close()
+		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second),
+			"sudo journalctl --no-pager -u "+units+" -n 300")
+		return errors.Join(err, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), directTeardownBound)
 	defer cancel()
 	n := cloudNode(h, c.SSHKey, c.HostKey)
 	if err := n.ConnectContext(ctx); err != nil {
-		return fmt.Errorf("cleanup did not reach the host: %w", err)
+		return errors.Join(collect, fmt.Errorf("cleanup did not reach the host: %w", err))
 	}
 	defer n.Close()
-	units := cloudQuote("sw-cloud-" + d.RunID + "-*")
-	logs, collect := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", 30,
-		"sudo journalctl --no-pager -u "+units+" -n 300")
-	collect = errors.Join(collect, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
 	_, stop := cloudStep(ctx, n, c.Output, "cloud-cleanup.json", "cleanup",
 		60, "sudo systemctl stop "+units+"; sudo systemctl reset-failed "+units+" 2>/dev/null || true")
 	ports := []string{}

@@ -29,6 +29,9 @@ type directHost struct {
 	failStep string
 	dirty    bool
 	hangKV   time.Duration // the kv_smoke step blocks this long before answering
+	hangLog  time.Duration // the journal capture blocks this long before answering
+	journals int           // journal captures answered so far
+	out      string        // the run's local output directory
 }
 
 func (h *directHost) exec(cmd string, c ssh.Channel) uint32 {
@@ -38,6 +41,13 @@ func (h *directHost) exec(cmd string, c ssh.Channel) uint32 {
 	switch {
 	case strings.HasPrefix(cmd, "cat >"):
 		io.Copy(io.Discard, c)
+	case strings.Contains(cmd, "journalctl"):
+		time.Sleep(h.hangLog)
+		h.mu.Lock()
+		h.journals++ // each capture is distinguishable, so an overwrite shows
+		n := h.journals
+		h.mu.Unlock()
+		fmt.Fprintf(c, "JOURNAL-MARKER %d\n", n)
 	case h.failStep != "" && strings.Contains(cmd, h.failStep):
 		return 1
 	case strings.Contains(cmd, "systemctl list-units"):
@@ -91,6 +101,7 @@ func directRunWithin(t *testing.T, h *directHost, within time.Duration, mutate .
 	t.Helper()
 	address, pin, key, _ := cloudSSH(t, "", h.exec)
 	cfg := CloudConfig{SSHKey: key, HostKey: pin, Output: t.TempDir(), Files: map[string]CloudFile{}}
+	h.out = cfg.Output
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
 		p := filepath.Join(t.TempDir(), name)
 		os.WriteFile(p, []byte(name), 0600)
@@ -137,6 +148,35 @@ func TestDirectCleanupRunsAfterAFailedStart(t *testing.T) {
 	}
 	if collect < 0 || collect > stop {
 		t.Fatalf("a failed start's logs were not read before teardown: journal %d, stop %d", collect, stop)
+	}
+	// codex01 review c8a23688 R4: no later fetch overwrites the captured journal.
+	var captured struct {
+		Stdout string `json:"stdout"`
+	}
+	raw, _ := os.ReadFile(filepath.Join(h.out, "cloud-collect.json"))
+	b, err := os.ReadFile(filepath.Join(h.out, "cloud-services.log"))
+	if json.Unmarshal(raw, &captured) != nil || !strings.Contains(captured.Stdout, "JOURNAL-MARKER") || err != nil || string(b) != captured.Stdout {
+		t.Fatalf("the pre-teardown service log was lost or overwritten: log %q, captured %q, %v", b, captured.Stdout, err)
+	}
+}
+
+// codex01 review c8a23688 R1: a stalled journal capture is cut at its own
+// controller-side bound, on its own connection, and never spends the teardown.
+func TestDirectStalledJournalCannotSpendTheTeardown(t *testing.T) {
+	collect, teardown := directCollectBound, directTeardownBound
+	directCollectBound, directTeardownBound = time.Second, 5*time.Second
+	t.Cleanup(func() { directCollectBound, directTeardownBound = collect, teardown })
+	h := &directHost{hangLog: 10 * time.Second}
+	started := time.Now()
+	err := directRun(t, h)
+	if err == nil || !strings.Contains(err.Error(), "collect-services") {
+		t.Fatalf("a stalled journal capture did not fail the run: %v", err)
+	}
+	if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
+		t.Fatal("a stalled journal capture left the host without teardown")
+	}
+	if elapsed := time.Since(started); elapsed > 8*time.Second {
+		t.Fatalf("the stalled capture held the cleanup for %v", elapsed)
 	}
 }
 
