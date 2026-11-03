@@ -114,6 +114,7 @@ func (l *AssignLayout) validate() error {
 // They are unexported on SmokeSettings, so plan JSON can never set them there.
 func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 	s := p.Smoke
+	s.filerVerbose = p.Restart != nil && p.Restart.Writes
 	if p.Soak != nil {
 		s.rotation = p.Soak.Rotation
 		if faultReady {

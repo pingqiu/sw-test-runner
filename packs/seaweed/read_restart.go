@@ -62,10 +62,17 @@ func (x ReadRestart) targetRole() string {
 	return x.Role
 }
 
+func (x ReadRestart) loadStage() string {
+	if x.Writes {
+		return "write-load"
+	}
+	return "load"
+}
+
 func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]bool) error {
 	x := p.Restart
 	role := x.targetRole()
-	if role != "volume" && role != "filer" {
+	if (role != "volume" && role != "filer" && role != "master") || (role == "master") != x.Writes {
 		return errors.New("unsupported restart role")
 	}
 	ep, ok := in.Restarts[x.Episode]
@@ -83,12 +90,12 @@ func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[strin
 		victim = victim || s.Job == ep.Victim && s.Role == role && s.Host == "m02"
 	}
 	j := in.Jobs[ep.Replacement]
-	want, e := ProfileArgs(d, "m02", "deploy", role, p.Smoke, in.Files["m02"])
+	want, e := ProfileArgs(d, "m02", "deploy", role, p.profileSettings(false), in.Files["m02"])
 	if !victim || (!x.Freeze && (used[ep.Replacement] || e != nil || !slices.Equal(j.Argv, append(want, "--replacement-"+role)) || j.Node != "m02" || j.Executable != in.Jobs[ep.Victim].Executable || j.SHA256 != in.Jobs[ep.Victim].SHA256)) {
 		return errors.New("replacement not exact private volume helper")
 	}
 	used[ep.Replacement] = true
-	for _, v := range []struct{ label, stage, route string }{{x.DC, "load", "dc"}, {x.RecoverDC, "recovery", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
+	for _, v := range []struct{ label, stage, route string }{{x.DC, x.loadStage(), "dc"}, {x.RecoverDC, "recovery", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
 		if x.Freeze && v.route == "http" {
 			continue
 		}
@@ -164,6 +171,7 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 		var ready struct {
 			Status     string
 			ClientMono float64 `json:"client_mono"`
+			ReadyMono  float64 `json:"ready_mono"`
 			Processes  map[string]struct {
 				Identity tr.ProcessIdentity `json:"scope_identity"`
 			}
@@ -173,6 +181,9 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 		}
 		if step.Host == "m01" {
 			readyMono = ready.ClientMono
+			if x.Writes {
+				readyMono = ready.ReadyMono // the window closes when READY passed, not when its probe began
+			}
 		}
 		if step.Host == "m02" {
 			role := x.targetRole()
@@ -198,7 +209,12 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 
 	var c SmokeConfig
 	_ = json.Unmarshal([]byte(in.Jobs[x.DC].Argv[3]), &c)
-	if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{receipt.Kill.PreKillMono}); err != nil {
+	remedy := "inspect DC window and exact DC/HTTP recovery receipts; HTTP outage DEFERRED"
+	if x.Writes {
+		if remedy, err = writeRemedy(e, c, receipt.Kill.PreKillMono, readyMono); err != nil {
+			return nil, err
+		}
+	} else if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{receipt.Kill.PreKillMono}); err != nil {
 		return nil, err
 	}
 	for _, v := range []struct{ label, route string }{{x.RecoverDC, "dc"}, {x.RecoverHTTP, "http"}} {
@@ -206,5 +222,5 @@ func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, 
 			return nil, err
 		}
 	}
-	return admittedResult("completed", "OK", "inspect DC window and exact DC/HTTP recovery receipts; HTTP outage DEFERRED", "seaweed_read_restart", d), nil
+	return admittedResult("completed", "OK", remedy, "seaweed_read_restart", d), nil
 }

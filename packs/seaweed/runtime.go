@@ -43,6 +43,8 @@ type ReadRestart struct {
 	RecoverDC   string `json:"recover_dc"`
 	RecoverHTTP string `json:"recover_http"`
 	Role        string `json:"role,omitempty"`
+	// Writes: report-only SETs across a master restart (role "master" only); DC is the write-load job.
+	Writes bool `json:"writes,omitempty"`
 }
 type Step struct {
 	Host string `json:"host"`
