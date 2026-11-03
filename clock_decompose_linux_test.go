@@ -15,8 +15,12 @@ package testrunner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +57,7 @@ type timedJobs struct {
 	node   *infra.Node
 	policy infra.DeploymentPolicy
 	verify bool
+	boot   string
 	mu     sync.Mutex
 	spans  map[string]span
 	errs   map[string]string
@@ -71,21 +76,36 @@ func (b *timedJobs) mark(name string, f func() error) error {
 	return err
 }
 
-func (b *timedJobs) readback(name string) {
+// readback is the approved guard, fail-closed: an error stops the attempt before its custody effect, as
+// approvedJobs.work does. It also binds the node to this host: its readback boot id must equal ours.
+func (b *timedJobs) readback(ctx context.Context, name string) error {
 	if !b.verify {
-		return
+		return nil
 	}
-	_ = b.mark(name, func() error { _, err := b.node.VerifyDeployment(context.Background(), b.policy); return err })
+	return b.mark(name, func() error {
+		r, err := b.node.VerifyDeployment(ctx, b.policy)
+		if err == nil && r.BootID != b.boot {
+			err = errors.New("readback boot is not this host's: the harness measures one host only")
+		}
+		return err
+	})
 }
 
 func (b *timedJobs) Enroll(ctx context.Context, id string, a RunAdmission, s JobSpec) (i ProcessIdentity, err error) {
-	b.readback("enroll_verify")
+	if err = b.readback(ctx, "enroll_verify"); err != nil {
+		return i, errors.Join(ErrJobNotStarted, err) // approvedJobs.Enroll: a failed work check never starts the job
+	}
 	err = b.mark("enroll_custody", func() error { i, err = b.SSHJobs.Enroll(ctx, id, a, s); return err })
+	if err == nil && i.BootID != b.boot {
+		err = errors.New("enrolled on another boot: the harness measures one host only")
+	}
 	return i, err
 }
 
 func (b *timedJobs) Authorize(ctx context.Context, id string, i ProcessIdentity) error {
-	b.readback("authorize_verify")
+	if err := b.readback(ctx, "authorize_verify"); err != nil {
+		return err // approvedJobs.Authorize: no authorization after a failed work check
+	}
 	return b.mark("authorize_custody", func() error { return b.SSHJobs.Authorize(ctx, id, i) })
 }
 
@@ -109,13 +129,49 @@ func TestSoakClockDecompose(t *testing.T) {
 		t.Fatalf("policy: %v", err)
 	}
 	node := &infra.Node{Host: c.Host, User: c.User, HostKey: c.HostKey, KeyFile: c.KeyFile}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := os.OpenFile(c.Out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
+	t.Cleanup(func() {
+		if err := out.Close(); err != nil {
+			t.Errorf("rows file close: %v", err)
+		}
+	})
 	enc := json.NewEncoder(out)
+	// Provenance first: which host, boot, binary, config and policy produced these rows.
+	hostname, _ := os.Hostname()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := map[string]any{"provenance": true, "hostname": hostname, "boot_id": strings.TrimSpace(string(boot)),
+		"binary_sha256": fileSHA(t, self), "config_sha256": fileSHA(t, path), "policy_sha256": fileSHA(t, c.Policy), "job_sha256": fileSHA(t, c.Job)}
+	if err := enc.Encode(prov); err != nil {
+		t.Fatal(err)
+	}
 	for run := 0; run < c.Runs; run++ {
+		measure(t, c, policy, node, strings.TrimSpace(string(boot)), run, enc)
+	}
+}
+
+func fileSHA(t *testing.T, p string) string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// measure runs one job. Its scope is closed on every path, and the row is written before any failure is raised,
+// so a failed attempt is kept as evidence but still fails the test.
+func measure(t *testing.T, c decomposeConfig, policy infra.DeploymentPolicy, node *infra.Node, boot string, run int, enc *json.Encoder) {
+	{
 		a := testAdmission()
 		a.RunID = "clock-decompose"
 		a.OutputDir = c.OutputDir
@@ -123,11 +179,24 @@ func TestSoakClockDecompose(t *testing.T) {
 		a.CleanupReserve = 10 * time.Second
 		a.HardDeadline = a.WorkDeadline.Add(a.CleanupReserve)
 		b := &timedJobs{SSHJobs: &SSHJobs{Nodes: map[string]*infra.Node{"m02": node}, Runner: c.Runner}, t: t, node: node, policy: policy,
-			verify: c.Verify, spans: map[string]span{}, errs: map[string]string{}}
+			verify: c.Verify, boot: boot, spans: map[string]span{}, errs: map[string]string{}}
 		s, err := NewRunScope(t.Context(), a, b, func(context.Context, RunAdmission) error { return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
+		closed := false
+		closeScope := func() error {
+			if closed {
+				return nil
+			}
+			closed = true
+			return s.Close()
+		}
+		defer func() {
+			if err := closeScope(); err != nil {
+				t.Errorf("run %d: scope close: %v", run, err)
+			}
+		}()
 		spec := JobSpec{Node: "m02", Executable: c.Python, SHA256: c.PythonSHA256, Argv: []string{"-I", c.Job}, CaptureOutput: true}
 		t1 := mono(t) // runtime.go: t1 immediately before RunApprovedPackJob
 		h, err := s.Start(spec)
@@ -141,14 +210,24 @@ func TestSoakClockDecompose(t *testing.T) {
 			row["error"] = err.Error()
 		} else {
 			stdout, _, derr := e.Output.Decode()
-			row["code"], row["job"] = e.Code, json.RawMessage(stdout)
-			if derr != nil || json.Valid(stdout) == false {
+			row["code"], row["identity"] = e.Code, e.Identity
+			if derr != nil || !json.Valid(stdout) {
 				row["error"] = "job output undecodable"
+			} else {
+				row["job"] = json.RawMessage(stdout)
+				if e.Code != 0 {
+					row["error"] = "job exit nonzero"
+				}
 			}
 		}
-		if err := enc.Encode(row); err != nil {
-			t.Fatal(err)
+		if cerr := closeScope(); cerr != nil {
+			row["close_error"] = cerr.Error()
 		}
-		_ = s.Close()
+		if eerr := enc.Encode(row); eerr != nil {
+			t.Fatalf("run %d: row not recorded: %v", run, eerr)
+		}
+		if row["error"] != nil || row["close_error"] != nil {
+			t.Fatalf("run %d failed: %v %v", run, row["error"], row["close_error"])
+		}
 	}
 }
