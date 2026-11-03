@@ -20,6 +20,7 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
+	ECStage1 bool                 `json:"ec_stage1,omitempty"`
 	SSHKey   string               `json:"ssh_key"`
 	HostKey  string               `json:"-"`
 	HostKeys map[string]string    `json:"-"`
@@ -41,10 +42,10 @@ type CloudFile struct {
 
 // CheckFiles is local-only and runs before any billable create.
 func (c CloudConfig) CheckFiles() error {
-	if len(c.Files) != 3 {
+	if len(c.Files) != len(c.artifactNames()) {
 		return errors.New("require weed, weed-volume and native.tar")
 	}
-	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
+	for _, name := range c.artifactNames() {
 		f, ok := c.Files[name]
 		if !ok {
 			return errors.New("missing product artifact")
@@ -67,11 +68,19 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
+	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != len(c.artifactNames()) {
 		return "", errors.New("one Azure, onprem or docker HTTP host and three artifacts required")
 	}
 	if directTarget(d.Target) && len(d.Hosts) != 1 {
 		return "", errors.New("a direct ssh target runs one host")
+	}
+	if c.ECStage1 && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
+		return "", errors.New("EC stage1 requires one direct HTTP host without other phases")
+	}
+	if c.ECStage1 {
+		if _, e = ecDirectPorts(d.Hosts[0]); e != nil {
+			return "", e
+		}
 	}
 	if c.Replication != "" && c.Replication != "001" {
 		return "", errors.New("replication must be absent or 001")
@@ -133,6 +142,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		sequence++
 		seconds := 120
+		if c.ECStage1 {
+			seconds = 190
+		}
 		if phase == "load" {
 			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.
 			if deadline, ok := ctx.Deadline(); ok {
@@ -191,10 +203,14 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		return "", nil
 	}
-	if _, e = run("prepare", "sudo install -d -o "+q(h.Management.User)+" "+q(root)+"; mkdir -p "+q(root+"/worker")+" "+q(root+"/volume")+" "+q(root+"/master")+" "+q(root+"/filer")); e != nil {
+	prepare := "sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker") + " " + q(root+"/volume") + " " + q(root+"/master") + " " + q(root+"/filer")
+	if c.ECStage1 {
+		prepare = "sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker")
+	}
+	if _, e = run("prepare", prepare); e != nil {
 		return "", e
 	}
-	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
+	for _, name := range c.artifactNames() {
 		if e = upload(name, c.Files[name].Path, root+"/"+name); e != nil {
 			return "", e
 		}
@@ -207,7 +223,11 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", e
 	}
 	defer os.RemoveAll(scratch)
-	for _, name := range cloudHelpers(phase, c.ChaosSet) {
+	helpers := cloudHelpers(phase, c.ChaosSet)
+	if c.ECStage1 {
+		helpers = []string{"ec_service.py", "ec_setup.py", "ec_capture.py", "ec_chaos.py", "chaos_load.py"}
+	}
+	for _, name := range helpers {
 		b, e := workerFiles.ReadFile("worker/" + name)
 		if e != nil {
 			return "", e
@@ -220,12 +240,14 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			return "", e
 		}
 	}
-	native := "tar -xf native.tar; test -d seaweedkv_native; "
-	if phase != "" && !contains(h.Roles, "client") {
-		native = ""
-	}
-	if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
-		return "", e
+	if !c.ECStage1 {
+		native := "tar -xf native.tar; test -d seaweedkv_native; "
+		if phase != "" && !contains(h.Roles, "client") {
+			native = ""
+		}
+		if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
+			return "", e
+		}
 	}
 	direct := directTarget(d.Target) && phase == ""
 	if direct {
@@ -234,6 +256,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		// still collects the service logs, then stops every unit this run started
 		// and requires a clean postflight, over its own connection and deadline.
 		defer func() { failure = errors.Join(failure, directCleanup(c, d, h)) }()
+	}
+	if c.ECStage1 {
+		return runDirectEC(d, h, c, run)
 	}
 	service := func(role, cmd string) error {
 		_, e := run("start-"+role, cloudStart(d, root, role, cmd))
@@ -359,8 +384,11 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 			return fmt.Errorf("service-log capture did not reach the host: %w", err)
 		}
 		defer n.Close()
-		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second),
-			"sudo journalctl --no-pager -u "+units+" -n 300")
+		command := "sudo journalctl --no-pager -u " + units + " -n 300"
+		if c.ECStage1 {
+			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
+		}
+		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second), command)
 		return errors.Join(err, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), directTeardownBound)
@@ -375,6 +403,13 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	ports := []string{}
 	for _, s := range h.Services {
 		ports = append(ports, strconv.Itoa(s.Port))
+	}
+	if c.ECStage1 {
+		extra, err := ecDirectPorts(h)
+		if err != nil {
+			return errors.Join(collect, stop, err)
+		}
+		ports = extra
 	}
 	// A probe that cannot run is a failure, never a count of zero: an empty
 	// listing from a failed systemctl, ss or grep would otherwise read as clean.
@@ -448,4 +483,11 @@ func servicePort(h inventory.Host, name string) int {
 		}
 	}
 	return 0
+}
+
+func (c CloudConfig) artifactNames() []string {
+	if c.ECStage1 {
+		return []string{"weed"}
+	}
+	return []string{"weed", "weed-volume", "native.tar"}
 }
