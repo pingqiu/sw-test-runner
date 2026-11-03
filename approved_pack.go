@@ -26,6 +26,28 @@ func (c *ActionContext) boundPackContext() error {
 	return nil
 }
 
+// ApprovedAuthorizeMono returns the controller CLOCK_MONOTONIC read after the job's final successful approved
+// work/readback check and immediately before its one underlying Authorize (soak clock-bracket plan r2, step 2).
+// Exec follows authorization, so it precedes the job's first statement; already-completed validation leaves the
+// bracket, nothing is subtracted or assumed. It is bound to this handle and the settled exit's process identity,
+// and is consumed by the first call.
+func (c *ActionContext) ApprovedAuthorizeMono(h JobHandle, e ExitInfo) (float64, error) {
+	if err := c.boundPackContext(); err != nil {
+		return 0, err
+	}
+	if h.scope != c.Safety || h.job == nil {
+		return 0, errors.New("foreign job handle")
+	}
+	g, ok := c.Safety.backend.(*approvedJobs)
+	if !ok {
+		return 0, errors.New("no approved job backend")
+	}
+	if !e.Settled || e.Identity != h.job.identity {
+		return 0, errors.New("authorize stamp needs this job's settled exit")
+	}
+	return g.takeAuthorize(h.id, e.Identity)
+}
+
 // ApprovedPackInputs only succeeds inside this ApprovedRun's exact Engine
 // context. A caller-created Safety scope, Vars or YAML flag is insufficient.
 func (c *ActionContext) ApprovedPackInputs() (PackInputs, error) {
