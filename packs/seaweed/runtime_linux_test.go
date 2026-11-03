@@ -51,7 +51,8 @@ func (n *cpuNode) soakRow(argv []string) []byte {
 		status, criteria["misses"] = "FAIL", map[string]string{"outcome": "FAIL", "reason": "stand-in"}
 	}
 	row, _ := json.Marshal(map[string]any{"status": status, "criteria": criteria, "k7": []any{}, "resources": "NOT_OBSERVED",
-		"binding": map[string]string{"schema": b.Schema, "run_id": b.RunID, "boot_id": b.BootID, "root": b.Root}})
+		"binding":              map[string]string{"schema": b.Schema, "run_id": b.RunID, "boot_id": b.BootID, "root": b.Root},
+		"misses_qualification": map[string]string{"method": "stand-in", "clock": "stand-in", "limit": "stand-in"}})
 	return append(row, '\n')
 }
 

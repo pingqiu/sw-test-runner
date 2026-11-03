@@ -233,8 +233,10 @@ def assess(c):
         case, latest = get_case(r), oracle.latest.get(r['key'])
         if case == 'hit' and (latest is None or not latest.matches(r['length'], r['sha256'])):
             wrong.append(('get', r['op']))
-        elif case == 'hit':  # exact bytes of the latest version: C5's read-back evidence for that version
-            hits.setdefault((r['key'], latest.sequence), []).append(r)
+        elif case == 'hit' and r['sequence'] == latest.sequence:
+            # C5's read-back evidence: exact bytes of the version the GET itself recorded, which is the latest one.
+            # A hit recorded against another or an unknown version, even with the same bytes, credits nothing.
+            hits.setdefault((r['key'], r['sequence']), []).append(r)
         elif case == 'miss':
             # J1: the latest ACK completed before THIS miss was submitted, not one landing while it was in flight.
             misses.append((r, next((v for done, v in reversed(acked.get(r['key'], [])) if done < r['submitted']), None)))
@@ -330,7 +332,17 @@ def assess(c):
             k7.append(dict(episode=f['episode'], role=f['role'], dt_after_ready_s=first['submitted'] - f['ready_mono'],
                            latency_s=lat, at_rc_timeout=lat >= 4.9))
     status = 'PASS' if all(v['outcome'] == 'PASS' for v in crit.values()) else 'FAIL'
-    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED')
+    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
+
+
+# Emitted with every verdict, PASS or FAIL: what an excused miss does and doesn't mean.
+QUALIFICATION = dict(
+    method='qualified observed ordering under the stated limit (decision 3 revision); not a retirement or durability '
+           'proof; no parity claim',
+    clock='conditional on the paired clock samples S1/S2: ordering is judged across their bracket, and without usable '
+          'samples no miss is excused',
+    limit='accepted by Ping: a real loss between a version\'s last exact read and its volume\'s rotation success line '
+          'is excused')
 
 
 def binding(c):
@@ -346,7 +358,7 @@ def main():
             raise ValueError('assessor config schema differs')
         row = assess(config)
     except Exception as error:  # any unreadable or malformed evidence fails closed
-        row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED')
+        row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
     row['binding'] = binding(config)
     print(json.dumps(row, sort_keys=True), flush=True)
 

@@ -709,6 +709,37 @@ class SoakAssess(unittest.TestCase):
         ch(ev)
         self.assertIn('misses', self.failing(self.run_on(ev)))
 
+    # codex01 review f94b5c19: the read-back is bound to the GET's own recorded version, not relabelled as the latest.
+    def test_c5_a_hit_with_an_unknown_sequence_is_no_read_back(self):
+        self.mutate(lambda ev: self.ev(ev, 'g1m').update(sequence=999), 'misses')
+
+    def test_c5_a_hit_of_an_older_version_with_the_same_bytes_is_no_read_back(self):
+        def ch(ev):  # v2 has v1's bytes on another FID; the only exact read is recorded against v1
+            n = max(a['sequence'] for a in ev['acks']) + 1
+            m = next(a for a in ev['acks'] if a['key'] == 'm')
+            ev['acks'].append(dict(m, sequence=n, submitted=1104.95, completed=1105, fids=['20,cd'], writer=0))
+            q = ev['events'][-1]
+            q['dispatched'] += 1
+            ev['events'].insert(-3, dict(op=str(q['dispatched']), worker=0, action='set', key='m', dispatched=1104.94, submitted=1104.95,
+                                         completed=1105, ok=True))
+            self.ev(ev, 'g2').update(sequence=n, fids=['20,cd'])
+        self.mutate(ch, 'misses')
+
+    def test_the_emitted_verdict_states_its_qualification(self):
+        row = self.run_on(evidence())
+        q = row.get('misses_qualification') or {}
+        self.assertIn('qualified observed ordering under the stated limit', q.get('method', ''))
+        self.assertIn('no parity claim', q.get('method', ''))
+        self.assertIn('paired clock samples', q.get('clock', ''))
+        self.assertIn('last exact read', q.get('limit', ''))
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        out = subprocess.run([sys.executable, str(HERE / 'soak_assess.py'), '--config', json.dumps(dict(config(root), schema='wrong'))],
+                             capture_output=True, text=True)
+        failed = json.loads(out.stdout.splitlines()[-1])
+        self.assertEqual(failed['status'], 'FAIL')
+        self.assertEqual(failed.get('misses_qualification'), q)
+
     def test_cx21_known_limit_latent_loss_between_last_exact_read_and_s_is_excused(self):
         """Recorded, not refused, by Ping's acceptance: ACK 1100, exact read 1110, a loss in between, S 1175, miss 1180."""
         self.passes(lambda ev: None)

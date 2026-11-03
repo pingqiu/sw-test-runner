@@ -15,7 +15,8 @@ func passRow(t *testing.T, edit func(map[string]any)) string {
 	for _, c := range soakCriteria {
 		crit[c] = map[string]any{"outcome": "PASS", "reason": "ok"}
 	}
-	row := map[string]any{"status": "PASS", "criteria": crit, "k7": []any{}, "resources": "NOT_OBSERVED", "binding": testBinding}
+	row := map[string]any{"status": "PASS", "criteria": crit, "k7": []any{}, "resources": "NOT_OBSERVED", "binding": testBinding,
+		"misses_qualification": map[string]any{"method": "qualified observed ordering under the stated limit; no parity claim", "clock": "conditional", "limit": "latent loss"}}
 	if edit != nil {
 		edit(row)
 	}
@@ -44,6 +45,9 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	errRow := passRow(t, func(r map[string]any) {
 		r["status"], r["criteria"], r["error"] = "FAIL", map[string]any{}, "ValueError('x')"
 	})
+	if !strings.Contains(passRow(t, nil), "misses_qualification") {
+		t.Fatal("fixture lost the qualification")
+	}
 	if v, err := decodeVerdict(captured([]byte(errRow)), testBinding); err != nil || v.Status != "FAIL" {
 		t.Fatalf("assessor error row not decoded as FAIL: %v", err)
 	}
@@ -72,7 +76,11 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		"resources observed":      passRow(t, func(r map[string]any) { r["resources"] = "PASS" }),
 		"PASS with a FAIL inside": passRow(t, func(r map[string]any) { r["criteria"].(map[string]any)["routes"] = map[string]any{"outcome": "FAIL"} }),
 		"unknown status":          passRow(t, func(r map[string]any) { r["status"] = "MAYBE" }),
-		"not JSON":                "garbage",
+		// decision 3 revision: every verdict states what an excused miss means.
+		"no qualification":    passRow(t, func(r map[string]any) { delete(r, "misses_qualification") }),
+		"empty limit":         passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["limit"] = "" }),
+		"qualification extra": passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["vibes"] = "x" }),
+		"not JSON":            "garbage",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := decodeVerdict(captured([]byte(body)), testBinding); err == nil {
