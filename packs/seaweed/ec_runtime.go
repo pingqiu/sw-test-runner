@@ -77,16 +77,22 @@ func ecPayload(run, key string) []byte {
 	block := sha256.Sum256([]byte(run + "/" + key))
 	return bytes.Repeat(block[:], 8192)
 }
+
+type ecReadBody struct {
+	RunID    string `json:"run_id"`
+	Wrong    int
+	Control  string
+	Outcomes []ecOutcome
+}
+
 func ecRead(ctx context.Context, a *tr.ActionContext, label, route string, m EC1aManifest, plant bool) error {
-	var body struct {
-		RunID    string `json:"run_id"`
-		Wrong    int
-		Control  string
-		Outcomes []ecOutcome
-	}
+	var body ecReadBody
 	if err := ecTask(ctx, a, label, &body); err != nil {
 		return err
 	}
+	return ecAssessRead(body, route, m, plant)
+}
+func ecAssessRead(body ecReadBody, route string, m EC1aManifest, plant bool) error {
 	if body.RunID != m.RunID || (!plant && (body.Wrong != 0 || body.Control != "")) || (plant && (body.Wrong != 1 || body.Control != "WRONG_BYTE_REJECTED")) {
 		return errors.New("EC read scope/wrong bytes")
 	}
@@ -265,49 +271,8 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 	if err = ecTask(ctx, a, p.Capture, &snap); err != nil {
 		return nil, err
 	}
-	if !snap.OriginalAbsent || !reflect.DeepEqual(seed.Objects, snap.Manifest.Objects) || snap.Manifest.RunID != b.RunID || snap.Manifest.Generation == "" || len(snap.Holders) != 14 || len(snap.Shards) != 14 || len(snap.Files) == 0 {
-		return nil, errors.New("EC frozen capture invalid")
-	}
-	holders := map[string]bool{}
-	for _, h := range snap.Holders {
-		if holders[h.Job] || h.Job == "master" || h.Job == "filer" || h.Job == "s3" || !contains(p.Services, h.Job) || h.PID <= 0 || h.Start == 0 || h.Boot != in.Boots["m02"] {
-			return nil, errors.New("EC holder capture invalid")
-		}
-		holders[h.Job] = true
-	}
-	shardSet := map[string]map[int]bool{}
-	for _, file := range snap.UnrelatedVolumes {
-		if !holders[file.Job] || file.Volume == "" || file.Bytes < 0 || len(file.SHA256) != 64 || filepath.Base(file.Name) != file.Name {
-			return nil, errors.New("EC unrelated volume evidence invalid")
-		}
-		for _, object := range seed.Objects {
-			if strings.Split(object.FID, ",")[0] == file.Volume {
-				return nil, errors.New("EC target recorded as unrelated volume")
-			}
-		}
-	}
-	shardJobs := map[string]bool{}
-	generations := map[string]int64{}
-	if json.Unmarshal([]byte(snap.Manifest.Generation), &generations) != nil {
-		return nil, errors.New("EC generation map malformed")
-	}
-	for _, s := range snap.Shards {
-		if !holders[s.Job] || shardJobs[s.Job] || s.Shard < 0 || s.Shard >= 14 || len(s.SHA256) != 64 || s.Bytes <= 0 || s.Generation <= 0 || s.Generation != generations[s.Volume] || len(s.IndexSHA256) != 64 || len(s.VifSHA256) != 64 {
-			return nil, errors.New("EC shard capture invalid")
-		}
-		shardJobs[s.Job] = true
-		if shardSet[s.Volume] == nil {
-			shardSet[s.Volume] = map[int]bool{}
-		}
-		if shardSet[s.Volume][s.Shard] {
-			return nil, errors.New("EC stage1a duplicate holder placement unsupported")
-		}
-		shardSet[s.Volume][s.Shard] = true
-	}
-	for _, o := range snap.Manifest.Objects {
-		if len(shardSet[strings.Split(o.FID, ",")[0]]) != 14 {
-			return nil, errors.New("EC full14 shard set missing")
-		}
+	if err = ecValidateSnapshot(seed, snap, p.Services, in.Boots["m02"]); err != nil {
+		return nil, err
 	}
 	report := map[string]any{"implementation": p.Implementation, "s1": "NOT_RUN", "s2": "NOT_COVERED", "exposure": "NOT_OBSERVED", "capture": snap, "reads": []string{}, "losses": []tr.GenerationRestartReceipt{}}
 	save := func() error {
@@ -334,7 +299,7 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 	lost := map[string]bool{}
 	for i, episode := range p.Episodes {
 		g := in.Restarts[episode]
-		if !holders[g.Victim] || lost[g.Victim] {
+		if !contains(p.Services, g.Victim) || lost[g.Victim] {
 			return nil, errors.New("EC repeated/foreign holder loss")
 		}
 		_, receipt, e := a.RestartApprovedPackGeneration(ctx, episode, handles[g.Victim])
@@ -369,4 +334,52 @@ func ecStage1(ctx context.Context, a *tr.ActionContext, _ tr.Action) (out map[st
 	}
 	report["mandatory_bytes_deadlines"] = "PASS"
 	return map[string]string{"s1": "PASS", "s2": "NOT_COVERED", "exposure": "NOT_OBSERVED", "value": "S1 exact; S2 bytes/deadlines observed, product reconstruction marker absent"}, nil
+}
+
+func ecValidateSnapshot(seed EC1aManifest, snap ecSnapshot, services []string, boot string) error {
+	if !snap.OriginalAbsent || !reflect.DeepEqual(seed.Objects, snap.Manifest.Objects) || snap.Manifest.RunID != seed.RunID || snap.Manifest.Generation == "" || len(snap.Holders) != 14 || len(snap.Shards) != 14 || len(snap.Files) == 0 {
+		return errors.New("EC frozen capture invalid")
+	}
+	holders := map[string]bool{}
+	for _, h := range snap.Holders {
+		if holders[h.Job] || h.Job == "master" || h.Job == "filer" || h.Job == "s3" || !contains(services, h.Job) || h.PID <= 0 || h.Start == 0 || h.Boot != boot {
+			return errors.New("EC holder capture invalid")
+		}
+		holders[h.Job] = true
+	}
+	shardSet := map[string]map[int]bool{}
+	for _, file := range snap.UnrelatedVolumes {
+		if !holders[file.Job] || file.Volume == "" || file.Bytes < 0 || len(file.SHA256) != 64 || filepath.Base(file.Name) != file.Name {
+			return errors.New("EC unrelated volume evidence invalid")
+		}
+		for _, object := range seed.Objects {
+			if strings.Split(object.FID, ",")[0] == file.Volume {
+				return errors.New("EC target recorded as unrelated volume")
+			}
+		}
+	}
+	shardJobs := map[string]bool{}
+	generations := map[string]int64{}
+	if json.Unmarshal([]byte(snap.Manifest.Generation), &generations) != nil {
+		return errors.New("EC generation map malformed")
+	}
+	for _, s := range snap.Shards {
+		if !holders[s.Job] || shardJobs[s.Job] || s.Shard < 0 || s.Shard >= 14 || len(s.SHA256) != 64 || s.Bytes <= 0 || s.Generation <= 0 || s.Generation != generations[s.Volume] || len(s.IndexSHA256) != 64 || len(s.VifSHA256) != 64 {
+			return errors.New("EC shard capture invalid")
+		}
+		shardJobs[s.Job] = true
+		if shardSet[s.Volume] == nil {
+			shardSet[s.Volume] = map[int]bool{}
+		}
+		if shardSet[s.Volume][s.Shard] {
+			return errors.New("EC stage1a duplicate holder placement unsupported")
+		}
+		shardSet[s.Volume][s.Shard] = true
+	}
+	for _, o := range snap.Manifest.Objects {
+		if len(shardSet[strings.Split(o.FID, ",")[0]]) != 14 {
+			return errors.New("EC full14 shard set missing")
+		}
+	}
+	return nil
 }
