@@ -40,6 +40,10 @@ def capture(c,manifest):
         holders.append(matches[0])
         members=[]
         for path in directory.iterdir():
+            metadata=re.fullmatch(r'(?:.*_)?([0-9]+)\.(vif|idx)',path.name)
+            if metadata and str(int(metadata[1])) not in volumes:
+                unrelated.append(dict(volume=str(int(metadata[1])),job=label,name=path.name,**stable(path)))
+                continue
             if path.suffix=='.vif':
                 vif_bytes=path.read_bytes();proof=stable(path)
                 if proof['sha256']!=hashlib.sha256(vif_bytes).hexdigest():raise ValueError('vif parse/hash changed')
