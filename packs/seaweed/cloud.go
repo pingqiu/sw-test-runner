@@ -67,8 +67,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if d.Target != "azure" || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
-		return "", errors.New("one newly created Azure HTTP host and three artifacts required")
+	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != 3 {
+		return "", errors.New("one Azure, onprem or docker HTTP host and three artifacts required")
+	}
+	if directTarget(d.Target) && len(d.Hosts) != 1 {
+		return "", errors.New("a direct ssh target runs one host")
 	}
 	if c.Replication != "" && c.Replication != "001" {
 		return "", errors.New("replication must be absent or 001")
@@ -99,7 +102,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			meta = candidate
 		}
 	}
-	if h.RunRoot != "/data/seaweed-runs/"+d.RunID {
+	if h.RunRoot != cloudRunRoot(d, h) {
 		return "", errors.New("unexpected cloud run root")
 	}
 	q := cloudQuote
@@ -108,7 +111,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q)
 	}
 	defer func() {
-		if failure != nil && phase == "" {
+		// A direct target's cleanup already captured the service journal before
+		// its teardown; a second fetch after teardown would overwrite it.
+		if failure != nil && phase == "" && !directTarget(d.Target) {
 			if e := collectCloudFailure(ctx, n, c.Output, h.RunRoot, d.RunID, q); e != nil {
 				failure = errors.Join(failure, fmt.Errorf("save failure-log fetch: %w", e))
 			}
@@ -157,7 +162,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return nil
 	}
 	root := h.RunRoot
-	if phase == "" || phase == "prepare" {
+	if (phase == "" || phase == "prepare") && !directTarget(d.Target) { // an existing host has no cloud-init
 		command := "timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'"
 		out, stderr, rc, runErr := n.Run(ctx, command)
 		gateErr := errors.Join(runErr, qualifyCloudInit(out, rc))
@@ -222,6 +227,14 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if _, e = run("configure", "cd "+q(root)+"; "+native+"printf '%s\\n' '[filer.options.kvcache]' 'enabled = true' 'authority_mode = \"route-by-key\"' '[leveldb2]' 'enabled = true' "+q("dir = \""+root+"/filer\"")+" > filer.toml"); e != nil {
 		return "", e
 	}
+	direct := directTarget(d.Target) && phase == ""
+	if direct {
+		// An existing host outlives the run, unlike a destroyed VM. Registered
+		// before any start, so a failed start, a failed step or a cancelled run
+		// still collects the service logs, then stops every unit this run started
+		// and requires a clean postflight, over its own connection and deadline.
+		defer func() { failure = errors.Join(failure, directCleanup(c, d, h)) }()
+	}
 	service := func(role, cmd string) error {
 		_, e := run("start-"+role, cloudStart(d, root, role, cmd))
 		return e
@@ -234,6 +247,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 	}
 	defer func() {
+		if direct {
+			return // directCleanup collects the logs before its teardown
+		}
 		logs, collectErr := run("collect-services", "sudo journalctl --no-pager -u "+q("sw-cloud-"+d.RunID+"-*")+" -n 300")
 		failure = errors.Join(failure, collectErr, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
 	}()
@@ -303,6 +319,78 @@ func cloudHelpers(phase, chaosSet string) []string {
 		helpers = append(helpers, "chaos_load.py")
 	}
 	return helpers
+}
+
+// directTarget is an existing host reached over plain ssh: no cloud lifecycle,
+// no cloud-init, and the run cleans up after itself.
+func directTarget(target string) bool { return target == "onprem" || target == "docker" }
+
+// cloudRunRoot is the only run root a host may declare: the VM's data path, or
+// for a direct target a directory under the ssh user's home.
+func cloudRunRoot(d inventory.Document, h inventory.Host) string {
+	if !directTarget(d.Target) {
+		return "/data/seaweed-runs/" + d.RunID
+	}
+	home := "/home/" + h.Management.User
+	if h.Management.User == "root" {
+		home = "/root"
+	}
+	return home + "/sw-runs/" + d.RunID
+}
+
+// Controller-side bounds of a direct run's cleanup: the diagnostic capture,
+// then the teardown (stop and postflight), each with its own connection.
+var directCollectBound, directTeardownBound = 30 * time.Second, 90 * time.Second
+
+// directCleanup collects this run's service logs, then stops its transient
+// units, then checks that none remain and no declared service port listens.
+// It opens its own connection under its own deadline: the run's connection
+// closes when the run's context is cancelled, and a cleanup that cannot reach
+// the host is a failure, never a clean result.
+func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error {
+	units := cloudQuote("sw-cloud-" + d.RunID + "-*")
+	// Diagnostics first, on their own connection and controller-side deadline,
+	// so a stalled journal can never spend the teardown's time or connection.
+	collect := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), directCollectBound)
+		defer cancel()
+		n := cloudNode(h, c.SSHKey, c.HostKey)
+		if err := n.ConnectContext(ctx); err != nil {
+			return fmt.Errorf("service-log capture did not reach the host: %w", err)
+		}
+		defer n.Close()
+		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second),
+			"sudo journalctl --no-pager -u "+units+" -n 300")
+		return errors.Join(err, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), directTeardownBound)
+	defer cancel()
+	n := cloudNode(h, c.SSHKey, c.HostKey)
+	if err := n.ConnectContext(ctx); err != nil {
+		return errors.Join(collect, fmt.Errorf("cleanup did not reach the host: %w", err))
+	}
+	defer n.Close()
+	_, stop := cloudStep(ctx, n, c.Output, "cloud-cleanup.json", "cleanup",
+		60, "sudo systemctl stop "+units+"; sudo systemctl reset-failed "+units+" 2>/dev/null || true")
+	ports := []string{}
+	for _, s := range h.Services {
+		ports = append(ports, strconv.Itoa(s.Port))
+	}
+	// A probe that cannot run is a failure, never a count of zero: an empty
+	// listing from a failed systemctl, ss or grep would otherwise read as clean.
+	// grep -c exits 1 for no match (count 0) and 2 for an error.
+	check := "l=$(sudo systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
+		"; u=$(printf '%s' \"$l\" | grep -c .) || [ $? -eq 1 ] || { echo 'postflight: grep failed'; exit 3; }; p=0"
+	if len(ports) > 0 {
+		check += "; s=$(ss -Hltn) || { echo 'postflight: ss failed'; exit 3; }" +
+			"; p=$(printf '%s\\n' \"$s\" | grep -cE ':(" + strings.Join(ports, "|") + ")[[:space:]]') || [ $? -eq 1 ] || { echo 'postflight: grep failed'; exit 3; }"
+	}
+	check += "; echo \"units=$u ports=$p\"; [ \"$u\" = 0 ] && [ \"$p\" = 0 ]"
+	out, post := cloudStep(ctx, n, c.Output, "cloud-postflight.json", "postflight", 30, check)
+	if post != nil {
+		post = fmt.Errorf("postflight not clean (%s): %w", strings.TrimSpace(out), post)
+	}
+	return errors.Join(collect, stop, post)
 }
 
 func cloudNode(h inventory.Host, key, pin string) *infra.Node {
