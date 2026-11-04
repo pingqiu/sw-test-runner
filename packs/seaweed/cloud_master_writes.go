@@ -54,7 +54,7 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 		return "", err
 	}
 	// No Assign probe: writes must meet the master's warm-up instead of waiting it out.
-	ready, err := run("master-ready", "until curl -fsS --max-time 3 "+q("http://"+endpoint(h, "master_http")+"/dir/status")+" | python3 -c "+q("import json,sys;sys.exit(0 if json.load(sys.stdin)['IsLeader'] else 1)")+"; do sleep 1; done; "+chaosStamp+"; "+chaosIdentityScript(unit))
+	ready, err := run("master-ready", "until curl -fsS --max-time 3 "+q("http://"+endpoint(h, "master_http")+"/cluster/status")+" | python3 -c "+q("import json,sys;sys.exit(0 if json.load(sys.stdin)['IsLeader'] is True else 1)")+"; do sleep 1; done; "+chaosStamp+"; "+chaosIdentityScript(unit))
 	if err != nil {
 		return "", err
 	}

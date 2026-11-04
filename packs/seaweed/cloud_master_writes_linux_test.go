@@ -5,12 +5,17 @@ package seaweed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/pingqiu/sw-test-runner/inventory"
 	"golang.org/x/crypto/ssh"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +220,89 @@ func TestMainPIDReadbackSudoAndFailure(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 			if (err == nil) != (mode == "good") || strings.Contains(string(out), "VERIFIED") != (mode == "good") {
 				t.Fatalf("mode%s err%v output%s", mode, err, out)
+			}
+		})
+	}
+}
+
+// Execute the actual generated leader predicate against the saved real product
+// schemas over HTTP; only replace the retry sleep by a one-poll refusal.
+func TestMasterReadyRealHTTPResponseSchema(t *testing.T) {
+	raw, err := os.ReadFile("testdata/master-leader-real-response.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	old := masterWriteSettle
+	masterWriteSettle = 0
+	defer func() { masterWriteSettle = old }()
+	for _, mode := range []string{"leader", "not-leader", "wrong-schema", "string-true"} {
+		t.Run(mode, func(t *testing.T) {
+			requested := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requested <- r.URL.Path
+				if r.URL.Path != "/cluster/status" {
+					w.Write(fixture["dir_status"])
+					return
+				}
+				switch mode {
+				case "not-leader":
+					fmt.Fprint(w, `{"IsLeader":false}`)
+				case "wrong-schema":
+					w.Write(fixture["dir_status"])
+				case "string-true":
+					fmt.Fprint(w, `{"IsLeader":"true"}`)
+				default:
+					w.Write(fixture["cluster_status"])
+				}
+			}))
+			defer server.Close()
+			u, _ := url.Parse(server.URL)
+			port, _ := strconv.Atoi(u.Port())
+			var d inventory.Document
+			json.Unmarshal(directInput(t, "127.0.0.1:22"), &d)
+			h := d.Hosts[0]
+			h.Data.Address = u.Hostname()
+			for i := range h.Services {
+				if h.Services[i].Name == "master_http" {
+					h.Services[i].Port = port
+				}
+			}
+			bin := t.TempDir()
+			os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\ntest \"$1\" = -n || exit 90\nshift\nexec \"$@\"\n"), 0700)
+			os.WriteFile(filepath.Join(bin, "systemctl"), []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", os.Getpid())), 0700)
+			c := writeCfg()
+			c.Transport = "http"
+			config, _ := json.Marshal(c)
+			observed := false
+			stop := errors.New("test stops after real readiness probe")
+			_, got := runDirectMasterWrites(context.Background(), d, h, CloudConfig{}, []string{"-I", "worker", "--config", string(config)}, func(name, cmd string) (string, error) {
+				switch name {
+				case "master-kill":
+					return "104.5 OLD 1 1 GONE", nil
+				case "master-ready":
+					observed = true
+					cmd = strings.Replace(cmd, "do sleep 1; done", "do exit 77; done", 1)
+					call := exec.Command("sh", "-ec", cmd)
+					call.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+					out, err := call.CombinedOutput()
+					if (err == nil) != (mode == "leader") {
+						t.Errorf("mode%s: %v %s", mode, err, out)
+					}
+					return "", stop
+				}
+				return "", nil
+			})
+			path := ""
+			select {
+			case path = <-requested:
+			default:
+			}
+			if !observed || !errors.Is(got, stop) || path != "/cluster/status" {
+				t.Fatalf("probe=%v error=%v URL=%s", observed, got, path)
 			}
 		})
 	}
