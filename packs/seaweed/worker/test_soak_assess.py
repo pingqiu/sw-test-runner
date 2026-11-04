@@ -958,6 +958,13 @@ class KVLoadAssess(unittest.TestCase):
             self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL', counter)
         # codex01: hits in an earlier generation of the worker still need the route, whatever the last snapshot says.
         self.assertEqual(self.run_on(all_refused(kv_evidence()))['criteria']['routes']['outcome'], 'FAIL')
+        # codex01: no hit is not all refused. One plain miss of worker 1 inside E1's window (excused there as
+        # reported) keeps its route requirement.
+        ev = worker1_refused(all_refused(kv_evidence()))
+        plain = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['submitted'] > 1010)
+        del plain['cause']
+        row = self.run_on(ev)
+        self.assertEqual((row['criteria']['misses']['outcome'], row['criteria']['routes']['outcome']), ('PASS', 'FAIL'), row['criteria'])
         # All flagged processes are named, not the first six.
         ev = kv_evidence()
         ev['files']['workers.json'] = {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)}

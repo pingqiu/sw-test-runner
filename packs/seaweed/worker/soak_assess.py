@@ -463,9 +463,13 @@ def assess(c):
         before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
         after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
         mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
-    # kv_load: a worker with a hit in any generation always needs its route.
-    hit_workers = {str(e['worker']) for e in gets if get_case(e) == 'hit'}
-    route_bad = assess_routes(root, workers, kills, frozenset(set(workers) - hit_workers) if pat else frozenset())
+    # kv_load: only a worker whose EVERY GET, in all its generations, is a recorded budget-refusal miss may
+    # show no route; a hit, a plain miss or a fault error (excused in a window or not) keeps the requirement.
+    refused = {}
+    for e in gets:
+        refused.setdefault(str(e['worker']), []).append(get_case(e) == 'miss' and e.get('cause') == 'budget_refusal')
+    refused_only = frozenset(w for w, all_refused in refused.items() if all(all_refused)) if pat else frozenset()
+    route_bad = assess_routes(root, workers, kills, refused_only)
     mark('routes', not route_bad, 'bad %s' % route_bad)
 
     # K7 (a FINDING, never a FAIL): the first non-HTTP SET after each fault's successful READY.
