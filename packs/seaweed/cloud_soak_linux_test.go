@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,8 @@ func (h *soakHost) exec(cmd string, c ssh.Channel) uint32 {
 	switch {
 	case h.failStep != "" && strings.Contains(cmd, h.failStep):
 		return 1
+	case strings.HasPrefix(cmd, "cat >"):
+		io.Copy(io.Discard, c)
 	case strings.Contains(cmd, "systemctl kill"):
 		time.Sleep(20 * time.Millisecond) // a stamp taken after the kill would land past killMono
 		h.mu.Lock()
@@ -93,15 +96,18 @@ func directSoakFixture(t *testing.T, m01, m02 *soakHost) *directSoak {
 		d.Hosts[i].RunRoot = "/home/" + d.Hosts[i].Management.User + "/sw-runs/" + d.RunID
 	}
 	job := func(node string, argv ...string) tr.JobPin {
-		return tr.JobPin{Node: node, Executable: "/usr/bin/python3.12", Argv: append([]string{"/opt/seaweed/worker/lab_profile.py"}, argv...)}
+		return tr.JobPin{Node: node, Executable: "/usr/bin/python3.12", Argv: append([]string{"/opt/seaweed/rel/worker/lab_profile.py"}, argv...)}
 	}
-	plan := Plan{Soak: &SoakPlan{},
+	release := t.TempDir() // the local release tree the declared release files come from
+	os.MkdirAll(filepath.Join(release, "worker"), 0700)
+	os.WriteFile(filepath.Join(release, "worker", "lab_profile.py"), []byte("profile"), 0600)
+	plan := Plan{Soak: &SoakPlan{}, Smoke: SmokeSettings{HelperDir: "/opt/seaweed/rel/worker"},
 		Preflight: []Step{{Host: "m01", Job: "preflight-m01"}},
 		Deploy:    []Step{{Host: "m02", Role: "master", Job: "deploy-master"}, {Host: "m02", Role: "volume", Job: "deploy-volume"}},
 		Ready:     []Step{{Host: "m02", Job: "ready-m02"}}}
 	return &directSoak{
 		soakWindow: soakWindow{root: t.TempDir(), runID: d.RunID, bootID: "boot-m01", roles: map[string]string{}},
-		c:          CloudConfig{SSHKey: key, Output: t.TempDir()},
+		c:          CloudConfig{SSHKey: key, Output: t.TempDir(), SoakRelease: release},
 		d:          &d,
 		b: ProfileBundle{Plan: plan, Jobs: map[string]tr.JobPin{
 			"preflight-m01": job("m01", "preflight-step"), "ready-m02": job("m02", "ready-step"),
@@ -109,8 +115,8 @@ func directSoakFixture(t *testing.T, m01, m02 *soakHost) *directSoak {
 			"volume-gen2": job("m02", "deploy", "volume", "--replacement")},
 			Restarts: map[string]tr.GenerationRestartPlan{"E1": {Victim: "deploy-volume", Replacement: "volume-gen2"}}},
 		in: ProfileInput{Files: map[string]map[string]string{
-			"m01": {"/opt/seaweed/worker/lab_profile.py": strings.Repeat("c", 64)},
-			"m02": {"/opt/seaweed/worker/lab_profile.py": strings.Repeat("c", 64)}}},
+			"m01": {"/opt/seaweed/rel/worker/lab_profile.py": strings.Repeat("c", 64), "/usr/bin/python3.12": strings.Repeat("d", 64)},
+			"m02": {"/opt/seaweed/rel/worker/lab_profile.py": strings.Repeat("c", 64), "/usr/bin/python3.12": strings.Repeat("d", 64)}}},
 		deadline: time.Now().Add(time.Minute),
 	}
 }
@@ -224,8 +230,10 @@ func TestDirectSoakStartsDeployJobsAsUnits(t *testing.T) {
 		t.Fatalf("m01 preflight not a bounded step: %v", m01.commands)
 	}
 	for id, h := range map[string]*soakHost{"m01": m01, "m02": m02} {
-		if h.index("install -d -m 0700", s.d.Hosts[0].RunRoot) < 0 && h.index("install -d -m 0700", root) < 0 {
-			t.Fatalf("%s run root not made private", id)
+		mk, up := h.index("install -d -m 0700"), h.index("cat >", "upload-worker_lab_profile.py")
+		put, check := h.index("install -D -m 0755", "/opt/seaweed/rel/worker/lab_profile.py"), h.index("sha256sum -c", "/usr/bin/python3.12", "lab_profile.py")
+		if !(mk >= 0 && mk < up && up < put && put < check) || h.index("cat >", "python3.12") >= 0 {
+			t.Fatalf("%s prepare order mkdir=%d upload=%d install=%d check=%d (the interpreter is only checked): %v", id, mk, up, put, check, h.commands)
 		}
 	}
 }
@@ -253,11 +261,12 @@ func TestDirectSoakGate(t *testing.T) {
 		"with ec":     {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.ECStage1 = true }, want: gate},
 		"with chaos":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Chaos = true }, want: gate},
 		"with repl":   {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Replication = "001" }, want: gate},
+		"no release":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakRelease = "" }, want: gate},
 		"no profile":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = filepath.Join(t.TempDir(), "absent.json") }, want: "no such file"},
 		"wrong input": {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = writeProfile(t, `{"requested_inventory":"{}"}`) }, want: "not the soak profile's requested inventory"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := CloudConfig{KVSoak: true, SSHKey: key, Output: t.TempDir()}
+			c := CloudConfig{KVSoak: true, SSHKey: key, Output: t.TempDir(), SoakRelease: t.TempDir()}
 			if tc.cfg != nil {
 				tc.cfg(&c)
 			}

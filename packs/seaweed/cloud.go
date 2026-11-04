@@ -36,9 +36,10 @@ type CloudConfig struct {
 	// ChaosSet "A" (C1-C3) or "B" (C4-C6) runs stage 2 under replication 001.
 	ChaosSet string `json:"chaos_set,omitempty"`
 	// KVSoak runs the two-host KV soak from SoakProfile, the profile input
-	// the bundle is built from; its declared files are copied beforehand.
+	// the bundle is built from, uploading its release files from SoakRelease.
 	KVSoak      bool   `json:"kv_soak,omitempty"`
 	SoakProfile string `json:"-"`
+	SoakRelease string `json:"-"`
 	localHost   string // the host the controller itself runs on: reached locally, not over ssh
 }
 
@@ -89,7 +90,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", e
 	}
 	if c.KVSoak {
-		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
+		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
 			return "", errors.New("kv_soak requires a two-host onprem inventory and no other phase")
 		}
 		return runDirectSoak(ctx, raw, c)
@@ -190,17 +191,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			return nil
 		}
 		sequence++
-		command := "upload " + local + " -> " + remote
-		e := n.Upload(local, remote)
-		rc := 0
-		if e != nil {
-			rc = -1
-		}
-		w := writeCloudStep(c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), "upload-"+name, command, "", "", rc, e)
-		if e != nil || w != nil {
-			return fmt.Errorf("cloud step upload-%s command=%q: %v", name, command, errors.Join(e, w))
-		}
-		return nil
+		return cloudUpload(n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, local, remote)
 	}
 	root := h.RunRoot
 	if (phase == "" || phase == "prepare") && !directTarget(d.Target) { // an existing host has no cloud-init
@@ -461,6 +452,21 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		post = fmt.Errorf("postflight not clean (%s): %w", strings.TrimSpace(out), post)
 	}
 	return errors.Join(collect, stop, post)
+}
+
+// cloudUpload copies one local file to the host and journals it as dir/file.
+func cloudUpload(n *infra.Node, dir, file, name, local, remote string) error {
+	command := "upload " + local + " -> " + remote
+	e := n.Upload(local, remote)
+	rc := 0
+	if e != nil {
+		rc = -1
+	}
+	w := writeCloudStep(dir, file, "upload-"+name, command, "", "", rc, e)
+	if e != nil || w != nil {
+		return fmt.Errorf("cloud step upload-%s command=%q: %v", name, command, errors.Join(e, w))
+	}
+	return nil
 }
 
 func cloudNode(h inventory.Host, key, pin string) *infra.Node {

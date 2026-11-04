@@ -42,9 +42,10 @@ type directSoak struct {
 func (s *directSoak) unit(label string) string { return "sw-cloud-" + s.d.RunID + "-" + label }
 
 // open connects to each host once for the run (cleanup opens its own) and
-// prepares it: a private run root and every declared file checked against its
-// pin. Binaries are copied before the run (the lab process); a missing or
-// different file refuses the run here, before any service starts.
+// prepares it: a private run root, every declared release file uploaded from
+// the local release tree (system files such as the interpreter are only
+// checked), then every declared file checked against its pin, before any
+// service starts.
 func (s *directSoak) open(ctx context.Context) (err error) {
 	s.nodes, s.hosts = map[string]*infra.Node{}, map[string]inventory.Host{}
 	for _, h := range s.d.Hosts {
@@ -54,9 +55,21 @@ func (s *directSoak) open(ctx context.Context) (err error) {
 			sums += sum + "  " + p + "\n"
 		}
 		if err = n.ConnectContext(ctx); err == nil {
-			_, err = cloudStep(ctx, n, s.c.Output, "soak-prepare-"+h.ID+".json", "prepare-"+h.ID, 120,
-				"sudo install -d -m 0700 -o "+cloudQuote(h.Management.User)+" "+cloudQuote(h.RunRoot)+
-					"; printf %s "+cloudQuote(sums)+" | sha256sum -c --quiet -")
+			_, err = cloudStep(ctx, n, s.c.Output, "soak-prepare-"+h.ID+".json", "prepare-"+h.ID, 30,
+				"sudo install -d -m 0700 -o "+cloudQuote(h.Management.User)+" "+cloudQuote(h.RunRoot))
+		}
+		release := path.Dir(s.b.Plan.Smoke.HelperDir)
+		for p := range s.in.Files[h.ID] {
+			rel, ok := strings.CutPrefix(p, release+"/")
+			if tmp := path.Join(h.RunRoot, "upload-"+strings.ReplaceAll(rel, "/", "_")); ok && err == nil {
+				if err = cloudUpload(n, s.c.Output, "soak-upload-"+h.ID+"-"+path.Base(tmp)+".json", rel, filepath.Join(s.c.SoakRelease, filepath.FromSlash(rel)), tmp); err == nil {
+					_, err = cloudStep(ctx, n, s.c.Output, "soak-install-"+h.ID+"-"+path.Base(tmp)+".json", "install-"+rel, 60,
+						"sudo install -D -m 0755 "+cloudQuote(tmp)+" "+cloudQuote(p)+" && rm -f "+cloudQuote(tmp))
+				}
+			}
+		}
+		if err == nil {
+			_, err = cloudStep(ctx, n, s.c.Output, "soak-check-"+h.ID+".json", "check-"+h.ID, 120, "printf %s "+cloudQuote(sums)+" | sha256sum -c --quiet -")
 		}
 		if err != nil {
 			return err
