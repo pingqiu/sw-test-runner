@@ -60,8 +60,9 @@ network namespace, host network fault or platform authority machinery.
 
 C5 process-result.json separates process_recovery from unavailable_keys.
 The latter persists eligible_keys and affected_reads; eligibility or exact
-reads alone do not establish unavailable-key coverage. COVERED requires a
-failed read of an eligible key inside the assessed unavailable-key window.
-Otherwise its status is NOT_COVERED, including zero eligible keys, even when
-ordinary process recovery and the overall command pass. No live result is
-retroactively changed by this output correction.
+reads alone do not establish unavailable-key coverage. The existing markers
+do not timestamp when both victims are GONE, so this row stays NOT_COVERED.
+When affected_reads is positive it includes reason "no GONE clock"; the
+counts remain diagnostic, even when ordinary process recovery and the
+overall command pass. No live result is retroactively changed by this output
+correction. New clock/probe evidence is deferred.
