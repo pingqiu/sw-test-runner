@@ -104,6 +104,8 @@ type SoakVerdict struct {
 		Clock  string `json:"clock"`
 		Limit  string `json:"limit"`
 	} `json:"misses_qualification"`
+	// Rule A (Ping, 2026-11-04): misses inside the clock bracket around B, reported per op; they do not fail the row.
+	MissesUndecidable []map[string]any `json:"misses_undecidable,omitempty"`
 }
 
 // verdictFields are the decoded field names. encoding/json matches struct

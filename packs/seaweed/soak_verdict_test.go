@@ -42,6 +42,13 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if v, err := decodeVerdict(captured([]byte(fail)), testBinding, soakCriteria); err != nil || v.Status != "FAIL" {
 		t.Fatalf("valid FAIL not decoded: %v", err)
 	}
+	// Rule A: the assessor reports undecidable misses alongside a PASS row; the strict decoder accepts the field.
+	undecidable := passRow(t, func(r map[string]any) {
+		r["misses_undecidable"] = []any{map[string]any{"op": "36640", "vid": 26, "submit_minus_early_b_s": 0.047, "submit_minus_late_b_s": -0.008}}
+	})
+	if v, err := decodeVerdict(captured([]byte(undecidable)), testBinding, soakCriteria); err != nil || v.Status != "PASS" || len(v.MissesUndecidable) != 1 {
+		t.Fatalf("PASS with an undecidable miss: %+v %v", v.MissesUndecidable, err)
+	}
 	errRow := passRow(t, func(r map[string]any) {
 		r["status"], r["criteria"], r["error"] = "FAIL", map[string]any{}, "ValueError('x')"
 	})
