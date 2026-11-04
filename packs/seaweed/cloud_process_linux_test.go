@@ -148,6 +148,14 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 			vid -= 10
 		}
 		a, b := 2*(vid-2)-1, 2*(vid-2)
+		if f.variant == "c5-zero-pair" {
+			if vid == 3 {
+				b = 3
+			}
+			if vid == 4 {
+				a = 2
+			}
+		}
 		if f.variant == "foreign-lookup" {
 			b = 6
 		}
@@ -160,6 +168,14 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 				i := 0
 				fmt.Sscan(id, &i)
 				vid := 2 + (i+1)/2
+				if f.variant == "c5-zero-pair" {
+					if i == 2 {
+						vid = 4
+					}
+					if i == 3 {
+						vid = 3
+					}
+				}
 				if f.variant == "single-copy" && i == 2 {
 					vid = 99
 				}
@@ -276,6 +292,9 @@ func processRun(t *testing.T, name, variant string) (*processFake, string, error
 	}
 	if strings.HasPrefix(name, "C") {
 		f.mixed = &chaos2Fake{variant: variant, stamps: map[string]int{}, killed: map[string]bool{}, cases: map[string]string{}}
+		if variant == "c5-zero-pair" {
+			f.mixed.variant = ""
+		}
 	}
 	address, pin, key, _ := cloudSSH(t, "", f.exec)
 	raw := directInput(t, address)
@@ -441,6 +460,48 @@ func TestDirectProcessC5CopyAttribution(t *testing.T) {
 			}
 			if f.index("systemctl list-units") < 0 {
 				t.Fatal("missing cleanup")
+			}
+		})
+	}
+}
+
+func TestDirectProcessC5PersistsUnavailableKeyCoverage(t *testing.T) {
+	for _, v := range []string{"c5-zero-pair", "c5-eligible-only", "c5-unavailable"} {
+		t.Run(v, func(t *testing.T) {
+			_, out, err := processRun(t, "C5-two-kill", v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var row struct {
+				Status          string
+				ProcessRecovery string `json:"process_recovery"`
+				UnavailableKeys struct {
+					Status        string
+					EligibleKeys  int `json:"eligible_keys"`
+					AffectedReads int `json:"affected_reads"`
+				} `json:"unavailable_keys"`
+			}
+			raw, err := os.ReadFile(filepath.Join(out, "process-result.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = json.Unmarshal(raw, &row); err != nil {
+				t.Fatal(err)
+			}
+			t.Log(string(raw))
+			if row.Status != "PASS" || row.ProcessRecovery != "PASS" {
+				t.Fatal("ordinary recovery changed", string(raw))
+			}
+			want := "NOT_COVERED"
+			eligible := 0
+			if v != "c5-zero-pair" {
+				eligible = 3
+			}
+			if v == "c5-unavailable" {
+				want = "COVERED"
+			}
+			if row.UnavailableKeys.Status != want || row.UnavailableKeys.EligibleKeys != eligible || (row.UnavailableKeys.AffectedReads > 0) != (v == "c5-unavailable") {
+				t.Fatal("coverage omitted or eligibility mistaken for observation", string(raw))
 			}
 		})
 	}

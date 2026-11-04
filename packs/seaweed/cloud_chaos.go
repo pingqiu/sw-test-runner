@@ -64,9 +64,10 @@ func chaosContScript(pid, start string) string {
 }
 
 type chaosRun struct {
-	docs      map[string]inventory.Document
-	gens      *chaosGens
-	seedCheck func(context.Context, map[string]string) error
+	docs            map[string]inventory.Document
+	gens            *chaosGens
+	seedCheck       func(context.Context, map[string]string) error
+	unavailableKeys map[string]any
 
 	dir   string
 	rep   string // cloud.replication, for loads and replacement commands

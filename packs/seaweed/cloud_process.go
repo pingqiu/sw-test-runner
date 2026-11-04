@@ -188,7 +188,11 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		return "", e
 	}
 	result = filepath.Join(c.Output, "process-result.json")
-	e = os.WriteFile(result, processJSON(map[string]any{"case": name, "status": "PASS", "C3": "NOT_RUN", "C6": "NOT_RUN", "host_tolerance": "NOT_CLAIMED"}), 0600)
+	row := map[string]any{"case": name, "status": "PASS", "C3": "NOT_RUN", "C6": "NOT_RUN", "host_tolerance": "NOT_CLAIMED"}
+	if name == "C5-two-kill" {
+		row["process_recovery"], row["unavailable_keys"] = "PASS", r.unavailableKeys
+	}
+	e = os.WriteFile(result, processJSON(row), 0600)
 	return result, e // Overall direct PASS also requires the deferred clean postflight.
 }
 

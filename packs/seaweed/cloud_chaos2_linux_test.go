@@ -142,8 +142,8 @@ func (f *chaos2Fake) load(id string, base float64) string {
 		case f.variant == "outside-window" && id == "client2" && s > base+125 && s < base+126:
 			o.Exact = false // latest P=base+55 (restart), fails at base+125.5: past P+60
 		case strings.HasPrefix(f.variant, "c5-") && f.cases[id] == "C5-two-kill" && o.Kind == "kv_get" && s > base+117 && s < base+125:
-			o.Exact = false // past restart(base+55)+60, before ready(base+80)+60
-			if f.variant == "c5-unavailable" || f.variant == "c5-mixed-unknown" {
+			o.Exact = f.variant == "c5-eligible-only" // eligibility or exact reads alone do not witness unavailable-key handling
+			if f.variant == "c5-unavailable" || f.variant == "c5-mixed-unknown" || f.variant == "c5-eligible-only" {
 				o.Key = "kU" // both copies on {vol3, vol4}
 			}
 		}

@@ -30,7 +30,9 @@ current role generations, including the replacement. Unknown/null FIDs and
 single/foreign copies refuse overall qualification even if byte readback
 passed. The mixed cases do not run an unrelated seed workload. ACKs must exercise all
 six owners. Configuration 001 alone cannot satisfy copies.json. Existing
-worker payloads and assessors remain unchanged.
+worker payloads and schedules remain unchanged. Shared C5 attribution is
+tightened for cloud and direct callers: every FID must have known killed-pair
+placement before the extended unavailable-key window can apply.
 
 Stage 1 keeps the three clients' 120 s HTTP load, prospective client-local P,
 per-failed-op start >= P and first recovered exact completion <= P+60,
@@ -55,3 +57,11 @@ service port absent. Collection failure remains FAIL and still tears down.
 Raw per-step stdout/stderr, copies, markers and generation receipts stay in
 --out; failed mixed-load journals are captured before teardown. No new Python,
 network namespace, host network fault or platform authority machinery.
+
+C5 process-result.json separates process_recovery from unavailable_keys.
+The latter persists eligible_keys and affected_reads; eligibility or exact
+reads alone do not establish unavailable-key coverage. COVERED requires a
+failed read of an eligible key inside the assessed unavailable-key window.
+Otherwise its status is NOT_COVERED, including zero eligible keys, even when
+ordinary process recovery and the overall command pass. No live result is
+retroactively changed by this output correction.
