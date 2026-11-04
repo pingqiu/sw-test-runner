@@ -176,7 +176,7 @@ func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 	s := p.Smoke
 	s.filerVerbose = p.Restart != nil && p.Restart.Writes
 	if p.Soak != nil {
-		s.rotation = p.Soak.Rotation
+		s.rotation, s.kvLoad = p.Soak.Rotation, p.Soak.Pattern != nil
 		if faultReady {
 			s.readyAssign = p.Soak.ReadyAssign
 		}

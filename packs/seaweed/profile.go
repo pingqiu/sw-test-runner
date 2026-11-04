@@ -89,8 +89,10 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 		if x.ID == "m02" && slices.Equal(x.Roles, []string{"master", "filer", "volume"}) {
 			server = x
 		}
-		if x.ID == "m01" && !slices.Equal(x.Roles, []string{"client"}) {
-			return nil, errors.New("M01 client only")
+		// M01 is the client; for kv_load also a volume server, so replication
+		// 001 keeps a copy there while M02's volume restarts.
+		if x.ID == "m01" && !slices.Equal(x.Roles, []string{"client"}) && !(s.kvLoad && slices.Equal(x.Roles, []string{"client", "volume"})) {
+			return nil, errors.New("M01 client only, or client and volume for kv_load")
 		}
 	}
 	if h == nil || server == nil || h.RDMA.GIDIndex == nil || h.RDMA.Port != 1 || h.RDMA.Device != "mlx5_0" || (action == "deploy" && (role == "client" || !contains(h.Roles, role))) || (action != "deploy" && role != "") {
@@ -127,7 +129,7 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 			return nil, errors.New("profile missing explicit port: " + name)
 		}
 	}
-	if host == "m02" {
+	if host == "m02" || contains(h.Roles, "volume") { // a host that runs a product pins it
 		for _, name := range []string{"weed", "weed-volume"} {
 			pin := files[path.Join(release, "bin", name)]
 			if len(pin) != 64 || strings.Trim(pin, "0123456789abcdef") != "" {

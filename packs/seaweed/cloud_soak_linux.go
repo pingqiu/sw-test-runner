@@ -301,7 +301,7 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	if err != nil {
 		return "", err
 	}
-	v, err := decodeVerdict(e, want)
+	v, err := decodeVerdict(e, want, p.Soak.criteria())
 	rows = filepath.Join(c.Output, "soak-verdict.json")
 	body, _ := json.MarshalIndent(v, "", " ")
 	if err = errors.Join(err, os.WriteFile(rows, body, 0600)); err == nil && v.Status != "PASS" {

@@ -19,6 +19,8 @@ from soak_stats import WITNESS, boot_id
 SCHEMA = 'seaweed-soak-verdict/1'
 MANDATORY = ('wrong_reads', 'failed_sets', 'get_outcomes', 'terminal', 'fault_errors', 'misses', 'coverage', 'body',
              'client_kill', 'rotation', 'max_vid_advanced', 'routes')  # Go's soakCriteria, same set
+KV_LOAD = ('wrong_reads', 'failed_sets', 'get_outcomes', 'terminal', 'fault_errors', 'misses', 'write_once', 'body',
+           'client_kill', 'load_as_declared', 'routes')  # Go's kvLoadCriteria, same set
 FILE, LINE, ROWS, OBJECT = 64 << 20, 64 << 10, 200000, 4 << 20
 CLOCK_CEILING_S, CLOCK_ANOMALY_S = 2.0, 0.1  # owner-chosen and frozen (decision 3 r6): never raised to pass misses
 COUNTERS = ('direct_dc_reads', 'direct_rc_reads', 'copied_reads')
@@ -214,6 +216,68 @@ def assess_routes(root, workers, kills):
     return bad
 
 
+def kv_qualified(declared, faults, begin):
+    """The plan's faults joined exactly to the evidence: one record per declared episode and nothing else,
+    each a successful restart (REPLACED, as the direct path's Restart ends, or the approved runner's
+    REPLACEMENT_STARTED; no error) of a live M02 victim, SIGKILL applied, a new
+    M02 replacement, dispatched within 15 s of the declared time, and dispatch <= PreKillMono <= READY
+    within 60 s. Anything short of that for any fault: none qualifies, so no window opens."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    def ok(f, d):
+        r = f['receipt']
+        kill, old, new = r.get('Kill') or {}, (r.get('Kill') or {}).get('Identity') or {}, r.get('Replacement') or {}
+        return f['role'] == d['role'] and r.get('State') in ('REPLACED', 'REPLACEMENT_STARTED') and not r.get('Error') \
+            and old.get('Node') == 'm02' and kill.get('AliveBefore') is True and kill.get('Signal') == 'SIGKILL' \
+            and isinstance(kill.get('AppliedAt'), str) and not kill['AppliedAt'].startswith('0001') and new.get('Node') == 'm02' \
+            and num(new.get('PID')) and new['PID'] > 0 and new['PID'] != old.get('PID') and num(kill.get('PreKillMono')) \
+            and abs(f['dispatch_mono'] - begin - d['at_s']) <= 15 \
+            and f['dispatch_mono'] <= kill['PreKillMono'] <= f['ready_mono'] <= f['dispatch_mono'] + 60
+    by = {}
+    for f in faults:
+        by.setdefault(f['episode'], []).append(f)
+    good = [by[d['episode']][0] for d in declared if len(by.get(d['episode'], ())) == 1 and ok(by[d['episode']][0], d)]
+    return good if len(good) == len(declared) == len(faults) else []
+
+
+def kv_load_rows(pat, declared_faults, acks, ops, faults):
+    """kv_load's own rows. write_once: every key's first version ACKed exactly once at the declared size,
+    and nothing read (dispatched or submitted) before the last of those ACKs. load_as_declared, in the
+    timed phases after that barrier: each client's operations within 10% of rate x the unpaused time;
+    each phase's write share as declared (none in a read phase, 1 - read_ratio within 0.05 in a mixed
+    one); the top 1% of keys drawing their declared share of the reads within 0.05; and exactly the
+    plan's faults, each READY after its dispatch."""
+    first = [a for a in acks if a['seed'].startswith('kv-load-') and a['seed'].endswith('-0')]
+    index = {a['key']: int(a['seed'].split('-')[2]) for a in first}
+    barrier = max((a['completed'] for a in first), default=None)
+    early = [e['op'] for e in ops if e['action'] == 'get' and (barrier is None or min(e['dispatched'], e['submitted']) < barrier)]
+    once = len(first) == pat['keys'] and sorted(index.values()) == list(range(pat['keys'])) and \
+        all(a['length'] == pat['object_bytes'] for a in acks)
+    write_once = (once and not early, '%d first versions for %d keys, %d GETs before the barrier' % (len(first), pat['keys'], len(early)))
+    span = sum(p['duration_s'] for p in pat['phases'][1:])
+    start = barrier or 0.0
+    pause = lambda a, b: sum(max(0.0, min(f['ready_mono'], b) - max(f['dispatch_mono'], a)) for f in faults)
+    paused = pause(start, start + span)
+    timed = [e for e in ops if start <= e['dispatched'] < start + span]
+    reads = [index[e['key']] for e in timed if e['action'] == 'get' and e['key'] in index]
+    top = max(1, pat['keys'] // 100)
+    w = [1.0 if pat['distribution'] == 'uniform' else (k + 1) ** -pat['zipf_s'] for k in range(pat['keys'])]
+    share, expected = sum(i < top for i in reads) / max(len(reads), 1), sum(w[:top]) / sum(w)
+    per = [sum(e['worker'] == i for e in timed) for i in range(pat['clients'])]
+    mix, rates, t0, r = [], True, start, pat['rate_per_client']
+    for p in pat['phases'][1:]:  # every client at its rate in every phase, not balanced across them
+        d, in_p = p['duration_s'], [e for e in timed if t0 <= e['dispatched'] < t0 + p['duration_s']]
+        rates = rates and all(0.9 * r * (d - pause(t0, t0 + d)) <= sum(e['worker'] == i for e in in_p) <= 1.1 * r * d
+                              for i in range(pat['clients']))
+        writes = sum(e['action'] == 'set' for e in in_p) / max(len(in_p), 1)
+        mix.append(writes == 0 if p['kind'] == 'read' else abs(writes - (1 - p['read_ratio'])) <= 0.05)
+        t0 += p['duration_s']
+    named = len(faults) == len(declared_faults)  # the qualified faults: one per declared, none unqualified
+    ok = rates and all(mix) and abs(share - expected) <= 0.05 and named
+    return write_once, (ok, 'ops per client %s in %.0f s (%.0f paused), want %.1f/s; phase mixes %s; top-1%% share %.3f, '
+                        'declared %.3f; faults %s as declared %s' % (per, span, paused, pat['rate_per_client'], mix, share,
+                                                                    expected, [f['episode'] for f in faults], named))
+
+
 def assess(c):
     root, crit = Path(c['root']), {}
     def mark(name, ok, reason=''):
@@ -236,10 +300,11 @@ def assess(c):
     m02 = typed(obj(root, 'm02-collect.json'), status=str, collection=str, rotated=list, dat_vids=list)
     if m02['status'] != 'SOAK_COLLECTED' or m02['collection'] != c['collection']:
         raise ValueError('M02 collect missing or foreign')
-    workers = obj(root, 'workers.json')
-    if not isinstance(workers, dict) or sorted(workers) != ['0', '1', '2', '3'] or \
-            [typed(workers[i], pid=int, starttime=int, transport=str)['transport'] for i in '0123'] != ['dc', 'dc', 'dc', 'http']:
-        raise ValueError('workers.json is not the accepted 3 DC + 1 HTTP set')
+    workers, pat = obj(root, 'workers.json'), c.get('pattern')  # kv_load: its own clients, all DC
+    ids = [str(i) for i in range(pat['clients'] if pat else 4)]
+    if not isinstance(workers, dict) or sorted(workers) != sorted(ids) or [typed(workers[i], pid=int, starttime=int, transport=str)
+                                                                          ['transport'] for i in ids] != (['dc'] * len(ids) if pat else ['dc', 'dc', 'dc', 'http']):
+        raise ValueError('workers.json is not the accepted client set')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
     oracle, by_seq, wrong, misses, unknown, acked, hits, latest_raw = Oracle(), {}, [], [], [], {}, {}, {}
@@ -325,39 +390,51 @@ def assess(c):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
         return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
             miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
-    unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
-    mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
+    unexcused = [e for e, latest in misses if not excused(e, latest)]
+    if pat:  # kv_load: every miss outside the qualified fault windows fails (no soak retirement excusal); inside, reported
+        qualified = kv_qualified(c['faults'], faults, begin)
+        inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in qualified)}
+        unexcused = [e for e, _ in misses if e['op'] not in inside]
+        clock_error += '; %d inside fault windows, reported' % len(inside)
+    mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
     writers, keys = {}, {}
     for a in acks:
         writers[a['writer']] = writers.get(a['writer'], 0) + 1
         keys.setdefault(a['key'], set()).add(a['writer'])
-    mark('coverage', sorted(writers) == [0, 1, 2, 3] and any(len(w) == 4 for w in keys.values()), 'writers %s' % sorted(writers))
+    if pat:
+        (ok, why), declared = kv_load_rows(pat, c['faults'], acks, ops, qualified)
+        mark('write_once', ok, why)
+    else:
+        mark('coverage', sorted(writers) == [0, 1, 2, 3] and any(len(w) == 4 for w in keys.values()), 'writers %s' % sorted(writers))
     ends = [typed(e, mono=float)['mono'] for e in marks if e['event'] == 'body_end']
     late = [e['op'] for e in ops if ends and e['dispatched'] > ends[0]]
     mark('body', len(ends) == 1 and abs(ends[0] - begin - c['duration_s']) <= 1 and not late, 'ends %s, late %d' % (ends, len(late)))
     k = kills[0] if len(kills) == 1 else None
     w = k and k['witness']
     original = k and workers.get(str(k['worker']))
-    ok = bool(k) and k['worker'] in (0, 1, 2) and k['started'] - begin >= c['client_kill_at_s'] and 0 <= k['killed'] - k['started'] <= 60 \
+    ok = bool(k) and (original or {}).get('transport') == 'dc' and k['started'] - begin >= c['client_kill_at_s'] and 0 <= k['killed'] - k['started'] <= 60 \
         and 0 <= k['finished'] - k['killed'] <= 30 and w.get('event') == 'submitted' and w.get('action') == 'get' \
         and w.get('pid') == original['pid'] and k['replacement'].get('pid') != original['pid']
     mark('client_kill', ok, '%d kills' % len(kills))
-    final = set(good[-1]['present']) if good else None
-    proven = sorted(v for v in rotated if final is not None and v not in final and v not in dat)
-    mark('rotation', len(proven) >= 10, '%d proven' % len(proven))
-    mf = next((f for f in faults if f['role'] == 'master'), None)
-    before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
-    after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
-    mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
+    if pat:
+        mark('load_as_declared', *declared)
+    else:
+        final = set(good[-1]['present']) if good else None
+        proven = sorted(v for v in rotated if final is not None and v not in final and v not in dat)
+        mark('rotation', len(proven) >= 10, '%d proven' % len(proven))
+        mf = next((f for f in faults if f['role'] == 'master'), None)
+        before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
+        after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
+        mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
     route_bad = assess_routes(root, workers, kills)
     mark('routes', not route_bad, 'bad %s' % route_bad[:6])
 
     # K7 (a FINDING, never a FAIL): the first non-HTTP SET after each fault's successful READY.
     k7 = []
     for f in faults:
-        first = min((a for a in acks if a['submitted'] >= f['ready_mono'] and a['writer'] != 3), key=lambda a: a['submitted'], default=None)
+        first = min((a for a in acks if a['submitted'] >= f['ready_mono'] and workers[str(a['writer'])]['transport'] != 'http'), key=lambda a: a['submitted'], default=None)
         if first:
             lat = first['completed'] - first['submitted']
             k7.append(dict(episode=f['episode'], role=f['role'], dt_after_ready_s=first['submitted'] - f['ready_mono'],

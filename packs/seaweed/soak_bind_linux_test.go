@@ -411,7 +411,7 @@ func TestTheAdmittedAssessorArgvRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admitted argv failed: %v", err)
 	}
-	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", "boot-1", root})
+	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", "boot-1", root}, soakCriteria)
 	if err != nil || v.Status != "FAIL" || !strings.Contains(v.Error, "M01 boot") {
 		t.Fatalf("want this run's FAIL row (empty evidence, foreign boot), got %+v %v", v, err)
 	}
@@ -445,7 +445,7 @@ func TestTheAdmittedAssessorPassRowDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admitted argv failed: %v", err)
 	}
-	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root})
+	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root}, soakCriteria)
 	if err != nil || v.Status != "PASS" || !strings.Contains(v.MissesQualification.Method, "no parity claim") {
 		t.Fatalf("want the real PASS row decoded, got %+v %v\n%s", v, err, raw)
 	}

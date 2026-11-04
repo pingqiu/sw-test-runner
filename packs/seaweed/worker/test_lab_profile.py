@@ -84,11 +84,11 @@ class GenerationChecks(unittest.TestCase):
 
 class LaunchContract(unittest.TestCase):
     def config(self):
+        services = dict(master_http=19755, master_grpc=29755,filer_http=19105,filer_grpc=29105,
+                        volume_http=19601,volume_grpc=29601,rdma=18980,
+                        rdma_control=18982,dc_control=18983,rdma_push=18981)
         return dict(root='/private/run', release='/opt/protected', address='10.0.2.3',
-                    server_address='10.0.2.3', services=dict(master_http=19755,
-                    master_grpc=29755,filer_http=19105,filer_grpc=29105,
-                    volume_http=19601,volume_grpc=29601,rdma=18980,
-                    rdma_control=18982,dc_control=18983,rdma_push=18981))
+                    server_address='10.0.2.3', services=services, server_services=dict(services))
 
     def test_single_master_explicit_and_no_forced_growth_or_rotation(self):
         argv, env = profile.product_command(self.config(), 'master')
@@ -150,6 +150,13 @@ class LaunchContract(unittest.TestCase):
                 self.assertEqual((root2 / 'filer.sock').read_bytes(), b'EXISTING')
             finally:
                 sentinel.unlink()  # only the exact exclusive-created local CPU fixture
+
+    def test_a_volume_on_m01_registers_with_the_server_master(self):  # kv_load: M01 runs no master
+        c = dict(self.config(), address='10.0.2.2', device='mlx5_0', gid_index=3,
+                 services=dict(volume_http=19602, volume_grpc=29602, rdma=18990, rdma_control=18992, dc_control=18993, rdma_push=18991))
+        argv, _ = profile.product_command(c, 'volume')
+        self.assertEqual(argv[argv.index('--master') + 1], '10.0.2.3:19755')
+        self.assertEqual(argv[argv.index('--ip') + 1], '10.0.2.2')
 
     def test_dc_volume_uses_declared_ports_and_device(self):
         c = dict(self.config(), device='mlx5_0', gid_index=3)

@@ -836,6 +836,176 @@ class SoakAssess(unittest.TestCase):
         self.passes(lambda ev: None)
 
 
+KV_PATTERN = dict(clients=2, transport='dc', keys=4, distribution='uniform', object_bytes=64, rate_per_client=1,
+                  phases=[dict(kind='write_once'), dict(kind='read', duration_s=100)])
+
+
+KV_RECEIPT = dict(State='REPLACED',  # what directSoak.Restart (cloud_soak_linux.go) records on success
+                  Kill=dict(Identity=dict(Node='m02', PID=4242), AliveBefore=True, Signal='SIGKILL',
+                            AppliedAt='2026-11-04T07:00:00Z', PreKillMono=1010.5),
+                  Replacement=dict(Node='m02', PID=5151))
+
+
+def receipt(**change):  # KV_RECEIPT with Kill fields (kill_*), Kill.Identity (victim_*) or top-level fields changed
+    r = json.loads(json.dumps(KV_RECEIPT))
+    for k, v in change.items():
+        (r['Kill'] if k.startswith('kill_') else r['Kill']['Identity'] if k.startswith('victim_') else r)[k.split('_', 1)[1] if '_' in k and k.split('_')[0] in ('kill', 'victim') else k] = v
+    return r
+
+
+def kv_evidence(miss_at=None):
+    """A complete kv_load run: 2 DC clients write 4 keys once (barrier at 1004), then read them
+    uniformly at 1/s each for 100 s; volume fault E1 pauses 1010-1015; client 1 is killed at 1070."""
+    acks, events, op = [], [], [0]
+    def event(**e):
+        op[0] += 1
+        events.append(dict(e, op=str(op[0])))
+        return events[-1]
+    for i in range(4):
+        seed, t = 'kv-load-%d-0' % i, 1001 + i
+        acks.append(dict(key='k%d' % i, writer=i % 2, seed=seed, submitted=t - .05, completed=t, sequence=i + 1, length=64,
+                         digest=digest(seed, 64), fids=['3,ab']))
+        event(worker=i % 2, action='set', key='k%d' % i, dispatched=t - .06, submitted=t - .05, completed=t, ok=True)
+    for n in range(200):
+        t, a = 1005 + n / 2, acks[n % 4]
+        hit = dict(ok=True, length=64, sha256=a['digest'])
+        miss = dict(ok=False, miss=True, fids=a['fids'], error='DC batch push-read response status 1')
+        event(worker=n % 2, action='get', key=a['key'], dispatched=t, submitted=t + .01, completed=t + .02,
+              sequence=a['sequence'], **(miss if miss_at is not None and n == miss_at else hit))
+    kill = dict(event='client_kill', kind='client_kill', worker=1, started=1070, killed=1071, finished=1072,
+                witness=dict(event='submitted', action='get', pid=11, operation_id=str(op[0] + 1)), replacement=dict(pid=77, starttime=1))
+    events += [kill, dict(event='body_end', mono=1200), dict(event='quiescent', mono=1261, dispatched=op[0] + 1)]
+    boot, dc = boot_id(), dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=5, direct_rc_reads=0, copied_reads=0)
+    files = {'soak-load-start.json': dict(boot_id=boot, mono=1000), 'workers.json': {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)},
+             'faults.json': [dict(episode='E1', role='volume', dispatch_mono=1010, ready_mono=1015, receipt=KV_RECEIPT)],
+             'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[], events=[])}
+    stats = {'native-stats-%d-1.jsonl' % pid: [dict(status='OBSERVED', stats=dict(loader=dc))] for pid in (10, 11, 77)}
+    return dict(files=files, acks=acks, events=events, polls=[], stats=stats)
+
+
+class KVLoadAssess(unittest.TestCase):
+    """kv_load's criteria set: its own write_once and load_as_declared rows."""
+    failing = SoakAssess.failing
+
+    def run_on(self, ev):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, ev)
+        return soak_assess.assess(dict(config(root), duration_s=200, client_kill_at_s=50, pattern=getattr(self, 'pattern', KV_PATTERN),
+                                       faults=getattr(self, 'declared', [dict(at_s=10, role='volume', episode='E1')])))
+
+    def kv_fails(self, change, rule):
+        ev = kv_evidence()
+        change(ev)
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('FAIL', [rule]), row['criteria'])
+
+    def test_a_complete_kv_load_run_passes_the_kv_load_set(self):
+        row = self.run_on(kv_evidence())
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        self.assertEqual(sorted(row['criteria']), sorted(soak_assess.KV_LOAD))
+
+    def test_write_once_needs_every_key_once_and_no_read_before_the_barrier(self):
+        ev = kv_evidence()  # key 3's first version recorded as key 2's: one key twice, one never (wrong_reads fails too)
+        ev['acks'][3]['seed'] = 'kv-load-2-0'
+        self.assertEqual(self.run_on(ev)['criteria']['write_once']['outcome'], 'FAIL')
+        self.kv_fails(lambda ev: next(e for e in ev['events'] if e.get('action') == 'get').__setitem__('submitted', 1003), 'write_once')
+
+    def test_load_as_declared_needs_every_client_and_its_rate(self):
+        self.kv_fails(lambda ev: [e.__setitem__('worker', 0) for e in ev['events'] if e.get('action') == 'get'], 'load_as_declared')
+        ev = kv_evidence()  # a third of the reads gone (terminal fails too: check the row itself)
+        ev['events'] = [e for e in ev['events'] if not (e.get('action') == 'get' and int(e['op']) % 3 == 0)]
+        self.assertEqual(self.run_on(ev)['criteria']['load_as_declared']['outcome'], 'FAIL')
+
+    def test_a_skewed_uniform_read_share_is_not_as_declared(self):
+        ev = kv_evidence()
+        for e in ev['events']:
+            if e.get('action') == 'get':
+                e['key'], e['sequence'], e['sha256'] = 'k0', 1, ev['acks'][0]['digest']
+        self.assertEqual(self.run_on(ev)['criteria']['load_as_declared']['outcome'], 'FAIL')
+
+    def test_misses_inside_a_fault_window_are_reported_outside_they_fail(self):
+        row = self.run_on(kv_evidence(miss_at=20))  # submitted at 1015.01, inside E1's window [1010, 1075]
+        self.assertEqual(row['criteria']['misses']['outcome'], 'PASS', row['criteria']['misses'])
+        self.assertIn('1 inside fault windows', row['criteria']['misses']['reason'])
+        self.assertEqual(self.run_on(kv_evidence(miss_at=180))['criteria']['misses']['outcome'], 'FAIL')  # at 1095.01, after it
+
+    def row(self, ev, name, **pattern):
+        self.pattern = dict(KV_PATTERN, **pattern)
+        return self.run_on(ev)['criteria'][name]['outcome']
+
+    def test_objects_of_another_size_than_declared_fail_write_once(self):
+        self.assertEqual(self.row(kv_evidence(), 'write_once', object_bytes=65), 'FAIL')
+
+    def test_an_all_read_mixed_phase_is_not_as_declared(self):
+        self.assertEqual(self.row(kv_evidence(), 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='mixed', duration_s=100, read_ratio=.75)]), 'FAIL')
+
+    def test_one_busy_client_and_one_idle_client_are_not_as_declared(self):
+        ev = kv_evidence()
+        gets = [e for e in ev['events'] if e.get('action') == 'get']
+        for e in gets[1:]:
+            e['worker'] = 0  # 199 to 1
+        self.assertEqual(self.row(ev, 'load_as_declared'), 'FAIL')
+
+    def test_a_plan_fault_missing_from_the_evidence_is_not_as_declared(self):
+        ev = kv_evidence()
+        ev['files']['faults.json'] = []
+        self.assertEqual(self.row(ev, 'load_as_declared'), 'FAIL')
+
+    def forged(self, **change):
+        ev = kv_evidence(miss_at=20)  # a miss at 1015.01, inside the declared fault's window
+        ev['files']['faults.json'][0].update(change)
+        return self.run_on(ev)['criteria']
+
+    def test_a_forged_fault_opens_no_window_and_is_not_as_declared(self):
+        for name, change in (('empty kill receipt', dict(receipt=receipt(Kill={}))),
+                             ('replacement on M01', dict(receipt=receipt(Replacement=dict(Node='m01', PID=5151)))),
+                             ('kill on M01', dict(receipt=receipt(victim_Node='m01'))),
+                             ('kill not applied', dict(receipt=receipt(kill_AppliedAt='0001-01-01T00:00:00Z'))),
+                             ('restart failed', dict(receipt=receipt(State='FAILED', Error='replacement did not start'))),
+                             ('replacement is the victim', dict(receipt=receipt(Replacement=dict(Node='m02', PID=4242)))),
+                             ('PreKillMono after READY', dict(receipt=receipt(kill_PreKillMono=1016))),
+                             ('READY 120 s after dispatch', dict(ready_mono=1130)),
+                             ('dispatched 30 s off the declared 10 s', dict(dispatch_mono=1040, ready_mono=1043)),
+                             ('another episode', dict(episode='E9'))):
+            crit = self.forged(**change)
+            with self.subTest(name):
+                self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
+
+    def test_the_approved_runners_success_state_also_qualifies(self):
+        crit = self.forged(receipt=receipt(State='REPLACEMENT_STARTED'))
+        self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('PASS', 'PASS'), crit)
+
+    def test_a_duplicate_episode_cannot_stand_in_for_a_missing_one(self):
+        self.declared = [dict(at_s=10, role='volume', episode='E1'), dict(at_s=60, role='master', episode='E2')]
+        ev = kv_evidence(miss_at=20)
+        ev['files']['faults.json'].append(dict(ev['files']['faults.json'][0]))  # E1 twice, no E2
+        crit = self.run_on(ev)['criteria']
+        self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
+
+    def test_rates_are_per_client_in_every_phase_not_balanced_across_them(self):
+        ev = kv_evidence()
+        for e in ev['events']:
+            if e.get('action') == 'get':
+                e['worker'] = 0 if e['dispatched'] < 1054 else 1  # one client per 50 s phase
+        self.assertEqual(self.row(ev, 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='read', duration_s=50),
+                                                                  dict(kind='read', duration_s=50)]), 'FAIL')
+        self.assertEqual(self.row(kv_evidence(), 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='read', duration_s=50),
+                                                                             dict(kind='read', duration_s=50)]), 'PASS')
+
+    def test_a_miss_outside_the_fault_windows_fails_even_if_the_soak_would_excuse_it(self):
+        saved = soak_assess.miss_excused
+        soak_assess.miss_excused = lambda *a: True
+        self.addCleanup(setattr, soak_assess, 'miss_excused', saved)
+        self.assertEqual(self.run_on(kv_evidence(miss_at=180))['criteria']['misses']['outcome'], 'FAIL')
+
+    def test_an_http_client_is_refused(self):
+        ev = kv_evidence()
+        ev['files']['workers.json']['1']['transport'] = 'http'
+        with self.assertRaises(ValueError):
+            self.run_on(ev)
+
+
 class StrictReader(unittest.TestCase):
     """The one evidence reader: no-follow, regular, bounded, strict JSON."""
     def setUp(self):
