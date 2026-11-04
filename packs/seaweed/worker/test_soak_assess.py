@@ -878,7 +878,8 @@ class KVLoadAssess(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
         write(root, ev)
-        return soak_assess.assess(dict(config(root), duration_s=200, client_kill_at_s=50, pattern=KV_PATTERN))
+        return soak_assess.assess(dict(config(root), duration_s=200, client_kill_at_s=50, pattern=getattr(self, 'pattern', KV_PATTERN),
+                                       faults=[dict(at_s=10, role='volume', episode='E1')]))
 
     def kv_fails(self, change, rule):
         ev = kv_evidence()
@@ -915,6 +916,34 @@ class KVLoadAssess(unittest.TestCase):
         self.assertEqual(row['criteria']['misses']['outcome'], 'PASS', row['criteria']['misses'])
         self.assertIn('1 inside fault windows', row['criteria']['misses']['reason'])
         self.assertEqual(self.run_on(kv_evidence(miss_at=180))['criteria']['misses']['outcome'], 'FAIL')  # at 1095.01, after it
+
+    def row(self, ev, name, **pattern):
+        self.pattern = dict(KV_PATTERN, **pattern)
+        return self.run_on(ev)['criteria'][name]['outcome']
+
+    def test_objects_of_another_size_than_declared_fail_write_once(self):
+        self.assertEqual(self.row(kv_evidence(), 'write_once', object_bytes=65), 'FAIL')
+
+    def test_an_all_read_mixed_phase_is_not_as_declared(self):
+        self.assertEqual(self.row(kv_evidence(), 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='mixed', duration_s=100, read_ratio=.75)]), 'FAIL')
+
+    def test_one_busy_client_and_one_idle_client_are_not_as_declared(self):
+        ev = kv_evidence()
+        gets = [e for e in ev['events'] if e.get('action') == 'get']
+        for e in gets[1:]:
+            e['worker'] = 0  # 199 to 1
+        self.assertEqual(self.row(ev, 'load_as_declared'), 'FAIL')
+
+    def test_a_plan_fault_missing_from_the_evidence_is_not_as_declared(self):
+        ev = kv_evidence()
+        ev['files']['faults.json'] = []
+        self.assertEqual(self.row(ev, 'load_as_declared'), 'FAIL')
+
+    def test_a_miss_outside_the_fault_windows_fails_even_if_the_soak_would_excuse_it(self):
+        saved = soak_assess.miss_excused
+        soak_assess.miss_excused = lambda *a: True
+        self.addCleanup(setattr, soak_assess, 'miss_excused', saved)
+        self.assertEqual(self.run_on(kv_evidence(miss_at=180))['criteria']['misses']['outcome'], 'FAIL')
 
     def test_an_http_client_is_refused(self):
         ev = kv_evidence()

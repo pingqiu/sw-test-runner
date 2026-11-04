@@ -32,3 +32,6 @@ Thumbs.db
 
 # experimental backup files left during extraction
 *.orig
+
+# Python bytecode from running the worker tests
+__pycache__/

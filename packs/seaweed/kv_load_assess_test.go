@@ -41,8 +41,9 @@ func TestSoakAssessArgsCarryThePatternOnlyForKVLoad(t *testing.T) {
 		if err != nil || json.Unmarshal([]byte(argv[len(argv)-1]), &c) != nil {
 			t.Fatalf("assess argv %q: %v", argv, err)
 		}
-		if _, has := c["pattern"]; has != (x.Pattern != nil) {
-			t.Errorf("pattern %v in the assessor config: %v", x.Pattern != nil, has)
+		_, pattern := c["pattern"]
+		if _, faults := c["faults"]; pattern != (x.Pattern != nil) || faults != pattern {
+			t.Errorf("pattern %v: the assessor config has pattern %v, faults %v", x.Pattern != nil, pattern, faults)
 		}
 	}
 }
@@ -50,19 +51,30 @@ func TestSoakAssessArgsCarryThePatternOnlyForKVLoad(t *testing.T) {
 // M01 may run a volume server beside the client (kv_load's replication 001),
 // and nothing else.
 func TestM01RunsTheClientAndOptionallyAVolume(t *testing.T) {
-	s := SmokeSettings{HelperDir: "/opt/profile/worker", NativeDir: "/opt/profile/native", Keys: 1, Length: 64}
-	files := map[string]string{"/opt/profile/bin/weed": "a", "/opt/profile/bin/weed-volume": "b"}
-	for roles, ok := range map[string]bool{"client": true, "client,volume": true, "client,master": false, "volume": false, "client,volume,filer": false} {
+	smoke := SmokeSettings{HelperDir: "/opt/profile/worker", NativeDir: "/opt/profile/native", Keys: 1, Length: 64}
+	kv := Plan{Smoke: smoke, Soak: &SoakPlan{Pattern: lmcacheLike()}}.profileSettings(false)
+	pins := map[string]string{"/opt/profile/bin/weed": strings.Repeat("a", 64), "/opt/profile/bin/weed-volume": strings.Repeat("b", 64)}
+	for name, c := range map[string]struct {
+		roles string
+		s     SmokeSettings
+		ok    bool
+	}{"client": {"client", smoke, true}, "client and volume, kv_load": {"client,volume", kv, true}, "client and volume, soak": {"client,volume", smoke, false},
+		"client and master, kv_load": {"client,master", kv, false}, "volume alone": {"volume", kv, false}} {
 		d := profileFixture(t)
-		d.Hosts[0].Roles = strings.Split(roles, ",")
-		_, err := ProfileArgs(d, "m01", "preflight", "", s, files)
-		if (err == nil) != ok || !ok && !strings.Contains(err.Error(), "M01 client only, or client and volume") {
-			t.Errorf("M01 roles %s: %v", roles, err)
+		d.Hosts[0].Roles = strings.Split(c.roles, ",")
+		_, err := ProfileArgs(d, "m01", "preflight", "", c.s, pins)
+		if (err == nil) != c.ok || !c.ok && !strings.Contains(err.Error(), "M01 client only, or client and volume for kv_load") {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 	d := profileFixture(t)
 	d.Hosts[0].Roles = []string{"client", "volume"}
-	if _, err := ProfileArgs(d, "m01", "deploy", "volume", s, files); err != nil {
-		t.Fatalf("M01's volume deploy refused: %v", err)
+	if _, err := ProfileArgs(d, "m01", "deploy", "volume", kv, map[string]string{}); err == nil || !strings.Contains(err.Error(), "product pin") {
+		t.Fatalf("M01's volume deployed without its product pins: %v", err)
+	}
+	args, err := ProfileArgs(d, "m01", "deploy", "volume", kv, pins)
+	var c ProfileConfig
+	if err != nil || json.Unmarshal([]byte(args[3]), &c) != nil || c.Products["weed-volume"] != pins["/opt/profile/bin/weed-volume"] {
+		t.Fatalf("M01's volume deploy: products %v, %v", c.Products, err)
 	}
 }

@@ -78,7 +78,7 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 		"duration_s": x.DurationS, "quiescence_s": int(QuiescenceReserve.Seconds()), "client_kill_at_s": x.ClientKillAtS,
 		"collection": x.Layout.Collection}
 	if x.Pattern != nil {
-		config["pattern"] = x.Pattern // kv_load: judged by its own rows; absent for the soak
+		config["pattern"], config["faults"] = x.Pattern, x.Faults // kv_load: judged by its own rows; absent for the soak
 	}
 	raw, err := json.Marshal(config)
 	return []string{"-I", path.Join(s.HelperDir, "soak_assess.py"), "--config", string(raw)}, err

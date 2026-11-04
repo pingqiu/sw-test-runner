@@ -98,7 +98,7 @@ def product_command(config, role):
     binary = PurePosixPath(config['release']) / 'bin'
     ports = config['services']
     address = config['address']
-    master = address + ':' + str(ports['master_http'])
+    master = config['server_address'] + ':' + str(config['server_services']['master_http'])  # M02's, from either host
     # No inherited RDMA selector, credentials, shell configuration or tmp path.
     env = dict(PATH='/usr/bin:/bin', TZ='UTC', HOME=str(root / 'home'),
                XDG_CACHE_HOME=str(root / 'cache'), TMPDIR=str(root / 'tmp'),
@@ -571,7 +571,7 @@ def services(config):
             if not any('RDMA DC push-read writer active' in line
                        for log in logs for line in log['markers']):
                 raise ValueError('owned volume DC writer not active')
-            cm = 'RDMA listener bound on ' + config['server_address'] + ':' + str(config['services']['rdma'])
+            cm = 'RDMA listener bound on ' + config.get('address', config['server_address']) + ':' + str(config['services']['rdma'])  # this host's own
             if not any(line.rstrip().endswith(cm) for log in logs for line in log['markers']):
                 raise ValueError('owned volume RDMA CM bind not observed')
             facts[role]['logs'] = logs
@@ -632,7 +632,8 @@ def ready(config):
             if leader.get('IsLeader', leader.get('isLeader')) is not True:
                 raise ValueError('master not leader')
             topology = http_json(master + '/dir/status', config)
-            volume = address + ':' + str(ports['volume_http'])
+            own = 'volume' in config.get('roles', ())  # M01's own volume (kv_load), else M02's
+            volume = (config.get('address', address) + ':' + str(config['services']['volume_http'])) if own else address + ':' + str(ports['volume_http'])
             if not topology_contains(topology, volume):
                 raise ValueError('volume missing from master topology')
             http_json('http://' + address + ':' + str(ports['filer_http']) + '/', config, False)

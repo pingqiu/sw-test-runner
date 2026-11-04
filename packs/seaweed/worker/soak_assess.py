@@ -216,30 +216,42 @@ def assess_routes(root, workers, kills):
     return bad
 
 
-def kv_load_rows(pat, acks, ops, faults):
-    """kv_load's own rows. write_once: every key's first version ACKed exactly once, and nothing read
-    (dispatched or submitted) before the last of those ACKs. load_as_declared: in the timed phases after
-    that barrier, every client active, operations within 10% of clients x rate x the unpaused time, and
-    the top 1% of keys drawing their declared share of the reads within 0.05."""
+def kv_load_rows(pat, declared_faults, acks, ops, faults):
+    """kv_load's own rows. write_once: every key's first version ACKed exactly once at the declared size,
+    and nothing read (dispatched or submitted) before the last of those ACKs. load_as_declared, in the
+    timed phases after that barrier: each client's operations within 10% of rate x the unpaused time;
+    each phase's write share as declared (none in a read phase, 1 - read_ratio within 0.05 in a mixed
+    one); the top 1% of keys drawing their declared share of the reads within 0.05; and exactly the
+    plan's faults, each READY after its dispatch."""
     first = [a for a in acks if a['seed'].startswith('kv-load-') and a['seed'].endswith('-0')]
     index = {a['key']: int(a['seed'].split('-')[2]) for a in first}
     barrier = max((a['completed'] for a in first), default=None)
     early = [e['op'] for e in ops if e['action'] == 'get' and (barrier is None or min(e['dispatched'], e['submitted']) < barrier)]
-    once = len(first) == pat['keys'] and sorted(index.values()) == list(range(pat['keys']))
+    once = len(first) == pat['keys'] and sorted(index.values()) == list(range(pat['keys'])) and \
+        all(a['length'] == pat['object_bytes'] for a in acks)
     write_once = (once and not early, '%d first versions for %d keys, %d GETs before the barrier' % (len(first), pat['keys'], len(early)))
     span = sum(p['duration_s'] for p in pat['phases'][1:])
     start = barrier or 0.0
     paused = sum(max(0.0, min(f['ready_mono'], start + span) - max(f['dispatch_mono'], start)) for f in faults)
     timed = [e for e in ops if start <= e['dispatched'] < start + span]
-    want = pat['clients'] * pat['rate_per_client']
     reads = [index[e['key']] for e in timed if e['action'] == 'get' and e['key'] in index]
     top = max(1, pat['keys'] // 100)
     w = [1.0 if pat['distribution'] == 'uniform' else (k + 1) ** -pat['zipf_s'] for k in range(pat['keys'])]
     share, expected = sum(i < top for i in reads) / max(len(reads), 1), sum(w[:top]) / sum(w)
-    ok = {e['worker'] for e in timed} == set(range(pat['clients'])) and \
-        0.9 * want * (span - paused) <= len(timed) <= 1.1 * want * span and abs(share - expected) <= 0.05
-    return write_once, (ok, '%d ops in %.0f s (%.0f paused), %d clients; top-1%% share %.3f, declared %.3f' % (
-        len(timed), span, paused, len({e['worker'] for e in timed}), share, expected))
+    per = [sum(e['worker'] == i for e in timed) for i in range(pat['clients'])]
+    rates = all(0.9 * pat['rate_per_client'] * (span - paused) <= n <= 1.1 * pat['rate_per_client'] * span for n in per)
+    mix, t0 = [], start
+    for p in pat['phases'][1:]:
+        in_p = [e for e in timed if t0 <= e['dispatched'] < t0 + p['duration_s']]
+        writes = sum(e['action'] == 'set' for e in in_p) / max(len(in_p), 1)
+        mix.append(writes == 0 if p['kind'] == 'read' else abs(writes - (1 - p['read_ratio'])) <= 0.05)
+        t0 += p['duration_s']
+    named = sorted((f['episode'], f['role']) for f in declared_faults) == sorted((f['episode'], f['role']) for f in faults) \
+        and all(f['ready_mono'] > f['dispatch_mono'] for f in faults)
+    ok = rates and all(mix) and abs(share - expected) <= 0.05 and named
+    return write_once, (ok, 'ops per client %s in %.0f s (%.0f paused), want %.1f/s; phase mixes %s; top-1%% share %.3f, '
+                        'declared %.3f; faults %s as declared %s' % (per, span, paused, pat['rate_per_client'], mix, share,
+                                                                    expected, [f['episode'] for f in faults], named))
 
 
 def assess(c):
@@ -355,9 +367,9 @@ def assess(c):
         return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
             miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
     unexcused = [e for e, latest in misses if not excused(e, latest)]
-    if pat:  # kv_load: judged outside the fault windows; inside, reported only (first runs)
-        inside = [e['op'] for e in unexcused if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in faults)]
-        unexcused = [e for e in unexcused if e['op'] not in inside]
+    if pat:  # kv_load: every miss outside the fault windows fails (no soak retirement excusal); inside, reported only
+        inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in faults)}
+        unexcused = [e for e, _ in misses if e['op'] not in inside]
         clock_error += '; %d inside fault windows, reported' % len(inside)
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
@@ -367,7 +379,7 @@ def assess(c):
         writers[a['writer']] = writers.get(a['writer'], 0) + 1
         keys.setdefault(a['key'], set()).add(a['writer'])
     if pat:
-        (ok, why), declared = kv_load_rows(pat, acks, ops, faults)
+        (ok, why), declared = kv_load_rows(pat, c['faults'], acks, ops, faults)
         mark('write_once', ok, why)
     else:
         mark('coverage', sorted(writers) == [0, 1, 2, 3] and any(len(w) == 4 for w in keys.values()), 'writers %s' % sorted(writers))
