@@ -129,3 +129,15 @@ exists until real runs justify one.
 Each scenario run has one kill, so the two-host plan is at least three runs, with and
 without the assign retry hint. Retry steps should show in the filer log; GET latency
 above about 1 s during warm-up would mean queueing behind stalled SETs.
+
+## Direct master-write report
+
+Use `seaweed-cloud direct` with `master_writes:true`, one onprem/docker HTTP
+host and the default three KV artifacts. This optional case replaces the default
+smoke with the same 120s write-load schedule over loader-http. The master unit
+and data directory are retained across one SIGKILL/restart; readiness observes
+its HTTP leader status without an Assign probe. The same client host stamps
+P before Kill and READY after the leader probe. Filer -v=1 records assignment
+retry diagnostics. `master-writes.json` uses the report-only contract above;
+no latency/error-rate SLA or RDMA claim is introduced. The existing DC
+approved-run case remains until its later migration.
