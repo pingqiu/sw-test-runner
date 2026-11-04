@@ -22,6 +22,7 @@ class Oracle:
         self.latest = {}
         self.pending = {}
         self.reading = {}
+        self.readers = {}  # concurrent GETs per key in `reading`: a hot key is read by many clients at once
         self.retired = set()
         self.sequence = 0
         self.acks = []
@@ -48,17 +49,30 @@ class Oracle:
         return version
 
     def begin_read(self, key):
-        if key in self.pending or key in self.reading:
-            raise OracleError("ambiguous read during write or existing read")
+        """Reads of one key may overlap: none can begin during a write, and begin_write refuses while
+        any is in flight, so every concurrent reader expects the same latest version."""
+        if key in self.pending:
+            raise OracleError("ambiguous read during write")
         if key not in self.latest:
             raise OracleError("unacknowledged key")
-        self.reading[key] = self.latest[key]
+        if key in self.reading:
+            self.readers[key] += 1
+        else:
+            self.reading[key], self.readers[key] = self.latest[key], 1
         return self.reading[key]
 
-    def finish_read(self, key, status, payload):
-        version = self.reading.pop(key, None)
+    def end_read(self, key):
+        """Release one in-flight read of key: the version it expects."""
+        version = self.reading.get(key)
         if version is None:
             raise OracleError("read lacks its per-key guard")
+        self.readers[key] -= 1
+        if not self.readers[key]:
+            del self.reading[key], self.readers[key]
+        return version
+
+    def finish_read(self, key, status, payload):
+        version = self.end_read(key)
         if status == 200:
             if not version.matches(len(payload), sha256(payload).hexdigest()):
                 raise OracleError("WRONG_BYTES: latest ACK hash/length differs")

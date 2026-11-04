@@ -199,12 +199,14 @@ class Pattern:
             return None
         index = self.draw()
         key = self.key(index)
-        if key in busy:
-            return None
         ph = phases[self.phase]
         if ph['kind'] == 'mixed' and writing_allowed and self.rng.random() >= ph['read_ratio']:
+            if key in busy:
+                return None  # a write needs its key to itself (the oracle)
             self.versions[index] = self.versions.get(index, 0) + 1
             return 'set', key, 'kv-load-%d-%d' % (index, self.versions[index])
+        if key in pending_sets:
+            return None  # never read beside a write; reads beside reads are a hot key's load
         return ('get', key) if key in latest else None
 
 
@@ -298,14 +300,20 @@ def run(config):
             cmd['sequence'] = oracle.begin_write(key, payload(cmd['seed'], length)).sequence
         else:
             oracle.begin_read(key)
-        busy[key], commands[i], available[i] = i, cmd, time.monotonic() + gap
+        busy[key] = busy.get(key, 0) + 1  # in-flight ops per key: kv_load reads of one key may overlap
+        commands[i], available[i] = cmd, time.monotonic() + gap
         workers[i]['pipe'].send(cmd)
+
+    def release(key):
+        busy[key] -= 1
+        if not busy[key]:
+            del busy[key]
 
     def complete(i, row):
         cmd = commands.pop(i)
         key = cmd['key']
         log('completions.jsonl', dict(worker=i, op=cmd['operation_id'], action=cmd['action'], row=row))  # raw, BEFORE judging (r9 line 53)
-        busy.pop(key)
+        release(key)
         if row['operation_id'] != cmd['operation_id']:
             raise OracleError('completion identity')
         event = dict(worker=i, op=cmd['operation_id'], action=cmd['action'], key=key, dispatched=cmd['dispatched'], submitted=row['submitted'],
@@ -321,7 +329,7 @@ def run(config):
             counts['acks'] += 1
             verify.append(key)
         else:
-            v = oracle.reading.pop(key)
+            v = oracle.end_read(key)
             event.update(sequence=v.sequence, length=row.get('length'), sha256=row.get('sha256'))
             case = classify_get(row, cmd['operation_id'] in window['allowed'])
             if case == 'hit':
@@ -357,8 +365,8 @@ def run(config):
                 pump(i)
                 if i in commands and commands[i]['action'] == 'get' and i in submissions:
                     witness, cmd = submissions.pop(i), commands.pop(i)
-                    oracle.reading.pop(cmd['key'])
-                    busy.pop(cmd['key'])
+                    oracle.end_read(cmd['key'])
+                    release(cmd['key'])
                     killed = time.monotonic()
                     workers[i]['process'].kill()
                     workers[i]['process'].join(5)
