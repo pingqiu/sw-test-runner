@@ -76,6 +76,8 @@ def get_case(e):
             typed(e, length=int, sha256=str, sequence=int)
         elif case == 'miss':
             typed(e, sequence=int, fids=list)
+            if e.get('cause', 'budget_refusal') != 'budget_refusal':
+                return 'unknown'  # the one recorded miss cause
             if not e['ok']:  # r9: an ok=False miss only in the DC status-1 shape; ok=True not-hit is a candidate
                 case = case if MISS.search(typed(e, error=str)['error']) else 'unknown'
             elif classify_get(dict(ok=True, results=typed(e, results=list)['results']), False) != 'miss':
@@ -219,15 +221,20 @@ def assess_routes(root, workers, kills):
     present = {p.name for p in root.iterdir() if p.name.startswith('native-stats-')}
     bad = sorted(present ^ set(expected))
     for name in sorted(present & set(expected)):
-        loaders = [typed(typed(r, stats=dict)['stats'], loader=dict)['loader'] for r in lines(root, name)
-                   if typed(r, status=str)['status'] == 'OBSERVED']
-        if not loaders:
+        observed = [typed(r, stats=dict)['stats'] for r in lines(root, name) if typed(r, status=str)['status'] == 'OBSERVED']
+        if not observed:
             bad.append(name)
             continue
-        last = typed(loaders[-1], transport=str, **{k: int for k in COUNTERS})
+        last = typed(typed(observed[-1], loader=dict)['loader'], transport=str, **{k: int for k in COUNTERS})
         dc, rc, copied = (last[k] for k in COUNTERS)
         if expected[name] == 'dc':
-            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and dc > 0 and rc == 0 and copied == 0
+            # A process whose every read was a K8 refusal miss has no route to show: zero DC reads and
+            # read_calls equal to its refusal-miss counter. Any process with a read that was not refused
+            # still needs its DC route.
+            k8 = observed[-1].get('native_budget_refusal_process') or {}
+            refused = k8.get('missing_keys_refused', 0) + k8.get('missing_keys_deadline', 0) if isinstance(k8, dict) else -1
+            all_refused = dc == 0 and isinstance(last.get('read_calls'), int) and last['read_calls'] > 0 and last['read_calls'] == refused
+            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (dc > 0 or all_refused)                 and rc == 0 and copied == 0
         else:
             ok = last['transport'] == 'http' and dc == 0 and rc == 0 and copied > 0
         if not ok or min(dc, rc, copied) < 0:
@@ -415,6 +422,11 @@ def assess(c):
         inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in qualified)}
         unexcused = [e for e, _ in misses if e['op'] not in inside]
         clock_error += '; %d inside fault windows, reported' % len(inside)
+    # A K8 budget-refusal miss is a cache outcome by design, excused only when its own event names the
+    # cause (the worker's counter delta across that GET); nothing else is inferred.
+    refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
+    unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
+    clock_error += '; %d budget-refusal misses excused' % len(refused)
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
@@ -448,7 +460,7 @@ def assess(c):
         after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
         mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
     route_bad = assess_routes(root, workers, kills)
-    mark('routes', not route_bad, 'bad %s' % route_bad[:6])
+    mark('routes', not route_bad, 'bad %s' % route_bad)
 
     # K7 (a FINDING, never a FAIL): the first non-HTTP SET after each fault's successful READY.
     k7 = []

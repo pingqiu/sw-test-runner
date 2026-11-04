@@ -919,6 +919,36 @@ class KVLoadAssess(unittest.TestCase):
         self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
         self.assertEqual(sorted(row['criteria']), sorted(soak_assess.KV_LOAD))
 
+    def test_a_budget_refusal_miss_is_excused_and_a_miss_without_that_cause_is_not(self):
+        # kv_load rerun 1 (2026-11-04): K8 refusal misses had no excuse case. Read 150 (t 1080) lies outside
+        # E1's window (1010 to 1015 + 60): only its recorded cause can excuse it.
+        for cause, rule in (('budget_refusal', None), (None, 'misses'), ('rotation', 'get_outcomes')):
+            ev = kv_evidence(miss_at=150)
+            miss = next(e for e in ev['events'] if e.get('miss'))
+            miss.update(ok=True, results=[False], error='')
+            if cause:
+                miss['cause'] = cause  # any cause but budget_refusal makes the GET unrecognised
+            row = self.run_on(ev)
+            self.assertEqual(self.failing(row), [rule] if rule else [], (cause, row['criteria']))
+
+    def test_an_all_refused_process_may_lack_a_route_and_every_flagged_one_is_reported(self):
+        ev = kv_evidence()
+        name = 'native-stats-11-1.jsonl'  # worker 1's original process
+        refused = dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=0, direct_rc_reads=0, copied_reads=0, read_calls=40)
+        ev['stats'][name] = [dict(status='OBSERVED', stats=dict(loader=refused,
+                                                               native_budget_refusal_process=dict(missing_keys_refused=40, missing_keys_deadline=0)))]
+        self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'PASS')
+        ev['stats'][name][0]['stats']['native_budget_refusal_process']['missing_keys_refused'] = 39  # one read not refused
+        self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL')
+        # All flagged processes are named, not the first six.
+        ev = kv_evidence()
+        ev['files']['workers.json'] = {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)}
+        names = ['native-stats-%d-9.jsonl' % p for p in range(100, 108)]  # 8 foreign series
+        for n in names:
+            ev['stats'][n] = [dict(status='OBSERVED', stats=dict(loader=dict(refused, read_calls=1)))]
+        reason = self.run_on(ev)['criteria']['routes']['reason']
+        self.assertTrue(all(n in reason for n in names), reason)
+
     def test_op_events_are_bounded_by_the_declared_pattern_not_the_soak_caps(self):
         # kv_load run 2 (2026-11-04): a full 900 s load wrote 71.4 MB of op-events, over the soak's 64 MiB,
         # and the verdict was never computed. Shrunk here: soak caps below the fixture's 204 rows.

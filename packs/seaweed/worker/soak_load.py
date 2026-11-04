@@ -339,6 +339,8 @@ def run(config):
                 counts['hits'] += 1
             elif case == 'miss':
                 event.update(miss=True, fids=list(v.fids), results=row['results'])  # judged in 3b by the decision-3 join
+                if row.get('cause') == 'budget_refusal':  # the worker's counter delta: a K8 refusal miss
+                    event['cause'] = 'budget_refusal'
                 counts['misses'] += 1
             elif case == 'fault':  # acked + r9 kind
                 event.update(fault_error=True, episode=window['allowed'][cmd['operation_id']])  # credited only by 3b, within [P, P+60]

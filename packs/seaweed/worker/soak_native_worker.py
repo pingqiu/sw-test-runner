@@ -25,10 +25,18 @@ def finish(conn, future, timeout=30):
     raise TimeoutError('native completion deadline')
 
 
+def refusal_misses(conn):
+    """This process's K8 budget-refusal miss counter (refusal, its deadline or a hold-off; 0 without it)."""
+    b=json.loads(conn.stats_json()).get('native_budget_refusal_process') or {}
+    return int(b.get('missing_keys_refused',0))+int(b.get('missing_keys_deadline',0))
+
+
 def work(conn, command, submitted=None):
     action=command['action']; key=command['key']
     expected=payload(command['seed'],command['length'])
     if action not in ('set','get'): raise ValueError('unknown operation')
+    # One op in flight per worker process: the counter's delta across this GET is this GET's miss cause.
+    refused_before=refusal_misses(conn) if action=='get' else None
     buf=expected if action=='set' else bytearray(v^255 for v in expected)
     start=time.monotonic();start_epoch=time.time()
     future=int(getattr(conn,'submit_batch_'+action)([key],[memoryview(buf)]))
@@ -46,6 +54,8 @@ def work(conn, command, submitted=None):
     if action=='get':
         row.update(length=len(buf),sha256=hashlib.sha256(buf).hexdigest(),
                    untouched=buf==bytearray(v^255 for v in expected))
+        if refusal_misses(conn)>refused_before:
+            row['cause']='budget_refusal'
     return row
 
 

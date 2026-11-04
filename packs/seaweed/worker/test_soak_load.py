@@ -196,6 +196,17 @@ class FaultWindowWorker(unittest.TestCase):
         self.assertEqual(summary['status'], 'LOAD_DONE')
         self.assertTrue(misses and all(e['ok'] is True and e['results'] == [False] and e['fids'] for e in misses), misses)
 
+    def test_a_refused_miss_carries_its_cause_into_the_op_event(self):
+        # kv_load rerun 1 (2026-11-04): 100,820 K8 refusal misses, none attributable in op-events.
+        self.toggle('fake-refused', 1.0, 1.5)
+        self.toggle('fake-notfound', 3.0, 1.5)
+        summary = soak_load.run(self.config)
+        misses = [e for e in self.events() if e.get('miss')]
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        refused = [e for e in misses if e.get('cause') == 'budget_refusal']
+        self.assertTrue(refused and len(refused) < len(misses), misses)  # plain misses carry no cause
+        self.assertTrue(all(set(e) >= {'miss', 'fids', 'results'} for e in refused))
+
     def test_a_failed_get_with_an_empty_error_is_still_fatal_and_its_row_is_kept(self):
         self.toggle('fake-fail-empty', 1.5, 10)
         with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
@@ -292,6 +303,44 @@ class PushPipes(unittest.TestCase):
         for bad in (0, 9, True, '2', 2.0):
             with self.assertRaises(ValueError, msg=bad):
                 soak_load.push_pipes(dict(push_pipes=bad))
+
+
+class RefusalCause(unittest.TestCase):
+    """soak_native_worker.work names a GET's miss cause from the process's own budget-refusal counter:
+    one op in flight per worker process, so the delta across the GET is that GET's."""
+
+    class Conn:
+        def __init__(self, refuse):
+            import os as _os
+            self.refuse, self.refused, self.done = refuse, 0, []
+            self.r, self.w = _os.pipe()
+
+        def stats_json(self):
+            return json.dumps(dict(native_budget_refusal_process=dict(missing_keys_refused=self.refused, missing_keys_deadline=0)))
+
+        def submit_batch_get(self, keys, bufs):
+            import os as _os
+            if self.refuse:
+                self.refused += 1
+            self.done.append((7, True, '', [False]))
+            _os.write(self.w, b'x')
+            return 7
+
+        def event_fd(self):
+            return self.r
+
+        def drain_completions(self):
+            import os as _os
+            _os.read(self.r, 1)
+            return [self.done.pop()]
+
+    def test_a_refused_get_is_named_and_a_plain_miss_is_not(self):
+        import soak_native_worker
+        cmd = dict(action='get', key='k', seed='s', length=8, operation_id='1')
+        refused = soak_native_worker.work(self.Conn(True), cmd)
+        plain = soak_native_worker.work(self.Conn(False), cmd)
+        self.assertEqual(refused.get('cause'), 'budget_refusal')
+        self.assertNotIn('cause', plain)
 
 
 class HotKeyReads(unittest.TestCase):
