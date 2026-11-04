@@ -840,6 +840,18 @@ KV_PATTERN = dict(clients=2, transport='dc', keys=4, distribution='uniform', obj
                   phases=[dict(kind='write_once'), dict(kind='read', duration_s=100)])
 
 
+KV_RECEIPT = dict(State='REPLACEMENT_STARTED', Kill=dict(Identity=dict(Node='m02', PID=4242), AliveBefore=True, Signal='SIGKILL',
+                                                        AppliedAt='2026-11-04T07:00:00Z', PreKillMono=1010.5),
+                  Replacement=dict(Node='m02', PID=5151))
+
+
+def receipt(**change):  # KV_RECEIPT with Kill fields (kill_*), Kill.Identity (victim_*) or top-level fields changed
+    r = json.loads(json.dumps(KV_RECEIPT))
+    for k, v in change.items():
+        (r['Kill'] if k.startswith('kill_') else r['Kill']['Identity'] if k.startswith('victim_') else r)[k.split('_', 1)[1] if '_' in k and k.split('_')[0] in ('kill', 'victim') else k] = v
+    return r
+
+
 def kv_evidence(miss_at=None):
     """A complete kv_load run: 2 DC clients write 4 keys once (barrier at 1004), then read them
     uniformly at 1/s each for 100 s; volume fault E1 pauses 1010-1015; client 1 is killed at 1070."""
@@ -864,7 +876,7 @@ def kv_evidence(miss_at=None):
     events += [kill, dict(event='body_end', mono=1200), dict(event='quiescent', mono=1261, dispatched=op[0] + 1)]
     boot, dc = boot_id(), dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=5, direct_rc_reads=0, copied_reads=0)
     files = {'soak-load-start.json': dict(boot_id=boot, mono=1000), 'workers.json': {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)},
-             'faults.json': [dict(episode='E1', role='volume', dispatch_mono=1010, ready_mono=1015, receipt=dict(Kill=dict(PreKillMono=1010), Replacement=dict(Node='m02')))],
+             'faults.json': [dict(episode='E1', role='volume', dispatch_mono=1010, ready_mono=1015, receipt=KV_RECEIPT)],
              'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[], events=[])}
     stats = {'native-stats-%d-1.jsonl' % pid: [dict(status='OBSERVED', stats=dict(loader=dc))] for pid in (10, 11, 77)}
     return dict(files=files, acks=acks, events=events, polls=[], stats=stats)
@@ -879,7 +891,7 @@ class KVLoadAssess(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root)
         write(root, ev)
         return soak_assess.assess(dict(config(root), duration_s=200, client_kill_at_s=50, pattern=getattr(self, 'pattern', KV_PATTERN),
-                                       faults=[dict(at_s=10, role='volume', episode='E1')]))
+                                       faults=getattr(self, 'declared', [dict(at_s=10, role='volume', episode='E1')])))
 
     def kv_fails(self, change, rule):
         ev = kv_evidence()
@@ -945,14 +957,26 @@ class KVLoadAssess(unittest.TestCase):
         return self.run_on(ev)['criteria']
 
     def test_a_forged_fault_opens_no_window_and_is_not_as_declared(self):
-        for name, change in (('empty kill receipt', dict(receipt=dict(Kill={}, Replacement=dict(Node='m02')))),
-                             ('replacement on M01', dict(receipt=dict(Kill=dict(PreKillMono=1010), Replacement=dict(Node='m01')))),
+        for name, change in (('empty kill receipt', dict(receipt=receipt(Kill={}))),
+                             ('replacement on M01', dict(receipt=receipt(Replacement=dict(Node='m01', PID=5151)))),
+                             ('kill on M01', dict(receipt=receipt(victim_Node='m01'))),
+                             ('kill not applied', dict(receipt=receipt(kill_AppliedAt='0001-01-01T00:00:00Z'))),
+                             ('restart failed', dict(receipt=receipt(State='FAILED', Error='replacement did not start'))),
+                             ('replacement is the victim', dict(receipt=receipt(Replacement=dict(Node='m02', PID=4242)))),
+                             ('PreKillMono after READY', dict(receipt=receipt(kill_PreKillMono=1016))),
                              ('READY 120 s after dispatch', dict(ready_mono=1130)),
                              ('dispatched 30 s off the declared 10 s', dict(dispatch_mono=1040, ready_mono=1043)),
                              ('another episode', dict(episode='E9'))):
             crit = self.forged(**change)
             with self.subTest(name):
                 self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
+
+    def test_a_duplicate_episode_cannot_stand_in_for_a_missing_one(self):
+        self.declared = [dict(at_s=10, role='volume', episode='E1'), dict(at_s=60, role='master', episode='E2')]
+        ev = kv_evidence(miss_at=20)
+        ev['files']['faults.json'].append(dict(ev['files']['faults.json'][0]))  # E1 twice, no E2
+        crit = self.run_on(ev)['criteria']
+        self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
 
     def test_rates_are_per_client_in_every_phase_not_balanced_across_them(self):
         ev = kv_evidence()

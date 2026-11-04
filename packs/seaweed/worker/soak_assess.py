@@ -217,14 +217,25 @@ def assess_routes(root, workers, kills):
 
 
 def kv_qualified(declared, faults, begin):
-    """The evidence faults that are the plan's: its episode and role, dispatched within 15 s of the
-    declared time, a kill receipt, the replacement on M02, READY within 60 s. Only these open a window."""
+    """The plan's faults joined exactly to the evidence: one record per declared episode and nothing else,
+    each a successful restart (REPLACEMENT_STARTED, no error) of a live M02 victim, SIGKILL applied, a new
+    M02 replacement, dispatched within 15 s of the declared time, and dispatch <= PreKillMono <= READY
+    within 60 s. Anything short of that for any fault: none qualifies, so no window opens."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
     def ok(f, d):
-        kill, new = f['receipt'].get('Kill') or {}, f['receipt'].get('Replacement') or {}
-        return (f['episode'], f['role']) == (d['episode'], d['role']) and abs(f['dispatch_mono'] - begin - d['at_s']) <= 15 \
-            and isinstance(kill.get('PreKillMono'), (int, float)) and kill['PreKillMono'] > 0 and new.get('Node') == 'm02' \
-            and 0 < f['ready_mono'] - f['dispatch_mono'] <= 60
-    return [f for f in faults if any(ok(f, d) for d in declared)]
+        r = f['receipt']
+        kill, old, new = r.get('Kill') or {}, (r.get('Kill') or {}).get('Identity') or {}, r.get('Replacement') or {}
+        return f['role'] == d['role'] and r.get('State') == 'REPLACEMENT_STARTED' and not r.get('Error') \
+            and old.get('Node') == 'm02' and kill.get('AliveBefore') is True and kill.get('Signal') == 'SIGKILL' \
+            and isinstance(kill.get('AppliedAt'), str) and not kill['AppliedAt'].startswith('0001') and new.get('Node') == 'm02' \
+            and num(new.get('PID')) and new['PID'] > 0 and new['PID'] != old.get('PID') and num(kill.get('PreKillMono')) \
+            and abs(f['dispatch_mono'] - begin - d['at_s']) <= 15 \
+            and f['dispatch_mono'] <= kill['PreKillMono'] <= f['ready_mono'] <= f['dispatch_mono'] + 60
+    by = {}
+    for f in faults:
+        by.setdefault(f['episode'], []).append(f)
+    good = [by[d['episode']][0] for d in declared if len(by.get(d['episode'], ())) == 1 and ok(by[d['episode']][0], d)]
+    return good if len(good) == len(declared) == len(faults) else []
 
 
 def kv_load_rows(pat, declared_faults, acks, ops, faults):
@@ -381,7 +392,6 @@ def assess(c):
     unexcused = [e for e, latest in misses if not excused(e, latest)]
     if pat:  # kv_load: every miss outside the qualified fault windows fails (no soak retirement excusal); inside, reported
         qualified = kv_qualified(c['faults'], faults, begin)
-        qualified = qualified if len(qualified) == len(faults) else []  # one forged fault: no window for any
         inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in qualified)}
         unexcused = [e for e, _ in misses if e['op'] not in inside]
         clock_error += '; %d inside fault windows, reported' % len(inside)
