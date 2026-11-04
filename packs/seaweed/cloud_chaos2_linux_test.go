@@ -139,9 +139,14 @@ func (f *chaos2Fake) load(id string, base float64) string {
 			o.Key = "kA"
 		}
 		switch {
+		case f.variant == "c5-sweep-shape" && f.cases[id] == "C5-two-kill" && id == "client3" && i == 29:
+			// Sweep op109, rebased into this fixture's ordered operation IDs:
+			// one eligible GET at P+0.212s, empty error, no both-GONE clock.
+			o.Key, o.Exact = "kU", false
+			o.Started, o.Ended = base+30.211837061, base+30.255116621
 		case f.variant == "outside-window" && id == "client2" && s > base+125 && s < base+126:
 			o.Exact = false // latest P=base+55 (restart), fails at base+125.5: past P+60
-		case strings.HasPrefix(f.variant, "c5-") && f.cases[id] == "C5-two-kill" && o.Kind == "kv_get" && s > base+117 && s < base+125:
+		case strings.HasPrefix(f.variant, "c5-") && f.variant != "c5-sweep-shape" && f.cases[id] == "C5-two-kill" && o.Kind == "kv_get" && s > base+117 && s < base+125:
 			o.Exact = f.variant == "c5-eligible-only" // eligibility or exact reads alone do not witness unavailable-key handling
 			if f.variant == "c5-unavailable" || f.variant == "c5-mixed-unknown" || f.variant == "c5-eligible-only" {
 				o.Key = "kU" // both copies on {vol3, vol4}

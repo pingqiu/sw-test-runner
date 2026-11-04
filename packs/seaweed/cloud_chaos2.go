@@ -278,11 +278,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		}
 	}
 	if x.Name == "C5-two-kill" {
-		status := "NOT_COVERED"
+		r.unavailableKeys = map[string]any{"status": "NOT_COVERED", "eligible_keys": eligibleKeys, "affected_reads": affectedReads}
 		if affectedReads > 0 {
-			status = "COVERED"
+			// Existing markers do not bound the interval after BOTH GONE witnesses.
+			r.unavailableKeys["reason"] = "no GONE clock"
 		}
-		r.unavailableKeys = map[string]any{"status": status, "eligible_keys": eligibleKeys, "affected_reads": affectedReads}
 	}
 	return r.save("result.json", results)
 }

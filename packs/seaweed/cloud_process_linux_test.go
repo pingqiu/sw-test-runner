@@ -466,7 +466,7 @@ func TestDirectProcessC5CopyAttribution(t *testing.T) {
 }
 
 func TestDirectProcessC5PersistsUnavailableKeyCoverage(t *testing.T) {
-	for _, v := range []string{"c5-zero-pair", "c5-eligible-only", "c5-unavailable"} {
+	for _, v := range []string{"c5-zero-pair", "c5-eligible-only", "c5-unavailable", "c5-sweep-shape"} {
 		t.Run(v, func(t *testing.T) {
 			_, out, err := processRun(t, "C5-two-kill", v)
 			if err != nil {
@@ -477,6 +477,7 @@ func TestDirectProcessC5PersistsUnavailableKeyCoverage(t *testing.T) {
 				ProcessRecovery string `json:"process_recovery"`
 				UnavailableKeys struct {
 					Status        string
+					Reason        string
 					EligibleKeys  int `json:"eligible_keys"`
 					AffectedReads int `json:"affected_reads"`
 				} `json:"unavailable_keys"`
@@ -497,11 +498,16 @@ func TestDirectProcessC5PersistsUnavailableKeyCoverage(t *testing.T) {
 			if v != "c5-zero-pair" {
 				eligible = 3
 			}
-			if v == "c5-unavailable" {
-				want = "COVERED"
+			affected := v == "c5-unavailable" || v == "c5-sweep-shape"
+			reason := ""
+			if affected {
+				reason = "no GONE clock"
 			}
-			if row.UnavailableKeys.Status != want || row.UnavailableKeys.EligibleKeys != eligible || (row.UnavailableKeys.AffectedReads > 0) != (v == "c5-unavailable") {
+			if row.UnavailableKeys.Status != want || row.UnavailableKeys.Reason != reason || row.UnavailableKeys.EligibleKeys != eligible || (row.UnavailableKeys.AffectedReads > 0) != affected {
 				t.Fatal("coverage omitted or eligibility mistaken for observation", string(raw))
+			}
+			if v == "c5-sweep-shape" && row.UnavailableKeys.AffectedReads != 1 {
+				t.Fatal("sweep-shaped single failure was not exercised", string(raw))
 			}
 		})
 	}
