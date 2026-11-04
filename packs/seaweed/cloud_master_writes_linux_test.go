@@ -49,12 +49,12 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 			return 23
 		}
 	case strings.Contains(cmd, "echo GONE"):
-		output = "104.5\nOLD 100 1\nGONE\n"
+		output = "OLD 100 1\nGONE\n104.5\n"
 		if h.mode == "lost-kill" || h.mode == "failed-kill-readback" {
 			return 23
 		}
 		if h.mode == "bad-clock" {
-			output = "NaN\nOLD 100 1\nGONE\n"
+			output = "OLD 100 1\nGONE\nNaN\n"
 		}
 	case strings.Contains(cmd, "echo \"NEW"):
 		if !strings.Contains(cmd, "-master-g2") {
@@ -282,7 +282,7 @@ func TestMasterReadyRealHTTPResponseSchema(t *testing.T) {
 			_, got := runDirectMasterWrites(context.Background(), d, h, CloudConfig{}, []string{"-I", "worker", "--config", string(config)}, func(name, cmd string) (string, error) {
 				switch name {
 				case "master-kill":
-					return "104.5 OLD 1 1 GONE", nil
+					return "OLD 1 1 GONE 104.5", nil
 				case "master-ready":
 					observed = true
 					cmd = strings.Replace(cmd, "do sleep 1; done", "do exit 77; done", 1)
@@ -327,5 +327,50 @@ func TestMasterKillIdentityBeforeSignal(t *testing.T) {
 				t.Fatalf("mode%s err%v output%s", mode, err, out)
 			}
 		})
+	}
+}
+
+// Execute the emitted stamp/kill order. A SET at104.01 lands after the old
+// prospective stamp104 but before confirmed GONE104.5 and cannot win.
+func TestDirectMasterAckStartsAtConfirmedGone(t *testing.T) {
+	old := masterWriteSettle
+	masterWriteSettle = 0
+	defer func() { masterWriteSettle = old }()
+	var d inventory.Document
+	json.Unmarshal(directInput(t, "127.0.0.1:22"), &d)
+	h := d.Hosts[0]
+	h.RunRoot = t.TempDir()
+	clock := filepath.Join(t.TempDir(), "clock")
+	os.WriteFile(clock, []byte("104\n"), 0600)
+	cfg := writeCfg()
+	body, _ := json.Marshal(cfg)
+	out, err := runDirectMasterWrites(t.Context(), d, h, CloudConfig{Output: t.TempDir()}, []string{"-I", "worker", "--config", string(body)}, func(name, cmd string) (string, error) {
+		switch name {
+		case "master-kill":
+			cmd = strings.Replace(cmd, chaosKillScript("sw-cloud-"+d.RunID+"-master"), "echo 'OLD 100 1'; echo 104.5 > "+cloudQuote(clock)+"; echo GONE; exit 0", 1)
+			cmd = strings.ReplaceAll(cmd, chaosStamp, "cat "+cloudQuote(clock))
+			b, e := exec.Command("sh", "-ec", cmd).CombinedOutput()
+			return string(b), e
+		case "master-ready":
+			return "106.5 NEW 101 2", nil
+		case "write-wait":
+			return string(fixtureRows(t, nil)), nil
+		}
+		return "", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, e := os.ReadFile(out)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var r map[string]any
+	json.Unmarshal(b, &r)
+	if v := r["first_ack_after_kill_s"].(float64); v < 1.50 || v > 1.52 {
+		t.Errorf("pre-kill ACK won: %s", b)
+	}
+	if v, ok := r["first_ack_after_ready_s"].(float64); !ok || v < 1.39 || v > 1.41 {
+		t.Errorf("READY ACK absent/wrong: %s", b)
 	}
 }
