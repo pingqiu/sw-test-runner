@@ -96,16 +96,20 @@ func (s *directSoak) step(ctx context.Context, label string, seconds int) (tr.Ex
 	if err != nil {
 		return tr.ExitInfo{}, err
 	}
+	start := time.Now()
 	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-"+label+".json", label, seconds, cmd)
-	e := exitInfo(out, 0)
+	e := exitInfo(out, 0, start)
 	if err != nil { // a failed or unreachable step has no known end
 		e.Code, e.Settled, e.Output.Complete = 1, false, false
 	}
 	return e, err
 }
 
-func exitInfo(out string, code int) tr.ExitInfo {
-	return tr.ExitInfo{Code: code, Settled: true, Output: tr.CapturedOutput{Complete: true, StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(out)))}}
+// exitInfo is a step's receipt: its stdout, read between start and now. The
+// step's stderr is journalled in its step file, not carried here (empty).
+func exitInfo(out string, code int, start time.Time) tr.ExitInfo {
+	return tr.ExitInfo{Code: code, Settled: true, Output: tr.CapturedOutput{Complete: true, ReadStart: start, ReadEnd: time.Now(),
+		StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(out))), StderrSHA256: fmt.Sprintf("%x", sha256.Sum256(nil))}}
 }
 
 // start runs a job as a transient unit owned by the ssh user, its stdout and
@@ -148,13 +152,13 @@ func (s *directSoak) StartTask(ctx context.Context, label string) (tr.JobHandle,
 // end, then returns its exit status and stdout. A failed transient unit stays
 // loaded with its status; a clean exit unloads it and reads as status 0.
 func (s *directSoak) WaitTask(ctx context.Context, _ tr.JobHandle) (tr.ExitInfo, error) {
-	pin, u := s.b.Jobs[s.load], cloudQuote(s.unit(s.load)) // StartTask checked the label
+	pin, u, start := s.b.Jobs[s.load], cloudQuote(s.unit(s.load)), time.Now() // StartTask checked the label
 	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-wait.json", "wait-"+s.load, int(time.Until(s.deadline)/time.Second)+60,
 		"while systemctl is-active -q "+u+"; do sleep 2; done; systemctl show -p ExecMainStatus --value "+u+
 			"; cat "+cloudQuote(path.Join(s.hosts[pin.Node].RunRoot, s.load+".stdout")))
 	code, body, _ := strings.Cut(out, "\n")
 	rc, cerr := strconv.Atoi(strings.TrimSpace(code))
-	e := exitInfo(body, rc)
+	e := exitInfo(body, rc, start)
 	if err = errors.Join(err, cerr); err != nil { // an unknown end is never a settled one
 		e.Code, e.Settled, e.Output.Complete = -1, false, false
 	} else if rc != 0 { // a settled failure stays a failure

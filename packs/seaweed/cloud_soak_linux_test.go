@@ -327,6 +327,9 @@ func TestDirectSoakLoadFailureIsStickyAtTheFinalJoin(t *testing.T) {
 		p, in := soakTestPlan()
 		_, exit, err := runSoak(ctx, directWait{fakeSoak: f, d: s}, p, in, map[string]tr.JobHandle{})
 		f.cancel()
+		if out, _, derr := exit.Output.Decode(); !tc.fail && (derr != nil || !strings.Contains(string(out), "LOAD_DONE")) {
+			t.Fatalf("the receipt does not decode: %v %q", derr, out)
+		}
 		if tc.fail != (err != nil) || tc.fail && (!strings.Contains(fmt.Sprint(err), "exited 23") || exit.Code != 23 || !exit.Settled) || !tc.fail && (!exit.Settled || exit.Code != 0) {
 			t.Fatalf("wait %q: err=%v exit=%+v", tc.wait, err, exit)
 		}
