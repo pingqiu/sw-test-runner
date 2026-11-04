@@ -34,6 +34,13 @@ class UnderQuorum(unittest.TestCase):
  def test_offset_high_byte_cannot_be_reinterpreted_as_low(self):
   self.files([16,(1<<35)+16],self.block)
   with self.assertRaises(ValueError):self.capture()
+ def test_disagreement_retains_original_metadata(self):
+  path=self.root/'h0/bucket_1.vif';data=json.loads(path.read_bytes());data['datFileSize']+=8;path.write_text(json.dumps(data))
+  with self.assertRaises(ValueError) as caught:self.capture()
+  evidence=json.loads(str(caught.exception).split(': ',1)[1]);vifs=[f for f in evidence['files'] if 'raw_vif' in f]
+  self.assertEqual(len(vifs),14);self.assertEqual(len(evidence['layouts']),14)
+  for f in vifs:self.assertEqual(hashlib.sha256(f['raw_vif'].encode()).hexdigest(),f['sha256'])
+  self.assertEqual(sum(f['name'].endswith('.ecx') for f in evidence['files']),14)
  def test_unknown_layout_refuses(self):
   self.files([16,self.block+16],0)
   with self.assertRaises(ValueError):self.capture()

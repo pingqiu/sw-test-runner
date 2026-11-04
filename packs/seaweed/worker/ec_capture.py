@@ -60,7 +60,7 @@ def capture(c,manifest):
                 vid,number=match.group(1),int(match.group(2))
                 if number>=14:raise ValueError('foreign shard id')
                 shards.append(dict(volume=vid,shard=number,job=label,**stable(path)))
-            elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path)))
+            elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path),**(dict(raw_vif=vif_bytes.decode()) if path.suffix=='.vif' and c.get('under_quorum') else {})))
         if len(members)!=1:raise ValueError('one shard per holder required')
         member=members[0];vid=re.fullmatch(r'.*?(\d+)\.ec(\d\d)',member.name).group(1)
         if not member.with_suffix('.vif').is_file() or not member.with_suffix('.ecx').is_file():raise ValueError('holder-local metadata/index missing')
@@ -73,7 +73,7 @@ def capture(c,manifest):
         if {s['shard'] for s in shards if s['volume']==vid}!=set(range(14)):raise ValueError('missing shard')
     result=dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
     if c.get('under_quorum'):
-        if len(volumes)!=1 or len(layouts)!=14 or any(v!=layouts[0] for v in layouts):raise ValueError('uniform first-encode layout disagreement')
+        if len(volumes)!=1 or len(layouts)!=14 or any(v!=layouts[0] for v in layouts):raise ValueError('uniform first-encode layout disagreement: '+json.dumps(dict(layouts=layouts,files=files,holders=holders,volumes=sorted(volumes))))
         version,block,dat=layouts[0]
         if version not in (3,4) or dat<=0 or block!=((dat+10*1048576-1)//(10*1048576))*1048576:raise ValueError('unsupported uniform layout')
         data=member.with_suffix('.ecx').read_bytes()
