@@ -28,7 +28,7 @@ def stamp(mono, offset=EPOCH):
 
 
 def line(kind, vid, mono, gen=0, offset=EPOCH):
-    text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'start': 'retiring non-replicated cache Volume %d collection=lmcache',
+    text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'start': 'retiring before seal: cache Volume %d collection=lmcache',
             'success': 'rotated non-replicated cache Volume %d collection=lmcache'}[kind]
     raw = stamp(mono, offset) + ' ' + text % vid
     return dict(kind=kind, vid=vid, stamp=stamp(mono, offset), gen=gen, line=raw, sha256=hashlib.sha256(raw.encode()).hexdigest())
@@ -446,6 +446,14 @@ class SoakAssess(unittest.TestCase):
     def test_start_boundary_is_the_first_retiring_line_of_a_resumed_rotation(self):  # mono #972: the seal fence is monotonic
         rows = (line('birth', 20, 995), line('start', 20, 1150), line('start', 20, 1159.9), line('success', 20, 1160))
         self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1150, places=5)  # the first attempt's seal fenced readers
+
+    def test_the_accepted_limit_a_failed_first_attempt_without_a_later_read(self):  # codex01 R2 on fa1bad9, pinned
+        # Failed first attempt line 1150; exact read 1154.1; loss 1155; miss 1156; retry line 1159.9; S 1160. With no
+        # later same-VID read the miss is EXCUSED: inside the accepted last-exact..S blind spot, not a guarantee of C9.
+        args = self.boundary_args(1156)
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1150}, {20: 1154.1}))
+        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1154.1}))  # a later B would refuse it
+        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1150}, {20: 1157.1}))  # an observed later hit vetoes
 
     def test_a_resumed_rotation_whose_first_attempt_left_the_volume_serving_is_c9s(self):  # claude03 P3-1, via C9
         args = self.boundary_args(1159.95)

@@ -621,13 +621,23 @@ class SoakCollect(unittest.TestCase):
         self.assertEqual(sorted((e['kind'], e['stamp'], e['gen']) for e in ev), [
             ('birth', '1102 09:10:16.000002', 0), ('success', '1102 09:25:16.146813', 0), ('unwritable', '1102 09:24:16.000001', 0)])
 
-    def test_the_retiring_line_is_a_start_event(self):  # mono #969's exact glog line, logged before unpublish
-        retiring = 'I1104 07:12:01.123456 master_cache_volume_rotation.go:580 retiring non-replicated cache Volume 22 collection=lmcache\n'
+    def test_the_retiring_line_is_a_start_event(self):  # mono #972's exact glog lines (seal, and a resumed unpublish)
+        seal = 'I1104 07:12:01.023456 master_cache_volume_rotation.go:612 retiring before seal: cache Volume 22 collection=lmcache\n'
+        resumed = 'I1104 07:12:01.123456 master_cache_volume_rotation.go:628 retiring before unpublish: cache Volume 22 collection=lmcache\n'
         rotated = 'I1104 07:12:01.130001 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 22 collection=lmcache bytes=1\n'
         with (self.root / 'master.stderr').open('a') as f:
-            f.write(retiring + rotated)
+            f.write(seal + resumed + rotated)
         ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 22]
-        self.assertEqual(sorted((e['kind'], e['stamp']) for e in ev), [('start', '1104 07:12:01.123456'), ('success', '1104 07:12:01.130001')])
+        self.assertEqual(sorted((e['kind'], e['stamp']) for e in ev), [
+            ('start', '1104 07:12:01.023456'), ('start', '1104 07:12:01.123456'), ('success', '1104 07:12:01.130001')])
+
+    def test_the_969_retiring_line_is_not_a_start_event(self):  # claude03 on #96: B only from #972's placement
+        old = 'I1104 07:12:01.123456 master_cache_volume_rotation.go:618 retiring non-replicated cache Volume 23 collection=lmcache\n'
+        rotated = 'I1104 07:12:01.130001 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 23 collection=lmcache bytes=1\n'
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write(old + rotated)
+        ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 23]
+        self.assertEqual([e['kind'] for e in ev], ['success'])
 
     # codex01 review db5d4589: each generation's own sources must be complete; another's cannot stand in.
     def refused_collect(self):

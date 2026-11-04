@@ -145,13 +145,16 @@ def rotation_boundaries(events, begin, end):
 
 
 def start_boundaries(events, begin, end, bounds):
-    """Per VID with a success boundary S, M02 epoch B of its FIRST retiring line ("retiring non-replicated cache
-    Volume N": mono #972 logs it once per attempt, immediately before that attempt's first reader-visible step, i.e.
-    before the seal on a fresh rotation and before unpublish on a resumed one) strictly between the VID's birth and S.
+    """Per VID with a success boundary S, M02 epoch B of its FIRST retiring line ("retiring before seal|unpublish:
+    cache Volume N": mono #972 logs it once per attempt, immediately before that attempt's first potentially
+    reader-visible step, i.e. before the seal on a fresh rotation and before unpublish on a resumed one) strictly
+    between the VID's birth and S. The line marks placement before the first potential effect, not proof it happened.
     The seal's read fence is monotonic (a durable retirement intent is never cleared automatically), so the first
     attempt's line bounds the earliest instant readers may lose the Volume, and a resumed rotation's later line can
-    only be later. An attempt whose seal or unpublish failed and left the Volume serving is caught by C9 (a later
-    same-VID hit refuses the miss), not by choosing a later line. Any retiring line outside (birth, S), or none,
+    only be later. An attempt whose seal or unpublish failed and left the Volume serving is refused only when C9
+    OBSERVES it (a later same-VID hit); without a later read such a miss is excused, inside the accepted
+    last-exact-read..S blind spot (decision 3's stated limit), never claimed as proof the fence held. Only #972's
+    text yields a start event (lab_profile.RETIRING); #969's form keeps B = S. Any retiring line outside (birth, S), or none,
     keeps B = S, the stricter success boundary. History refusals are rotation_boundaries': this only refines a VID
     that already passed them."""
     out = {}
