@@ -98,7 +98,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		err = errors.New("EC readiness terminal missing")
 		return
 	}
-	config := map[string]any{"root": root, "run_id": d.RunID, "keys": 64, "s3": url("s3_http"), "filer_http": url("filer_http"), "volume": url("volume_http")}
+	config := map[string]any{"root": root, "run_id": d.RunID, "keys": 64, "s3": url("s3_http"), "filer_http": url("filer_http"), "volume": url("volume_http"), "observe_errors": c.ECUnderQuorum}
 	worker := func(stage, route string, plant bool) string {
 		cmd := "python3 -I " + q(root+"/worker/ec_chaos.py") + " --config " + js(config) + " --stage " + stage + " --manifest " + q(manifest) + " --journal " + q(root+"/"+stage+"-"+route+".jsonl")
 		if route != "" {
@@ -127,7 +127,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	if _, err = run("ec-encode", leaf("ec_setup.py", map[string]any{"root": root, "stage": "encode", "weed": root + "/weed", "master": master, "manifest": manifest})); err != nil {
 		return
 	}
-	raw, err = run("ec-capture", leaf("ec_capture.py", map[string]any{"root": root, "run_id": d.RunID, "holders": holders, "volume_exe": root + "/weed", "volume_sha256": c.Files["weed"].SHA256})+" "+q(manifest))
+	raw, err = run("ec-capture", leaf("ec_capture.py", map[string]any{"root": root, "run_id": d.RunID, "holders": holders, "volume_exe": root + "/weed", "volume_sha256": c.Files["weed"].SHA256, "under_quorum": c.ECUnderQuorum})+" "+q(manifest))
 	if err != nil {
 		return
 	}
@@ -144,17 +144,20 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		return
 	}
 	report["capture"], report["ack"] = snap, 64
+	if c.ECUnderQuorum {
+		report["vif_version_split"] = map[string]any{"counts": snap.VifVersions, "correction_lines": snap.Corrections}
+	}
 	read := func(name, route string, plant bool) error { // Every raw terminal is retained by cloudStep, including failures.
 		cmd := strings.Replace(worker("read", route, plant), q(root+"/read-"+route+".jsonl"), q(root+"/"+name+".jsonl"), 1)
 		raw, e := run(name, cmd)
-		if e != nil {
-			return e
-		}
 		var body ecReadBody
-		if e = json.Unmarshal([]byte(raw), &body); e != nil {
-			return e
+		if decodeErr := json.Unmarshal([]byte(raw), &body); decodeErr != nil {
+			return errors.Join(e, decodeErr)
 		}
-		return ecAssessRead(body, route, snap.Manifest, plant)
+		if c.ECUnderQuorum && !plant {
+			return errors.Join(e, ecAssessUnderQuorum(body, route, snap, report["holders_killed"] == 5))
+		}
+		return errors.Join(e, ecAssessRead(body, route, snap.Manifest, plant))
 	}
 	if err = read("ec-plant", "s3", true); err != nil {
 		return
@@ -166,8 +169,16 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		}
 	}
 	report["s1"] = "PASS"
-	for i := 0; i < 4; i++ {
-		victim := fmt.Sprint("h", i)
+	victims := []string{"h0", "h1", "h2", "h3"}
+	if c.ECUnderQuorum {
+		byShard := map[int]string{}
+		for _, shard := range snap.Shards {
+			byShard[shard.Shard] = shard.Job
+		}
+		victims = []string{byShard[10], byShard[11], byShard[12], byShard[13], byShard[0]}
+	}
+	dead := map[string]bool{}
+	for i, victim := range victims {
 		unit := q("sw-cloud-" + d.RunID + "-" + victim)
 		var pid int
 		var start uint64
@@ -182,7 +193,15 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 			return
 		}
 		report["holders_killed"] = i + 1
-		config["volume"] = fmt.Sprintf("http://127.0.0.1:%d", servicePort(h, "volume_http")+i+1)
+		dead[victim] = true
+		port := servicePort(h, "volume_http") + i + 1
+		if c.ECUnderQuorum {
+			port = servicePort(h, "volume_http")
+			for n := 0; dead[fmt.Sprint("h", n)]; n++ {
+				port++
+			}
+		}
+		config["volume"] = fmt.Sprintf("http://127.0.0.1:%d", port)
 		for _, route := range []string{"s3", "volume"} {
 			if err = read(fmt.Sprintf("ec-s2-%d-%s", i+1, route), route, false); err != nil {
 				return
@@ -190,5 +209,10 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		}
 	}
 	report["mandatory_bytes_deadlines"], report["exact"], report["wrong"] = "PASS", 640, 0
+	if c.ECUnderQuorum {
+		report["s2a"], report["survivors"] = "PASS", 9
+		report["stage1_exact"] = 640
+		delete(report, "exact")
+	}
 	return
 }

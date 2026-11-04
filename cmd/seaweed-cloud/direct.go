@@ -20,6 +20,8 @@ import (
 type directConfig struct {
 	MasterWrites bool `json:"master_writes,omitempty"`
 	ECStage1     bool `json:"ec_stage1,omitempty"`
+
+	ECUnderQuorum bool `json:"ec_under_quorum,omitempty"`
 	// KVSoak runs the two-host KV soak from SoakProfile (a profile input).
 	ReadCase    string                       `json:"read_case,omitempty"`
 	KVSoak      bool                         `json:"kv_soak,omitempty"`
@@ -89,7 +91,7 @@ func runDirect(args []string, w io.Writer) int {
 	defer cancel()
 	ctx, stop := context.WithTimeout(ctx, *timeout)
 	defer stop()
-	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
+	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, ECUnderQuorum: c.ECUnderQuorum, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()

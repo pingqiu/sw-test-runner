@@ -1,16 +1,18 @@
 """Frozen owned EC files/holders, first encode only (no vacuum generation support)."""
-import hashlib,json,os,pathlib,re,stat,sys
+import hashlib,json,os,pathlib,re,stat,sys,subprocess
 
-def stable(path,hash_body=True):
+def stable(path,hash_body=True,superblock=False):
     a=path.lstat()
     if not stat.S_ISREG(a.st_mode) or a.st_uid!=os.getuid():raise ValueError('foreign/nonregular EC file')
     h=hashlib.sha256()
     with path.open('rb') as f:
+        prefix=f.read(8) if superblock else b''
+        h.update(prefix)
         if hash_body:
             for block in iter(lambda:f.read(1048576),b''):h.update(block)
     b=path.stat()
     if (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)!=(b.st_dev,b.st_ino,b.st_size,b.st_mtime_ns,b.st_ctime_ns):raise ValueError('EC file changed during capture')
-    return dict(sha256=h.hexdigest(),bytes=a.st_size)
+    return dict(sha256=h.hexdigest(),bytes=a.st_size,**(dict(superblock=prefix.hex()) if superblock else {}))
 
 def capture(c,manifest):
     root=pathlib.Path(c['root']);rootstat=root.lstat()
@@ -18,7 +20,7 @@ def capture(c,manifest):
     if not 1<=len(c['holders'])<=14 or manifest['run_id']!=c['run_id']:raise ValueError('holder/manifest scope')
     volumes={o['fid'].split(',')[0] for o in manifest['objects']}
     if not volumes or any(not re.fullmatch(r'[1-9][0-9]*',v) for v in volumes):raise ValueError('manifest volume id')
-    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[];unrelated=[]
+    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[];unrelated=[];layouts=[]
     for label,folder in c['holders'].items():
         directory=pathlib.Path(folder)
         if directory.parent!=root or directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=os.getuid() or directory.stat().st_mode&0o022:raise ValueError('foreign holder dir')
@@ -49,6 +51,7 @@ def capture(c,manifest):
                 vif_bytes=path.read_bytes();proof=stable(path)
                 if proof['sha256']!=hashlib.sha256(vif_bytes).hexdigest():raise ValueError('vif parse/hash changed')
                 raw=json.loads(vif_bytes);cfg=raw.get('ecShardConfig',{});generation=int(cfg.get('encodeTsNs',0))
+                if c.get('under_quorum'):layouts.append([int(raw.get('version',0)),int(cfg.get('blockSize',0)),int(raw.get('datFileSize',0))])
                 if int(cfg.get('dataShards',0))!=10 or int(cfg.get('parityShards',0))!=4 or generation<=0:raise ValueError('requires explicit10+4 encode generation')
                 vid=path.stem.rsplit('_',1)[-1]
                 if vid in configs and configs[vid]!=generation:raise ValueError('mixed encode generations')
@@ -58,8 +61,8 @@ def capture(c,manifest):
                 members.append(path)
                 vid,number=match.group(1),int(match.group(2))
                 if number>=14:raise ValueError('foreign shard id')
-                shards.append(dict(volume=vid,shard=number,job=label,**stable(path)))
-            elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path)))
+                shards.append(dict(volume=vid,shard=number,job=label,**stable(path,superblock=bool(c.get('under_quorum')) and number==0)))
+            elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path),**(dict(raw_vif=vif_bytes.decode()) if path.suffix=='.vif' and c.get('under_quorum') else {})))
         if len(members)!=1:raise ValueError('one shard per holder required')
         member=members[0];vid=re.fullmatch(r'.*?(\d+)\.ec(\d\d)',member.name).group(1)
         if not member.with_suffix('.vif').is_file() or not member.with_suffix('.ecx').is_file():raise ValueError('holder-local metadata/index missing')
@@ -70,7 +73,33 @@ def capture(c,manifest):
     if set(configs)!=volumes or {s['volume'] for s in shards}!=volumes:raise ValueError('manifest volume set differs')
     for vid in volumes:
         if {s['shard'] for s in shards if s['volume']==vid}!=set(range(14)):raise ValueError('missing shard')
-    return dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
+    result=dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
+    if c.get('under_quorum'):
+        if len(volumes)!=1 or len(layouts)!=14 or any(v[0] not in (3,4) or v[1:]!=layouts[0][1:] for v in layouts):raise ValueError('uniform first-encode layout disagreement: '+json.dumps(dict(layouts=layouts,files=files,holders=holders,volumes=sorted(volumes))))
+        header=next(bytes.fromhex(s['superblock']) for s in shards if s['shard']==0)
+        version=header[0] if len(header)==8 else 0
+        block,dat=layouts[0][1:]
+        if version not in (3,4) or dat<=0 or block!=((dat+10*1048576-1)//(10*1048576))*1048576:raise ValueError('unsupported uniform layout')
+        data=member.with_suffix('.ecx').read_bytes()
+        if hashlib.sha256(data).hexdigest()!=indexes[vid] or len(data)%17:raise ValueError('5-byte index differs')
+        positions={}
+        for i in range(0,len(data),17):
+            row=data[i:i+17];key=int.from_bytes(row[:8],'big')
+            if key in positions:raise ValueError('duplicate index needle')
+            positions[key]=[(int.from_bytes(row[8:12],'big')+(row[12]<<32))*8,int.from_bytes(row[13:17],'big',signed=True)]
+        intervals={}
+        for o in manifest['objects']:
+            token=o['fid'].split(',')[1]
+            if not re.fullmatch(r'[0-9a-fA-F]{9,24}',token):raise ValueError('needle FID encoding')
+            offset,size=positions[int(token[:-8],16)]
+            base=16+size+12+(8 if version==4 else 0)
+            actual=base+((-base)%8 if version==4 else 8-base%8)
+            if offset<=0 or size<o['length'] or offset+actual>dat:raise ValueError('needle interval outside encoded data')
+            intervals[o['key']]=[offset,actual]
+        logs=subprocess.check_output(['sudo','-n','journalctl','--no-pager','-u','sw-cloud-'+c['run_id']+'-*'],text=True,timeout=10)
+        result['version_corrections']=[line for line in logs.splitlines() if 'ec_volume.go:1593' in line]
+        result.update(layout=[version,block,dat],intervals=intervals,superblock=header.hex(),vif_versions={str(v):sum(l[0]==v for l in layouts) for v in (3,4)})
+    return result
 
 if __name__=='__main__':
     c=json.loads(sys.argv[1]);m=json.loads(pathlib.Path(sys.argv[2]).read_bytes())

@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"testing"
 )
@@ -81,5 +82,51 @@ func TestECRealCorruptResponseCannotEarnControlPass(t *testing.T) {
 	}
 	if err = ecAssessRead(body, "s3", manifest, true); err == nil {
 		t.Fatal("real corrupt pre-plant response accepted")
+	}
+}
+
+func TestECUnderQuorumBoundsAndBindings(t *testing.T) {
+	for _, mode := range []string{"positive", "timeout", "nan", "key", "4xx", "empty-error", "missing", "control-error"} {
+		t.Run(mode, func(t *testing.T) {
+			m := EC1aManifest{RunID: "bounds"}
+			s := ecSnapshot{Superblock: "0300000000000000", VifVersions: map[string]int{"3": 14, "4": 0}, Layout: []int64{3, 2 << 20, 20 << 20}, Intervals: map[string][]int64{}}
+			b := ecReadBody{RunID: m.RunID}
+			for i, k := range []string{"missing", "intact"} {
+				o := EC1aObject{Key: k, Length: 262144, SHA256: hash(ecPayload(m.RunID, k)), ACK: true}
+				m.Objects = append(m.Objects, o)
+				off := int64(16)
+				if i == 1 {
+					off = 2 << 20
+				}
+				s.Intervals[k] = []int64{off, 262200}
+				r := ecOutcome{chaosOp: chaosOp{Op: i, Kind: "s3_get", Key: k, Started: 1, Ended: 2, Exact: i == 1}, Route: "s3", Status: 503}
+				if i == 1 {
+					r.Status = 200
+					r.Length = o.Length
+					r.SHA256 = o.SHA256
+				}
+				b.Outcomes = append(b.Outcomes, r)
+			}
+			s.Manifest = m
+			switch mode {
+			case "timeout":
+				b.Outcomes[0].Ended = 32
+			case "nan":
+				b.Outcomes[0].Started = math.NaN()
+			case "key":
+				b.Outcomes[0].Key = "foreign"
+			case "4xx":
+				b.Outcomes[0].Status = 404
+			case "empty-error":
+				b.Outcomes[0].Status = 0
+			case "missing":
+				b.Outcomes = b.Outcomes[:1]
+			case "control-error":
+				b.Outcomes[1].Status = 503
+			}
+			if e := ecAssessUnderQuorum(b, "s3", s, true); (e == nil) != (mode == "positive") {
+				t.Fatalf("%s: %v", mode, e)
+			}
+		})
 	}
 }

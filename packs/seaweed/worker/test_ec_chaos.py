@@ -18,6 +18,10 @@ class ECLeaf(unittest.TestCase):
    with mock.patch.object(leaf,'request',return_value=(200,b'wrong')):
     row=leaf.reads(c,manifest,'s3',pathlib.Path(d)/'wrong.jsonl')
     self.assertFalse(row['outcomes'][0]['exact']);self.assertEqual(row['wrong'],1)
+   c['observe_errors']=True;manifest['objects']*=2
+   with mock.patch.object(leaf,'request',return_value=(200,b'wrong')) as req:
+    row=leaf.reads(c,manifest,'s3',pathlib.Path(d)/'stop.jsonl')
+    self.assertEqual(req.call_count,1);self.assertEqual(len(row['outcomes']),1)
 
 class RealHTTP(unittest.TestCase):
  def test_status_and_whole_operation_deadline(self):
@@ -36,7 +40,7 @@ class RealHTTP(unittest.TestCase):
       self.wfile.write(b'\r\nContent-Length: 0\r\n\r\n');self.wfile.flush()
      except OSError:pass
      return
-    self.send_response(500 if self.path=='/500' else 200);self.send_header('Content-Length',str(20 if self.path=='/slow' else len(body) if self.path.startswith('/testops-') else 1));self.end_headers()
+    self.send_response(500 if self.path=='/500' else 200);self.send_header('Content-Length',str(20 if self.path=='/slow' else len(body)+10 if getattr(self.server,'mode','exact')=='incomplete' else len(body) if self.path.startswith('/testops-') else 1));self.end_headers()
     try:
      if self.path=='/slow':
       for i in range(20):self.wfile.write(b'x');self.wfile.flush();time.sleep(.02)
@@ -64,11 +68,18 @@ class RealHTTP(unittest.TestCase):
     self.assertTrue(row['outcomes'][0]['original']['exact'])
     journal=[json.loads(v) for v in (pathlib.Path(tmp)/'control.jsonl').read_text().splitlines()];self.assertEqual(journal[0]['event'],'SUBMIT')
     self.assertEqual(journal[1]['event'],'OUTCOME')
-    for mode in ('corrupt','short'):
+    for mode in ('corrupt','short','incomplete'):
      server.mode=mode;argv[argv.index('--journal')+1]=str(pathlib.Path(tmp)/(mode+'.jsonl'))
      bad=subprocess.run(argv,capture_output=True,text=True,timeout=5)
      self.assertEqual(bad.returncode,1,bad.stdout+bad.stderr)
      badrow=json.loads(bad.stdout);self.assertNotEqual(badrow.get('control'),'WRONG_BYTE_REJECTED')
+     if mode=='incomplete':
+      self.assertFalse(badrow['outcomes'][0]['exact']);self.assertIn('IncompleteRead',badrow['outcomes'][0]['error'])
+      argv[-1:] = []
+      argv[argv.index('--journal')+1]=str(pathlib.Path(tmp)/'incomplete-ordinary.jsonl')
+      ordinary=subprocess.run(argv,capture_output=True,text=True,timeout=5)
+      self.assertEqual(ordinary.returncode,1,ordinary.stdout+ordinary.stderr)
+      self.assertFalse(json.loads(ordinary.stdout)['outcomes'][0]['exact'])
     server.mode='exact'
    with mock.patch.object(leaf.chaos,'OP_LIMIT',.1):
     with self.assertRaises(TimeoutError):leaf.request(url+'/slow')
