@@ -1,16 +1,18 @@
 """Frozen owned EC files/holders, first encode only (no vacuum generation support)."""
 import hashlib,json,os,pathlib,re,stat,sys
 
-def stable(path,hash_body=True):
+def stable(path,hash_body=True,superblock=False):
     a=path.lstat()
     if not stat.S_ISREG(a.st_mode) or a.st_uid!=os.getuid():raise ValueError('foreign/nonregular EC file')
     h=hashlib.sha256()
     with path.open('rb') as f:
+        prefix=f.read(8) if superblock else b''
+        h.update(prefix)
         if hash_body:
             for block in iter(lambda:f.read(1048576),b''):h.update(block)
     b=path.stat()
     if (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)!=(b.st_dev,b.st_ino,b.st_size,b.st_mtime_ns,b.st_ctime_ns):raise ValueError('EC file changed during capture')
-    return dict(sha256=h.hexdigest(),bytes=a.st_size)
+    return dict(sha256=h.hexdigest(),bytes=a.st_size,**(dict(superblock=prefix.hex()) if superblock else {}))
 
 def capture(c,manifest):
     root=pathlib.Path(c['root']);rootstat=root.lstat()
@@ -59,7 +61,7 @@ def capture(c,manifest):
                 members.append(path)
                 vid,number=match.group(1),int(match.group(2))
                 if number>=14:raise ValueError('foreign shard id')
-                shards.append(dict(volume=vid,shard=number,job=label,**stable(path)))
+                shards.append(dict(volume=vid,shard=number,job=label,**stable(path,superblock=bool(c.get('under_quorum')) and number==0)))
             elif path.suffix in ('.vif','.ecx'):files.append(dict(job=label,name=path.name,**stable(path),**(dict(raw_vif=vif_bytes.decode()) if path.suffix=='.vif' and c.get('under_quorum') else {})))
         if len(members)!=1:raise ValueError('one shard per holder required')
         member=members[0];vid=re.fullmatch(r'.*?(\d+)\.ec(\d\d)',member.name).group(1)
@@ -73,8 +75,10 @@ def capture(c,manifest):
         if {s['shard'] for s in shards if s['volume']==vid}!=set(range(14)):raise ValueError('missing shard')
     result=dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
     if c.get('under_quorum'):
-        if len(volumes)!=1 or len(layouts)!=14 or any(v!=layouts[0] for v in layouts):raise ValueError('uniform first-encode layout disagreement: '+json.dumps(dict(layouts=layouts,files=files,holders=holders,volumes=sorted(volumes))))
-        version,block,dat=layouts[0]
+        if len(volumes)!=1 or len(layouts)!=14 or any(v[0] not in (3,4) or v[1:]!=layouts[0][1:] for v in layouts):raise ValueError('uniform first-encode layout disagreement: '+json.dumps(dict(layouts=layouts,files=files,holders=holders,volumes=sorted(volumes))))
+        header=next(bytes.fromhex(s['superblock']) for s in shards if s['shard']==0)
+        version=header[0] if len(header)==8 else 0
+        block,dat=layouts[0][1:]
         if version not in (3,4) or dat<=0 or block!=((dat+10*1048576-1)//(10*1048576))*1048576:raise ValueError('unsupported uniform layout')
         data=member.with_suffix('.ecx').read_bytes()
         if hashlib.sha256(data).hexdigest()!=indexes[vid] or len(data)%17:raise ValueError('5-byte index differs')
@@ -92,7 +96,7 @@ def capture(c,manifest):
             actual=base+((-base)%8 if version==4 else 8-base%8)
             if offset<=0 or size<o['length'] or offset+actual>dat:raise ValueError('needle interval outside encoded data')
             intervals[o['key']]=[offset,actual]
-        result.update(layout=layouts[0],intervals=intervals)
+        result.update(layout=[version,block,dat],intervals=intervals,superblock=header.hex(),vif_versions={str(v):sum(l[0]==v for l in layouts) for v in (3,4)})
     return result
 
 if __name__=='__main__':

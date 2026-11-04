@@ -154,6 +154,8 @@ func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
 				}
 				intervals[o.Key] = []int64{offset, 262200}
 			}
+			snapshot["superblock"] = "0300000000000000"
+			snapshot["vif_versions"] = map[string]int{"3": 14, "4": 0}
 			snapshot["layout"] = []int64{3, 2 << 20, 20 << 20}
 			snapshot["intervals"] = intervals
 		}

@@ -11,6 +11,8 @@ class UnderQuorum(unittest.TestCase):
   for i in range(14):
    d=self.root/('h'+str(i));d.mkdir(mode=0o700);self.holders[d.name]=str(d)
    with (d/('bucket_1.ec%02d'%i)).open('wb') as f:f.truncate(self.block)
+   if i==0:
+    with (d/'bucket_1.ec00').open('r+b') as f:f.write(bytes([3,0,0,0,0,0,0,0]))
    self.procs.append(subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)','--dir='+str(d)]))
   self.files([16,self.block+16],self.block)
  def tearDown(self):
@@ -41,6 +43,14 @@ class UnderQuorum(unittest.TestCase):
   self.assertEqual(len(vifs),14);self.assertEqual(len(evidence['layouts']),14)
   for f in vifs:self.assertEqual(hashlib.sha256(f['raw_vif'].encode()).hexdigest(),f['sha256'])
   self.assertEqual(sum(f['name'].endswith('.ecx') for f in evidence['files']),14)
+ def test_canonical_superblock_and_reported_split(self):
+  for i,d in enumerate(self.root.iterdir()):
+   p=d/'bucket_1.vif';v=json.loads(p.read_bytes());v['version']=3+i%2;p.write_text(json.dumps(v))
+  with (self.root/'h0/bucket_1.ec00').open('r+b') as f:f.write(bytes([4,0,0,0,0,0,0,0]))
+  row=self.capture();self.assertEqual(row['layout'],[4,self.block,20*1024*1024]);self.assertEqual(row['vif_versions'],{'3':7,'4':7});self.assertEqual(row['superblock'],'0400000000000000');self.assertEqual(row['intervals']['ec-0'],[16,104])
+ def test_short_superblock_refuses(self):
+  (self.root/'h0/bucket_1.ec00').write_bytes(bytes([3,0,0]))
+  with self.assertRaises(ValueError):self.capture()
  def test_unknown_layout_refuses(self):
   self.files([16,self.block+16],0)
   with self.assertRaises(ValueError):self.capture()

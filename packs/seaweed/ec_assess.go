@@ -12,6 +12,8 @@ import (
 
 // Shared EC payload, byte assessment and frozen-capture validation for direct runs.
 type ecSnapshot struct {
+	Superblock     string             `json:"superblock"`
+	VifVersions    map[string]int     `json:"vif_versions"`
 	Layout         []int64            `json:"layout"`
 	Intervals      map[string][]int64 `json:"intervals"`
 	Manifest       EC1aManifest       `json:"manifest"`

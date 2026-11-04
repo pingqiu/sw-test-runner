@@ -56,7 +56,14 @@ GETs, for 704 total. S2 remains NOT_COVERED without the product marker.
 Add `ec_under_quorum:true` alongside `ec_stage1:true`; use `--timeout 25m`,
 work 25 minutes / hard 27 minutes / cleanup reserve 60 seconds (existing inventory maximum). This cell
 requires a single first-encode uniform 10+4 volume with a 5-byte-offset index.
-The frozen `.vif` and `.ecx` bind each manifest needle's complete data span.
+The frozen `.vif` geometry/generation and `.ecx` bind each manifest needle's
+complete data span. Canonical needle version comes from the ec00 superblock
+(first8 bytes, read on the same descriptor as the shard SHA256), following
+mono64999748 super_block_read.go.go:27. All14 geometry/generation/index checks
+remain. Mixed vif versions are recorded as counts in `vif_version_split`;
+its correction-line evidence is the collected `cloud-services.log` lines
+containing `ec_volume.go:1593`. The result audit emits those lines alongside
+the counts. This is evidence of the split, not proof of a product read bug.
 Both missing-data0 and intact-data cohorts must be nonempty, else NOT_COVERED.
 Kill captured owners of shards 10,11,12,13, then 0, checking each generation.
 The first four losses retain stage 1's 640 exact GETs. With nine survivors,

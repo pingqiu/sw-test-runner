@@ -1,12 +1,16 @@
 package seaweed
 
-import "errors"
+import (
+	"encoding/hex"
+	"errors"
+)
 
 // The frozen first-encode uniform layout binds every needle to its data span.
 // Only data0 plus all four parity holders are absent in the degraded cell.
 func ecAssessUnderQuorum(b ecReadBody, route string, s ecSnapshot, degraded bool) error {
 	l := s.Layout
-	if b.RunID != s.Manifest.RunID || b.Control != "" || len(l) != 3 || (l[0] != 3 && l[0] != 4) || l[2] <= 0 || l[1] != ((l[2]+10*1048576-1)/(10*1048576))*1048576 || len(s.Intervals) != len(s.Manifest.Objects) {
+	header, err := hex.DecodeString(s.Superblock)
+	if err != nil || len(header) != 8 || len(l) != 3 || int64(header[0]) != l[0] || s.VifVersions["3"] < 0 || s.VifVersions["4"] < 0 || s.VifVersions["3"]+s.VifVersions["4"] != 14 || b.RunID != s.Manifest.RunID || b.Control != "" || (l[0] != 3 && l[0] != 4) || l[2] <= 0 || l[1] != ((l[2]+10*1048576-1)/(10*1048576))*1048576 || len(s.Intervals) != len(s.Manifest.Objects) {
 		return errors.New("EC under-quorum layout/scope invalid")
 	}
 	targets := 0

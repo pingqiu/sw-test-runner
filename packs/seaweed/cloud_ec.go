@@ -144,6 +144,9 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		return
 	}
 	report["capture"], report["ack"] = snap, 64
+	if c.ECUnderQuorum {
+		report["vif_version_split"] = map[string]any{"counts": snap.VifVersions, "correction_lines": "cloud-services.log: ec_volume.go:1593"}
+	}
 	read := func(name, route string, plant bool) error { // Every raw terminal is retained by cloudStep, including failures.
 		cmd := strings.Replace(worker("read", route, plant), q(root+"/read-"+route+".jsonl"), q(root+"/"+name+".jsonl"), 1)
 		raw, e := run(name, cmd)

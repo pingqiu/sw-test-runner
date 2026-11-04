@@ -89,7 +89,7 @@ func TestECUnderQuorumBoundsAndBindings(t *testing.T) {
 	for _, mode := range []string{"positive", "timeout", "nan", "key", "4xx", "empty-error", "missing", "control-error"} {
 		t.Run(mode, func(t *testing.T) {
 			m := EC1aManifest{RunID: "bounds"}
-			s := ecSnapshot{Layout: []int64{3, 2 << 20, 20 << 20}, Intervals: map[string][]int64{}}
+			s := ecSnapshot{Superblock: "0300000000000000", VifVersions: map[string]int{"3": 14, "4": 0}, Layout: []int64{3, 2 << 20, 20 << 20}, Intervals: map[string][]int64{}}
 			b := ecReadBody{RunID: m.RunID}
 			for i, k := range []string{"missing", "intact"} {
 				o := EC1aObject{Key: k, Length: 262144, SHA256: hash(ecPayload(m.RunID, k)), ACK: true}
