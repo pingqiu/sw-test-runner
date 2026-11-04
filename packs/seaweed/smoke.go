@@ -92,10 +92,15 @@ func smokeConfig(d *inventory.Document, client string, s SmokeSettings) (SmokeCo
 			filer = h
 		}
 		if contains(h.Roles, "volume") {
-			if volume != nil {
+			// One volume, or (kv_load) a second on the client itself: the
+			// endpoints are then the other's, beside the filer (push reads
+			// dial each volume's own advertised endpoint either way).
+			if volume != nil && h.ID != client && volume.ID != client {
 				return SmokeConfig{}, errors.New("single-volume smoke only")
 			}
-			volume = h
+			if volume == nil || volume.ID == client {
+				volume = h
+			}
 		}
 		if h.ID == client && contains(h.Roles, "client") {
 			worker = h

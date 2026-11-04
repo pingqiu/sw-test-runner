@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
 // A kv_load plan's verdict must carry kv_load's set and a soak's the soak's;
@@ -76,5 +78,36 @@ func TestM01RunsTheClientAndOptionallyAVolume(t *testing.T) {
 	var c ProfileConfig
 	if err != nil || json.Unmarshal([]byte(args[3]), &c) != nil || c.Products["weed-volume"] != pins["/opt/profile/bin/weed-volume"] {
 		t.Fatalf("M01's volume deploy: products %v, %v", c.Products, err)
+	}
+}
+
+// kv_load's M01 volume beside the client doesn't break the load's smoke
+// config: its endpoints stay M02's, whichever host comes first; two volumes
+// that aren't the client's are still refused.
+func TestSmokeConfigTakesTheServerVolumeBesideTheClients(t *testing.T) {
+	s := SmokeSettings{HelperDir: "/opt/profile/worker", NativeDir: "/opt/profile/native", Keys: 1, Length: 64}
+	for _, reverse := range []bool{false, true} {
+		d := profileFixture(t)
+		d.Hosts[0].Roles = []string{"client", "volume"}
+		if reverse {
+			d.Hosts[0], d.Hosts[1] = d.Hosts[1], d.Hosts[0]
+		}
+		c, err := smokeConfig(d, "m01", s)
+		var m02 inventory.Host
+		for _, h := range d.Hosts {
+			if h.ID == "m02" {
+				m02 = h
+			}
+		}
+		if err != nil || c.RDMAAddress != endpoint(m02, "rdma") {
+			t.Fatalf("reverse=%v: %v, rdma %q, want M02's %q", reverse, err, c.RDMAAddress, endpoint(m02, "rdma"))
+		}
+	}
+	d := profileFixture(t)
+	third := d.Hosts[1]
+	third.ID, third.Roles = "m03", []string{"volume"}
+	d.Hosts = append(d.Hosts, third)
+	if _, err := smokeConfig(d, "m01", s); err == nil || !strings.Contains(err.Error(), "single-volume") {
+		t.Fatalf("two non-client volumes: %v", err)
 	}
 }
