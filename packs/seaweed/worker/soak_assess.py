@@ -216,12 +216,10 @@ def stats_name(identity):
 def assess_routes(root, workers, kills, refused_only=frozenset()):
     """Exactly one native-stats series per worker generation (4 originals + each replacement), none foreign,
     and each one's last observed loader counters in the accepted DC or HTTP identity. kv_load only: a DC
-    process of a worker in `refused_only` (no hit in any of its generations) may show no route when its
-    every read was a K8 refusal miss."""
+    process (series name) in `refused_only` (every GET of its own generation a recorded refusal miss) may
+    show no route when its every read was a K8 refusal miss."""
     expected = {stats_name(w): w['transport'] for w in workers.values()}
     expected.update({stats_name(k['replacement']): workers[str(k['worker'])]['transport'] for k in kills})
-    owner = {stats_name(w): i for i, w in workers.items()}
-    owner.update({stats_name(k['replacement']): str(k['worker']) for k in kills})
     present = {p.name for p in root.iterdir() if p.name.startswith('native-stats-')}
     bad = sorted(present ^ set(expected))
     for name in sorted(present & set(expected)):
@@ -236,13 +234,36 @@ def assess_routes(root, workers, kills, refused_only=frozenset()):
             # read_calls equal to its refusal-miss counter. Any process with a read that was not refused
             # still needs its DC route.
             refused, calls = k8_refusal_misses(observed[-1]), last.get('read_calls')
-            all_refused = owner[name] in refused_only and dc == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
+            all_refused = name in refused_only and dc == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
             ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (dc > 0 or all_refused)                 and rc == 0 and copied == 0
         else:
             ok = last['transport'] == 'http' and dc == 0 and rc == 0 and copied > 0
         if not ok or min(dc, rc, copied) < 0:
             bad.append(name)
     return bad
+
+
+def refusal_only_processes(workers, kills, gets):
+    """kv_load: the native-stats series whose OWN generation's GETs are all recorded budget-refusal misses
+    (the route sample is per process, so is its exemption). A GET is attributed to a worker's generation by
+    that worker's kill rows: before `killed` the earlier generation, from `finished` the replacement. A GET
+    dispatched inside a kill (killed <= t < finished), or of an unknown worker, belongs to no one generation
+    and denies the exemption to every generation of its worker (fail closed). A hit, a plain miss or a fault
+    error keeps its generation's route requirement."""
+    names = {i: [stats_name(w)] for i, w in workers.items()}
+    splits = {i: [] for i in workers}
+    for k in sorted(kills, key=lambda k: k['killed']):
+        names[str(k['worker'])].append(stats_name(k['replacement']))
+        splits[str(k['worker'])].append((k['killed'], k['finished']))
+    outcomes, denied = {}, set()
+    for e in gets:
+        w, t = str(e['worker']), e['dispatched']
+        if w not in names or any(killed <= t < finished for killed, finished in splits[w]):
+            denied.add(w)
+            continue
+        generation = sum(1 for _, finished in splits[w] if t >= finished)
+        outcomes.setdefault(names[w][generation], []).append(get_case(e) == 'miss' and e.get('cause') == 'budget_refusal')
+    return frozenset(n for w, ns in names.items() if w not in denied for n in ns if outcomes.get(n) and all(outcomes[n]))
 
 
 def kv_qualified(declared, faults, begin):
@@ -334,6 +355,8 @@ def assess(c):
     if not isinstance(workers, dict) or sorted(workers) != sorted(ids) or [typed(workers[i], pid=int, starttime=int, transport=str)
                                                                           ['transport'] for i in ids] != (['dc'] * len(ids) if pat else ['dc', 'dc', 'dc', 'http']):
         raise ValueError('workers.json is not the accepted client set')
+    if any(str(e['worker']) not in workers for e in ops):  # every op belongs to one admitted client
+        raise ValueError('op-event of a worker outside workers.json')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
     oracle, by_seq, wrong, misses, unknown, acked, hits, latest_raw = Oracle(), {}, [], [], [], {}, {}, {}
@@ -463,12 +486,7 @@ def assess(c):
         before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
         after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
         mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
-    # kv_load: only a worker whose EVERY GET, in all its generations, is a recorded budget-refusal miss may
-    # show no route; a hit, a plain miss or a fault error (excused in a window or not) keeps the requirement.
-    refused = {}
-    for e in gets:
-        refused.setdefault(str(e['worker']), []).append(get_case(e) == 'miss' and e.get('cause') == 'budget_refusal')
-    refused_only = frozenset(w for w, all_refused in refused.items() if all(all_refused)) if pat else frozenset()
+    refused_only = refusal_only_processes(workers, kills, gets) if pat else frozenset()
     route_bad = assess_routes(root, workers, kills, refused_only)
     mark('routes', not route_bad, 'bad %s' % route_bad)
 
