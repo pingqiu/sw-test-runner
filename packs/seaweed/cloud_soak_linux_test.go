@@ -28,6 +28,7 @@ type soakHost struct {
 	failStep string
 	dirty    bool
 	killMono float64 // the controller clock when the kill reached this host
+	wait     string  // the answer to the load wait: status line, then stdout
 }
 
 func (h *soakHost) exec(cmd string, c ssh.Channel) uint32 {
@@ -45,6 +46,8 @@ func (h *soakHost) exec(cmd string, c ssh.Channel) uint32 {
 		h.mu.Lock()
 		h.killMono, _ = controllerMono()
 		h.mu.Unlock()
+	case strings.Contains(cmd, "ExecMainStatus"):
+		fmt.Fprint(c, h.wait)
 	case strings.Contains(cmd, "MainPID") && strings.Contains(cmd, "volume-gen2"):
 		fmt.Fprintln(c, "5151 77 boot-m02 "+strings.Repeat("b", 64))
 	case strings.Contains(cmd, "MainPID"):
@@ -287,4 +290,104 @@ func writeProfile(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// directWait is the runtime's fake soak with the load wait answered by the
+// direct executor's own WaitTask, once the fake's load has ended.
+type directWait struct {
+	*fakeSoak
+	d *directSoak
+}
+
+func (w directWait) WaitTask(ctx context.Context, h tr.JobHandle) (tr.ExitInfo, error) {
+	select {
+	case <-w.exited:
+	case <-ctx.Done():
+		return tr.ExitInfo{}, ctx.Err()
+	}
+	return w.d.WaitTask(ctx, h)
+}
+
+// A load that exits 23 is a failure at runSoak's final join (it is settled,
+// and the error is sticky); the same run with status 0 is the control.
+func TestDirectSoakLoadFailureIsStickyAtTheFinalJoin(t *testing.T) {
+	for _, tc := range []struct {
+		wait string
+		fail bool
+	}{{"0\n{\"status\":\"LOAD_DONE\"}\n", false}, {"23\npartial\n", true}} {
+		m01 := &soakHost{wait: tc.wait}
+		s := directSoakFixture(t, m01, &soakHost{})
+		s.b.Jobs["load"] = tr.JobPin{Node: "m01", Executable: "/usr/bin/python3.12", Argv: []string{"soak_load.py"}}
+		if err := s.open(soakCtx(t)); err != nil {
+			t.Fatal(err)
+		}
+		s.load = "load"
+		f, ctx := newFakeSoak(t), soakCtx(t)
+		ctx, f.cancel = context.WithCancel(ctx)
+		p, in := soakTestPlan()
+		_, exit, err := runSoak(ctx, directWait{fakeSoak: f, d: s}, p, in, map[string]tr.JobHandle{})
+		f.cancel()
+		if tc.fail != (err != nil) || tc.fail && (!strings.Contains(fmt.Sprint(err), "exited 23") || exit.Code != 23 || !exit.Settled) || !tc.fail && (!exit.Settled || exit.Code != 0) {
+			t.Fatalf("wait %q: err=%v exit=%+v", tc.wait, err, exit)
+		}
+	}
+}
+
+// A wait that cannot read a status (unreachable, failed or missing receipt)
+// is an error with no settlement: an unknown end is never relabelled completed.
+func TestDirectSoakWaitUnknownEndIsUnsettled(t *testing.T) {
+	for name, h := range map[string]*soakHost{
+		"step failed":    {failStep: "ExecMainStatus"},
+		"no receipt":     {wait: ""},
+		"garbled status": {wait: "inactive\nrow\n"},
+	} {
+		s := directSoakFixture(t, h, &soakHost{})
+		s.b.Jobs["load"] = tr.JobPin{Node: "m01", Executable: "/usr/bin/python3.12", Argv: []string{"soak_load.py"}}
+		if err := s.open(soakCtx(t)); err != nil {
+			t.Fatal(err)
+		}
+		s.load = "load"
+		e, err := s.WaitTask(soakCtx(t), tr.JobHandle{})
+		if err == nil || e.Settled || e.Output.Complete || e.Code != -1 {
+			t.Fatalf("%s: err=%v exit=%+v", name, err, e)
+		}
+	}
+}
+
+// Every generation's unit writes its own .stdout and .stderr in the run root,
+// the contract launch records and collect checks (suffixes, parent, per pid).
+func TestDirectSoakGenerationsOwnTheirLogs(t *testing.T) {
+	m02 := &soakHost{}
+	s := directSoakFixture(t, &soakHost{}, m02)
+	if err := s.open(soakCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"deploy-volume", "deploy-master"} {
+		if err := s.start(soakCtx(t), label); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{}); err != nil {
+		t.Fatal(err)
+	}
+	root, seen := s.hosts["m02"].RunRoot, map[string]bool{}
+	for _, label := range []string{"deploy-volume", "deploy-master", "volume-gen2"} {
+		i := m02.index("systemd-run", "--unit="+s.unit(label)+" ")
+		if i < 0 {
+			t.Fatalf("%s never started", label)
+		}
+		cmd := m02.commands[i]
+		var logs []string
+		for _, stream := range []string{"StandardOutput=file:", "StandardError=file:"} {
+			_, rest, ok := strings.Cut(cmd, stream)
+			if !ok {
+				t.Fatalf("%s: no %s in %q", label, stream, cmd)
+			}
+			logs = append(logs, strings.Fields(rest)[0])
+		}
+		if logs[0] != root+"/"+label+".stdout" || logs[1] != root+"/"+label+".stderr" || seen[logs[0]] || seen[logs[1]] {
+			t.Fatalf("%s logs %v not its own pair in %s", label, logs, root)
+		}
+		seen[logs[0]], seen[logs[1]] = true, true
+	}
 }

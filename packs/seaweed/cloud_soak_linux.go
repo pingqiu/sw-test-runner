@@ -98,8 +98,8 @@ func (s *directSoak) step(ctx context.Context, label string, seconds int) (tr.Ex
 	}
 	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-"+label+".json", label, seconds, cmd)
 	e := exitInfo(out, 0)
-	if err != nil {
-		e.Code = 1
+	if err != nil { // a failed or unreachable step has no known end
+		e.Code, e.Settled, e.Output.Complete = 1, false, false
 	}
 	return e, err
 }
@@ -108,7 +108,9 @@ func exitInfo(out string, code int) tr.ExitInfo {
 	return tr.ExitInfo{Code: code, Settled: true, Output: tr.CapturedOutput{Complete: true, StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(out)))}}
 }
 
-// start runs a job as a transient unit owned by the ssh user, stdout to a file.
+// start runs a job as a transient unit owned by the ssh user, its stdout and
+// stderr to this generation's own files in the run root (launch records both;
+// ready and collect read them back).
 func (s *directSoak) start(ctx context.Context, label string) error {
 	pin, cmd, err := s.command(label)
 	if err != nil {
@@ -117,7 +119,8 @@ func (s *directSoak) start(ctx context.Context, label string) error {
 	h := s.hosts[pin.Node]
 	_, err = cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-start-"+label+".json", "start-"+label, 30,
 		"sudo systemd-run --unit="+cloudQuote(s.unit(label))+" --uid="+cloudQuote(h.Management.User)+
-			" --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+" "+cmd)
+			" --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+
+			" --property=StandardError="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stderr"))+" "+cmd)
 	return err
 }
 
@@ -151,7 +154,13 @@ func (s *directSoak) WaitTask(ctx context.Context, _ tr.JobHandle) (tr.ExitInfo,
 			"; cat "+cloudQuote(path.Join(s.hosts[pin.Node].RunRoot, s.load+".stdout")))
 	code, body, _ := strings.Cut(out, "\n")
 	rc, cerr := strconv.Atoi(strings.TrimSpace(code))
-	return exitInfo(body, rc), errors.Join(err, cerr)
+	e := exitInfo(body, rc)
+	if err = errors.Join(err, cerr); err != nil { // an unknown end is never a settled one
+		e.Code, e.Settled, e.Output.Complete = -1, false, false
+	} else if rc != 0 { // a settled failure stays a failure
+		err = fmt.Errorf("soak: load task %s exited %d", s.load, rc)
+	}
+	return e, err
 }
 
 // Restart kills the victim's unit and starts the replacement generation, with
@@ -262,7 +271,10 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	if err := s.clocked(ctx, p.Soak.Setup.Job, s.root, "soak-clock-s1.json", ""); err != nil {
 		return "", err
 	}
-	records, _, err := runSoak(ctx, s, p, tr.PackInputs{Jobs: s.b.Jobs, Restarts: s.b.Restarts, Files: s.in.Files}, map[string]tr.JobHandle{})
+	records, exit, err := runSoak(ctx, s, p, tr.PackInputs{Jobs: s.b.Jobs, Restarts: s.b.Restarts, Files: s.in.Files}, map[string]tr.JobHandle{})
+	if err == nil && (!exit.Settled || exit.Code != 0) { // the load's receipt is part of the result
+		err = fmt.Errorf("soak: load ended unsettled or with status %d", exit.Code)
+	}
 	if err = errors.Join(err, publishFile(filepath.Join(s.root, "faults.json"), records)); err != nil {
 		return "", err
 	}
