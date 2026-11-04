@@ -2,10 +2,8 @@
 
 package seaweed
 
-import (
-	"context"
-	"errors"
-)
+import "context"
+import "errors"
 
 // runDirectSoak needs the M01 controller clock, so it only runs on Linux.
 func runDirectSoak(context.Context, []byte, CloudConfig) (string, error) {
