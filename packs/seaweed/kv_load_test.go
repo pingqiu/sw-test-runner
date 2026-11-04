@@ -1,6 +1,7 @@
 package seaweed
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -61,6 +62,54 @@ func TestLoadPatternBounds(t *testing.T) {
 	mixed.Phases = append(mixed.Phases, LoadPhase{Kind: "mixed", DurationS: 300, ReadRatio: 0.9})
 	if err := mixed.check(1800); err != nil {
 		t.Fatalf("uniform with a mixed phase was refused: %v", err)
+	}
+}
+
+// A present null capacity knob refuses on both decode paths (profile input
+// and plan) instead of decoding to 0 and vanishing; a number decodes, and an
+// unknown pattern field still refuses inside the custom decoder.
+func TestLoadPatternRefusesANullKnob(t *testing.T) {
+	input := func(pattern string) error {
+		_, err := DecodeProfileInput([]byte(`{"soak":{"pattern":` + pattern + `}}`))
+		return err
+	}
+	plan := func(pattern string) error {
+		_, _, err := decodePlan(`{"soak":{"pattern":` + pattern + `}}`)
+		return err
+	}
+	for _, knob := range []string{"volume_nofile", "push_pipes", "PUSH_PIPES"} {
+		null := `{"clients":32,"` + knob + `":null}`
+		for name, decode := range map[string]func(string) error{"profile input": input, "plan": plan} {
+			// A case alias is already refused by uniqueJSON ("noncanonical").
+			if err := decode(null); err == nil || !strings.Contains(err.Error(), "not null") && !strings.Contains(err.Error(), "noncanonical") {
+				t.Errorf("%s, %s null: %v", name, knob, err)
+			}
+		}
+	}
+	if err := input(`{"clients":32,"push_pipes":2,"volume_nofile":4096}`); err != nil {
+		t.Fatalf("numbers refused: %v", err)
+	}
+	var p SoakPlan
+	if err := json.Unmarshal([]byte(`{"pattern":{"push_pipes":2,"volume_nofile":4096}}`), &p); err != nil || p.Pattern.PushPipes != 2 || p.Pattern.VolumeNofile != 4096 {
+		t.Fatalf("knobs decoded as %+v: %v", p.Pattern, err)
+	}
+	if err := input(`{"clients":32,"pipes":2}`); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("an unknown pattern field passed: %v", err)
+	}
+}
+
+// The preflight bound covers the pattern's full declared writes: write_once
+// plus every mixed phase at its rate, not just one copy of the keys.
+func TestDatasetBytesCoverEveryDeclaredWrite(t *testing.T) {
+	p := lmcacheLike() // write_once then read: the keys only
+	if got, want := p.datasetBytes(), int64(2*4096*(64<<10)); got != want {
+		t.Fatalf("write_once + read: %d, want %d", got, want)
+	}
+	// codex01's case: a mixed phase writing 10% of 32 x 10/s for 1500 s adds
+	// 48000 writes, about 3 GiB of payload after the 4096 keys.
+	p.Phases = append(p.Phases, LoadPhase{Kind: "mixed", DurationS: 1500, ReadRatio: 0.9})
+	if got, want := p.datasetBytes(), int64(2*(4096+48000)*(64<<10)); got != want {
+		t.Fatalf("with a mixed phase: %d, want %d", got, want)
 	}
 }
 

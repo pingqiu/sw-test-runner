@@ -423,7 +423,6 @@ class RotationConfig(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in root.iterdir()), [], 'no dir, config or generation file')
 
 
-@unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
 class KVLoadRotationCheck(unittest.TestCase):
     """kv_load: the disk's used bytes plus the dataset stay under the high
     watermark, or rotation drains the volumes from the first cycle."""
@@ -457,6 +456,7 @@ class KVLoadRotationCheck(unittest.TestCase):
                 profile.kv_load_rotation_check(dict(self.config(0.9), **bad), self.fs(100, 50))
 
 
+@unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
 class MasterReplacementState(unittest.TestCase):
     """R5: a replacement master reuses the original's retained state, never a
     recreated or swapped one, and never while the original is live."""

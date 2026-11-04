@@ -1,6 +1,8 @@
 package seaweed
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"math"
 	"regexp"
@@ -58,10 +60,37 @@ type LoadPattern struct {
 	PushPipes    int `json:"push_pipes,omitempty"`
 }
 
-// datasetBytes bounds the bytes write_once leaves on one volume disk: every
-// key on that disk, with as much again for needle overhead and slack.
+// UnmarshalJSON refuses a present null capacity knob: plain decoding would
+// turn it into 0, which means absent, and the knob would silently vanish. The
+// rest decodes as strictly as the plan itself (unknown fields refuse).
+func (p *LoadPattern) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for k, v := range fields {
+		if (strings.EqualFold(k, "volume_nofile") || strings.EqualFold(k, "push_pipes")) && string(bytes.TrimSpace(v)) == "null" {
+			return errors.New("kv_load pattern " + strings.ToLower(k) + " must be absent or a number, not null")
+		}
+	}
+	type plain LoadPattern
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode((*plain)(p))
+}
+
+// datasetBytes bounds the bytes the declared pattern writes onto one volume
+// disk: write_once's keys plus every mixed phase's writes at its declared
+// rate (an overwrite leaves the old needle's bytes until vacuum), all on that
+// disk, with as much again for needle overhead and slack.
 func (p *LoadPattern) datasetBytes() int64 {
-	return 2 * int64(p.Keys) * int64(p.ObjectBytes)
+	writes := float64(p.Keys)
+	for _, ph := range p.Phases[1:] {
+		if ph.Kind == "mixed" {
+			writes += float64(p.Clients) * p.RatePerClient * float64(ph.DurationS) * (1 - ph.ReadRatio)
+		}
+	}
+	return 2 * int64(math.Ceil(writes)) * int64(p.ObjectBytes)
 }
 
 // LoadPhase: write_once writes every key exactly once, then read reads for

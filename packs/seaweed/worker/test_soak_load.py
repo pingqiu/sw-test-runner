@@ -275,7 +275,9 @@ class FaultWindowWorker(unittest.TestCase):
 class PushPipes(unittest.TestCase):
     def setUp(self):
         import os
-        self.addCleanup(os.environ.__setitem__, 'SW_RDMA_KVCACHE_PUSH_PIPES', os.environ.get('SW_RDMA_KVCACHE_PUSH_PIPES', ''))
+        before = os.environ.get('SW_RDMA_KVCACHE_PUSH_PIPES')
+        self.addCleanup(lambda: os.environ.pop('SW_RDMA_KVCACHE_PUSH_PIPES', None) if before is None
+                        else os.environ.__setitem__('SW_RDMA_KVCACHE_PUSH_PIPES', before))
         os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'] = '8'  # as kv_smoke.configure() leaves it
 
     def test_absent_keeps_configure_and_present_overrides(self):
