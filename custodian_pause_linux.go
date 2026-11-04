@@ -49,14 +49,32 @@ func processTaskState(root string) (string, error) {
 	return "", errors.New("mixed task stop state")
 }
 
+// pollFds is unix.Poll; tests replace it to deliver EINTR deterministically.
+var pollFds = unix.Poll
+
+// pidfdEINTRRetries bounds the retries: a persistent EINTR stays an error.
+const pidfdEINTRRetries = 4
+
+// pidfdReady polls the victim's pidfd without waiting (ready means it exited).
+// EINTR (a signal, e.g. the Go runtime's preemption, arrived during the call)
+// is not an answer: the zero-timeout poll is repeated, at most
+// pidfdEINTRRetries times; after that the EINTR is returned (UNKNOWN).
+func pidfdReady(fd int) (int, error) {
+	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	n, err := pollFds(poll, 0)
+	for i := 0; i < pidfdEINTRRetries && err == unix.EINTR; i++ {
+		n, err = pollFds(poll, 0)
+	}
+	return n, err
+}
+
 func (p *processPause) custodyCommand(q custodyRequest, i ProcessIdentity, a RunAdmission, authorized bool, fd int) (w ProcessPauseWitness, err error) {
 	w.Identity = i
 	limit := q.Admission.EffectDeadline
 	if !authorized || q.Identity != i || !limit.After(time.Now()) || limit.After(q.PauseDeadline) || q.PauseDeadline.After(a.HardDeadline) {
 		return w, errors.New("pause identity/deadline refused")
 	}
-	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	if n, e := unix.Poll(poll, 0); e != nil || n != 0 {
+	if n, e := pidfdReady(fd); e != nil || n != 0 {
 		return w, fmt.Errorf("pause victim liveness UNKNOWN: ready_fds=%d poll_error=%v", n, e)
 	}
 	want := "LIVE"
