@@ -1,5 +1,5 @@
 """Frozen owned EC files/holders, first encode only (no vacuum generation support)."""
-import hashlib,json,os,pathlib,re,stat,sys
+import hashlib,json,os,pathlib,re,stat,sys,subprocess
 
 def stable(path,hash_body=True,superblock=False):
     a=path.lstat()
@@ -96,6 +96,8 @@ def capture(c,manifest):
             actual=base+((-base)%8 if version==4 else 8-base%8)
             if offset<=0 or size<o['length'] or offset+actual>dat:raise ValueError('needle interval outside encoded data')
             intervals[o['key']]=[offset,actual]
+        logs=subprocess.check_output(['sudo','-n','journalctl','--no-pager','-u','sw-cloud-'+c['run_id']+'-*'],text=True,timeout=10)
+        result['version_corrections']=[line for line in logs.splitlines() if 'ec_volume.go:1593' in line]
         result.update(layout=[version,block,dat],intervals=intervals,superblock=header.hex(),vif_versions={str(v):sum(l[0]==v for l in layouts) for v in (3,4)})
     return result
 

@@ -61,9 +61,9 @@ complete data span. Canonical needle version comes from the ec00 superblock
 (first8 bytes, read on the same descriptor as the shard SHA256), following
 mono64999748 super_block_read.go.go:27. All14 geometry/generation/index checks
 remain. Mixed vif versions are recorded as counts in `vif_version_split`;
-its correction-line evidence is the collected `cloud-services.log` lines
-containing `ec_volume.go:1593`. The result audit emits those lines alongside
-the counts. This is evidence of the split, not proof of a product read bug.
+the actual `ec_volume.go:1593` correction lines are captured before faults
+with a bounded journal read and included alongside the counts. A failed
+journal read refuses the capture; postflight collection remains independent. This is evidence of the split, not proof of a product read bug.
 Both missing-data0 and intact-data cohorts must be nonempty, else NOT_COVERED.
 Kill captured owners of shards 10,11,12,13, then 0, checking each generation.
 The first four losses retain stage 1's 640 exact GETs. With nine survivors,

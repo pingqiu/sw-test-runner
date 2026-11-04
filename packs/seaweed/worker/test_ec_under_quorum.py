@@ -1,11 +1,13 @@
 """Frozen real /proc/file capture, with literal first-encode interval controls."""
 import hashlib, importlib.util, json, os, pathlib, subprocess, sys, tempfile, unittest
+from unittest import mock
 
 @unittest.skipUnless(sys.platform=='linux','requires owned /proc holder fixtures')
 class UnderQuorum(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.root=pathlib.Path(self.tmp.name);os.chmod(self.root,0o700)
   spec=importlib.util.spec_from_file_location('uq_capture',pathlib.Path(__file__).with_name('ec_capture.py'));self.cap=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.cap)
+  self.logs=mock.patch.object(subprocess,'check_output',return_value='ec_volume.go:1593 correcting\n');self.log_read=self.logs.start();self.addCleanup(self.logs.stop)
   self.block=2*1024*1024;self.procs=[];self.holders={}
   self.manifest={'run_id':'fixture','objects':[{'key':'ec-'+str(i-1),'fid':'1,%xaabbccdd'%i,'length':64} for i in (1,2)]}
   for i in range(14):
@@ -47,10 +49,13 @@ class UnderQuorum(unittest.TestCase):
   for i,d in enumerate(self.root.iterdir()):
    p=d/'bucket_1.vif';v=json.loads(p.read_bytes());v['version']=3+i%2;p.write_text(json.dumps(v))
   with (self.root/'h0/bucket_1.ec00').open('r+b') as f:f.write(bytes([4,0,0,0,0,0,0,0]))
-  row=self.capture();self.assertEqual(row['layout'],[4,self.block,20*1024*1024]);self.assertEqual(row['vif_versions'],{'3':7,'4':7});self.assertEqual(row['superblock'],'0400000000000000');self.assertEqual(row['intervals']['ec-0'],[16,104])
+  row=self.capture();self.assertEqual(row['layout'],[4,self.block,20*1024*1024]);self.assertEqual(row['vif_versions'],{'3':7,'4':7});self.assertEqual(row['superblock'],'0400000000000000');self.assertEqual(row['intervals']['ec-0'],[16,104]);self.assertEqual(row['version_corrections'],['ec_volume.go:1593 correcting']);self.log_read.assert_called_once()
  def test_short_superblock_refuses(self):
   (self.root/'h0/bucket_1.ec00').write_bytes(bytes([3,0,0]))
   with self.assertRaises(ValueError):self.capture()
+ def test_correction_log_failure_refuses(self):
+  self.log_read.side_effect=subprocess.CalledProcessError(23,['journalctl'])
+  with self.assertRaises(subprocess.CalledProcessError):self.capture()
  def test_unknown_layout_refuses(self):
   self.files([16,self.block+16],0)
   with self.assertRaises(ValueError):self.capture()

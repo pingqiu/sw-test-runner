@@ -145,7 +145,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	}
 	report["capture"], report["ack"] = snap, 64
 	if c.ECUnderQuorum {
-		report["vif_version_split"] = map[string]any{"counts": snap.VifVersions, "correction_lines": "cloud-services.log: ec_volume.go:1593"}
+		report["vif_version_split"] = map[string]any{"counts": snap.VifVersions, "correction_lines": snap.Corrections}
 	}
 	read := func(name, route string, plant bool) error { // Every raw terminal is retained by cloudStep, including failures.
 		cmd := strings.Replace(worker("read", route, plant), q(root+"/read-"+route+".jsonl"), q(root+"/"+name+".jsonl"), 1)
@@ -171,14 +171,11 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	report["s1"] = "PASS"
 	victims := []string{"h0", "h1", "h2", "h3"}
 	if c.ECUnderQuorum {
-		victims = nil
-		for _, id := range []int{10, 11, 12, 13, 0} {
-			for _, shard := range snap.Shards {
-				if shard.Shard == id {
-					victims = append(victims, shard.Job)
-				}
-			}
+		byShard := map[int]string{}
+		for _, shard := range snap.Shards {
+			byShard[shard.Shard] = shard.Job
 		}
+		victims = []string{byShard[10], byShard[11], byShard[12], byShard[13], byShard[0]}
 	}
 	dead := map[string]bool{}
 	for i, victim := range victims {
@@ -199,12 +196,9 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		dead[victim] = true
 		port := servicePort(h, "volume_http") + i + 1
 		if c.ECUnderQuorum {
-			for _, holder := range snap.Holders {
-				if !dead[holder.Job] {
-					n, _ := strconv.Atoi(strings.TrimPrefix(holder.Job, "h"))
-					port = servicePort(h, "volume_http") + n
-					break
-				}
+			port = servicePort(h, "volume_http")
+			for n := 0; dead[fmt.Sprint("h", n)]; n++ {
+				port++
 			}
 		}
 		config["volume"] = fmt.Sprintf("http://127.0.0.1:%d", port)

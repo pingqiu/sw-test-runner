@@ -12,6 +12,7 @@ import (
 
 // Shared EC payload, byte assessment and frozen-capture validation for direct runs.
 type ecSnapshot struct {
+	Corrections    []string           `json:"version_corrections"`
 	Superblock     string             `json:"superblock"`
 	VifVersions    map[string]int     `json:"vif_versions"`
 	Layout         []int64            `json:"layout"`
