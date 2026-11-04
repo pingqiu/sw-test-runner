@@ -23,6 +23,9 @@ func TestPidfdReadyRetriesEINTR(t *testing.T) {
 		"eintr twice then none ready": {answers: []error{unix.EINTR, unix.EINTR, nil}, calls: 3},
 		"eintr then ready":            {answers: []error{unix.EINTR, nil}, ready: 1, wantN: 1, calls: 2},
 		"real error":                  {answers: []error{unix.EBADF}, wantN: -1, wantErr: unix.EBADF, calls: 1},
+		"eintr then real error":       {answers: []error{unix.EINTR, unix.EBADF}, wantN: -1, wantErr: unix.EBADF, calls: 2},
+		// A persistent EINTR ends after the cap and stays UNKNOWN (the error).
+		"always eintr": {answers: repeatErr(unix.EINTR, 100), wantN: -1, wantErr: unix.EINTR, calls: 1 + pidfdEINTRRetries},
 	} {
 		calls := 0
 		pollFds = func(fds []unix.PollFd, timeout int) (int, error) {
@@ -41,4 +44,12 @@ func TestPidfdReadyRetriesEINTR(t *testing.T) {
 			t.Fatalf("%s: n=%d err=%v calls=%d", name, n, err, calls)
 		}
 	}
+}
+
+func repeatErr(e error, n int) []error {
+	out := make([]error, n)
+	for i := range out {
+		out[i] = e
+	}
+	return out
 }
