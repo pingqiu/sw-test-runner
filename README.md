@@ -323,3 +323,26 @@ Cloud provisioning and on-prem deployment share the versioned
 checks data only; it cannot authorize or launch jobs.
 
 Azure provision-only module: [provision/terraform/azure](provision/terraform/azure/README.md). Static validation only; runtime admission remains gated on S0b.
+
+### Two-host DC read cases
+
+On the M01 controller, use the direct entry with `read_case` set to
+`volume-restart`, `filer-restart`, or `volume-freeze`. Use the same two-host
+onprem DC inventory and `soak_profile` / `soak_release` fields as KV soak;
+the profile input must omit `soak`. Do not also set `kv_soak` or another case.
+The profile carries the current host observations and release files for both hosts.
+
+```sh
+seaweed-cloud direct --inventory requested.json --config read-case.json \
+  --out new-read-result --timeout 10m
+```
+
+Each case seeds exact bytes, runs 120 s of DC GETs, and faults after 30 s.
+Restart cases check fresh DC and HTTP recovery; filer HTTP recovery checks
+retained metadata through the replacement. Freeze holds the volume for at least
+20 s and requires a real overlapping GET plus continuing load after validated
+resume; HTTP controls remain deferred for freeze. `read-case.json` in the output
+contains the case-only result and receipts; overall success requires the CLI result
+and clean per-host cleanup/postflight logs. An uncertain STOP is UNKNOWN: teardown
+kills the victim without racing it with CONT. Wrong bytes, missing proof and unclean
+postflight fail; missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.

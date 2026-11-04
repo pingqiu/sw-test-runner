@@ -86,3 +86,22 @@ func TestDirectMasterWritesSelectorReachesPack(t *testing.T) {
 		t.Fatalf("master writes selector did not reach shared pack: %+v", out)
 	}
 }
+
+func TestDirectReadCaseSelectorReachesPack(t *testing.T) {
+	dir := t.TempDir()
+	inv, cfg := filepath.Join(dir, "inv.json"), filepath.Join(dir, "cfg.json")
+	raw, err := os.ReadFile("../../inventory/testdata/http.requested.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	json.Unmarshal(raw, &doc)
+	doc["target"] = "onprem"
+	raw, _ = json.Marshal(doc)
+	os.WriteFile(inv, raw, 0600)
+	os.WriteFile(cfg, []byte(`{"read_case":"invalid-case"}`), 0600)
+	_, out := directCall(t, "--inventory", inv, "--config", cfg, "--out", filepath.Join(dir, "out"))
+	if out.Code != "FAIL" || !strings.Contains(out.Error, "read_case requires") {
+		t.Fatalf("selector did not reach pack: %+v", out)
+	}
+}

@@ -37,7 +37,8 @@ type CloudConfig struct {
 	ChaosSet string `json:"chaos_set,omitempty"`
 	// KVSoak runs the two-host KV soak from SoakProfile, the profile input
 	// the bundle is built from, uploading its release files from SoakRelease.
-	KVSoak bool `json:"kv_soak,omitempty"`
+	ReadCase string `json:"read_case,omitempty"`
+	KVSoak   bool   `json:"kv_soak,omitempty"`
 	// KVLoad runs the same two-host pipeline with the profile's client pattern.
 	KVLoad      bool   `json:"kv_load,omitempty"`
 	SoakProfile string `json:"-"`
@@ -91,9 +92,14 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if c.KVSoak || c.KVLoad {
+	if c.ReadCase != "" {
+		if c.ReadCase != "volume-restart" && c.ReadCase != "filer-restart" && c.ReadCase != "volume-freeze" || c.KVSoak || c.KVLoad {
+			return "", errors.New("read_case requires one supported case without kv_soak or kv_load")
+		}
+	}
+	if c.KVSoak || c.KVLoad || c.ReadCase != "" {
 		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.MasterWrites || c.Chaos || c.Replication != "" || c.ChaosSet != "" || c.KVSoak && c.KVLoad {
-			return "", errors.New("kv_soak requires a two-host onprem inventory and no other phase")
+			return "", errors.New("kv_soak requires a two-host onprem inventory; read_case requires a two-host onprem inventory and no other phase")
 		}
 		return runDirectSoak(ctx, raw, c)
 	}
