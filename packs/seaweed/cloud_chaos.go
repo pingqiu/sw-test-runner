@@ -60,15 +60,26 @@ func chaosStopScript(unit string) string {
 
 func chaosContScript(pid, start string) string {
 	return `pid=` + pid + `; [ "$(` + chaosStat + `)" = ` + cloudQuote(start) + ` ]; sudo -n kill -CONT "$pid"; ` +
-		`for i in $(seq 200); do none=1; ` + chaosThreads + `if [ "$s" = T ]; then none=0; fi; done; if [ $none = 1 ]; then echo LIVE; exit 0; fi; sleep 0.05; done; exit 1`
+		`for i in $(seq 200); do none=1; ` + chaosThreads + `case "$s" in T|t|Z|X|x|'') none=0;; esac; done; if [ $none = 1 ] && [ "$(` + chaosStat + `)" = ` + cloudQuote(start) + ` ]; then echo LIVE; exit 0; fi; sleep 0.05; done; exit 1`
 }
 
 type chaosRun struct {
+	docs      map[string]inventory.Document
+	gens      *chaosGens
+	seedCheck func(context.Context, map[string]string) error
+
 	dir   string
 	rep   string // cloud.replication, for loads and replacement commands
 	nodes map[string]*infra.Node
 	mu    sync.Mutex
 	seq   int
+}
+
+func (r *chaosRun) document(d inventory.Document, id string) inventory.Document {
+	if r.docs != nil {
+		return r.docs[id]
+	}
+	return d
 }
 
 func (r *chaosRun) step(ctx context.Context, id, name string, seconds int, cmd string) (string, error) {
@@ -194,7 +205,7 @@ func chaosUnit(role string, gen int) string {
 	return role + "-g" + strconv.Itoa(gen)
 }
 
-func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts map[string]inventory.Host, gens map[string]int, r *chaosRun) error {
+func chaosReadCommands(d inventory.Document, x chaosCase, hosts map[string]inventory.Host, rep string) (map[string]map[string]string, map[string]SmokeConfig, error) {
 	meta, vol := hosts["meta"], hosts["vol1"]
 	cmds, cfgs := map[string]map[string]string{}, map[string]SmokeConfig{}
 	for _, id := range chaosClients {
@@ -203,13 +214,13 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 			view := d
 			view.State, view.Hosts = "resolved", []inventory.Host{meta, vol, hosts[id]}
 			root := hosts[id].RunRoot
-			args, e := ReadLoadArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: r.rep}, stage, "http")
+			args, e := ReadLoadArgs(&view, id, SmokeSettings{NativeDir: root, HelperDir: root + "/worker", Keys: 16, Length: 1 << 20, Replication: rep}, stage, "http")
 			if e != nil {
-				return e
+				return nil, nil, e
 			}
 			var cfg SmokeConfig
 			if e = json.Unmarshal([]byte(args[3]), &cfg); e != nil {
-				return e
+				return nil, nil, e
 			}
 			// Fresh keys per case: the client name carries the case.
 			cfg.Client = id + "-" + x.Name
@@ -223,6 +234,15 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 			cmds[id][stage] = cmd
 		}
 	}
+	return cmds, cfgs, nil
+}
+
+func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts map[string]inventory.Host, gens map[string]int, r *chaosRun) error {
+	cmds, cfgs, e := chaosReadCommands(d, x, hosts, r.rep)
+	if e != nil {
+		return e
+	}
+	vol := hosts["vol1"]
 	seeds, e := r.each(ctx, "seed", 120, func(id string) string { return cmds[id]["seed"] })
 	if e != nil {
 		return e
@@ -230,6 +250,11 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 	for id, out := range seeds {
 		if _, e = checkReadOutput([]byte(out), cfgs[id], "seed", "http"); e != nil {
 			return fmt.Errorf("%s seed: %w", id, e)
+		}
+	}
+	if r.seedCheck != nil {
+		if e = r.seedCheck(ctx, seeds); e != nil {
+			return e
 		}
 	}
 	// Freeze exposure counts only keys whose seeded fid is on the frozen
@@ -259,7 +284,7 @@ func runChaosCase(ctx context.Context, d inventory.Document, x chaosCase, hosts 
 		if marks["P"], e = r.stamp(ctx, "P"); e != nil {
 			return e
 		}
-		unit := "sw-cloud-" + d.RunID + "-" + chaosUnit(x.Role, gens[x.Role])
+		unit := "sw-cloud-" + r.document(d, x.Victim).RunID + "-" + chaosUnit(x.Role, gens[x.Role])
 		if x.Freeze {
 			return chaosFreeze(ctx, r, x.Victim, unit, marks, witness)
 		}
@@ -377,8 +402,13 @@ func chaosKill(ctx context.Context, r *chaosRun, victim, role, unit string) (str
 // chaosStart starts role's same command as unit next on victim, requires a
 // generation identity different from old, then waits for the deploy URL.
 func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts map[string]inventory.Host, victim, role, next, old string) (string, error) {
+	d = r.document(d, victim)
 	h, root := hosts[victim], hosts[victim].RunRoot
-	if _, e := r.step(ctx, victim, "start-"+next, 60, cloudStart(d, root, next, cloudServices(h, hosts["meta"], root, true, r.rep)[role])); e != nil {
+	command := cloudServices(h, hosts["meta"], root, true, r.rep)[role]
+	if r.docs != nil && role == "filer" {
+		command += " -localSocket=" + cloudQuote(root+"/filer.sock")
+	}
+	if _, e := r.step(ctx, victim, "start-"+next, 60, cloudStart(d, root, next, command)); e != nil {
 		return "", e
 	}
 	identity, e := r.step(ctx, victim, "identity-"+next, 30, chaosIdentityScript("sw-cloud-"+d.RunID+"-"+next))
