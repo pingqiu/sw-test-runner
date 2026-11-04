@@ -65,6 +65,7 @@ func chaosContScript(pid, start string) string {
 
 type chaosRun struct {
 	docs      map[string]inventory.Document
+	gens      *chaosGens
 	seedCheck func(context.Context, map[string]string) error
 
 	dir   string

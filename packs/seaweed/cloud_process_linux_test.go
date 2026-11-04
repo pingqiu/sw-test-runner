@@ -92,13 +92,15 @@ func TestProcessPlacementKeepsPhysicalInventory(t *testing.T) {
 // caller, not a parallel controller; markers share this host's client clock.
 type processFake struct {
 	directHost
-	mu      sync.Mutex
-	variant string
-	stamps  int
-	stage   *chaosFake
-	mixed   *chaos2Fake
-	ports   map[string]int
-	data    string
+	mu          sync.Mutex
+	variant     string
+	stamps      int
+	stage       *chaosFake
+	mixed       *chaos2Fake
+	ports       map[string]int
+	data        string
+	baseRoot    string
+	journalRead bool
 }
 
 func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
@@ -142,6 +144,9 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 	if strings.Contains(cmd, "/dir/lookup?") {
 		vid := 1
 		fmt.Sscanf(strings.Split(cmd, "volumeId=")[1], "%d", &vid)
+		if vid >= 13 {
+			vid -= 10
+		}
 		a, b := 2*(vid-2)-1, 2*(vid-2)
 		if f.variant == "foreign-lookup" {
 			b = 6
@@ -158,10 +163,54 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 				if f.variant == "single-copy" && i == 2 {
 					vid = 99
 				}
-				fmt.Fprintf(ch, `{"Volumes":[{"Id":%d,"ReadOnly":false}]}`, vid)
+				root := f.baseRoot + "-vol" + id
+				dir := root + "/volume"
+				if f.variant == "foreign-vol6" && i == 6 {
+					dir = "/unrelated/foreign-volume"
+				}
+				if strings.Contains(cmd, "/proc/$pid/cmdline") {
+					if f.variant == "foreign-identity-vol6" && i == 6 {
+						return 1
+					}
+					fmt.Fprintf(ch, "OWNER %d 555 %s:%d %s\n", 1000+i, f.data, port, root)
+				}
+				mixed := vid + 10
+				if f.variant == "mixed-s3-one-copy" && i == 2 {
+					mixed = 99
+				}
+				f.mu.Lock()
+				after := f.journalRead
+				f.mu.Unlock()
+				volumes := []map[string]any{{"Id": vid, "ReadOnly": false}}
+				if after {
+					volumes = append(volumes, map[string]any{"Id": mixed, "ReadOnly": false})
+				}
+				raw, _ := json.Marshal(map[string]any{"DiskStatuses": []map[string]string{{"dir": dir}}, "ProcessID": 999999, "Volumes": volumes})
+				fmt.Fprint(ch, string(raw))
 				return 0
 			}
 		}
+	}
+	if strings.Contains(cmd, "cat ") && strings.Contains(cmd, ".journal") && !strings.Contains(cmd, "journalctl") {
+		f.mu.Lock()
+		f.journalRead = true
+		f.mu.Unlock()
+		for _, vid := range []int{3, 4, 5, 13, 14, 15} {
+			fid := fmt.Sprintf("%d,abc", vid)
+			if f.variant == "mixed-s3-unknown" && vid == 13 {
+				fid = "99,abc"
+			}
+			if f.variant == "mixed-s3-no-fid" && vid == 13 {
+				fmt.Fprintln(ch, `{"event":"ACK","kind":"s3","key":"s","fids":null}`)
+				continue
+			}
+			kind := "kv"
+			if vid >= 13 {
+				kind = "s3"
+			}
+			fmt.Fprintf(ch, `{"event":"ACK","kind":%q,"key":"k%d","fids":[%q]}`+"\n", kind, vid, fid)
+		}
+		return 0
 	}
 	if strings.Contains(cmd, "kv_smoke.py") || strings.Contains(cmd, "chaos_load.py") || strings.Contains(cmd, "kill -") || strings.Contains(cmd, `echo "NEW`) {
 		id := "vol1"
@@ -225,6 +274,7 @@ func processRun(t *testing.T, name, variant string) (*processFake, string, error
 	var d inventory.Document
 	json.Unmarshal(raw, &d)
 	f.data = d.Hosts[0].Data.Address
+	f.baseRoot = d.Hosts[0].RunRoot
 	for i := 1; i <= 6; i++ {
 		f.ports[fmt.Sprint(i)] = servicePort(d.Hosts[0], "volume_http") + i - 1
 	}
@@ -290,5 +340,44 @@ func TestProcessResumeCannotWitnessADeadVictim(t *testing.T) {
 	}
 	if out, err = r.run(chaosContScript(f[1], f[2])); err == nil || strings.Contains(out, "LIVE") {
 		t.Fatal("dead victim earned LIVE", out, err)
+	}
+}
+
+func TestDirectProcessReviewRemainders(t *testing.T) {
+	for _, v := range []string{"mixed-s3-unknown", "mixed-s3-one-copy", "mixed-s3-no-fid", "foreign-vol6", "foreign-identity-vol6"} {
+		t.Run(v, func(t *testing.T) {
+			f, _, err := processRun(t, "C1-single-kill", v)
+			if err == nil {
+				t.Fatal("unqualified mixed workload passed", v)
+			}
+			if strings.HasPrefix(v, "foreign-") && f.index("kill -KILL") >= 0 {
+				t.Fatal("foreign non-victim owner reached fault")
+			}
+			if f.index("systemctl stop") < 0 || f.index("systemctl list-units") < 0 {
+				t.Fatal("refusal skipped cleanup")
+			}
+		})
+	}
+}
+
+func TestProcessOwnerRejectsAnActualForeignProcess(t *testing.T) {
+	f, _, err := processRun(t, "C1-single-kill", "foreign-identity-vol6")
+	if err == nil {
+		t.Fatal("foreign owner fixture passed")
+	}
+	var cmd string
+	for _, s := range f.commands {
+		if strings.Contains(s, "/proc/$pid/cmdline") && strings.Contains(s, "-vol6/volume") {
+			cmd = s
+			break
+		}
+	}
+	if cmd == "" {
+		t.Fatal("role was never bound to its actual process")
+	}
+	rig := newScriptRig(t, `[ "$1" = -n ] && shift; exec "$@"`)
+	rig.victim("sw-cloud-pack-cpu-vol6-volume")
+	if out, err := rig.run(cmd); err == nil || strings.Contains(out, "OWNER") {
+		t.Fatal("foreign executable/argv earned owner proof", out, err)
 	}
 }

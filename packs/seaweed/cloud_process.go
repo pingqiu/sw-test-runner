@@ -119,7 +119,7 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		return "", e
 	}
 	defer release()
-	r := &chaosRun{dir: c.Output, rep: "001", nodes: nodes, docs: docs}
+	r := &chaosRun{dir: c.Output, rep: "001", nodes: nodes, docs: docs, gens: &chaosGens{gens: map[string]int{}, witness: map[string]string{}}}
 	for _, h := range view.Hosts {
 		if _, e = r.step(ctx, h.ID, "fresh-"+h.ID, 10, "test ! -e "+cloudQuote(h.RunRoot)); e != nil {
 			return "", e
@@ -149,6 +149,11 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	}
 	for _, h := range view.Hosts {
 		if h.ID == "meta" || contains(h.Roles, "volume") {
+			if contains(h.Roles, "volume") {
+				if _, e = processOwner(ctx, r, hosts, h.ID); e != nil {
+					return "", e
+				}
+			}
 			if e = phase("before", h); e != nil {
 				return "", e
 			}
@@ -161,21 +166,13 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	if selected != nil {
 		e = runChaosCase(ctx, view, *selected, hosts, map[string]int{"volume": 1, "filer": 1}, r)
 	} else {
-		cmds, cfgs, err := chaosReadCommands(view, chaosCase{Name: name}, hosts, "001")
-		if err != nil {
-			return "", err
-		}
-		seeds, err := r.each(ctx, "seed", 120, func(id string) string { return cmds[id]["seed"] })
-		if err != nil {
-			return "", err
-		}
-		for id, out := range seeds {
-			if _, err = checkReadOutput([]byte(out), cfgs[id], "seed", "http"); err != nil {
+		e = runChaos2Case(ctx, view, chaos2Sets["A"][0], hosts, r.gens, r)
+		if e == nil {
+			journals, err := r.each(ctx, "actual-journal", 30, func(id string) string { return "cat " + cloudQuote(hosts[id].RunRoot+"/chaos-"+name+".journal") })
+			if err != nil {
 				return "", err
 			}
-		}
-		if e = r.seedCheck(ctx, seeds); e == nil {
-			e = runChaos2Case(ctx, view, chaos2Sets["A"][0], hosts, &chaosGens{gens: map[string]int{}, witness: map[string]string{}}, r)
+			e = processCopies(ctx, r, hosts, journals)
 		}
 	}
 	if e != nil {
@@ -198,13 +195,32 @@ func processPins(d inventory.Document, c CloudConfig) map[string]string {
 	return pins
 }
 
-// Join every seeded ACK VID to two distinct observed volume-process owners
+// Join MainPID/starttime to executable, argv/root and owned TCP listeners;
+// recheck that unit generation after the status read.
+func processOwner(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, id string) (string, error) {
+	h := hosts[id]
+	unit := r.gens.unit(r.docs[id], id, "volume")
+	cmd := mainPID(unit) + `test "$(sudo -n readlink /proc/$pid/exe)" = ` + cloudQuote(h.RunRoot+"/weed-volume") + `; test "$(sudo -n readlink /proc/$pid/cwd)" = ` + cloudQuote(h.RunRoot) + `; ` +
+		`args=$(sudo -n cat /proc/$pid/cmdline | tr '\000' '\n'); for arg in ` + cloudQuote("--dir="+h.RunRoot+"/volume") + ` ` + cloudQuote("--ip="+h.Data.Address) + ` ` + cloudQuote("--port="+strconv.Itoa(servicePort(h, "volume_http"))) + ` ` + cloudQuote("--port.grpc="+strconv.Itoa(servicePort(h, "volume_grpc"))) + `; do printf '%s\n' "$args" | grep -Fx -- "$arg" >/dev/null || exit 1; done; ` +
+		`sockets=$(sudo -n ss -Hltnp) || exit 1; for p in ` + strconv.Itoa(servicePort(h, "volume_http")) + ` ` + strconv.Itoa(servicePort(h, "volume_grpc")) + `; do printf '%s\n' "$sockets" | awk -v p="$p" -v pid="$pid" '$4 ~ (":" p "$") && index($0,"pid=" pid ","){found=1} END{exit !found}' || exit 1; done; ` +
+		`body=$(curl -fsS --max-time 10 ` + cloudQuote("http://"+endpoint(h, "volume_http")+"/status") + `) || exit 1; test "$(` + chaosStat + `)" = "$start"; test "$(sudo -n systemctl show -p MainPID --value ` + cloudQuote(unit) + `)" = "$pid"; printf 'OWNER %s %s %s %s\n%s\n' "$pid" "$start" ` + cloudQuote(endpoint(h, "volume_http")) + ` ` + cloudQuote(h.RunRoot) + ` "$body"`
+	out, e := r.step(ctx, id, "copies-"+id, 30, cmd)
+	receipt, body, ok := strings.Cut(out, "\n")
+	f := strings.Fields(receipt)
+	var st struct{ DiskStatuses []struct{ Dir string } }
+	if e != nil || !ok || len(f) != 5 || f[0] != "OWNER" || f[3] != endpoint(h, "volume_http") || f[4] != h.RunRoot || json.Unmarshal([]byte(body), &st) != nil || len(st.DiskStatuses) != 1 || st.DiskStatuses[0].Dir != h.RunRoot+"/volume" {
+		return "", errors.Join(e, errors.New("volume role identity/endpoint/root not bound: "+id))
+	}
+	return body, nil
+}
+
+// Join every actual ACK VID to two distinct observed volume-process owners
 // and the master's actual lookup. Replication 001 alone is not this proof.
-func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, seeds map[string]string) error {
+func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, acks map[string]string) error {
 	owners := map[string][]string{}
 	for i := 1; i <= 6; i++ {
 		id := "vol" + strconv.Itoa(i)
-		out, e := r.step(ctx, id, "copies-"+id, 30, "curl -fsS --max-time 10 "+cloudQuote("http://"+endpoint(hosts[id], "volume_http")+"/status"))
+		out, e := processOwner(ctx, r, hosts, id)
 		var st struct {
 			Volumes []struct {
 				Id       uint64
@@ -230,14 +246,14 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 		}
 	}
 	used := map[string]bool{}
-	for _, out := range seeds {
+	for _, out := range acks {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 			var ack struct {
 				Event string
 				FIDs  []string
 			}
 			if json.Unmarshal([]byte(line), &ack) != nil {
-				return errors.New("seed row malformed")
+				return errors.New("ACK journal row malformed")
 			}
 			if ack.Event != "ACK" {
 				continue
@@ -261,7 +277,7 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 		}
 	}
 	if len(exercised) != 6 {
-		return errors.New("seeded ACKs do not exercise all six owners")
+		return errors.New("ACKs do not exercise all six owners")
 	}
 
 	for vid := range used {
@@ -283,5 +299,5 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 			return errors.New("master lookup differs from captured owners")
 		}
 	}
-	return r.save("copies.json", map[string]any{"owners": owners, "seeded_vids": used, "copies": 2})
+	return r.save("copies.json", map[string]any{"owners": owners, "acked_vids": used, "copies": 2})
 }

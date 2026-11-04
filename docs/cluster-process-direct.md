@@ -16,11 +16,20 @@ saved unchanged inside process-placement.json alongside the role/host map.
 Each role has a distinct run directory and transient-unit generation.
 Co-location is process tolerance, never host tolerance.
 
-The baseline reuses the cluster topology/writable-owner probe. Before the
-fault, all six volume statuses must show writable owners; each observed VID
-must have exactly two distinct volume-process owners. Every seed ACK's VID
-joins those captures and the master's lookup and exercises all six owners. Configuration 001 alone cannot
-satisfy copies.json. Shared worker payloads and all existing assessors stay.
+The baseline reuses the cluster topology/writable-owner probe. Before any
+fault, each volume role is joined to its unit MainPID/starttime, deployed
+executable, working directory, exact data/endpoint argv, both owned TCP
+listeners, and status disk directory. The unit generation is rechecked after
+the status read. Unknown or foreign non-victim owners refuse before dispatch.
+
+Stage 1 joins all seed ACK VIDs to two distinct observed role owners and the
+master lookup. C1 creates new KV/S3 VIDs during the mixed load: after recovery
+it reads the actual ACK journals and repeats that join for every FID using
+current role generations, including the replacement. Unknown/null FIDs and
+single/foreign copies refuse overall qualification even if byte readback
+passed. C1 no longer runs an unrelated seed workload. ACKs must exercise all
+six owners. Configuration 001 alone cannot satisfy copies.json. Existing
+worker payloads and assessors remain unchanged.
 
 Stage 1 keeps the three clients' 120 s HTTP load, prospective client-local P,
 per-failed-op start >= P and first recovered exact completion <= P+60,
