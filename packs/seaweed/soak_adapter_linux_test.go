@@ -15,7 +15,7 @@ import (
 
 func testAdapter(t *testing.T) *soakAdapter {
 	t.Helper()
-	return &soakAdapter{root: t.TempDir(), runID: "run-1", bootID: "boot-1", roles: map[string]string{}}
+	return &soakAdapter{soakWindow: soakWindow{root: t.TempDir(), runID: "run-1", bootID: "boot-1", roles: map[string]string{}}}
 }
 
 func TestSoakAdapterPublishIsExclusiveAndReadBoundIsStrict(t *testing.T) {
