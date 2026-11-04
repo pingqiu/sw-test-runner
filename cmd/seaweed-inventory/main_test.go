@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +34,20 @@ func TestJSONRefusalContract(t *testing.T) {
 				t.Fatalf("exit=%d JSON=%s", exit, out.String())
 			}
 		})
+	}
+}
+
+func TestValidInventoryPointsToDirectExecution(t *testing.T) {
+	var out bytes.Buffer
+	if code := execute([]string{"validate", "../../examples/inventory/http.requested.json"}, &out); code != 0 {
+		t.Fatalf("valid inventory refused: %d %s", code, out.String())
+	}
+	var r map[string]any
+	if json.Unmarshal(out.Bytes(), &r) != nil || r["execution_authorized"] != false {
+		t.Fatal(out.String())
+	}
+	remedy, _ := r["remedy"].(string)
+	if !strings.Contains(remedy, "seaweed-cloud direct") || strings.Contains(remedy, "S0b") {
+		t.Fatal("retired remedy", remedy)
 	}
 }

@@ -125,6 +125,10 @@ Usage:
   sw-test-runner cancel [-results-dir <dir>] [run_id]  Request cancel for a running run
   sw-test-runner help                                  Show this help
 
+Seaweed pack on an existing local/lab SSH host (built by make build):
+  seaweed-cloud direct --inventory INV.json --config CONFIG.json --out NEW_DIR
+  This is the existing seaweed-cloud entry, not a sw-test-runner subcommand.
+
 Common flags:
   -tiers <tiers>       Comma-separated enabled tiers: core,block,devops,chaos (default: all)
 

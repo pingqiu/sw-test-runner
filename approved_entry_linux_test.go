@@ -130,8 +130,32 @@ func init() {
 	}
 }
 
+// The deployed approved branch is retired. This test-only hook keeps generic
+// RunApprovedRequest/lease/custody controls on the ordinary queue worker.
+func approvedQueueHook(t *testing.T, root, queue, adapter, policy string) []string {
+	t.Helper()
+	staged := filepath.Join(root, "api-request.json")
+	request := filepath.Join(root, "running", "r1.env")
+	if err := os.Rename(filepath.Join(queue, "r1.env"), staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(queue, "r1.env"), []byte(":\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(root, "api-hook.sh")
+	body := `#!/bin/sh
+set -e
+mv "$S0B_TEST_STAGED" "$S0B_TEST_REQUEST"
+exec "$S0B_TEST_ADAPTER" approved-run --request "$S0B_TEST_REQUEST" --policy "$S0B_TEST_POLICY"
+`
+	if err := os.WriteFile(hook, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"TESTOPS_RDMA_CI_SCRIPT=" + hook, "S0B_TEST_ADAPTER=" + adapter, "S0B_TEST_REQUEST=" + request, "S0B_TEST_STAGED=" + staged, "S0B_TEST_POLICY=" + policy}
+}
+
 func TestApprovedWorkerDispatchesStrictDataThroughActualAdapter(t *testing.T) {
-	for _, mode := range []string{"positive", "foreign-go", "shell", "adapter-pin"} {
+	for _, mode := range []string{"positive", "foreign-go", "shell"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newApprovedFixture(t)
 			raw := []byte("name: approved\nphases:\n  - name: owned\n    actions:\n      - action: approved_job\n        job: probe\n  - name: second\n    actions:\n      - action: approved_job\n        job: probe\n")
@@ -171,10 +195,6 @@ func TestApprovedWorkerDispatchesStrictDataThroughActualAdapter(t *testing.T) {
 			if err = os.WriteFile(adapter, body, 0700); err != nil {
 				t.Fatal(err)
 			}
-			digest := fmt.Sprintf("%x", sha256.Sum256(body))
-			if mode == "adapter-pin" {
-				digest = strings.Repeat("0", 64)
-			}
 			script, err := filepath.Abs("scripts/testops-ci-worker.sh")
 			if err != nil {
 				t.Fatal(err)
@@ -185,7 +205,8 @@ func TestApprovedWorkerDispatchesStrictDataThroughActualAdapter(t *testing.T) {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
-			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+state, "TESTOPS_LOCK_FILE="+filepath.Join(f.dir, "flock"), "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:", "TESTOPS_RDMA_CI_SCRIPT=/bin/true", "TESTOPS_APPROVED_ADAPTER="+adapter, "TESTOPS_APPROVED_ADAPTER_SHA256="+digest, "TESTOPS_APPROVED_POLICY="+f.profile)
+			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+state, "TESTOPS_LOCK_FILE="+filepath.Join(f.dir, "flock"), "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:")
+			cmd.Env = append(cmd.Env, approvedQueueHook(t, f.dir, queue, adapter, f.profile)...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("worker failure: %v %s", err, out)
