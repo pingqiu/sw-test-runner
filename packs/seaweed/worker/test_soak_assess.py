@@ -919,6 +919,26 @@ class KVLoadAssess(unittest.TestCase):
         self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
         self.assertEqual(sorted(row['criteria']), sorted(soak_assess.KV_LOAD))
 
+    def test_op_events_are_bounded_by_the_declared_pattern_not_the_soak_caps(self):
+        # kv_load run 2 (2026-11-04): a full 900 s load wrote 71.4 MB of op-events, over the soak's 64 MiB,
+        # and the verdict was never computed. Shrunk here: soak caps below the fixture's 204 rows.
+        self.addCleanup(setattr, soak_assess, 'ROWS', soak_assess.ROWS)
+        self.addCleanup(setattr, soak_assess, 'FILE', soak_assess.FILE)
+        soak_assess.ROWS, soak_assess.FILE = 100, 20000
+        row = self.run_on(kv_evidence())
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row.get('error') or row['criteria'])
+        # The declared pattern's own bound: 2 x 4 keys + 2 clients x 1/s x 100 s, plus margins.
+        rows, limit = soak_assess.op_event_bounds(KV_PATTERN)
+        self.assertEqual(rows, 8 + 200 + 2 * 2 + 16)
+        self.assertEqual(limit, max(20000, rows * soak_assess.OP_ROW))
+        # More rows than the pattern can declare are still refused.
+        ev = kv_evidence()
+        ev['events'][4:4] = [dict(ev['events'][4], op='x%d' % i) for i in range(rows)]
+        with self.assertRaisesRegex(ValueError, 'over bound: op-events.jsonl'):
+            self.run_on(ev)
+        # Without a pattern (the soak) the caps are today's.
+        self.assertEqual(soak_assess.op_event_bounds(None), (100, 20000))
+
     def test_write_once_needs_every_key_once_and_no_read_before_the_barrier(self):
         ev = kv_evidence()  # key 3's first version recorded as key 2's: one key twice, one never (wrong_reads fails too)
         ev['acks'][3]['seed'] = 'kv-load-2-0'
