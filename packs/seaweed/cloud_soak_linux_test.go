@@ -225,7 +225,7 @@ func TestDirectSoakStartsDeployJobsAsUnits(t *testing.T) {
 	s.run(soakCtx(t))
 	user, root := s.d.Hosts[1].Management.User, s.d.Hosts[1].RunRoot
 	for _, label := range []string{"deploy-master", "deploy-volume"} {
-		if m02.index("systemd-run", "--unit="+s.unit(label), "--uid="+user, "WorkingDirectory="+root, "file:"+root+"/"+label+".stdout") < 0 {
+		if m02.index("systemd-run", "--unit="+s.unit(label), "--uid="+user, "WorkingDirectory="+root, "file:"+root+"/"+label+".stdout", "LimitMEMLOCK=infinity") < 0 {
 			t.Fatalf("%s not started as a unit: %v", label, m02.commands)
 		}
 	}

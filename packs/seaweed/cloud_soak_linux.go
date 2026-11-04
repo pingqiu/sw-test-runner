@@ -112,7 +112,9 @@ func exitInfo(out string, code int, start time.Time) tr.ExitInfo {
 		StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(out))), StderrSHA256: fmt.Sprintf("%x", sha256.Sum256(nil))}}
 }
 
-// start runs a job as a transient unit owned by the ssh user, its stdout and
+// start runs a job as a transient unit owned by the ssh user, with the ssh
+// session's unlimited locked memory (RDMA registers its buffers; a unit's
+// default is 8 MiB, and ibv_reg_mr then fails with ENOMEM), its stdout and
 // stderr to this generation's own files in the run root (launch records both;
 // ready and collect read them back).
 func (s *directSoak) start(ctx context.Context, label string) error {
@@ -123,7 +125,7 @@ func (s *directSoak) start(ctx context.Context, label string) error {
 	h := s.hosts[pin.Node]
 	_, err = cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-start-"+label+".json", "start-"+label, 30,
 		"sudo systemd-run --unit="+cloudQuote(s.unit(label))+" --uid="+cloudQuote(h.Management.User)+
-			" --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+
+			" --property=LimitMEMLOCK=infinity --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+
 			" --property=StandardError="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stderr"))+" "+cmd)
 	return err
 }
