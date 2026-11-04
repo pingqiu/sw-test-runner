@@ -238,10 +238,14 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 				if json.Unmarshal([]byte(line), &a) != nil || len(a.FIDs) == 0 {
 					continue // unknown placement is never excused
 				}
-				vid, _, _ := strings.Cut(a.FIDs[0], ",")
-				held := append([]string{}, placement[vid]...)
-				sort.Strings(held)
-				w.Unavailable[a.Key] = strings.Join(held, ",") == strings.Join(victims, ",")
+				unavailable := true
+				for _, fid := range a.FIDs {
+					vid, _, ok := strings.Cut(fid, ",")
+					held := append([]string{}, placement[vid]...)
+					sort.Strings(held)
+					unavailable = unavailable && ok && strings.Join(held, ",") == strings.Join(victims, ",")
+				}
+				w.Unavailable[a.Key] = unavailable
 			}
 		}
 		if e := checkChaosOps(out.Outcomes, w); e != nil {
