@@ -91,10 +91,10 @@ Controller config fields (keep credentials private; do not commit configs):
   `weed-volume`, and `native.tar` (containing `seaweedkv_native/`, compatible
   with the target's Python ABI and system libraries).
 - For EC set `ec_stage1: true` and supply **only** `weed` in `files`.
-  To test Rust holders, also set `ec_volume_impl: "rust"` and supply a pinned
-  `weed-volume` artifact; master, filer and S3 still use Go `weed`. It starts
+  For Rust holders, also set `ec_volume_impl: "rust"` and pin `weed-volume`
+  in `files`; master, filer and S3 still use Go `weed`. It starts
   one Go master/filer/S3 plus 14 holders, seeds 64 keys, encodes, rejects a
-  planted wrong byte, checks both routes, then kills 1â€“4 holders cumulatively.
+  planted wrong byte, checks both routes, then kills 1–4 holders cumulatively.
   S1 can PASS; S2 stays `NOT_COVERED` without a reconstruction marker.
 
 Create the output parent first; `--out` itself must not already exist. The CLI
@@ -127,10 +127,10 @@ mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
 ```
 
 - **Start here:** `docs/testops-handbook.md`, `docs/cross-product-testops-standard.md`, `docs/scenario-spec.md`, `docs/tutorial.md`
-- **For development agents:** `docs/agent-testops-runbook.md` â€” the short
+- **For development agents:** `docs/agent-testops-runbook.md` — the short
   guide for Block, S3, VFS, and RDMA agents running shared lab tests and
   reporting evidence.
-- **Reference:** `docs/wiki/` â€” code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
+- **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
 - **Live run dashboard/controller:** http://192.168.1.181:9099/ (global run view; M01 can enable RDMA queue submit)
 
 ## Agent quick start
@@ -177,34 +177,34 @@ make wiki                # serve the wiki locally
 
 ```
 .
-â”œâ”€â”€ README.md
-â”œâ”€â”€ LICENSE                       Apache-2.0
-â”œâ”€â”€ go.mod                        github.com/pingqiu/sw-test-runner
-â”œâ”€â”€ engine.go, parser.go, ...     framework: scenario sequencer + YAML parser
-â”œâ”€â”€ registry.go, types.go         action registry + ActionContext
-â”œâ”€â”€ reporter.go, baseline.go      JUnit XML, regression baselines
-â”œâ”€â”€ coordinator.go, agent.go      multi-node distributed mode
-â”œâ”€â”€ actions/                      product-agnostic actions
-â”‚   â”œâ”€â”€ system.go                 exec, sleep, assert_*, ssh, scp
-â”‚   â”œâ”€â”€ fault.go                  netem, partition, kill_pid, fill_disk
-â”‚   â”œâ”€â”€ bench.go, benchmark.go    fio loops, perf parsing
-â”‚   â”œâ”€â”€ iscsi.go, io.go, k8s.go   iSCSI client, dd/mkfs/mount, kubectl
-â”‚   â”œâ”€â”€ recovery.go, results.go   verify, sha256, JSON output
-â”‚   â””â”€â”€ ...
-â”œâ”€â”€ infra/                        agnostic node abstractions
-â”‚   â”œâ”€â”€ node.go                   SSH or local exec
-â”‚   â”œâ”€â”€ target.go, ha_target.go   daemon lifecycle helpers
-â”‚   â””â”€â”€ iscsi_client.go, fault.go
-â”œâ”€â”€ packs/                        product-specific action sets
-â”‚   â”œâ”€â”€ block/                    V2 seaweedfs weed-block
-â”‚   â”œâ”€â”€ kv/                       V2 seaweedfs kv/object
-â”‚   â”œâ”€â”€ s3/                       SeaweedFS S3 gateway
-â”‚   â”œâ”€â”€ rdma/                     M01/M02 RDMA lab gates
-â”‚   â””â”€â”€ v3block/                  V3 seaweed-block
-â”œâ”€â”€ scenarios/                    bundled scenario YAMLs (V2 baselines + V3)
-â”œâ”€â”€ cmd/sw-test-runner/           CLI entry
-â”œâ”€â”€ cmd/testops-controller/       safe RDMA queue submit/status web API
-â””â”€â”€ internal/blockapi/            internal HTTP client (V2 master REST)
+├── README.md
+├── LICENSE                       Apache-2.0
+├── go.mod                        github.com/pingqiu/sw-test-runner
+├── engine.go, parser.go, ...     framework: scenario sequencer + YAML parser
+├── registry.go, types.go         action registry + ActionContext
+├── reporter.go, baseline.go      JUnit XML, regression baselines
+├── coordinator.go, agent.go      multi-node distributed mode
+├── actions/                      product-agnostic actions
+│   ├── system.go                 exec, sleep, assert_*, ssh, scp
+│   ├── fault.go                  netem, partition, kill_pid, fill_disk
+│   ├── bench.go, benchmark.go    fio loops, perf parsing
+│   ├── iscsi.go, io.go, k8s.go   iSCSI client, dd/mkfs/mount, kubectl
+│   ├── recovery.go, results.go   verify, sha256, JSON output
+│   └── ...
+├── infra/                        agnostic node abstractions
+│   ├── node.go                   SSH or local exec
+│   ├── target.go, ha_target.go   daemon lifecycle helpers
+│   └── iscsi_client.go, fault.go
+├── packs/                        product-specific action sets
+│   ├── block/                    V2 seaweedfs weed-block
+│   ├── kv/                       V2 seaweedfs kv/object
+│   ├── s3/                       SeaweedFS S3 gateway
+│   ├── rdma/                     M01/M02 RDMA lab gates
+│   └── v3block/                  V3 seaweed-block
+├── scenarios/                    bundled scenario YAMLs (V2 baselines + V3)
+├── cmd/sw-test-runner/           CLI entry
+├── cmd/testops-controller/       safe RDMA queue submit/status web API
+└── internal/blockapi/            internal HTTP client (V2 master REST)
 ```
 
 ## Writing a scenario
@@ -238,13 +238,13 @@ Output:
 
 ```
 results/
-â””â”€â”€ 20260504-100000-abcd/
-    â”œâ”€â”€ manifest.json     run metadata
-    â”œâ”€â”€ result.json       structured per-phase results
-    â”œâ”€â”€ result.xml        JUnit XML
-    â”œâ”€â”€ result.html       human-readable
-    â”œâ”€â”€ scenario.yaml     echo of input
-    â””â”€â”€ artifacts/        per-daemon logs, fio JSON, etc.
+└── 20260504-100000-abcd/
+    ├── manifest.json     run metadata
+    ├── result.json       structured per-phase results
+    ├── result.xml        JUnit XML
+    ├── result.html       human-readable
+    ├── scenario.yaml     echo of input
+    └── artifacts/        per-daemon logs, fio JSON, etc.
 ```
 
 Validate a completed bundle without touching the lab:
@@ -302,7 +302,7 @@ A pack registers actions under whichever tier fits.
 
 - Actions must not embed product authority semantics (no `promote`,
   `demote`, `force-failover` shortcuts that bypass the product control plane).
-- Actions communicate via shell-out and HTTP/gRPC clients only â€” no direct
+- Actions communicate via shell-out and HTTP/gRPC clients only — no direct
   imports of product daemon internal types. This is what keeps the runner
   pluggable across V2/V3 and cross-language products.
 - Test the testrunner on its own (`go test ./... -count=1`); product
