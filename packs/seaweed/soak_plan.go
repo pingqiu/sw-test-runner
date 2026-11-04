@@ -60,6 +60,12 @@ type LoadPhase struct {
 	ReadRatio float64 `json:"read_ratio,omitempty"`
 }
 
+// writeSeconds is write_once's least duration at the declared rate: each
+// write, then its verification read.
+func (p *LoadPattern) writeSeconds() float64 {
+	return 2 * float64(p.Keys) / (float64(p.Clients) * p.RatePerClient)
+}
+
 // check bounds every pattern number, and requires the phases, with write_once
 // at its declared rate, to fit inside the load's duration.
 func (p *LoadPattern) check(durationS int) error {
@@ -75,7 +81,7 @@ func (p *LoadPattern) check(durationS int) error {
 	if len(p.Phases) < 2 || len(p.Phases) > 4 || p.Phases[0].Kind != "write_once" || p.Phases[0].DurationS != 0 || p.Phases[0].ReadRatio != 0 {
 		return errors.New("kv_load pattern starts with one write_once phase and has 2 to 4 phases")
 	}
-	need := 2 * float64(p.Keys) / (float64(p.Clients) * p.RatePerClient) // each write, then its verification read
+	need := p.writeSeconds()
 	for _, ph := range p.Phases[1:] {
 		if ph.DurationS < 1 || ph.DurationS > durationS || !(ph.Kind == "read" && ph.ReadRatio == 0 ||
 			ph.Kind == "mixed" && finite(ph.ReadRatio) && ph.ReadRatio > 0 && ph.ReadRatio < 1) {
@@ -190,6 +196,9 @@ func (x *SoakPlan) checkSchedule() error {
 	if x.Pattern != nil {
 		if err := x.Pattern.check(x.DurationS); err != nil {
 			return err
+		}
+		if float64(x.ClientKillAtS) < x.Pattern.writeSeconds() { // the kill's GET would come before the barrier
+			return errors.New("kv_load pattern client kill must come after write_once")
 		}
 	}
 	if len(x.Faults) == 0 || len(x.Faults) > 2 {

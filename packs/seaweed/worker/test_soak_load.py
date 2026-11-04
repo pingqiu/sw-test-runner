@@ -344,7 +344,15 @@ class KVLoadRun(unittest.TestCase):
         self.assertEqual(len({e['key'] for e in sets}), 6)
         self.assertEqual(len(sets), 6)
         self.assertTrue(gets)
-        self.assertLessEqual(max(e['completed'] for e in sets), min(e['dispatched'] for e in gets))
+        self.assertLessEqual(max(e['completed'] for e in sets), min(min(e['dispatched'], e['submitted']) for e in gets))
+
+    def test_a_client_kill_due_during_write_once_fails_before_any_get(self):
+        self.config.update(pattern=self.PATTERN, client_kill_at_s=0)
+        with self.assertRaisesRegex(soak_load.OracleError, 'client kill due before write_once ended'):
+            soak_load.run(self.config)
+        self.assertNotIn('get', [e['action'] for e in self.events()])
+        rows = [json.loads(l) for l in (self.root / 'completions.jsonl').read_text().splitlines()]
+        self.assertNotIn('get', [r['action'] for r in rows])  # nothing was even submitted
 
     def test_phases_that_do_not_complete_fail_the_load(self):
         self.config['pattern'] = dict(self.PATTERN, phases=[dict(kind='write_once'), dict(kind='read', duration_s=30)])

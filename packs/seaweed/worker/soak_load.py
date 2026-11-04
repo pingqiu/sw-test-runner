@@ -377,6 +377,8 @@ def run(config):
                 time.sleep(.002)
                 continue  # paused: no new dispatch of any kind until the exact close
             if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
+                if pattern and pattern.phase == 0:  # the kill's own GET would precede the write barrier
+                    raise OracleError('kv_load client kill due before write_once ended')
                 kills.append(client_kill(now))
                 log('op-events.jsonl', dict(event='client_kill', **kills[-1]))
             for i in range(clients):

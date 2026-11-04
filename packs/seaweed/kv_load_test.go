@@ -61,6 +61,12 @@ func TestCheckScheduleChecksThePattern(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.Soak.Pattern = lmcacheLike()
+	p.Soak.Pattern.Clients, p.Soak.Pattern.RatePerClient = 1, 10 // write_once takes at least 2*4096/10 = 819.2 s
+	if p.Soak.ClientKillAtS = 600; p.Soak.checkSchedule() == nil || !strings.Contains(p.Soak.checkSchedule().Error(), "client kill must come after write_once") {
+		t.Fatalf("a client kill at 600 s, before write_once's end, passed: %v", p.Soak.checkSchedule())
+	}
+	p.Soak.ClientKillAtS = 1320
+	p.Soak.Pattern = lmcacheLike()
 	p.Soak.Pattern.Clients = 0
 	if err := p.Soak.checkSchedule(); err == nil || !strings.Contains(err.Error(), "kv_load pattern") {
 		t.Fatalf("checkSchedule passed a bad pattern: %v", err)
