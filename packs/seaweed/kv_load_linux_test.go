@@ -7,12 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
 // loadConfig is the --config JSON of the fixture's admitted load job.
-func loadConfig(t *testing.T, f *cpuFixture) map[string]json.RawMessage {
+func loadConfig(t *testing.T, f *bindingFixture) map[string]json.RawMessage {
 	t.Helper()
 	argv := f.policy.Jobs[f.plan.Workload[0].Job].Argv
 	var c map[string]json.RawMessage
@@ -33,8 +31,8 @@ func TestKVLoadPatternReachesTheAdmittedLoadArgv(t *testing.T) {
 	if err := json.Unmarshal(loadConfig(t, f)["pattern"], &got); err != nil || got.Clients != 32 || got.ZipfS != 1.1 || got.Phases[1].DurationS != 600 {
 		t.Fatalf("pattern in the load argv: %+v, %v", got, err)
 	}
-	if out := runEntry(t, f); strings.Contains(out, "BINDING_REFUSED: soak") || f.node.authorized == 0 || !strings.Contains(out, "not the admitted M01 clock") {
-		t.Fatalf("a kv_load plan did not bind and reach the soak phase: %s", refusalLines(out))
+	if out := runSoakEntry(t, f); out != "BOUND_DATA_ONLY" {
+		t.Fatalf("kv_load data did not bind: %s", out)
 	}
 }
 
@@ -43,19 +41,9 @@ func TestKVLoadPatternReachesTheAdmittedLoadArgv(t *testing.T) {
 func TestKVLoadSelectorMatchesTheProfile(t *testing.T) {
 	var in ProfileInput
 	for _, withPattern := range []bool{false, true} {
-		soakProfile(t, 45*time.Minute, func(x *SoakPlan) {
+		in = soakInput(t, 45*time.Minute, func(x *SoakPlan) {
 			if withPattern {
 				x.Pattern = lmcacheLike()
-			}
-		}, func(f *cpuFixture, d *inventory.Document) {
-			settings := *f.plan.Soak
-			settings.Setup, settings.Evidence, settings.Assess, settings.FaultReady = Step{}, Step{}, Step{}, nil
-			in = ProfileInput{Requested: f.plan.Requested, Resolved: f.plan.Resolved, Smoke: f.plan.Smoke, Files: map[string]map[string]string{}, Soak: &settings}
-			for _, dep := range f.policy.Deployments {
-				in.Files[dep.NodeID] = map[string]string{}
-				for _, file := range dep.Files {
-					in.Files[dep.NodeID][file.Path] = file.SHA256
-				}
 			}
 		})
 		raw, _ := json.Marshal(in)

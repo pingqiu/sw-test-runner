@@ -324,7 +324,7 @@ Cloud provisioning and on-prem deployment share the versioned
 [`seaweed.inventory/v1` contract](inventory/README.md). The standalone validator
 checks data only; it cannot authorize or launch jobs.
 
-Azure provision-only module: [provision/terraform/azure](provision/terraform/azure/README.md). Static validation only; runtime admission remains gated on S0b.
+Azure provision-only module: [provision/terraform/azure](provision/terraform/azure/README.md). Cloud execution uses seaweed-cloud plan/run/destroy; existing hosts use seaweed-cloud direct.
 
 ### Two-host DC read cases
 

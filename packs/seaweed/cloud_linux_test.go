@@ -110,9 +110,8 @@ func cloudSSH(t *testing.T, summary string, execute ...func(string, ssh.Channel)
 
 func cloudInput(t *testing.T, address string) []byte {
 	t.Helper()
-	f := newHTTPFixture(t)
 	var d inventory.Document
-	json.Unmarshal([]byte(f.plan.Requested), &d)
+	json.Unmarshal(newHTTPInventory(t), &d)
 	host, port, _ := net.SplitHostPort(address)
 	fmt.Sscan(port, &d.Hosts[0].Management.Port)
 	d.Hosts[0].Management.Address = host

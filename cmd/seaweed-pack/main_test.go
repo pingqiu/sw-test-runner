@@ -27,7 +27,7 @@ func TestActualPlanCommandNeverExecutesAndRefusesBadInput(t *testing.T) {
 				if rc == 0 || v.Code != "ACTION_UNSUPPORTED" {
 					t.Fatalf("unsupported accepted %s", raw)
 				}
-			} else if rc != 0 || v.Code != "S0B_REQUIRED" {
+			} else if rc != 0 || v.Code != "PLAN_DATA_ONLY" {
 				t.Fatalf("bad plan rc=%d %s", rc, raw)
 			}
 		})

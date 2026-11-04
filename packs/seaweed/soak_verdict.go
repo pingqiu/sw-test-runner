@@ -2,7 +2,6 @@ package seaweed
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -191,51 +190,4 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 		return v, errors.New("soak verdict PASS without every mandatory criterion")
 	}
 	return v, nil
-}
-
-// soakVerdict runs after the plan's ordinary collect jobs: the M02 evidence
-// job, its bounded output published into the M01 run root, then the M01
-// assessor. A FAIL or any error fails the pack; earlier failures already did.
-func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document) (SoakVerdict, error) {
-	var v SoakVerdict
-	want, err := soakBinding(d)
-	if err != nil {
-		return v, err
-	}
-	t1, err := controllerMono()
-	if err != nil {
-		return v, err
-	}
-	h, e, err := a.RunApprovedPackJob(ctx, p.Soak.Evidence.Job, false)
-	if err != nil {
-		return v, err
-	}
-	t4, err := controllerMono()
-	if err != nil {
-		return v, err
-	}
-	m02, _, err := e.Output.Decode()
-	var probe struct {
-		Status string `json:"status"`
-	}
-	if err != nil || e.Code != 0 || oneStrictValue(m02) != nil || json.Unmarshal(m02, &probe) != nil || probe.Status != "SOAK_COLLECTED" {
-		return v, errors.New("soak M02 evidence failed, truncated or malformed")
-	}
-	if err = clockPublish(path.Join(want.Root, "m02-collect.json"), m02); err != nil {
-		return v, err
-	}
-	auth, err := authorizeT1(ctx, a, h, e)
-	if err != nil {
-		return v, err
-	}
-	if err = publishSoakClock(want.Root, "soak-clock-s2.json", want.RunID, m02, t1, auth, t4); err != nil {
-		return v, err
-	}
-	if _, e, err = a.RunApprovedPackJob(ctx, p.Soak.Assess.Job, false); err != nil {
-		return v, err
-	}
-	if v, err = decodeVerdict(e, want, p.Soak.criteria()); err == nil && v.Status != "PASS" {
-		err = errors.New("soak verdict FAIL")
-	}
-	return v, err
 }

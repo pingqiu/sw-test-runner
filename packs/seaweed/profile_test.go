@@ -91,7 +91,7 @@ func TestProfileBundleIsPinnedDataOnly(t *testing.T) {
 		t.Fatalf("bad data-only profile %+v", bundle)
 	}
 	plan, _ := MarshalPlan(bundle.Plan)
-	if result, err := PlanPhase(string(plan), "seaweed_workload"); err != nil || result.ExecutionAuthorized || result.Code != "S0B_REQUIRED" {
+	if result, err := PlanPhase(string(plan), "seaweed_workload"); err != nil || result.ExecutionAuthorized || result.Code != "PLAN_DATA_ONLY" {
 		t.Fatalf("plan=%+v %v", result, err)
 	}
 	in.Files["m01"]["/opt/profile/worker/lab_profile.py"] = strings.Repeat("d", 64)

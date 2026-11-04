@@ -13,13 +13,13 @@ import (
 	"time"
 )
 
-func testAdapter(t *testing.T) *soakAdapter {
+func testWindow(t *testing.T) *soakWindow {
 	t.Helper()
-	return &soakAdapter{soakWindow: soakWindow{root: t.TempDir(), runID: "run-1", bootID: "boot-1", roles: map[string]string{}}}
+	return &soakWindow{root: t.TempDir(), runID: "run-1", bootID: "boot-1", roles: map[string]string{}}
 }
 
-func TestSoakAdapterPublishIsExclusiveAndReadBoundIsStrict(t *testing.T) {
-	s := testAdapter(t)
+func TestSoakWindowPublishIsExclusiveAndReadBoundIsStrict(t *testing.T) {
+	s := testWindow(t)
 	p := filepath.Join(s.root, "x.json")
 	if err := publishFile(p, map[string]any{"a": 1}); err != nil {
 		t.Fatal(err)
@@ -75,20 +75,20 @@ func TestPublishNeverFollowsAPlantedSymlink(t *testing.T) {
 	}
 }
 
-func TestSoakAdapterLoadStartChecksBootAndClock(t *testing.T) {
+func TestSoakWindowLoadStartChecksBootAndClock(t *testing.T) {
 	for name, body := range map[string]string{
 		"foreign boot": `{"boot_id":"boot-2","mono":10}`,
 		"zero clock":   `{"boot_id":"boot-1","mono":0}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := testAdapter(t)
+			s := testWindow(t)
 			os.WriteFile(filepath.Join(s.root, "soak-load-start.json"), []byte(body), 0o600)
 			if _, err := s.LoadStart(context.Background()); err == nil {
 				t.Fatal("admitted")
 			}
 		})
 	}
-	s := testAdapter(t)
+	s := testWindow(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	if _, err := s.LoadStart(ctx); err == nil {
@@ -100,8 +100,8 @@ func TestSoakAdapterLoadStartChecksBootAndClock(t *testing.T) {
 	}
 }
 
-func TestSoakAdapterAckChecksTheFullBinding(t *testing.T) {
-	s := testAdapter(t)
+func TestSoakWindowAckChecksTheFullBinding(t *testing.T) {
+	s := testWindow(t)
 	if err := s.Pause("E1", "volume", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -129,11 +129,11 @@ func TestSoakAdapterAckChecksTheFullBinding(t *testing.T) {
 
 // The Go-published pause and close are exactly what the worker's own
 // read_bound accepts with the worker's binding (one contract, two languages).
-func TestSoakAdapterFilesSatisfyTheWorkersReader(t *testing.T) {
+func TestSoakWindowFilesSatisfyTheWorkersReader(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
 	}
-	s := testAdapter(t)
+	s := testWindow(t)
 	if err := s.Pause("E1", "volume", 100); err != nil {
 		t.Fatal(err)
 	}

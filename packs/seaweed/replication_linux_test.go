@@ -15,9 +15,8 @@ import (
 // Replication 001 is opt-in and cloud HTTP only; absent leaves every argv,
 // config and URL exactly as before.
 func TestReplicationIsOptInAndCloudOnly(t *testing.T) {
-	f := newHTTPFixture(t)
 	var d inventory.Document
-	if err := json.Unmarshal([]byte(f.plan.Requested), &d); err != nil {
+	if err := json.Unmarshal(newHTTPInventory(t), &d); err != nil {
 		t.Fatal(err)
 	}
 	d.State = "resolved"

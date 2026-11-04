@@ -1,18 +1,12 @@
 package seaweed
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
 	"math"
-	"os"
-	"path"
 	"slices"
 	"strconv"
-	"strings"
-	"time"
 )
 
 type GETOutcome struct {
@@ -108,119 +102,4 @@ func bindRestart(p Plan, d *inventory.Document, in tr.PackInputs, used map[strin
 		}
 	}
 	return nil
-}
-
-func readTask(ctx context.Context, a *tr.ActionContext, in tr.PackInputs, label, stage, route string) (map[string]any, error) {
-	var c SmokeConfig
-	if err := json.Unmarshal([]byte(in.Jobs[label].Argv[3]), &c); err != nil {
-		return nil, err
-	}
-	_, e, err := a.RunApprovedPackJob(ctx, label, false)
-	if err != nil {
-		return nil, err
-	}
-	return CheckReadTaskOutput(e, c, stage, route)
-}
-
-func (r *runtimePack) restart(ctx context.Context, a *tr.ActionContext, p Plan, d *inventory.Document, in tr.PackInputs, s *session) (map[string]string, error) {
-	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	for _, host := range d.Observation.Hosts {
-		if host.HostID == "m01" && (err != nil || strings.TrimSpace(string(boot)) != host.BootID) {
-			return nil, errors.New("runner is not the admitted M01 clock")
-		}
-	}
-	x := p.Restart
-	for _, v := range []struct{ label, stage, route string }{{p.Workload[0].Job, "seed", "dc"}, {x.RecoverHTTP, "recovery", "http"}} {
-		if x.Freeze && v.route == "http" {
-			continue
-		}
-		if _, err := readTask(ctx, a, in, v.label, v.stage, v.route); err != nil {
-			return nil, err
-		}
-	}
-	load, err := a.StartApprovedPackTask(ctx, x.DC)
-	if err != nil {
-		return nil, err
-	}
-	pause := time.After(30 * time.Second)
-	if r.pause != nil {
-		pause = r.pause()
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-pause:
-	}
-	if x.Freeze {
-		return r.freeze(ctx, a, p, d, in, s, load)
-	}
-	_, receipt, err := a.RestartApprovedPackGeneration(ctx, x.Episode, s.jobs[in.Restarts[x.Episode].Victim])
-	if err != nil {
-		return nil, err
-	}
-	readyMono := 0.
-	for _, step := range p.Ready {
-		_, e, err := a.RunApprovedPackJob(ctx, step.Job, false)
-		if err != nil {
-			return nil, err
-		}
-		raw, _, err := e.Output.Decode()
-		if err != nil {
-			return nil, err
-		}
-		var ready struct {
-			Status     string
-			ClientMono float64 `json:"client_mono"`
-			ReadyMono  float64 `json:"ready_mono"`
-			Processes  map[string]struct {
-				Identity tr.ProcessIdentity `json:"scope_identity"`
-			}
-		}
-		if err = json.Unmarshal(raw, &ready); err != nil || ready.Status != "READY" {
-			return nil, errors.New("replacement probe not READY")
-		}
-		if step.Host == "m01" {
-			readyMono = ready.ClientMono
-			if x.Writes {
-				readyMono = ready.ReadyMono // the window closes when READY passed, not when its probe began
-			}
-		}
-		if step.Host == "m02" {
-			role := x.targetRole()
-			i := ready.Processes[role].Identity
-			binary := "weed"
-			if role == "volume" {
-				binary = "weed-volume"
-			}
-			if i.PID != receipt.Replacement.PID || i.StartTime != receipt.Replacement.StartTime || i.BootID != receipt.Replacement.BootID || i.ExecutableSHA256 != in.Files["m02"][path.Join(p.Smoke.HelperDir, "../bin/"+binary)] {
-				return nil, errors.New("replacement readiness identity differs")
-			}
-		}
-	}
-	if readyMono <= 0 {
-		return nil, errors.New("client readiness observation missing")
-	}
-
-	// Load remains active until its fixed duration; no Wait watcher touches victim.
-	e, err := a.WaitApprovedPackTask(ctx, load)
-	if err != nil {
-		return nil, err
-	}
-
-	var c SmokeConfig
-	_ = json.Unmarshal([]byte(in.Jobs[x.DC].Argv[3]), &c)
-	remedy := "inspect DC window and exact DC/HTTP recovery receipts; HTTP outage DEFERRED"
-	if x.Writes {
-		if remedy, err = writeRemedy(e, c, receipt.Kill.PreKillMono, readyMono); err != nil {
-			return nil, err
-		}
-	} else if _, err = CheckReadTaskOutput(e, c, "load", "dc", ReadWindow{receipt.Kill.PreKillMono}); err != nil {
-		return nil, err
-	}
-	for _, v := range []struct{ label, route string }{{x.RecoverDC, "dc"}, {x.RecoverHTTP, "http"}} {
-		if _, err = readTask(ctx, a, in, v.label, "recovery", v.route); err != nil {
-			return nil, err
-		}
-	}
-	return admittedResult("completed", "OK", remedy, "seaweed_read_restart", d), nil
 }
