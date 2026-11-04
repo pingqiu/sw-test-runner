@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"strings"
 
@@ -104,13 +105,24 @@ type SoakVerdict struct {
 		Clock  string `json:"clock"`
 		Limit  string `json:"limit"`
 	} `json:"misses_qualification"`
+	// Rule A (Ping, 2026-11-04): misses inside the clock bracket around B, reported per op; they do not fail the row.
+	MissesUndecidable []MissUndecidable `json:"misses_undecidable,omitempty"`
+}
+
+// MissUndecidable is one rule-A miss: exactly these four members, each required and typed.
+type MissUndecidable struct {
+	Op                 string   `json:"op"`
+	Vid                *int     `json:"vid"`
+	SubmitMinusEarlyBS *float64 `json:"submit_minus_early_b_s"`
+	SubmitMinusLateBS  *float64 `json:"submit_minus_late_b_s"`
 }
 
 // verdictFields are the decoded field names. encoding/json matches struct
 // fields case-insensitively, so a key that folds to one of them must be it.
 var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root",
 	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono", // the clock row is decoded by encoding/json too
-	"misses_qualification", "method", "limit"}
+	"misses_qualification", "method", "limit",
+	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s"}
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -174,6 +186,15 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
 		return v, errors.New("soak verdict without its misses qualification")
+	}
+	// Rule A rows: every member present, typed and finite. The offsets are rounded diagnostics: the Python
+	// assessor alone classifies, so the sign is not judged again here (codex01 on 66da7699).
+	for _, u := range v.MissesUndecidable {
+		if u.Op == "" || u.Vid == nil || *u.Vid <= 0 || u.SubmitMinusEarlyBS == nil || u.SubmitMinusLateBS == nil ||
+			math.IsNaN(*u.SubmitMinusEarlyBS) || math.IsInf(*u.SubmitMinusEarlyBS, 0) || math.IsNaN(*u.SubmitMinusLateBS) ||
+			math.IsInf(*u.SubmitMinusLateBS, 0) {
+			return v, errors.New("soak verdict undecidable miss malformed")
+		}
 	}
 	if v.Binding != want {
 		return v, fmt.Errorf("soak verdict is bound to %+v, not this run", v.Binding)

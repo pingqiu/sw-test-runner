@@ -42,6 +42,27 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if v, err := decodeVerdict(captured([]byte(fail)), testBinding, soakCriteria); err != nil || v.Status != "FAIL" {
 		t.Fatalf("valid FAIL not decoded: %v", err)
 	}
+	// Rule A: the assessor reports undecidable misses alongside a PASS row; the strict decoder accepts the field.
+	undecidable := passRow(t, func(r map[string]any) {
+		r["misses_undecidable"] = []any{undecidableRow(nil)}
+	})
+	if v, err := decodeVerdict(captured([]byte(undecidable)), testBinding, soakCriteria); err != nil || v.Status != "PASS" || len(v.MissesUndecidable) != 1 {
+		t.Fatalf("PASS with an undecidable miss: %+v %v", v.MissesUndecidable, err)
+	}
+	// codex01 on 66da7699: the offsets are rounded diagnostics, not a second classifier. A submit 0.1 us after
+	// early(B) rounds to an early offset of 0.0, and a multi-VID op reports a VID already after B with a positive
+	// late offset; both are valid producer rows and must decode.
+	for name, edit := range map[string]func(map[string]any){
+		"early offset rounded to 0": func(u map[string]any) { u["submit_minus_early_b_s"] = 0.0 },
+		"multi-VID, one VID after B": func(u map[string]any) {
+			u["vid"], u["submit_minus_early_b_s"], u["submit_minus_late_b_s"] = 27, 9.93, 9.88
+		},
+	} {
+		row := passRow(t, func(r map[string]any) { r["misses_undecidable"] = []any{undecidableRow(nil), undecidableRow(edit)} })
+		if v, err := decodeVerdict(captured([]byte(row)), testBinding, soakCriteria); err != nil || len(v.MissesUndecidable) != 2 {
+			t.Fatalf("%s refused: %v", name, err)
+		}
+	}
 	errRow := passRow(t, func(r map[string]any) {
 		r["status"], r["criteria"], r["error"] = "FAIL", map[string]any{}, "ValueError('x')"
 	})
@@ -80,7 +101,34 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		"no qualification":    passRow(t, func(r map[string]any) { delete(r, "misses_qualification") }),
 		"empty limit":         passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["limit"] = "" }),
 		"qualification extra": passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["vibes"] = "x" }),
-		"not JSON":            "garbage",
+		// rule A rows (codex01 R1 on #110): the field and each member are typed, required and alias-guarded.
+		"undecidable alias": passRow(t, func(r map[string]any) { r["MISSES_UNDECIDABLE"] = []any{} }),
+		"undecidable op bool": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["op"] = true })}
+		}),
+		"undecidable vid str": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["vid"] = "26" })}
+		}),
+		"undecidable no vid": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { delete(u, "vid") })}
+		}),
+		"undecidable no early": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { delete(u, "submit_minus_early_b_s") })}
+		}),
+		"undecidable no late": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { delete(u, "submit_minus_late_b_s") })}
+		}),
+		"undecidable no op": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { delete(u, "op") })}
+		}),
+		"undecidable extra": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["vibes"] = 1 })}
+		}),
+		"undecidable OP alias": passRow(t, func(r map[string]any) {
+			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["OP"] = "x" })}
+		}),
+		"undecidable not array": passRow(t, func(r map[string]any) { r["misses_undecidable"] = undecidableRow(nil) }),
+		"not JSON":              "garbage",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := decodeVerdict(captured([]byte(body)), testBinding, soakCriteria); err == nil {
@@ -93,6 +141,15 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if _, err := decodeVerdict(e, testBinding, soakCriteria); err == nil {
 		t.Fatal("non-zero exit admitted")
 	}
+}
+
+// undecidableRow is one valid rule-A row (soak #4 op 36640), edited by the caller.
+func undecidableRow(edit func(map[string]any)) map[string]any {
+	u := map[string]any{"op": "36640", "vid": 26, "submit_minus_early_b_s": 0.047, "submit_minus_late_b_s": -0.008}
+	if edit != nil {
+		edit(u)
+	}
+	return u
 }
 
 func mustJSON(v any) string {

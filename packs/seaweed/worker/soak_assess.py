@@ -183,30 +183,44 @@ def start_boundaries(events, begin, end, bounds):
     return out
 
 
-def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
+def miss_outcome(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
     """Decision 3 revision (e45019f9 + codex01 8c56cca4), per miss: qualified observed ordering under the stated limit,
     in M01 mono; not a retirement or durability proof and not parity. The stated limit, accepted by Ping: a real loss
-    between the version's last exact read and S is excused. `hits` are exact GETs of this same version."""
+    between the version's last exact read and S is excused. `hits` are exact GETs of this same version.
+    'excused', 'undecidable' or 'unexcused'. Rule A (Ping, 2026-11-04): a GET submitted inside the clock bracket
+    around B, i.e. in (early(B), late(B)], cannot be ordered against B either way; it is 'undecidable', which does
+    not fail the row, only when every other check holds, C9 included, AND the VID has its #972 retiring line (B < S).
+    A GET provably before early(B), or inside the bracket without a retiring line, is unexcused."""
+    state = 'excused'
     for vid in {int(fid.split(',')[0]) for fid in version.fids}:
         if vid not in bounds or vid in dat:  # C2 (ledger), C8
-            return False
+            return 'unexcused'
         early, late = bounds[vid] - hi, bounds[vid] - lo
-        # C3 against S; C4 against B (the retiring line, before unpublish), defaulting to S. Submission, so a GET
-        # straddling B still refuses.
-        late_b = (starts or {}).get(vid, bounds[vid]) - lo
-        if not ack['completed'] < early or not e['submitted'] > late_b:
-            return False
+        b = (starts or {}).get(vid, bounds[vid])  # B: the first #972 retiring line, defaulting to S
+        if not ack['completed'] < early:  # C3 against S
+            return 'unexcused'
         if (vid_last_hit or {}).get(vid, -math.inf) > e['completed']:  # C9: the VID served a read after this miss
-            return False
+            return 'unexcused'
         if not any(h['submitted'] > ack['completed'] and h['completed'] < early for h in hits):  # C5
-            return False
+            return 'unexcused'
         after = [p for p in good if p['req'] > late]  # successful polls only; a failed reply is no evidence
         if any(vid in p['writables'] or vid in p['present'] for p in after):  # C6
-            return False
+            return 'unexcused'
         gone = next((p for p in after if vid not in p['present']), None)
         if not gone or gone['done'] > e['completed'] + 25:  # C7: requested after late(S)
-            return False
-    return True
+            return 'unexcused'
+        if e['submitted'] > b - lo:  # C4: submitted after late(B); submission, so a straddling GET does not count
+            continue
+        if e['submitted'] > b - hi and b < bounds[vid]:  # rule A: inside the bracket around a real retiring line
+            state = 'undecidable'
+            continue
+        return 'unexcused'  # provably before early(B), or inside the bracket without a retiring line
+    return state
+
+
+def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
+    """True only for an ordered, excused miss (miss_outcome 'excused'); an undecidable one is not excused."""
+    return miss_outcome(e, version, ack, good, bounds, lo, hi, dat, hits, starts, vid_last_hit) == 'excused'
 
 
 def stats_name(identity):
@@ -438,15 +452,25 @@ def assess(c):
         v = get_case(g) == 'hit' and by_seq.get((g['key'], g['sequence']), (None, None))[0]
         for vid in {int(f.split(',')[0]) for f in (v.fids if v else ())}:
             vid_last_hit[vid] = max(vid_last_hit.get(vid, -math.inf), g['completed'])
-    def excused(e, latest):
+    def outcome(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
-        return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
-            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
-    unexcused = [e for e, latest in misses if not excused(e, latest)]
+        if not (v and latest == v and list(e['fids']) == list(v.fids)):
+            return 'unexcused'
+        return miss_outcome(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
+    judged = [(e, outcome(e, latest)) for e, latest in misses]
+    unexcused = [e for e, o in judged if o == 'unexcused']
+    undecidable = []  # rule A: reported per op, separately from excused and unexcused
+    for e, o in judged:
+        if o == 'undecidable':
+            for vid in sorted({int(f.split(',')[0]) for f in e['fids']}):
+                b = starts.get(vid, bounds.get(vid))
+                undecidable.append(dict(op=e['op'], vid=vid, submit_minus_early_b_s=round(e['submitted'] - (b - hi), 6),
+                                        submit_minus_late_b_s=round(e['submitted'] - (b - lo), 6)))
     if pat:  # kv_load: every miss outside the qualified fault windows fails (no soak retirement excusal); inside, reported
         qualified = kv_qualified(c['faults'], faults, begin)
         inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in qualified)}
         unexcused = [e for e, _ in misses if e['op'] not in inside]
+        undecidable = []  # kv_load judges misses by fault windows, not by rotation ordering
         clock_error += '; %d inside fault windows, reported' % len(inside)
     # A K8 budget-refusal miss is a cache outcome by design, excused only when its own event names the
     # cause (the worker's counter delta across that GET); nothing else is inferred.
@@ -454,6 +478,9 @@ def assess(c):
         refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
         unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
         clock_error += '; %d budget-refusal misses excused' % len(refused)
+    if undecidable:
+        clock_error += '; %d undecidable inside the clock bracket around B (rule A) %s' % (
+            len({u['op'] for u in undecidable}), sorted({u['op'] for u in undecidable}, key=int)[:10])
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
@@ -499,7 +526,8 @@ def assess(c):
             k7.append(dict(episode=f['episode'], role=f['role'], dt_after_ready_s=first['submitted'] - f['ready_mono'],
                            latency_s=lat, at_rc_timeout=lat >= 4.9))
     status = 'PASS' if all(v['outcome'] == 'PASS' for v in crit.values()) else 'FAIL'
-    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
+    return dict(status=status, criteria=crit, k7=k7, resources='NOT_OBSERVED', misses_qualification=QUALIFICATION,
+                misses_undecidable=undecidable)
 
 
 # Emitted with every verdict, PASS or FAIL: what an excused miss does and doesn't mean.
