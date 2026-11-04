@@ -495,11 +495,12 @@ func cloudStart(d inventory.Document, root, unit, cmd string) string {
 // cloudNow is the controller clock; a var so a test can pin it.
 var cloudNow = time.Now
 
-// unitLifetime bounds a transient unit by the run's hard deadline, so systemd on
-// the host stops it by itself if the controller that started it dies mid-run.
-// The work envelope and its cleanup reserve end by then (the inventory checks
-// Work + CleanupReserveMS <= Hard), so a live controller has already cleaned up.
-// Empty only for a document with no hard deadline.
+// unitLifetime gives a transient unit a relative runtime limit, the time left to
+// the run's hard deadline when its start is built, so systemd on the host stops
+// it by itself if the controller dies mid-run. It's a backstop, not an exact
+// stop at Hard: dispatch delay and systemd's stop grace (TimeoutStopSec) can
+// carry the stop past Hard, and the controller's own cleanup stays independent
+// of it. Empty only for a document with no hard deadline.
 func unitLifetime(d inventory.Document) string {
 	hard, err := time.Parse(time.RFC3339Nano, d.Deadlines.Hard)
 	if err != nil {
