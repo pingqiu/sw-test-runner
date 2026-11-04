@@ -13,7 +13,7 @@ strictly additive: every v0 scenario keeps working unchanged.
 A scenario is a YAML file describing a sequence of **phases**. Each
 phase contains an ordered list of **actions** drawn from a shared
 **registry** populated by the framework's `actions.RegisterCore` plus
-zero or more **product packs** (`packs/v3block`, `packs/v1weed`, ...).
+zero or more **product packs** (`packs/v3block`, `packs/kv`, ...).
 
 The runner is invoked by a thin product wrapper (~25 lines, see
 `cmd/swblock/main.go` for an example) which composes the registry and
@@ -194,8 +194,8 @@ Every action is registered against a tier:
 **TierChaos** — `inject_netem` `inject_partition` `clear_fault`
 `corrupt_wal` `fill_disk`
 
-Pack-supplied actions follow product prefixes — `v3_*` (packs/v3block),
-`v1_*` (packs/v1weed). New product actions **must** carry a product
+Pack-supplied actions follow product prefixes — for example `v3_*`
+(packs/v3block). New product actions **must** carry a product
 prefix to avoid registry collisions.
 
 ## Run bundle
