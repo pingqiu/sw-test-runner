@@ -13,6 +13,9 @@ import (
 // cancels handshake, channel-open and upload I/O without taking Node.mu.
 // Existing Connect and the on-prem strict runtime remain unchanged.
 func (n *Node) ConnectContext(ctx context.Context) error {
+	if n.IsLocal || n.IsNative { // as Connect: a local node has no connection to open
+		return nil
+	}
 	deadline, bounded := ctx.Deadline()
 	if !bounded {
 		return fmt.Errorf("SSH connection requires a deadline")
