@@ -59,7 +59,7 @@ func TestCancelledPeerWithoutServicesStillCollects(t *testing.T) {
 	t.Setenv("REVIEW_CAPTURE_BIN", bin)
 	// No unit is expected when a peer fails during prepare. A forbidden journal
 	// invocation would fail, proving MISSING is distinguished from journal errors.
-	sudo := "#!/bin/sh\nif [ \"$1\" = systemctl ]; then exit 0; fi\nprintf 'unexpected journal' >&2\nexit 23\n"
+	sudo := "#!/bin/sh\ntest \"$1\" = -n || exit 90\nshift\nif [ \"$1\" = systemctl ]; then exit 0; fi\nprintf 'unexpected journal' >&2\nexit 23\n"
 	for name, script := range map[string]string{"sudo": sudo, "tail": "#!/bin/sh\nprintf 'collected cloud-init output\\n'\n"} {
 		if e := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); e != nil {
 			t.Fatal(e)

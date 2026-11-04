@@ -251,7 +251,7 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	post := h.commands[h.index("systemctl list-units")]
-	if !strings.Contains(post, "sudo systemctl list-units") {
+	if !strings.Contains(post, "sudo -n systemctl list-units") {
 		t.Fatalf("postflight lists units without sudo: %q", post)
 	}
 	for _, c := range []struct {
@@ -273,7 +273,7 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stub("sudo", `exec "$@"`)
+			stub("sudo", `test "$1" = -n || exit 90; shift; exec "$@"`)
 			stub("systemctl", "printf '%s' '"+c.units+"'; exit "+c.unitsRC)
 			stub("ss", "printf '%s\n' '"+c.listen+"'; exit "+c.ssRC)
 			if c.name == "awk fails" {

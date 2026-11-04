@@ -18,10 +18,11 @@ import (
 // directConfig is the controller-local input for an existing ssh host: the
 // key that reaches it, its host-key pin, and the three pinned artifacts.
 type directConfig struct {
-	ECStage1 bool                         `json:"ec_stage1,omitempty"`
-	SSHKey   string                       `json:"ssh_key"`
-	HostKey  string                       `json:"host_key"`
-	Files    map[string]seaweed.CloudFile `json:"files"`
+	MasterWrites bool                         `json:"master_writes,omitempty"`
+	ECStage1     bool                         `json:"ec_stage1,omitempty"`
+	SSHKey       string                       `json:"ssh_key"`
+	HostKey      string                       `json:"host_key"`
+	Files        map[string]seaweed.CloudFile `json:"files"`
 }
 
 // directResult is the one JSON line `direct` prints.
@@ -82,7 +83,7 @@ func runDirect(args []string, w io.Writer) int {
 	defer cancel()
 	ctx, stop := context.WithTimeout(ctx, *timeout)
 	defer stop()
-	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1})
+	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, MasterWrites: c.MasterWrites})
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()

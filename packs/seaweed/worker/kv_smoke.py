@@ -97,7 +97,7 @@ def configure(c):
 def read_stage_args(stage, route, transport='dc'):
     # A DC inventory seeds over DC; an HTTP (cloud) inventory reads only over HTTP.
     if stage=='write-load':
-        if route!='dc' or transport!='dc':raise ValueError('write-load is DC only')
+        if route!=transport or transport not in ('dc','http'):raise ValueError('write-load transport differs')
         return stage, route
     if stage not in ('seed','load','recovery') or route not in ('dc','http') or transport not in ('dc','http') or (stage=='seed' and route!=transport) or (transport=='http' and route!='http'):
         raise ValueError('unsupported read-only case stage/path')
@@ -174,7 +174,7 @@ def write_load(conn, c, emit, duration=120, pace=.25, writers=4):
     Every other GET takes a fresh key, one not yet read, whose lookup can't be served by earlier reads; the rest reread one key.
     A completed failure is recorded, never fatal or credited; no retry. An unknown completion or wrong bytes is fatal.
     Evidence past its byte budget is fatal too, never truncated. Any exit with work in flight retains its buffers."""
-    read_stage_args('write-load','dc',c['transport'])
+    read_stage_args('write-load',c['transport'],c['transport'])
     helper=exact_helper('soak_native_worker')
     helper.validate_api(type(conn))
     before=json.loads(conn.stats_json());started=time.monotonic()
@@ -244,8 +244,8 @@ def write_load(conn, c, emit, duration=120, pace=.25, writers=4):
         else:missing+=1
     after=json.loads(conn.stats_json())
     for s in (before,after):
-        if s['loader']['transport']!='rdma' or s['loader']['http_fallback_allowed'] is not False:raise AssertionError('wrong write transport')
-    return dict(status='OBSERVED',stage='write-load',transport='dc',sets=sets,gets=gets,acked=len(acked),failed=sets-len(acked),
+        if s['loader']['transport']!=('rdma' if c['transport']=='dc' else 'http') or (c['transport']=='dc' and s['loader']['http_fallback_allowed'] is not False):raise AssertionError('wrong write transport')
+    return dict(status='OBSERVED',stage='write-load',transport=c['transport'],sets=sets,gets=gets,acked=len(acked),failed=sets-len(acked),
         readback_exact=exact,readback_missing=missing,started=round(started,6),ended=round(ended_load,6),finished=round(time.monotonic(),6),before=before,after=after,
         run_id=c['run_id'],client=c['client'],root=c['root'])
 

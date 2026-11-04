@@ -116,7 +116,7 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 	if err != nil {
 		return r, err
 	}
-	if end == nil || end.Status != "OBSERVED" || end.Stage != "write-load" || end.Transport != "dc" || end.RunID != c.RunID || end.Client != c.Client || end.Root != c.Root {
+	if end == nil || end.Status != "OBSERVED" || end.Stage != "write-load" || end.Transport != c.Transport || (c.Transport != "dc" && c.Transport != "http") || end.RunID != c.RunID || end.Client != c.Client || end.Root != c.Root {
 		return r, errors.New("write load terminal binding differs")
 	}
 	if end.Started == nil || end.Ended == nil || *end.Started <= 0 {

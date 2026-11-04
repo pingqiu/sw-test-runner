@@ -229,9 +229,24 @@ class WriteLoadControls(unittest.TestCase):
         class Loud(FakeConnector):
             def complete(self,ok,results,error):return super().complete(False,None,'x'*2000)
         with self.assertRaisesRegex(AssertionError,'write-load evidence'):self.load('good',duration=20,conn=Loud())
-    def test_stage_needs_dc(self):
+    def test_http_write_load_uses_same_schedule_and_exact_readback(self):
+        conn=FakeConnector('explicit-http');rows=[]
+        try:
+            end=kv_smoke.write_load(conn,dict(self.C,transport='http'),rows.append,duration=.05,pace=.005)
+        finally:conn.close()
+        self.assertEqual(end['transport'],'http')
+        self.assertGreater(end['acked'],0)
+        self.assertEqual(end['readback_exact'],end['acked'])
+        self.assertEqual(end['readback_missing'],0)
+        conn=FakeConnector('good')
+        try:
+            with self.assertRaisesRegex(AssertionError,'transport'):
+                kv_smoke.write_load(conn,dict(self.C,transport='http'),lambda _:None,duration=.02,pace=.005)
+        finally:conn.close()
+    def test_stage_transport_is_explicit(self):
         self.assertEqual(kv_smoke.read_stage_args('write-load','dc'),('write-load','dc'))
-        for route,transport in (('http','dc'),('http','http')):
+        self.assertEqual(kv_smoke.read_stage_args('write-load','http','http'),('write-load','http'))
+        for route,transport in (('http','dc'),('dc','http'),('http','rc')):
             with self.assertRaises(ValueError):kv_smoke.read_stage_args('write-load',route,transport)
 
 if __name__=='__main__':unittest.main()

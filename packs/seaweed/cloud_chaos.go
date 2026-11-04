@@ -43,7 +43,7 @@ const chaosThreads = `for f in /proc/$pid/task/*/stat; do s=$(sed 's/.*) //' "$f
 // mainPID binds $pid/$start to the unit's live MainPID (systemd reports 0
 // for a unit whose process is gone, which refuses).
 func mainPID(unit string) string {
-	return `pid=$(systemctl show -p MainPID --value ` + cloudQuote(unit) + `); test "$pid" -gt 0; start=$(` + chaosStat + `); `
+	return `pid=$(sudo -n systemctl show -p MainPID --value ` + cloudQuote(unit) + `) || exit 1; test "$pid" -gt 0; stat=$(sed 's/.*) //' /proc/$pid/stat 2>/dev/null) || exit 1; start=$(printf '%s\n' "$stat" | cut -d' ' -f20); case "$start" in ''|*[!0-9]*) exit 1;; esac; `
 }
 
 func chaosKillScript(unit string) string {

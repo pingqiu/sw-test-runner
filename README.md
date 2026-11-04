@@ -104,6 +104,15 @@ bounds even after workload failure/cancellation; budget that beyond `--timeout`.
 It stops the run's transient units and requires zero units/listeners. Run data
 remains under `run_root`; retain the local evidence before disposing of it.
 
+Optional single-host HTTP master timing: set `master_writes:true` in the KV
+config (keep its three artifacts; do not combine with EC/chaos/replication).
+The same direct command runs 120s of 64 KiB fresh-key SETs and ACKed-key GETs, kills
+the master after 30s, starts a fresh master generation with the same data directory, then reads back
+ACKed keys. `master-writes.json` is always `REPORT_ONLY`: counts/latencies
+before Kill, Kill-to-READY and after READY, first post-Kill ACK and exact/missing
+readback counts. Completed failures are reported; unknown completion or wrong
+bytes fails. Raw worker JSONL, service logs and cleanup receipts remain in OUT.
+
 ## Docs and wiki
 
 Full documentation is a MkDocs wiki under `docs/` (mirrors the seaweed-block

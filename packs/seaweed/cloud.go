@@ -20,12 +20,13 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
-	ECStage1 bool                 `json:"ec_stage1,omitempty"`
-	SSHKey   string               `json:"ssh_key"`
-	HostKey  string               `json:"-"`
-	HostKeys map[string]string    `json:"-"`
-	Output   string               `json:"-"`
-	Files    map[string]CloudFile `json:"files"`
+	MasterWrites bool                 `json:"master_writes,omitempty"`
+	ECStage1     bool                 `json:"ec_stage1,omitempty"`
+	SSHKey       string               `json:"ssh_key"`
+	HostKey      string               `json:"-"`
+	HostKeys     map[string]string    `json:"-"`
+	Output       string               `json:"-"`
+	Files        map[string]CloudFile `json:"files"`
 	// Chaos opts a ten-node run into the read-restart/freeze cases after the
 	// functional phases. Absent or false leaves the run unchanged.
 	Chaos bool `json:"chaos,omitempty"`
@@ -73,6 +74,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	}
 	if directTarget(d.Target) && len(d.Hosts) != 1 {
 		return "", errors.New("a direct ssh target runs one host")
+	}
+	if c.MasterWrites && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
+		return "", errors.New("master writes requires one direct HTTP host without other phases")
 	}
 	if c.ECStage1 && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
 		return "", errors.New("EC stage1 requires one direct HTTP host without other phases")
@@ -142,7 +146,7 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		sequence++
 		seconds := 120
-		if c.ECStage1 {
+		if c.ECStage1 || c.MasterWrites {
 			seconds = 190
 		}
 		if phase == "load" {
@@ -266,6 +270,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	master := endpoint(meta, "master_http")
 	commands := cloudServices(h, meta, root, phase != "", c.Replication)
+	if c.MasterWrites {
+		commands["filer"] = strings.Replace(commands["filer"], " filer ", " -v=1 filer ", 1)
+	}
 	for _, role := range []string{"master", "volume", "filer", "s3"} {
 		if e = service(role, commands[role]); e != nil {
 			return "", e
@@ -308,6 +315,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	cmd := "python3"
 	for _, arg := range args {
 		cmd += " " + q(arg)
+	}
+	if c.MasterWrites {
+		return runDirectMasterWrites(ctx, d, h, c, args, run)
 	}
 	stdout, e := run("kv-smoke", cmd)
 	output := filepath.Join(c.Output, "cloud-kv.jsonl")
@@ -385,7 +395,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		}
 		defer n.Close()
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
-		if c.ECStage1 {
+		if c.ECStage1 || c.MasterWrites {
 			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
 		}
 		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second), command)
@@ -399,7 +409,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	}
 	defer n.Close()
 	_, stop := cloudStep(ctx, n, c.Output, "cloud-cleanup.json", "cleanup",
-		60, "sudo systemctl stop "+units+"; sudo systemctl reset-failed "+units+" 2>/dev/null || true")
+		60, "sudo -n systemctl stop "+units+"; sudo -n systemctl reset-failed "+units+" 2>/dev/null || true")
 	ports := []string{}
 	for _, s := range h.Services {
 		ports = append(ports, strconv.Itoa(s.Port))
@@ -414,7 +424,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	// A probe that cannot run is a failure, never a count of zero: an empty
 	// listing from a failed systemctl, ss or grep would otherwise read as clean.
 	// grep -c exits 1 for no match (count 0) and 2 for an error.
-	check := "l=$(sudo systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
+	check := "l=$(sudo -n systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
 		"; u=$(printf '%s' \"$l\" | grep -c .) || [ $? -eq 1 ] || { echo 'postflight: grep failed'; exit 3; }; p=0"
 	if len(ports) > 0 {
 		check += "; s=$(ss -Hltn) || { echo 'postflight: ss failed'; exit 3; }" +
