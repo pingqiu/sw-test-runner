@@ -32,14 +32,14 @@ func passRow(t *testing.T, edit func(map[string]any)) string {
 // that carries exactly the mandatory criteria, all PASS.
 func TestDecodeVerdictFailsClosed(t *testing.T) {
 	pass := passRow(t, nil)
-	if v, err := decodeVerdict(captured([]byte(pass+"\n")), testBinding); err != nil || v.Status != "PASS" {
+	if v, err := decodeVerdict(captured([]byte(pass+"\n")), testBinding, soakCriteria); err != nil || v.Status != "PASS" {
 		t.Fatalf("valid PASS refused: %v", err)
 	}
 	fail := passRow(t, func(r map[string]any) {
 		r["status"] = "FAIL"
 		r["criteria"].(map[string]any)["routes"] = map[string]any{"outcome": "FAIL", "reason": "bad"}
 	})
-	if v, err := decodeVerdict(captured([]byte(fail)), testBinding); err != nil || v.Status != "FAIL" {
+	if v, err := decodeVerdict(captured([]byte(fail)), testBinding, soakCriteria); err != nil || v.Status != "FAIL" {
 		t.Fatalf("valid FAIL not decoded: %v", err)
 	}
 	errRow := passRow(t, func(r map[string]any) {
@@ -48,7 +48,7 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if !strings.Contains(passRow(t, nil), "misses_qualification") {
 		t.Fatal("fixture lost the qualification")
 	}
-	if v, err := decodeVerdict(captured([]byte(errRow)), testBinding); err != nil || v.Status != "FAIL" {
+	if v, err := decodeVerdict(captured([]byte(errRow)), testBinding, soakCriteria); err != nil || v.Status != "FAIL" {
 		t.Fatalf("assessor error row not decoded as FAIL: %v", err)
 	}
 	for name, body := range map[string]string{
@@ -83,14 +83,14 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		"not JSON":            "garbage",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := decodeVerdict(captured([]byte(body)), testBinding); err == nil {
+			if _, err := decodeVerdict(captured([]byte(body)), testBinding, soakCriteria); err == nil {
 				t.Fatal("admitted")
 			}
 		})
 	}
 	e := captured([]byte(pass))
 	e.Code = 1
-	if _, err := decodeVerdict(e, testBinding); err == nil {
+	if _, err := decodeVerdict(e, testBinding, soakCriteria); err == nil {
 		t.Fatal("non-zero exit admitted")
 	}
 }

@@ -22,6 +22,20 @@ const SoakVerdictSchema = "seaweed-soak-verdict/1"
 var soakCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "terminal", "fault_errors", "misses", "coverage",
 	"body", "client_kill", "rotation", "max_vid_advanced", "routes"}
 
+// kvLoadCriteria is kv_load's set (soak_assess.KV_LOAD): the pattern's
+// write_once and load_as_declared replace the soak's coverage, rotation and
+// master-fault rows, and misses are judged outside the fault windows only.
+var kvLoadCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "terminal", "fault_errors", "misses", "write_once",
+	"body", "client_kill", "load_as_declared", "routes"}
+
+// criteria is the mandatory set the plan's assessor must return.
+func (x *SoakPlan) criteria() []string {
+	if x != nil && x.Pattern != nil {
+		return kvLoadCriteria
+	}
+	return soakCriteria
+}
+
 // SoakBinding is what the assessor was told to judge, echoed in its row.
 type SoakBinding struct {
 	Schema string `json:"schema"`
@@ -60,9 +74,13 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if m02 == "" {
 		return nil, errors.New("soak assessor needs the admitted M02 boot")
 	}
-	raw, err := json.Marshal(map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID, "m02_boot_id": m02,
+	config := map[string]any{"schema": b.Schema, "root": b.Root, "run_id": b.RunID, "boot_id": b.BootID, "m02_boot_id": m02,
 		"duration_s": x.DurationS, "quiescence_s": int(QuiescenceReserve.Seconds()), "client_kill_at_s": x.ClientKillAtS,
-		"collection": x.Layout.Collection})
+		"collection": x.Layout.Collection}
+	if x.Pattern != nil {
+		config["pattern"] = x.Pattern // kv_load: judged by its own rows; absent for the soak
+	}
+	raw, err := json.Marshal(config)
 	return []string{"-I", path.Join(s.HelperDir, "soak_assess.py"), "--config", string(raw)}, err
 }
 
@@ -141,7 +159,7 @@ func uniqueKeys(dec *json.Decoder) error {
 
 // decodeVerdict accepts exactly one strict row for the expected run; a PASS
 // must carry exactly the mandatory criteria, all PASS. Anything else fails closed.
-func decodeVerdict(e tr.ExitInfo, want SoakBinding) (SoakVerdict, error) {
+func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerdict, error) {
 	var v SoakVerdict
 	out, _, err := e.Output.Decode()
 	if err != nil || e.Code != 0 {
@@ -162,14 +180,14 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding) (SoakVerdict, error) {
 		return v, fmt.Errorf("soak verdict is bound to %+v, not this run", v.Binding)
 	}
 	for name, c := range v.Criteria {
-		if !contains(soakCriteria, name) || (c.Outcome != "PASS" && c.Outcome != "FAIL") {
+		if !contains(criteria, name) || (c.Outcome != "PASS" && c.Outcome != "FAIL") {
 			return v, fmt.Errorf("soak verdict criterion %q unknown or malformed", name)
 		}
 		if c.Outcome != "PASS" && v.Status == "PASS" {
 			return v, errors.New("soak verdict PASS with a failed criterion")
 		}
 	}
-	if v.Status == "PASS" && (len(v.Criteria) != len(soakCriteria) || v.Error != "") {
+	if v.Status == "PASS" && (len(v.Criteria) != len(criteria) || v.Error != "") {
 		return v, errors.New("soak verdict PASS without every mandatory criterion")
 	}
 	return v, nil
@@ -216,7 +234,7 @@ func (r *runtimePack) soakVerdict(ctx context.Context, a *tr.ActionContext, p Pl
 	if _, e, err = a.RunApprovedPackJob(ctx, p.Soak.Assess.Job, false); err != nil {
 		return v, err
 	}
-	if v, err = decodeVerdict(e, want); err == nil && v.Status != "PASS" {
+	if v, err = decodeVerdict(e, want, p.Soak.criteria()); err == nil && v.Status != "PASS" {
 		err = errors.New("soak verdict FAIL")
 	}
 	return v, err

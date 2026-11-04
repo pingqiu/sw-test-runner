@@ -89,8 +89,10 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 		if x.ID == "m02" && slices.Equal(x.Roles, []string{"master", "filer", "volume"}) {
 			server = x
 		}
-		if x.ID == "m01" && !slices.Equal(x.Roles, []string{"client"}) {
-			return nil, errors.New("M01 client only")
+		// M01 is the client, or the client and a volume server (kv_load's
+		// replication 001 keeps a copy there while M02's volume restarts).
+		if x.ID == "m01" && !slices.Equal(x.Roles, []string{"client"}) && !slices.Equal(x.Roles, []string{"client", "volume"}) {
+			return nil, errors.New("M01 client only, or client and volume")
 		}
 	}
 	if h == nil || server == nil || h.RDMA.GIDIndex == nil || h.RDMA.Port != 1 || h.RDMA.Device != "mlx5_0" || (action == "deploy" && (role == "client" || !contains(h.Roles, role))) || (action != "deploy" && role != "") {
