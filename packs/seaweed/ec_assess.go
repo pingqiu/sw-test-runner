@@ -12,8 +12,10 @@ import (
 
 // Shared EC payload, byte assessment and frozen-capture validation for direct runs.
 type ecSnapshot struct {
-	Manifest       EC1aManifest `json:"manifest"`
-	OriginalAbsent bool         `json:"original_absent"`
+	Layout         []int64            `json:"layout"`
+	Intervals      map[string][]int64 `json:"intervals"`
+	Manifest       EC1aManifest       `json:"manifest"`
+	OriginalAbsent bool               `json:"original_absent"`
 	Holders        []struct {
 		Job   string
 		PID   int

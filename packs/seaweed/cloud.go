@@ -27,6 +27,8 @@ type CloudConfig struct {
 	HostKeys     map[string]string    `json:"-"`
 	Output       string               `json:"-"`
 	Files        map[string]CloudFile `json:"files"`
+
+	ECUnderQuorum bool `json:"ec_under_quorum,omitempty"`
 	// Chaos opts a ten-node run into the read-restart/freeze cases after the
 	// functional phases. Absent or false leaves the run unchanged.
 	Chaos bool `json:"chaos,omitempty"`
@@ -112,6 +114,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if c.MasterWrites && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
 		return "", errors.New("master writes requires one direct HTTP host without other phases")
 	}
+	if c.ECUnderQuorum && !c.ECStage1 {
+		return "", errors.New("ec_under_quorum requires ec_stage1")
+	}
 	if c.ECStage1 && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
 		return "", errors.New("EC stage1 requires one direct HTTP host without other phases")
 	}
@@ -182,6 +187,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		seconds := 120
 		if c.ECStage1 || c.MasterWrites {
 			seconds = 190
+		}
+		if c.ECUnderQuorum && strings.HasPrefix(name, "ec-s2-5-") {
+			seconds = 600
 		}
 		if phase == "load" {
 			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.

@@ -80,6 +80,7 @@ def reads(c,manifest,route,path,plant=False):
             emit(f,dict(event='OUTCOME',**row))
             wrong+=int(status==200 and body!=expected)
             outcomes.append(row)
+            if not plant and c.get('observe_errors') and wrong:break # Stop immediately; caller classifies the bound P1 row.
     return dict(status='OBSERVED',stage='ec-read',run_id=c['run_id'],outcomes=outcomes,wrong=wrong,exposure='NOT_OBSERVED',control='WRONG_BYTE_REJECTED' if planted and wrong==1 else '')
 
 
@@ -95,7 +96,7 @@ def main():
                 __import__('os').fchmod(f.fileno(),0o600);json.dump(result,f);f.flush();__import__('os').fsync(f.fileno())
         print(json.dumps(result,allow_nan=False),flush=True)
         if a.plant_wrong_byte:return 0 if result.get('control')=='WRONG_BYTE_REJECTED' and sum(not r['exact'] for r in result['outcomes'])==1 else 1
-        return 0 if a.stage=='seed' or result['wrong']==0 and all(r['exact'] for r in result['outcomes']) else 1
+        return 0 if a.stage=='seed' or c.get('observe_errors') or result['wrong']==0 and all(r['exact'] for r in result['outcomes']) else 1
     except Exception as e:
         print(json.dumps(dict(status='FAIL',error=type(e).__name__+': '+str(e))),flush=True);return 1
 if __name__=='__main__':sys.exit(main())

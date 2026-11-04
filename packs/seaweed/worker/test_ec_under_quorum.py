@@ -1,0 +1,41 @@
+"""Frozen real /proc/file capture, with literal first-encode interval controls."""
+import hashlib, importlib.util, json, os, pathlib, subprocess, sys, tempfile, unittest
+
+@unittest.skipUnless(sys.platform=='linux','requires owned /proc holder fixtures')
+class UnderQuorum(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.root=pathlib.Path(self.tmp.name);os.chmod(self.root,0o700)
+  spec=importlib.util.spec_from_file_location('uq_capture',pathlib.Path(__file__).with_name('ec_capture.py'));self.cap=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.cap)
+  self.block=2*1024*1024;self.procs=[];self.holders={}
+  self.manifest={'run_id':'fixture','objects':[{'key':'ec-'+str(i-1),'fid':'1,%xaabbccdd'%i,'length':64} for i in (1,2)]}
+  for i in range(14):
+   d=self.root/('h'+str(i));d.mkdir(mode=0o700);self.holders[d.name]=str(d)
+   with (d/('bucket_1.ec%02d'%i)).open('wb') as f:f.truncate(self.block)
+   self.procs.append(subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)','--dir='+str(d)]))
+  self.files([16,self.block+16],self.block)
+ def tearDown(self):
+  for p in self.procs:p.terminate()
+  for p in self.procs:p.wait(timeout=3)
+  self.tmp.cleanup()
+ def files(self,offsets,block):
+  rows=b''
+  for i,offset in enumerate(offsets,1):
+   unit=offset//8
+   rows+=i.to_bytes(8,'big')+(unit&0xffffffff).to_bytes(4,'big')+bytes([unit>>32])+(64).to_bytes(4,'big',signed=True)
+  for d in self.root.iterdir():
+   (d/'bucket_1.ecx').write_bytes(rows)
+   (d/'bucket_1.vif').write_text(json.dumps({'version':3,'datFileSize':20*1024*1024,'ecShardConfig':{'dataShards':10,'parityShards':4,'encodeTsNs':'12345','blockSize':block}}))
+ def capture(self):
+  return self.cap.capture({'root':str(self.root),'holders':self.holders,'run_id':'fixture','volume_exe':sys.executable,'volume_sha256':hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest(),'under_quorum':True},self.manifest)
+ def test_literal_intervals_and_boundary(self):
+  row=self.capture();self.assertEqual(row['layout'],[3,self.block,20*1024*1024]);self.assertEqual(row['intervals'],{'ec-0':[16,96],'ec-1':[self.block+16,96]})
+  self.files([self.block-16,2*self.block+16],self.block)
+  self.assertEqual(self.capture()['intervals']['ec-0'],[self.block-16,96])
+ def test_offset_high_byte_cannot_be_reinterpreted_as_low(self):
+  self.files([16,(1<<35)+16],self.block)
+  with self.assertRaises(ValueError):self.capture()
+ def test_unknown_layout_refuses(self):
+  self.files([16,self.block+16],0)
+  with self.assertRaises(ValueError):self.capture()
+
+if __name__=='__main__':unittest.main()

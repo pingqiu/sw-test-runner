@@ -18,7 +18,7 @@ def capture(c,manifest):
     if not 1<=len(c['holders'])<=14 or manifest['run_id']!=c['run_id']:raise ValueError('holder/manifest scope')
     volumes={o['fid'].split(',')[0] for o in manifest['objects']}
     if not volumes or any(not re.fullmatch(r'[1-9][0-9]*',v) for v in volumes):raise ValueError('manifest volume id')
-    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[];unrelated=[]
+    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();holders=[];configs={};indexes={};shards=[];files=[];unrelated=[];layouts=[]
     for label,folder in c['holders'].items():
         directory=pathlib.Path(folder)
         if directory.parent!=root or directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=os.getuid() or directory.stat().st_mode&0o022:raise ValueError('foreign holder dir')
@@ -49,6 +49,7 @@ def capture(c,manifest):
                 vif_bytes=path.read_bytes();proof=stable(path)
                 if proof['sha256']!=hashlib.sha256(vif_bytes).hexdigest():raise ValueError('vif parse/hash changed')
                 raw=json.loads(vif_bytes);cfg=raw.get('ecShardConfig',{});generation=int(cfg.get('encodeTsNs',0))
+                if c.get('under_quorum'):layouts.append([int(raw.get('version',0)),int(cfg.get('blockSize',0)),int(raw.get('datFileSize',0))])
                 if int(cfg.get('dataShards',0))!=10 or int(cfg.get('parityShards',0))!=4 or generation<=0:raise ValueError('requires explicit10+4 encode generation')
                 vid=path.stem.rsplit('_',1)[-1]
                 if vid in configs and configs[vid]!=generation:raise ValueError('mixed encode generations')
@@ -70,7 +71,29 @@ def capture(c,manifest):
     if set(configs)!=volumes or {s['volume'] for s in shards}!=volumes:raise ValueError('manifest volume set differs')
     for vid in volumes:
         if {s['shard'] for s in shards if s['volume']==vid}!=set(range(14)):raise ValueError('missing shard')
-    return dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
+    result=dict(manifest=dict(manifest,generation=json.dumps(configs,sort_keys=True)),holders=holders,shards=shards,files=files,unrelated_volumes=unrelated,original_absent=True,exposure='NOT_OBSERVED')
+    if c.get('under_quorum'):
+        if len(volumes)!=1 or len(layouts)!=14 or any(v!=layouts[0] for v in layouts):raise ValueError('uniform first-encode layout disagreement')
+        version,block,dat=layouts[0]
+        if version not in (3,4) or dat<=0 or block!=((dat+10*1048576-1)//(10*1048576))*1048576:raise ValueError('unsupported uniform layout')
+        data=member.with_suffix('.ecx').read_bytes()
+        if hashlib.sha256(data).hexdigest()!=indexes[vid] or len(data)%17:raise ValueError('5-byte index differs')
+        positions={}
+        for i in range(0,len(data),17):
+            row=data[i:i+17];key=int.from_bytes(row[:8],'big')
+            if key in positions:raise ValueError('duplicate index needle')
+            positions[key]=[(int.from_bytes(row[8:12],'big')+(row[12]<<32))*8,int.from_bytes(row[13:17],'big',signed=True)]
+        intervals={}
+        for o in manifest['objects']:
+            token=o['fid'].split(',')[1]
+            if not re.fullmatch(r'[0-9a-fA-F]{9,24}',token):raise ValueError('needle FID encoding')
+            offset,size=positions[int(token[:-8],16)]
+            base=16+size+12+(8 if version==4 else 0)
+            actual=base+((-base)%8 if version==4 else 8-base%8)
+            if offset<=0 or size<o['length'] or offset+actual>dat:raise ValueError('needle interval outside encoded data')
+            intervals[o['key']]=[offset,actual]
+        result.update(layout=layouts[0],intervals=intervals)
+    return result
 
 if __name__=='__main__':
     c=json.loads(sys.argv[1]);m=json.loads(pathlib.Path(sys.argv[2]).read_bytes())

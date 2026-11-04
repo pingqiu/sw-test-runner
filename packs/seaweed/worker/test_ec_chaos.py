@@ -18,6 +18,10 @@ class ECLeaf(unittest.TestCase):
    with mock.patch.object(leaf,'request',return_value=(200,b'wrong')):
     row=leaf.reads(c,manifest,'s3',pathlib.Path(d)/'wrong.jsonl')
     self.assertFalse(row['outcomes'][0]['exact']);self.assertEqual(row['wrong'],1)
+   c['observe_errors']=True;manifest['objects']*=2
+   with mock.patch.object(leaf,'request',return_value=(200,b'wrong')) as req:
+    row=leaf.reads(c,manifest,'s3',pathlib.Path(d)/'stop.jsonl')
+    self.assertEqual(req.call_count,1);self.assertEqual(len(row['outcomes']),1)
 
 class RealHTTP(unittest.TestCase):
  def test_status_and_whole_operation_deadline(self):

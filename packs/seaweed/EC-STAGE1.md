@@ -50,3 +50,22 @@ Python worker leaves remain in use by direct. Expected rows are 64 ACKs,
 640 ordinary exact GETs / zero wrong bytes, one planted-byte rejection and
 four cumulative holder losses. The planted control adds 64 real original
 GETs, for 704 total. S2 remains NOT_COVERED without the product marker.
+
+## Under-quorum stage 2a (Go, local first)
+
+Add `ec_under_quorum:true` alongside `ec_stage1:true`; use `--timeout 25m`,
+work 25 minutes / hard 27 minutes / cleanup reserve 60 seconds (existing inventory maximum). This cell
+requires a single first-encode uniform 10+4 volume with a 5-byte-offset index.
+The frozen `.vif` and `.ecx` bind each manifest needle's complete data span.
+Both missing-data0 and intact-data cohorts must be nonempty, else NOT_COVERED.
+Kill captured owners of shards 10,11,12,13, then 0, checking each generation.
+The first four losses retain stage 1's 640 exact GETs. With nine survivors,
+every missing-data0 needle must return 5xx or a bounded read/transport error;
+all intact-data needles must remain byte exact on both S3 and volume HTTP.
+A target 200 or a control error fails. Any unplanted wrong-byte 200 is a P1:
+stop reading immediately, retain raw evidence and classify before changing code.
+Each GET has a 30-second bound; each final degraded route has a 600-second
+step bound. `s2a:PASS` describes this fail-closed cell, while reconstruction
+exposure remains NOT_OBSERVED and S2 remains NOT_COVERED without the marker.
+`ec-stage1.json` is a component result; cleanup/postflight must also pass for
+CLI success. Product builds go to the designated build host.
