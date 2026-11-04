@@ -148,3 +148,20 @@ logically in 120s. This fits the default smoke volume capacity and avoids
 turning the master-timing case into a capacity-pressure test. The full worker
 byte-evidence cap and all-ACK exact readback are unchanged. Raw reports remain
 REPORT_ONLY; the payload size is present in the recorded worker config.
+
+## Direct two-host execution
+
+`seaweed-cloud direct` now accepts `read_case=volume-restart|filer-restart|volume-freeze`
+with the two-host profile/release input used by KV soak (omit its `soak` settings).
+It reuses the direct executor's private run roots, units, bounded jobs and both-host
+cleanup. The existing worker, exact-byte/counter checks, pre-Kill error-window
+assessor and freeze exposure assessor are unchanged. Restart readiness must name
+the replacement identity; HTTP-before and HTTP-after have separate records.
+
+This path does not use or claim S0b GO/RunScope/pidfd custody. It checks the direct
+unit's observed PID/start/boot/product identity. Freeze registers its bounded
+resume cleanup before dispatching STOP; cancellation joins the bounded dispatch,
+then uses an independent connection for cleanup CONT. An attempted CONT is not
+repeated after a lost reply or failure; UNKNOWN remains a run failure even if
+final process cleanup succeeds. The old approved cases remain pending parity
+review and retirement. Offline controls are not real RDMA qualification.

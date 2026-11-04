@@ -142,6 +142,16 @@ func (s *directSoak) identity(ctx context.Context, node, label string) (tr.Proce
 	}
 	pid, e1 := strconv.Atoi(f[0])
 	start, e2 := strconv.ParseUint(f[1], 10, 64)
+	if s.c.ReadCase != "" {
+		binary := "weed-volume"
+		if s.c.ReadCase == "filer-restart" {
+			binary = "weed"
+		}
+		if pid <= 0 || start == 0 || f[2] != observedBoot(s.d, node) || f[3] != s.in.Files[node][path.Join(path.Dir(s.b.Plan.Smoke.HelperDir), "bin", binary)] {
+			return tr.ProcessIdentity{}, errors.New("read_case foreign or invalid process identity")
+		}
+	}
+
 	return tr.ProcessIdentity{Node: node, PID: pid, PGID: pid, StartTime: start, BootID: f[2], ExecutableSHA256: f[3], RunID: s.d.RunID}, errors.Join(e1, e2)
 }
 
@@ -184,8 +194,13 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 		pre, err = controllerMono()
 	}
 	if u := cloudQuote(s.unit(plan.Victim)); err == nil {
-		_, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20,
-			"sudo systemctl kill -s KILL "+u+"; while systemctl is-active -q "+u+"; do sleep 0.1; done")
+
+		command := "sudo systemctl kill -s KILL " + u + "; while systemctl is-active -q " + u + "; do sleep 0.1; done"
+		if s.c.ReadCase != "" {
+			prefix := mainPID(s.unit(plan.Victim))
+			command = prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosKillScript(s.unit(plan.Victim)), prefix)
+		}
+		_, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20, command)
 	}
 	if err != nil {
 		return tr.JobHandle{}, r, err
@@ -224,10 +239,10 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 		return "", err
 	}
 	d, err := inventory.Join([]byte(in.Requested), []byte(in.Resolved))
-	if err != nil || b.Plan.Soak == nil {
+	if err != nil || (b.Plan.Soak == nil) != (c.ReadCase != "") {
 		return "", errors.Join(err, errors.New("kv_soak needs a soak profile input"))
 	}
-	if (b.Plan.Soak.Pattern != nil) != c.KVLoad {
+	if b.Plan.Soak != nil && (b.Plan.Soak.Pattern != nil) != c.KVLoad {
 		return "", errors.New("kv_load needs a profile with a load pattern, and kv_soak one without")
 	}
 	boot := observedBoot(d, "m01")
@@ -239,8 +254,14 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 		return "", err
 	}
 	c.localHost = "m01"
-	return (&directSoak{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}},
-		c: c, d: d, b: b, in: in, deadline: deadline}).run(ctx)
+	executor := &directSoak{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}},
+		c: c, d: d, b: b, in: in, deadline: deadline}
+	if c.ReadCase != "" {
+		if err = executor.readJobs(); err != nil {
+			return "", err
+		}
+	}
+	return executor.run(ctx)
 }
 
 // run executes the plan, then always cleans up and postflights every host,
@@ -276,6 +297,10 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	}
 	if err := steps(p.Preflight, p.Deploy, p.Ready); err != nil {
 		return "", err
+	}
+	if c.ReadCase != "" {
+		rows, err := s.readCase(ctx)
+		return rows, errors.Join(err, steps(p.Collect))
 	}
 	if err := s.clocked(ctx, p.Soak.Setup.Job, s.root, "soak-clock-s1.json", ""); err != nil {
 		return "", err
