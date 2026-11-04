@@ -11,7 +11,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     _module = sys.modules['soak_load'] = types.ModuleType('soak_load')
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
-from soak_native_worker import payload
+from soak_native_worker import k8_refusal_misses, payload
 from soak_oracle import Oracle
 from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
@@ -76,6 +76,8 @@ def get_case(e):
             typed(e, length=int, sha256=str, sequence=int)
         elif case == 'miss':
             typed(e, sequence=int, fids=list)
+            if e.get('cause', 'budget_refusal') != 'budget_refusal':
+                return 'unknown'  # the one recorded miss cause
             if not e['ok']:  # r9: an ok=False miss only in the DC status-1 shape; ok=True not-hit is a candidate
                 case = case if MISS.search(typed(e, error=str)['error']) else 'unknown'
             elif classify_get(dict(ok=True, results=typed(e, results=list)['results']), False) != 'miss':
@@ -211,23 +213,31 @@ def stats_name(identity):
     return 'native-stats-%d-%d.jsonl' % (typed(identity, pid=int)['pid'], typed(identity, starttime=int)['starttime'])
 
 
-def assess_routes(root, workers, kills):
+def assess_routes(root, workers, kills, refused_only=frozenset()):
     """Exactly one native-stats series per worker generation (4 originals + each replacement), none foreign,
-    and each one's last observed loader counters in the accepted DC or HTTP identity."""
+    and each one's last observed loader counters in the accepted DC or HTTP identity. kv_load only: a DC
+    process of a worker in `refused_only` (no hit in any of its generations) may show no route when its
+    every read was a K8 refusal miss."""
     expected = {stats_name(w): w['transport'] for w in workers.values()}
     expected.update({stats_name(k['replacement']): workers[str(k['worker'])]['transport'] for k in kills})
+    owner = {stats_name(w): i for i, w in workers.items()}
+    owner.update({stats_name(k['replacement']): str(k['worker']) for k in kills})
     present = {p.name for p in root.iterdir() if p.name.startswith('native-stats-')}
     bad = sorted(present ^ set(expected))
     for name in sorted(present & set(expected)):
-        loaders = [typed(typed(r, stats=dict)['stats'], loader=dict)['loader'] for r in lines(root, name)
-                   if typed(r, status=str)['status'] == 'OBSERVED']
-        if not loaders:
+        observed = [typed(r, stats=dict)['stats'] for r in lines(root, name) if typed(r, status=str)['status'] == 'OBSERVED']
+        if not observed:
             bad.append(name)
             continue
-        last = typed(loaders[-1], transport=str, **{k: int for k in COUNTERS})
+        last = typed(typed(observed[-1], loader=dict)['loader'], transport=str, **{k: int for k in COUNTERS})
         dc, rc, copied = (last[k] for k in COUNTERS)
         if expected[name] == 'dc':
-            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and dc > 0 and rc == 0 and copied == 0
+            # A process whose every read was a K8 refusal miss has no route to show: zero DC reads and
+            # read_calls equal to its refusal-miss counter. Any process with a read that was not refused
+            # still needs its DC route.
+            refused, calls = k8_refusal_misses(observed[-1]), last.get('read_calls')
+            all_refused = owner[name] in refused_only and dc == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
+            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (dc > 0 or all_refused)                 and rc == 0 and copied == 0
         else:
             ok = last['transport'] == 'http' and dc == 0 and rc == 0 and copied > 0
         if not ok or min(dc, rc, copied) < 0:
@@ -415,6 +425,12 @@ def assess(c):
         inside = {e['op'] for e, _ in misses if any(f['dispatch_mono'] <= e['submitted'] <= f['ready_mono'] + 60 for f in qualified)}
         unexcused = [e for e, _ in misses if e['op'] not in inside]
         clock_error += '; %d inside fault windows, reported' % len(inside)
+    # A K8 budget-refusal miss is a cache outcome by design, excused only when its own event names the
+    # cause (the worker's counter delta across that GET); nothing else is inferred.
+    if pat:  # kv_load only: the ordinary soak keeps its semantics
+        refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
+        unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
+        clock_error += '; %d budget-refusal misses excused' % len(refused)
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
@@ -447,8 +463,14 @@ def assess(c):
         before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
         after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
         mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
-    route_bad = assess_routes(root, workers, kills)
-    mark('routes', not route_bad, 'bad %s' % route_bad[:6])
+    # kv_load: only a worker whose EVERY GET, in all its generations, is a recorded budget-refusal miss may
+    # show no route; a hit, a plain miss or a fault error (excused in a window or not) keeps the requirement.
+    refused = {}
+    for e in gets:
+        refused.setdefault(str(e['worker']), []).append(get_case(e) == 'miss' and e.get('cause') == 'budget_refusal')
+    refused_only = frozenset(w for w, all_refused in refused.items() if all(all_refused)) if pat else frozenset()
+    route_bad = assess_routes(root, workers, kills, refused_only)
+    mark('routes', not route_bad, 'bad %s' % route_bad)
 
     # K7 (a FINDING, never a FAIL): the first non-HTTP SET after each fault's successful READY.
     k7 = []

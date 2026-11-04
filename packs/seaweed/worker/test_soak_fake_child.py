@@ -27,6 +27,8 @@ def child(pipe, cfg):
                    completed=time.monotonic(), ok=True, error=None, results=None)
         if cmd['action'] == 'set':
             row['fids'] = ['3,0a1b2c']
+        elif (root / 'fake-refused').exists():  # a K8 budget-refusal miss: the worker's counter delta names it
+            row.update(results=[False], error='', cause='budget_refusal')
         elif (root / 'fake-notfound').exists():  # r9's miss-candidate shape: ok, the key not returned, no error text
             row.update(results=[False], error='')
         elif (root / 'fake-fail-empty').exists():  # a failed GET with an EMPTY error (the 11-02 r2 stop)
