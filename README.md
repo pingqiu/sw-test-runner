@@ -109,8 +109,9 @@ config (keep its three artifacts; do not combine with EC/chaos/replication).
 The same direct command runs 120s of 64 KiB fresh-key SETs and ACKed-key GETs, kills
 the master after 30s, starts a fresh master generation with the same data directory, then reads back
 ACKed keys. `master-writes.json` is always `REPORT_ONLY`: counts/latencies
-before Kill, Kill-to-READY and after READY, first post-Kill ACK and exact/missing
-readback counts. Completed failures are reported; unknown completion or wrong
+before confirmed GONE, GONE-to-READY and after READY, plus exact/missing readback.
+`kill_confirmed_mono` is stamped after the victim is gone. `first_ack_after_kill_s`
+measures from that stamp; `first_ack_after_ready_s` measures from leader READY. Completed failures are reported; unknown completion or wrong
 bytes fails. Raw worker JSONL, service logs and cleanup receipts remain in OUT.
 
 ## Docs and wiki

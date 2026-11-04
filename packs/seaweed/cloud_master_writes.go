@@ -40,17 +40,17 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 	case <-time.After(masterWriteSettle):
 	}
 	unit := "sw-cloud-" + d.RunID + "-master"
-	killed, err := run("master-kill", "test ! -f "+q(exit)+"; "+chaosStamp+"; "+chaosKillScript(unit))
+	killed, err := run("master-kill", "test ! -f "+q(exit)+"; ("+chaosKillScript(unit)+"); "+chaosStamp)
 	if err != nil {
 		return "", err
 	}
 	old := strings.Fields(killed)
-	if len(old) != 5 || old[1] != "OLD" || old[4] != "GONE" {
+	if len(old) != 5 || old[0] != "OLD" || old[3] != "GONE" {
 		return "", errors.New("master exit witness missing")
 	}
-	preKill, err := strconv.ParseFloat(old[0], 64)
-	if err != nil || math.IsNaN(preKill) || math.IsInf(preKill, 0) {
-		return "", errors.New("invalid pre-Kill clock")
+	gone, err := strconv.ParseFloat(old[4], 64)
+	if err != nil || math.IsNaN(gone) || math.IsInf(gone, 0) {
+		return "", errors.New("invalid confirmed-GONE clock")
 	}
 	unit += "-g2"
 	if _, err = run("master-restart", cloudStart(d, root, "master-g2", cloudServices(h, h, root, false, c.Replication)["master"])); err != nil {
@@ -62,7 +62,7 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 		return "", err
 	}
 	replacement := strings.Fields(ready)
-	if len(replacement) != 4 || replacement[1] != "NEW" || (replacement[2] == old[2] && replacement[3] == old[3]) {
+	if len(replacement) != 4 || replacement[1] != "NEW" || (replacement[2] == old[1] && replacement[3] == old[2]) {
 		return "", errors.New("master replacement identity missing")
 	}
 	readyMono, err := strconv.ParseFloat(replacement[0], 64)
@@ -73,10 +73,11 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 	if err != nil {
 		return "", err
 	}
-	report, err := writeReport([]byte(raw), config, preKill, readyMono)
+	report, err := writeReport([]byte(raw), config, gone, readyMono)
 	if err != nil {
 		return "", err
 	}
+	report.KillConfirmedMono = gone
 	out := filepath.Join(c.Output, "master-writes.json")
 	body, err = json.MarshalIndent(report, "", "  ")
 	if err == nil {

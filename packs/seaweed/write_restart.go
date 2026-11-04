@@ -23,24 +23,26 @@ type WriteWindow struct {
 type WriteError struct {
 	Event       string  `json:"event"`
 	OperationID int     `json:"operation_id"`
-	AtS         float64 `json:"at_s"` // after the pre-Kill mark
+	AtS         float64 `json:"at_s"` // after the report fault mark
 	Error       string  `json:"error"`
 }
 
 // WriteReport describes SETs and GETs around a master restart. It judges
 // nothing: no threshold is known yet, so Verdict is always REPORT_ONLY.
 type WriteReport struct {
-	Verdict            string         `json:"verdict"`
-	Sets               [3]WriteWindow `json:"sets_before_outage_after"`
-	RereadGets         [3]WriteWindow `json:"reread_gets_before_outage_after"` // disjoint from FreshGets
-	FreshGets          [3]WriteWindow `json:"fresh_gets_before_outage_after"`
-	KillToReadyS       float64        `json:"kill_to_ready_s"`
-	FirstAckAfterKillS float64        `json:"first_ack_after_kill_s"`
-	Errors             []WriteError   `json:"errors"`
-	ErrorsDropped      int            `json:"errors_dropped"`
-	Acked              int            `json:"acked"`
-	ReadbackExact      int            `json:"readback_exact"`
-	ReadbackMissing    int            `json:"readback_missing"`
+	Verdict             string         `json:"verdict"`
+	Sets                [3]WriteWindow `json:"sets_before_outage_after"`
+	RereadGets          [3]WriteWindow `json:"reread_gets_before_outage_after"` // disjoint from FreshGets
+	FreshGets           [3]WriteWindow `json:"fresh_gets_before_outage_after"`
+	KillToReadyS        float64        `json:"kill_to_ready_s"`
+	FirstAckAfterKillS  float64        `json:"first_ack_after_kill_s"`
+	FirstAckAfterReadyS float64        `json:"first_ack_after_ready_s"`
+	KillConfirmedMono   float64        `json:"kill_confirmed_mono,omitempty"`
+	Errors              []WriteError   `json:"errors"`
+	ErrorsDropped       int            `json:"errors_dropped"`
+	Acked               int            `json:"acked"`
+	ReadbackExact       int            `json:"readback_exact"`
+	ReadbackMissing     int            `json:"readback_missing"`
 }
 
 const (
@@ -106,9 +108,9 @@ func writeRows(raw []byte) ([]writeRow, *writeEnd, error) {
 }
 
 // writeReport binds the worker's rows to this run and splits them at the
-// pre-Kill mark and at READY, both on the M01 clock that wrote the rows.
+// supplied fault mark and READY on the client clock; direct uses confirmed GONE.
 func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport, error) {
-	r := WriteReport{Verdict: "REPORT_ONLY", KillToReadyS: ready - preKill, FirstAckAfterKillS: -1}
+	r := WriteReport{Verdict: "REPORT_ONLY", KillToReadyS: ready - preKill, FirstAckAfterKillS: -1, FirstAckAfterReadyS: -1}
 	if preKill <= 0 || ready <= preKill {
 		return r, errors.New("write load does not span the restart: kill/READY order")
 	}
@@ -178,6 +180,9 @@ func writeReport(raw []byte, c SmokeConfig, preKill, ready float64) (WriteReport
 			if kind == 0 {
 				acked++
 				ackedAt[row.Key] = ended
+				if ended >= ready && (r.FirstAckAfterReadyS < 0 || ended-ready < r.FirstAckAfterReadyS) {
+					r.FirstAckAfterReadyS = ended - ready
+				}
 				if ended >= preKill {
 					at := ended - preKill
 					if r.FirstAckAfterKillS < 0 || at < r.FirstAckAfterKillS {

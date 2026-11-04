@@ -137,7 +137,8 @@ host and the default three KV artifacts. This optional case replaces the default
 smoke with the same 120s write-load schedule over loader-http. A fresh master generation
 retains the data directory and argv across one SIGKILL/restart; readiness observes
 its HTTP leader status without an Assign probe. The same client host stamps
-P before Kill and READY after the leader probe. Filer -v=1 records assignment
+confirmed GONE after Kill and READY after the leader probe. First ACK delays are
+reported separately from GONE and from READY; pre-GONE completions cannot win. Filer -v=1 records assignment
 retry diagnostics. `master-writes.json` uses the report-only contract above;
 no latency/error-rate SLA or RDMA claim is introduced. The existing DC
 approved-run case remains until its later migration.
