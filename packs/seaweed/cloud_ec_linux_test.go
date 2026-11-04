@@ -84,7 +84,11 @@ func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
 		for i := 0; i < 14; i++ {
 			role := fmt.Sprint("h", i)
 			holders = append(holders, map[string]any{"Job": role, "PID": 100 + i, "starttime": uint64(i + 1), "boot_id": "boot"})
-			shards = append(shards, map[string]any{"Volume": "1", "Shard": i, "Job": role, "SHA256": strings.Repeat("a", 64), "Bytes": 1, "Generation": 1, "index_sha256": strings.Repeat("b", 64), "vif_sha256": strings.Repeat("c", 64)})
+			shardRole := role
+			if h.mode == "five-holder-topology" && i >= 4 {
+				shardRole = "h4"
+			}
+			shards = append(shards, map[string]any{"Volume": "1", "Shard": i, "Job": shardRole, "SHA256": strings.Repeat("a", 64), "Bytes": 1, "Generation": 1, "index_sha256": strings.Repeat("b", 64), "vif_sha256": strings.Repeat("c", 64)})
 		}
 		m := h.seed
 		m.Generation = `{"1":1}`
@@ -121,7 +125,7 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	return h, e
 }
 func TestDirectECMandatoryRowsAndCleanup(t *testing.T) {
-	for _, mode := range []string{"positive", "failed-step", "missing-terminal", "wrong-byte", "extra-holder-port"} {
+	for _, mode := range []string{"positive", "failed-step", "missing-terminal", "wrong-byte", "extra-holder-port", "five-holder-topology"} {
 		t.Run(mode, func(t *testing.T) {
 			h, e := runECFake(t, mode)
 			if (e == nil) != (mode == "positive") {
