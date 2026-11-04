@@ -152,7 +152,7 @@ func TestDirectSoakRestartStampsPreKillMono(t *testing.T) {
 		t.Fatalf("identities: victim %+v replacement %+v", r.Kill.Identity, r.Replacement)
 	}
 	victim, repl := s.unit("deploy-volume"), s.unit("volume-gen2")
-	id, kill, start, newID := m02.index("MainPID", victim), m02.index("systemctl kill -s KILL", victim), m02.index("systemd-run", repl), m02.index("MainPID", repl)
+	id, kill, start, newID := m02.index("MainPID", victim), m02.index("systemctl kill -s KILL", victim), m02.index("systemd-run", repl, "--property=RuntimeMaxSec="), m02.index("MainPID", repl)
 	if !(id >= 0 && id < kill && kill < start && start < newID) || m02.index("systemctl kill", repl) >= 0 || m01.index("systemctl kill") >= 0 || m01.index("systemd-run") >= 0 {
 		t.Fatalf("order identity=%d kill=%d start=%d new=%d; m01 saw %v", id, kill, start, newID, m01.commands)
 	}
@@ -225,7 +225,7 @@ func TestDirectSoakStartsDeployJobsAsUnits(t *testing.T) {
 	s.run(soakCtx(t))
 	user, root := s.d.Hosts[1].Management.User, s.d.Hosts[1].RunRoot
 	for _, label := range []string{"deploy-master", "deploy-volume"} {
-		if m02.index("systemd-run", "--unit="+s.unit(label), "--uid="+user, "WorkingDirectory="+root, "file:"+root+"/"+label+".stdout", "LimitMEMLOCK=infinity") < 0 {
+		if m02.index("systemd-run", "--unit="+s.unit(label), "--property=RuntimeMaxSec=", "--uid="+user, "WorkingDirectory="+root, "file:"+root+"/"+label+".stdout", "LimitMEMLOCK=infinity") < 0 {
 			t.Fatalf("%s not started as a unit: %v", label, m02.commands)
 		}
 	}

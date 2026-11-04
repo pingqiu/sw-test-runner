@@ -489,7 +489,25 @@ func cloudQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'
 // cloudStart starts one service generation as a transient unit; deploy uses the
 // role's unit name, a chaos replacement the same command under unit role+"-g2".
 func cloudStart(d inventory.Document, root, unit, cmd string) string {
-	return "sudo systemd-run --unit=" + cloudQuote("sw-cloud-"+d.RunID+"-"+unit) + " --property=WorkingDirectory=" + cloudQuote(root) + " " + cmd
+	return "sudo systemd-run --unit=" + cloudQuote("sw-cloud-"+d.RunID+"-"+unit) + unitLifetime(d) + " --property=WorkingDirectory=" + cloudQuote(root) + " " + cmd
+}
+
+// cloudNow is the controller clock; a var so a test can pin it.
+var cloudNow = time.Now
+
+// unitLifetime gives a transient unit a relative runtime limit, the time left to
+// the run's hard deadline when its start is built, so systemd on the host stops
+// it by itself if the controller dies mid-run. It's a backstop, not an exact
+// stop at Hard: dispatch delay and systemd's stop grace (TimeoutStopSec) can
+// carry the stop past Hard, and the controller's own cleanup stays independent
+// of it. Empty only for a document with no hard deadline.
+func unitLifetime(d inventory.Document) string {
+	hard, err := time.Parse(time.RFC3339Nano, d.Deadlines.Hard)
+	if err != nil {
+		return ""
+	}
+	left := (hard.Sub(cloudNow()) + time.Second - 1) / time.Second // whole seconds, rounded up
+	return " --property=RuntimeMaxSec=" + strconv.FormatInt(int64(max(left, 1)), 10)
 }
 
 // cloudServices is the single source of each role's service command.

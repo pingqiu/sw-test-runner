@@ -124,7 +124,7 @@ func (s *directSoak) start(ctx context.Context, label string) error {
 	}
 	h := s.hosts[pin.Node]
 	_, err = cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-start-"+label+".json", "start-"+label, 30,
-		"sudo systemd-run --unit="+cloudQuote(s.unit(label))+" --uid="+cloudQuote(h.Management.User)+
+		"sudo systemd-run --unit="+cloudQuote(s.unit(label))+unitLifetime(*s.d)+" --uid="+cloudQuote(h.Management.User)+
 			" --property=LimitMEMLOCK=infinity --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+
 			" --property=StandardError="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stderr"))+" "+cmd)
 	return err
