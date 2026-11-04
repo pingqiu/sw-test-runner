@@ -22,6 +22,7 @@ MANDATORY = ('wrong_reads', 'failed_sets', 'get_outcomes', 'terminal', 'fault_er
 KV_LOAD = ('wrong_reads', 'failed_sets', 'get_outcomes', 'terminal', 'fault_errors', 'misses', 'write_once', 'body',
            'client_kill', 'load_as_declared', 'routes')  # Go's kvLoadCriteria, same set
 FILE, LINE, ROWS, OBJECT = 64 << 20, 64 << 10, 200000, 4 << 20
+OP_ROW = 2 << 10  # kv_load's bound per op-events row (a full run averaged about 372 bytes)
 CLOCK_CEILING_S, CLOCK_ANOMALY_S = 2.0, 0.1  # owner-chosen and frozen (decision 3 r6): never raised to pass misses
 COUNTERS = ('direct_dc_reads', 'direct_rc_reads', 'copied_reads')
 
@@ -39,8 +40,21 @@ def typed(row, **spec):
     return row
 
 
-def lines(root, name):
-    rows = read_evidence(root / name, FILE, LINE, ROWS)
+def op_event_bounds(pat):
+    """(rows, bytes) op-events.jsonl may hold. The soak: its fixed caps. kv_load: what its declared
+    pattern can write (each key's write and its verification, every operation of every timed phase at
+    the declared rate, a margin per client and for the marks), at OP_ROW bytes a row, never below the
+    soak's caps. A full kv_load writes more than 64 MiB."""
+    if not pat:
+        return ROWS, FILE
+    ops = 2 * pat['keys'] + sum(pat['clients'] * pat['rate_per_client'] * ph['duration_s'] for ph in pat['phases'][1:])
+    rows = math.ceil(ops) + 2 * pat['clients'] + 16
+    return max(ROWS, rows), max(FILE, rows * OP_ROW)
+
+
+def lines(root, name, bounds=None):
+    max_rows, limit = bounds or (ROWS, FILE)
+    rows = read_evidence(root / name, limit, LINE, max_rows)
     if rows is None:
         raise ValueError('evidence missing: ' + name)
     return rows
@@ -293,7 +307,7 @@ def assess(c):
     begin = typed(read_bound(root / WITNESS, dict(boot_id=c['boot_id'])) or {}, mono=float)['mono']
     acks = [typed(a, key=str, writer=int, seed=str, submitted=float, completed=float, sequence=int, length=int,
                   digest=str, fids=list) for a in lines(root, 'ack-journal.jsonl')]
-    events = [typed(e) for e in lines(root, 'op-events.jsonl')]
+    events = [typed(e) for e in lines(root, 'op-events.jsonl', op_event_bounds(c.get('pattern')))]
     ops = [typed(e, op=str, action=str, key=str, worker=int, dispatched=float, submitted=float, completed=float, ok=bool)
            for e in events if 'action' in e]
     marks = [typed(e, event=str) for e in events if 'action' not in e]
