@@ -45,7 +45,7 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 		if h.cancel != nil {
 			h.cancel()
 		}
-		if !strings.Contains(cmd, "--read-path") || !strings.Contains(cmd, "http") {
+		if !strings.Contains(cmd, "--read-path") || !strings.Contains(cmd, "http") || !strings.Contains(cmd, `"length":65536`) {
 			return 23
 		}
 	case strings.Contains(cmd, "echo GONE"):

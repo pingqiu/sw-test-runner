@@ -22,6 +22,9 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 	if err := json.Unmarshal([]byte(args[3]), &config); err != nil {
 		return "", err
 	}
+	config.Length = 64 << 10
+	body, _ := json.Marshal(config)
+	args[3] = string(body)
 	cmd := "python3"
 	for _, arg := range append(args, "--stage", "write-load", "--read-path", "http") {
 		cmd += " " + q(arg)
@@ -75,7 +78,7 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 		return "", err
 	}
 	out := filepath.Join(c.Output, "master-writes.json")
-	body, err := json.MarshalIndent(report, "", "  ")
+	body, err = json.MarshalIndent(report, "", "  ")
 	if err == nil {
 		err = os.WriteFile(out, body, 0600)
 	}

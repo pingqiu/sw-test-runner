@@ -141,3 +141,9 @@ P before Kill and READY after the leader probe. Filer -v=1 records assignment
 retry diagnostics. `master-writes.json` uses the report-only contract above;
 no latency/error-rate SLA or RDMA claim is introduced. The existing DC
 approved-run case remains until its later migration.
+
+The direct timing case uses 64 KiB values: at most 480 paced SETs write 30 MiB
+logically in 120s. This fits the default smoke volume capacity and avoids
+turning the master-timing case into a capacity-pressure test. The full worker
+byte-evidence cap and all-ACK exact readback are unchanged. Raw reports remain
+REPORT_ONLY; the payload size is present in the recorded worker config.
