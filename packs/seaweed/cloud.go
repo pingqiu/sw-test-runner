@@ -20,13 +20,14 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
-	MasterWrites bool                 `json:"master_writes,omitempty"`
-	ECStage1     bool                 `json:"ec_stage1,omitempty"`
-	SSHKey       string               `json:"ssh_key"`
-	HostKey      string               `json:"-"`
-	HostKeys     map[string]string    `json:"-"`
-	Output       string               `json:"-"`
-	Files        map[string]CloudFile `json:"files"`
+	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
+	MasterWrites      bool                 `json:"master_writes,omitempty"`
+	ECStage1          bool                 `json:"ec_stage1,omitempty"`
+	SSHKey            string               `json:"ssh_key"`
+	HostKey           string               `json:"-"`
+	HostKeys          map[string]string    `json:"-"`
+	Output            string               `json:"-"`
+	Files             map[string]CloudFile `json:"files"`
 
 	ECUnderQuorum bool `json:"ec_under_quorum,omitempty"`
 
@@ -95,6 +96,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if len(c.ClusterChaosCases) > 0 {
+		return runDirectProcess(ctx, *d, c)
 	}
 	if c.ECVolumeImpl != "" && (!c.ECStage1 || (c.ECVolumeImpl != "go" && c.ECVolumeImpl != "rust") || (c.ECVolumeImpl == "rust" && c.ECUnderQuorum)) {
 		return "", errors.New("ec_volume_impl requires EC stage1; Rust under-quorum is not qualified")
@@ -307,6 +311,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	master := endpoint(meta, "master_http")
 	commands := cloudServices(h, meta, root, phase != "", c.Replication)
+	if len(c.ClusterChaosCases) > 0 {
+		commands["filer"] += " -localSocket=" + q(root+"/filer.sock")
+	}
 	if c.MasterWrites {
 		commands["filer"] = strings.Replace(commands["filer"], " filer ", " -v=1 filer ", 1)
 	}
@@ -434,6 +441,9 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
 		if c.ECStage1 || c.MasterWrites {
 			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
+		}
+		if len(c.ClusterChaosCases) > 0 {
+			command += " && find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.journal' -type f -print -exec cat {} +"
 		}
 		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second), command)
 		return errors.Join(err, os.WriteFile(filepath.Join(c.Output, "cloud-services.log"), []byte(logs), 0600))

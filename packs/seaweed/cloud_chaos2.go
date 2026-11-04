@@ -302,7 +302,7 @@ func (f *chaos2Fault) each(ids []string, act func(id string) error) error {
 }
 
 func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
-	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.d, id, role))
+	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.r.document(f.d, id), id, role))
 	f.g.note("kill-"+id+"-"+role, old)
 	return e
 }
