@@ -37,7 +37,9 @@ type CloudConfig struct {
 	ChaosSet string `json:"chaos_set,omitempty"`
 	// KVSoak runs the two-host KV soak from SoakProfile, the profile input
 	// the bundle is built from, uploading its release files from SoakRelease.
-	KVSoak      bool   `json:"kv_soak,omitempty"`
+	KVSoak bool `json:"kv_soak,omitempty"`
+	// KVLoad runs the same two-host pipeline with the profile's client pattern.
+	KVLoad      bool   `json:"kv_load,omitempty"`
 	SoakProfile string `json:"-"`
 	SoakRelease string `json:"-"`
 	localHost   string // the host the controller itself runs on: reached locally, not over ssh
@@ -89,8 +91,8 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
-	if c.KVSoak {
-		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.MasterWrites || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
+	if c.KVSoak || c.KVLoad {
+		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.MasterWrites || c.Chaos || c.Replication != "" || c.ChaosSet != "" || c.KVSoak && c.KVLoad {
 			return "", errors.New("kv_soak requires a two-host onprem inventory and no other phase")
 		}
 		return runDirectSoak(ctx, raw, c)

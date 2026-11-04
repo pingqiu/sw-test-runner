@@ -33,6 +33,66 @@ type SoakPlan struct {
 	// Step 3b: the M02 evidence job and the M01 verdict job, run at collect.
 	Evidence Step `json:"evidence"`
 	Assess   Step `json:"assess"`
+	// Pattern makes the load kv_load's configurable client pattern; nil keeps
+	// the soak's own fixed mix, byte for byte.
+	Pattern *LoadPattern `json:"pattern,omitempty"`
+}
+
+// LoadPattern is kv_load's client pattern: Clients workers on one transport,
+// Keys keys drawn uniformly or by zipf(ZipfS), ObjectBytes each, at most
+// RatePerClient operations a second per client, through Phases in order.
+type LoadPattern struct {
+	Clients       int         `json:"clients"`
+	Transport     string      `json:"transport"`
+	Keys          int         `json:"keys"`
+	Distribution  string      `json:"distribution"`
+	ZipfS         float64     `json:"zipf_s,omitempty"`
+	ObjectBytes   int         `json:"object_bytes"`
+	RatePerClient float64     `json:"rate_per_client"`
+	Phases        []LoadPhase `json:"phases"`
+}
+
+// LoadPhase: write_once writes every key exactly once, then read reads for
+// DurationS, and mixed reads with probability ReadRatio and writes otherwise.
+type LoadPhase struct {
+	Kind      string  `json:"kind"`
+	DurationS int     `json:"duration_s,omitempty"`
+	ReadRatio float64 `json:"read_ratio,omitempty"`
+}
+
+// writeSeconds is write_once's least duration at the declared rate: each
+// write, then its verification read.
+func (p *LoadPattern) writeSeconds() float64 {
+	return 2 * float64(p.Keys) / (float64(p.Clients) * p.RatePerClient)
+}
+
+// check bounds every pattern number, and requires the phases, with write_once
+// at its declared rate, to fit inside the load's duration.
+func (p *LoadPattern) check(durationS int) error {
+	finite := func(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
+	// dc only: the worker's mandatory client kill takes a DC worker.
+	if p.Clients < 1 || p.Clients > 64 || p.Transport != "dc" || p.Keys < 1 || p.Keys > 1<<20 ||
+		p.ObjectBytes < 1 || p.ObjectBytes > 31<<20 || !finite(p.RatePerClient) || p.RatePerClient <= 0 || p.RatePerClient > 100 {
+		return errors.New("kv_load pattern clients, transport, keys, object_bytes or rate out of range")
+	}
+	if !(p.Distribution == "uniform" && p.ZipfS == 0 || p.Distribution == "zipf" && finite(p.ZipfS) && p.ZipfS > 0 && p.ZipfS <= 3) {
+		return errors.New("kv_load pattern distribution must be uniform, or zipf with 0 < zipf_s <= 3")
+	}
+	if len(p.Phases) < 2 || len(p.Phases) > 4 || p.Phases[0].Kind != "write_once" || p.Phases[0].DurationS != 0 || p.Phases[0].ReadRatio != 0 {
+		return errors.New("kv_load pattern starts with one write_once phase and has 2 to 4 phases")
+	}
+	need := p.writeSeconds()
+	for _, ph := range p.Phases[1:] {
+		if ph.DurationS < 1 || ph.DurationS > durationS || !(ph.Kind == "read" && ph.ReadRatio == 0 ||
+			ph.Kind == "mixed" && finite(ph.ReadRatio) && ph.ReadRatio > 0 && ph.ReadRatio < 1) {
+			return errors.New("kv_load pattern phase must be read, or mixed with 0 < read_ratio < 1, for 1 s to the load duration")
+		}
+		need += float64(ph.DurationS)
+	}
+	if need > float64(durationS) {
+		return errors.New("kv_load pattern phases do not fit in the load duration")
+	}
+	return nil
 }
 
 type SoakFault struct {
@@ -132,6 +192,14 @@ func secs(n int) time.Duration { return time.Duration(n) * time.Second }
 func (x *SoakPlan) checkSchedule() error {
 	if x == nil || x.DurationS <= 0 || x.DurationS > int(SoakHorizon/time.Second) {
 		return errors.New("soak duration out of range")
+	}
+	if x.Pattern != nil {
+		if err := x.Pattern.check(x.DurationS); err != nil {
+			return err
+		}
+		if float64(x.ClientKillAtS) < x.Pattern.writeSeconds() { // the kill's GET would come before the barrier
+			return errors.New("kv_load pattern client kill must come after write_once")
+		}
 	}
 	if len(x.Faults) == 0 || len(x.Faults) > 2 {
 		return errors.New("soak needs one or two faults")

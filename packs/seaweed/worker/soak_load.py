@@ -2,7 +2,7 @@
 or a control handshake. Four native workers (3 DC + 1 HTTP), the oracle,
 read-after-ACK, the client kill, a read-only topology poller (decision 3),
 bounded evidence files and one bounded summary row on stdout."""
-import argparse, hashlib, json, math, multiprocessing as mp, os, random, re, stat, sys, threading, time, types, urllib.request
+import argparse, bisect, hashlib, json, math, multiprocessing as mp, os, random, re, stat, sys, threading, time, types, urllib.request
 from pathlib import Path
 
 
@@ -150,6 +150,57 @@ def read_bound(path, binding):
     return row
 
 
+class Pattern:
+    """kv_load's client pattern (LoadPattern in soak_plan.go): which operation a
+    free client issues next. write_once writes every key exactly once; read and
+    mixed then run for their durations, keys drawn uniformly or by zipf(s)."""
+
+    def __init__(self, p, rng, prefix):
+        self.p, self.rng, self.prefix, self.cursor, self.phase, self.started, self.versions = p, rng, prefix, 0, 0, None, {}
+        w = [1.0 if p['distribution'] == 'uniform' else (k + 1) ** -p['zipf_s'] for k in range(p['keys'])]
+        self.cum = [sum(w[:1])]
+        for x in w[1:]:
+            self.cum.append(self.cum[-1] + x)
+
+    def key(self, index):
+        return self.prefix + hashlib.sha256(('kv-load-key-%d' % index).encode()).hexdigest()
+
+    def draw(self):
+        return min(bisect.bisect(self.cum, self.rng.random() * self.cum[-1]), self.p['keys'] - 1)
+
+    def finished(self, now):
+        """True once every declared phase ran to its end."""
+        phases = self.p['phases']
+        while 0 < self.phase < len(phases) and now >= self.started + phases[self.phase]['duration_s']:
+            self.phase, self.started = self.phase + 1, self.started + phases[self.phase]['duration_s']
+        return self.phase >= len(phases)
+
+    def next(self, now, writing_allowed, pending_sets, latest, busy):
+        """-> ('set', key, seed) | ('get', key) | None for this free client."""
+        phases = self.p['phases']
+        if self.phase == 0:
+            if self.cursor < self.p['keys'] and not writing_allowed:
+                return None  # past the write stop, write_once can't finish: finished() then fails the load
+            if self.cursor < self.p['keys']:
+                key = self.key(self.cursor)
+                self.cursor += 1
+                return 'set', key, 'kv-load-%d-0' % (self.cursor - 1)
+            if pending_sets:
+                return None  # every key is written once and acknowledged before the reads
+            self.phase, self.started = 1, now
+        if self.finished(now):
+            return None
+        index = self.draw()
+        key = self.key(index)
+        if key in busy:
+            return None
+        ph = phases[self.phase]
+        if ph['kind'] == 'mixed' and writing_allowed and self.rng.random() >= ph['read_ratio']:
+            self.versions[index] = self.versions.get(index, 0) + 1
+            return 'set', key, 'kv-load-%d-%d' % (index, self.versions[index])
+        return ('get', key) if key in latest else None
+
+
 def run(config):
     import sys
     sys.path[:0] = [config['smoke']['helper_dir'], config['smoke']['native_dir']]
@@ -160,7 +211,11 @@ def run(config):
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
     oracle, rng, seq = Oracle(), random.Random(20261027), [0]
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
-    writers, key_writers, submissions, kills = {i: 0 for i in range(4)}, {}, {}, []
+    pat = config.get('pattern')  # kv_load's client pattern; absent, the soak's own mix
+    clients, gap = (pat['clients'], 1 / pat['rate_per_client']) if pat else (4, .125)
+    transport = (lambda i: pat['transport']) if pat else (lambda i: 'http' if i == 3 else 'dc')
+    pattern = Pattern(pat, rng, config['key_prefix']) if pat else None
+    writers, key_writers, submissions, kills = {i: 0 for i in range(clients)}, {}, {}, []
     stop = threading.Event()
     window = dict(episode=None, acked=False, done=set(), allowed={})  # addendum r4
     bind = dict(run_id=config['smoke']['run_id'], boot_id=boot_id())
@@ -209,7 +264,7 @@ def run(config):
     def start_worker(i):
         parent, remote = ctx.Pipe()
         cfg = dict(config['native'], root=str(root), stats_horizon_s=config['duration_s'] + config['quiescence_s'],
-                   transport='http' if i == 3 else 'dc')
+                   transport=transport(i))
         p = ctx.Process(target=child, args=(remote, cfg))
         p.start()
         remote.close()
@@ -225,7 +280,7 @@ def run(config):
             cmd['sequence'] = oracle.begin_write(key, payload(cmd['seed'], length)).sequence
         else:
             oracle.begin_read(key)
-        busy[key], commands[i], available[i] = i, cmd, time.monotonic() + .125
+        busy[key], commands[i], available[i] = i, cmd, time.monotonic() + gap
         workers[i]['pipe'].send(cmd)
 
     def complete(i, row):
@@ -280,7 +335,7 @@ def run(config):
     def client_kill(started):
         """r9's rule: kill a DC worker only while its GET is submitted and pending."""
         while time.monotonic() - started < 60:
-            for i in (0, 1, 2):
+            for i in (i for i in range(clients) if transport(i) == 'dc'):
                 pump(i)
                 if i in commands and commands[i]['action'] == 'get' and i in submissions:
                     witness, cmd = submissions.pop(i), commands.pop(i)
@@ -294,7 +349,7 @@ def run(config):
                     start_worker(i)
                     return dict(kind='client_kill', worker=i, started=started, killed=killed, finished=time.monotonic(),
                                 witness=witness, replacement=workers[i]['identity'])
-            for i in range(4):
+            for i in range(clients):
                 if i not in commands and oracle.latest:
                     key = next((k for k in oracle.latest if k not in busy), None)
                     if key:
@@ -304,16 +359,16 @@ def run(config):
 
     poller = threading.Thread(target=poll_topology, args=(config, stop, files['topology-polls.jsonl']), daemon=True)
     try:
-        for i in range(4):
+        for i in range(clients):
             start_worker(i)
         poller.start()
-        publish(root / 'workers.json', {str(i): dict(w['identity'], transport='http' if i == 3 else 'dc') for i, w in workers.items()})
+        publish(root / 'workers.json', {str(i): dict(w['identity'], transport=transport(i)) for i, w in workers.items()})
         begin = time.monotonic()  # the witness is written before the first operation
         publish(root / WITNESS, dict(boot_id=boot_id(), mono=begin))
         end, pace, next_write, owner, cursor = begin + config['duration_s'], config['pacing_s'], begin, 0, 0
         while time.monotonic() < end:
             now = time.monotonic()
-            for i in range(4):
+            for i in range(clients):
                 if not workers[i]['process'].is_alive():
                     raise RuntimeError('worker exited unexpectedly')
                 pump(i)
@@ -322,15 +377,24 @@ def run(config):
                 time.sleep(.002)
                 continue  # paused: no new dispatch of any kind until the exact close
             if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
+                if pattern and pattern.phase == 0:  # the kill's own GET would precede the write barrier
+                    raise OracleError('kv_load client kill due before write_once ended')
                 kills.append(client_kill(now))
                 log('op-events.jsonl', dict(event='client_kill', **kills[-1]))
-            for i in range(4):
+            for i in range(clients):
                 if i in commands or now < available.get(i, 0):
                     continue
-                key = next((k for k in verify if k not in busy), None)
+                # kv_load's write_once phase reads nothing, not even verification, until every write is ACKed
+                key = None if pattern and pattern.phase == 0 else next((k for k in verify if k not in busy), None)
                 if key is not None:
                     verify.remove(key)
                     send(i, 'get', key, oracle.latest[key].length, verification=True)
+                elif pattern:
+                    op = pattern.next(now, now < end - config['write_stop_s'], oracle.pending, oracle.latest, busy)
+                    if op and op[0] == 'set':
+                        send(i, 'set', op[1], pat['object_bytes'], seed=op[2])
+                    elif op:
+                        send(i, 'get', op[1], oracle.latest[op[1]].length)
                 elif i == owner and now >= next_write and now < end - config['write_stop_s']:
                     cursor += 1
                     slot = rng.randrange(32) if cursor % 7 else 32 + (cursor // 7) % 480
@@ -345,9 +409,11 @@ def run(config):
                         send(i, 'get', key, oracle.latest[key].length)
             time.sleep(.002)
         body_end = time.monotonic()
+        if pattern and not pattern.finished(body_end):
+            raise OracleError('kv_load phases did not complete within the load')
         log('op-events.jsonl', dict(event='body_end', mono=body_end))
         while time.monotonic() < end + config['quiescence_s']:  # drain, admit nothing
-            for i in range(4):
+            for i in range(clients):
                 pump(i)
             time.sleep(.02)
         if commands or oracle.pending or oracle.reading:

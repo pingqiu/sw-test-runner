@@ -271,5 +271,94 @@ class FaultWindowWorker(unittest.TestCase):
         self.assertEqual(after, [], 'operations dispatched after the pause without a close')
 
 
+
+class PatternMode(unittest.TestCase):
+    """kv_load's client pattern: what a free client issues next."""
+    BASE = dict(clients=4, transport='dc', keys=100, distribution='zipf', zipf_s=1.1, object_bytes=64 << 10,
+                rate_per_client=10, phases=[dict(kind='write_once'), dict(kind='read', duration_s=60)])
+
+    def pattern(self, **change):
+        import random
+        return soak_load.Pattern(dict(self.BASE, **change), random.Random(7), 'p/')
+
+    def test_write_once_writes_every_key_once_in_order_then_waits_for_the_acks(self):
+        p = self.pattern()
+        sets = [p.next(0, True, {}, {}, {}) for _ in range(100)]
+        self.assertEqual([s[1] for s in sets], [p.key(i) for i in range(100)])
+        self.assertEqual({s[0] for s in sets}, {'set'})
+        self.assertEqual(len({s[2] for s in sets}), 100)
+        latest = {p.key(i): 1 for i in range(100)}
+        self.assertIsNone(p.next(1, True, {'pending': 1}, latest, {}))  # reads wait for every ACK
+        op = p.next(2, True, {}, latest, {})
+        self.assertEqual(op[0], 'get')
+        self.assertTrue(all(p.next(3, True, {}, latest, {})[0] == 'get' for _ in range(200)))  # never written again
+
+    def test_the_read_phase_ends_after_its_duration(self):
+        p = self.pattern()
+        for _ in range(100):
+            p.next(0, True, {}, {}, {})
+        latest = {p.key(i): 1 for i in range(100)}
+        self.assertIsNotNone(p.next(10, True, {}, latest, {}))  # the read phase starts at 10
+        self.assertIsNotNone(p.next(69.9, True, {}, latest, {}))
+        self.assertIsNone(p.next(70, True, {}, latest, {}))
+
+    def test_zipf_concentrates_reads_on_the_hot_keys_and_uniform_does_not(self):
+        for dist, s, low, high in (('zipf', 1.1, .55, .64), ('uniform', 0, .005, .02)):  # zipf(1.1) over 4096: 0.593
+            p = self.pattern(keys=4096, distribution=dist, zipf_s=s)
+            draws = [p.draw() for _ in range(20000)]
+            top = sum(d < 41 for d in draws) / len(draws)  # the top 1% of keys
+            self.assertTrue(low < top < high, (dist, top))
+
+    def test_mixed_writes_about_its_share_and_only_while_writing_is_allowed(self):
+        p = self.pattern(phases=[dict(kind='write_once'), dict(kind='mixed', duration_s=60, read_ratio=.75)])
+        for _ in range(100):
+            p.next(0, True, {}, {}, {})
+        latest = {p.key(i): 1 for i in range(100)}
+        ops = [p.next(1, True, {}, latest, {})[0] for _ in range(4000)]
+        self.assertAlmostEqual(ops.count('set') / len(ops), .25, delta=.03)
+        self.assertNotIn('set', [p.next(1, False, {}, latest, {})[0] for _ in range(400)])
+
+    def test_write_once_stops_at_the_write_stop(self):
+        p = self.pattern()
+        self.assertIsNone(p.next(0, False, {}, {}, {}))
+        self.assertEqual(p.cursor, 0)
+        self.assertFalse(p.finished(10 ** 6))
+
+    def test_a_busy_key_is_skipped_not_doubled(self):
+        p = self.pattern(keys=1, distribution='uniform', zipf_s=0)
+        p.next(0, True, {}, {}, {})
+        self.assertIsNone(p.next(1, True, {}, {p.key(0): 1}, {p.key(0): 2}))
+
+
+class KVLoadRun(unittest.TestCase):
+    """The real run() in pattern mode, with the fake native child."""
+    setUp, events = FaultWindowWorker.setUp, FaultWindowWorker.events
+    PATTERN = dict(clients=2, transport='dc', keys=6, distribution='uniform', object_bytes=64, rate_per_client=50,
+                   phases=[dict(kind='write_once'), dict(kind='read', duration_s=1)])
+
+    def test_every_write_is_acked_before_any_read_and_the_reads_run(self):
+        self.config['pattern'] = self.PATTERN
+        soak_load.run(self.config)
+        ops = self.events()
+        sets, gets = [e for e in ops if e['action'] == 'set'], [e for e in ops if e['action'] == 'get']
+        self.assertEqual(len({e['key'] for e in sets}), 6)
+        self.assertEqual(len(sets), 6)
+        self.assertTrue(gets)
+        self.assertLessEqual(max(e['completed'] for e in sets), min(min(e['dispatched'], e['submitted']) for e in gets))
+
+    def test_a_client_kill_due_during_write_once_fails_before_any_get(self):
+        self.config.update(pattern=self.PATTERN, client_kill_at_s=0)
+        with self.assertRaisesRegex(soak_load.OracleError, 'client kill due before write_once ended'):
+            soak_load.run(self.config)
+        self.assertNotIn('get', [e['action'] for e in self.events()])
+        rows = [json.loads(l) for l in (self.root / 'completions.jsonl').read_text().splitlines()]
+        self.assertNotIn('get', [r['action'] for r in rows])  # nothing was even submitted
+
+    def test_phases_that_do_not_complete_fail_the_load(self):
+        self.config['pattern'] = dict(self.PATTERN, phases=[dict(kind='write_once'), dict(kind='read', duration_s=30)])
+        with self.assertRaisesRegex(soak_load.OracleError, 'did not complete'):
+            soak_load.run(self.config)
+
+
 if __name__ == '__main__':
     unittest.main()

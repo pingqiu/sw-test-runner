@@ -227,6 +227,9 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 	if err != nil || b.Plan.Soak == nil {
 		return "", errors.Join(err, errors.New("kv_soak needs a soak profile input"))
 	}
+	if (b.Plan.Soak.Pattern != nil) != c.KVLoad {
+		return "", errors.New("kv_load needs a profile with a load pattern, and kv_soak one without")
+	}
 	boot := observedBoot(d, "m01")
 	if local, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err != nil || boot == "" || string(bytes.TrimSpace(local)) != boot {
 		return "", errors.New("kv_soak: the controller must run on the admitted M01 boot")
