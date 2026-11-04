@@ -36,6 +36,25 @@ func TestKVLoadPatternReachesTheAdmittedLoadArgv(t *testing.T) {
 	}
 }
 
+// The normal builder doesn't panic on an empty pattern: it builds profile args
+// (datasetBytes) before anything checks the pattern, and bind's schedule check
+// then refuses the plan it built.
+func TestBuildProfileRefusesAnEmptyPatternWithoutPanic(t *testing.T) {
+	in := soakInput(t, 45*time.Minute, func(x *SoakPlan) { x.Pattern = &LoadPattern{} })
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("BuildProfile panicked on pattern {}: %v", r)
+		}
+	}()
+	bundle, err := BuildProfile(in)
+	if err != nil {
+		return // refused while building: also fine
+	}
+	if err := bundle.Plan.Soak.checkSchedule(); err == nil || !strings.Contains(err.Error(), "kv_load pattern") {
+		t.Fatalf("the plan built from pattern {} passes the schedule check: %v", err)
+	}
+}
+
 // kv_load runs only a profile with a pattern, and kv_soak only one without,
 // refused before any host is reached.
 func TestKVLoadSelectorMatchesTheProfile(t *testing.T) {

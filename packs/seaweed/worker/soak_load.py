@@ -150,6 +150,9 @@ def read_bound(path, binding):
     return row
 
 
+WRITE_ORDER_SEED = 20261104
+
+
 class Pattern:
     """kv_load's client pattern (LoadPattern in soak_plan.go): which operation a
     free client issues next. write_once writes every key exactly once; read and
@@ -157,6 +160,10 @@ class Pattern:
 
     def __init__(self, p, rng, prefix):
         self.p, self.rng, self.prefix, self.cursor, self.phase, self.started, self.versions = p, rng, prefix, 0, 0, None, {}
+        # write_once in a seeded permutation, from its own generator so the
+        # read draws are unchanged: a zipf-hot key is not also the oldest one.
+        self.order = list(range(p['keys']))
+        random.Random(WRITE_ORDER_SEED).shuffle(self.order)
         w = [1.0 if p['distribution'] == 'uniform' else (k + 1) ** -p['zipf_s'] for k in range(p['keys'])]
         self.cum = [sum(w[:1])]
         for x in w[1:]:
@@ -182,9 +189,9 @@ class Pattern:
             if self.cursor < self.p['keys'] and not writing_allowed:
                 return None  # past the write stop, write_once can't finish: finished() then fails the load
             if self.cursor < self.p['keys']:
-                key = self.key(self.cursor)
+                index = self.order[self.cursor]
                 self.cursor += 1
-                return 'set', key, 'kv-load-%d-0' % (self.cursor - 1)
+                return 'set', self.key(index), 'kv-load-%d-0' % index
             if pending_sets:
                 return None  # every key is written once and acknowledged before the reads
             self.phase, self.started = 1, now
@@ -201,11 +208,22 @@ class Pattern:
         return ('get', key) if key in latest else None
 
 
+def push_pipes(pat):
+    """kv_load's push_pipes knob, over configure()'s value; absent keeps it."""
+    pipes = (pat or {}).get('push_pipes')
+    if pipes is None:
+        return
+    if isinstance(pipes, bool) or not isinstance(pipes, int) or not 1 <= pipes <= 8:
+        raise ValueError('kv_load push_pipes must be 1..8')
+    os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'] = str(pipes)
+
+
 def run(config):
     import sys
     sys.path[:0] = [config['smoke']['helper_dir'], config['smoke']['native_dir']]
     from kv_smoke import configure
     configure(config['smoke'])  # the smoke task's exact RDMA environment, inherited by the workers
+    push_pipes(config.get('pattern'))
     root = Path(config['root'])
     files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}

@@ -1,6 +1,8 @@
 package seaweed
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"math"
 	"regexp"
@@ -50,6 +52,52 @@ type LoadPattern struct {
 	ObjectBytes   int         `json:"object_bytes"`
 	RatePerClient float64     `json:"rate_per_client"`
 	Phases        []LoadPhase `json:"phases"`
+	// Capacity knobs, absent (0) for today's values. VolumeNofile is the
+	// volumes' soft RLIMIT_NOFILE (their RDMA connection budget is soft/8,
+	// clamped 8..256; inherited is 1024, so 128). PushPipes is each client's
+	// SW_RDMA_KVCACHE_PUSH_PIPES (kv_smoke.configure sets 8).
+	VolumeNofile int `json:"volume_nofile,omitempty"`
+	PushPipes    int `json:"push_pipes,omitempty"`
+}
+
+// UnmarshalJSON refuses a present null capacity knob: plain decoding would
+// turn it into 0, which means absent, and the knob would silently vanish. The
+// rest decodes as strictly as the plan itself (unknown fields refuse).
+func (p *LoadPattern) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for k, v := range fields {
+		if (strings.EqualFold(k, "volume_nofile") || strings.EqualFold(k, "push_pipes")) && string(bytes.TrimSpace(v)) == "null" {
+			return errors.New("kv_load pattern " + strings.ToLower(k) + " must be absent or a number, not null")
+		}
+	}
+	type plain LoadPattern
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode((*plain)(p))
+}
+
+// datasetBytes is the most the declared pattern can write onto one volume
+// disk: write_once's keys plus every operation of every mixed phase at the
+// declared rate counted as a write (an overwrite leaves the old needle's bytes
+// until vacuum), all on that disk, with as much again for needle overhead and
+// slack. ProfileArgs reaches it before the pattern is checked, so it never
+// indexes the phases and saturates instead of overflowing; check() refuses
+// such a pattern later.
+func (p *LoadPattern) datasetBytes() int64 {
+	writes := float64(p.Keys)
+	for i, ph := range p.Phases {
+		if i > 0 && ph.Kind == "mixed" {
+			writes += float64(p.Clients) * p.RatePerClient * float64(ph.DurationS)
+		}
+	}
+	bytes := 2 * math.Ceil(writes) * float64(p.ObjectBytes)
+	if math.IsNaN(bytes) || bytes < 0 || bytes > math.MaxInt64/2 {
+		return math.MaxInt64 / 2
+	}
+	return int64(bytes)
 }
 
 // LoadPhase: write_once writes every key exactly once, then read reads for
@@ -77,6 +125,9 @@ func (p *LoadPattern) check(durationS int) error {
 	}
 	if !(p.Distribution == "uniform" && p.ZipfS == 0 || p.Distribution == "zipf" && finite(p.ZipfS) && p.ZipfS > 0 && p.ZipfS <= 3) {
 		return errors.New("kv_load pattern distribution must be uniform, or zipf with 0 < zipf_s <= 3")
+	}
+	if p.VolumeNofile != 0 && (p.VolumeNofile < 1024 || p.VolumeNofile > 1048576) || p.PushPipes < 0 || p.PushPipes > 8 {
+		return errors.New("kv_load pattern volume_nofile must be absent or 1024..1048576, push_pipes absent or 1..8")
 	}
 	if len(p.Phases) < 2 || len(p.Phases) > 4 || p.Phases[0].Kind != "write_once" || p.Phases[0].DurationS != 0 || p.Phases[0].ReadRatio != 0 {
 		return errors.New("kv_load pattern starts with one write_once phase and has 2 to 4 phases")
@@ -177,6 +228,9 @@ func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 	s.filerVerbose = p.Restart != nil && p.Restart.Writes
 	if p.Soak != nil {
 		s.rotation, s.kvLoad = p.Soak.Rotation, p.Soak.Pattern != nil
+		if x := p.Soak.Pattern; x != nil {
+			s.volumeNofile, s.kvLoadBytes = x.VolumeNofile, x.datasetBytes()
+		}
 		if faultReady {
 			s.readyAssign = p.Soak.ReadyAssign
 		}

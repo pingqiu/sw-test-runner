@@ -1,6 +1,7 @@
 package seaweed
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -39,6 +40,11 @@ func TestLoadPatternBounds(t *testing.T) {
 		"mixed ratio 1":          func(p *LoadPattern) { p.Phases[1] = LoadPhase{Kind: "mixed", DurationS: 60, ReadRatio: 1} },
 		"phases overrun":         func(p *LoadPattern) { p.Phases[1].DurationS = 1790 },
 		"writes and their reads": func(p *LoadPattern) { p.Phases[1].DurationS = 1780 }, // 2*4096/(32*10) = 25.6 s before the reads
+		"nofile under 1024":      func(p *LoadPattern) { p.VolumeNofile = 1023 },
+		"nofile over product":    func(p *LoadPattern) { p.VolumeNofile = 1048577 },
+		"negative nofile":        func(p *LoadPattern) { p.VolumeNofile = -1 },
+		"pipes over 8":           func(p *LoadPattern) { p.PushPipes = 9 },
+		"negative pipes":         func(p *LoadPattern) { p.PushPipes = -1 },
 	} {
 		p := lmcacheLike()
 		mutate(p)
@@ -46,11 +52,84 @@ func TestLoadPatternBounds(t *testing.T) {
 			t.Errorf("%s: err %v, want a kv_load pattern refusal", name, err)
 		}
 	}
+	knobs := lmcacheLike()
+	knobs.VolumeNofile, knobs.PushPipes = 4096, 2 // run 2's capacity
+	if err := knobs.check(1800); err != nil {
+		t.Fatalf("nofile 4096 and 2 pipes were refused: %v", err)
+	}
 	mixed := lmcacheLike()
 	mixed.Distribution, mixed.ZipfS = "uniform", 0
 	mixed.Phases = append(mixed.Phases, LoadPhase{Kind: "mixed", DurationS: 300, ReadRatio: 0.9})
 	if err := mixed.check(1800); err != nil {
 		t.Fatalf("uniform with a mixed phase was refused: %v", err)
+	}
+}
+
+// A present null capacity knob refuses on both decode paths (profile input
+// and plan) instead of decoding to 0 and vanishing; a number decodes, and an
+// unknown pattern field still refuses inside the custom decoder.
+func TestLoadPatternRefusesANullKnob(t *testing.T) {
+	input := func(pattern string) error {
+		_, err := DecodeProfileInput([]byte(`{"soak":{"pattern":` + pattern + `}}`))
+		return err
+	}
+	plan := func(pattern string) error {
+		_, _, err := decodePlan(`{"soak":{"pattern":` + pattern + `}}`)
+		return err
+	}
+	for _, knob := range []string{"volume_nofile", "push_pipes", "PUSH_PIPES"} {
+		null := `{"clients":32,"` + knob + `":null}`
+		for name, decode := range map[string]func(string) error{"profile input": input, "plan": plan} {
+			// A case alias is already refused by uniqueJSON ("noncanonical").
+			if err := decode(null); err == nil || !strings.Contains(err.Error(), "not null") && !strings.Contains(err.Error(), "noncanonical") {
+				t.Errorf("%s, %s null: %v", name, knob, err)
+			}
+		}
+	}
+	if err := input(`{"clients":32,"push_pipes":2,"volume_nofile":4096}`); err != nil {
+		t.Fatalf("numbers refused: %v", err)
+	}
+	var p SoakPlan
+	if err := json.Unmarshal([]byte(`{"pattern":{"push_pipes":2,"volume_nofile":4096}}`), &p); err != nil || p.Pattern.PushPipes != 2 || p.Pattern.VolumeNofile != 4096 {
+		t.Fatalf("knobs decoded as %+v: %v", p.Pattern, err)
+	}
+	if err := input(`{"clients":32,"pipes":2}`); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("an unknown pattern field passed: %v", err)
+	}
+}
+
+// The preflight bound is the most the declared pattern can write: write_once
+// plus every mixed operation counted as a write, whatever its read ratio.
+func TestDatasetBytesBoundEveryPossibleWrite(t *testing.T) {
+	p := lmcacheLike() // write_once then read: the keys only
+	if got, want := p.datasetBytes(), int64(2*4096*(64<<10)); got != want {
+		t.Fatalf("write_once + read: %d, want %d", got, want)
+	}
+	// A mixed phase of 32 x 10/s for 1500 s: all 480000 operations count.
+	p.Phases = append(p.Phases, LoadPhase{Kind: "mixed", DurationS: 1500, ReadRatio: 0.9})
+	if got, want := p.datasetBytes(), int64(2*(4096+480000)*(64<<10)); got != want {
+		t.Fatalf("with a mixed phase: %d, want %d", got, want)
+	}
+	// codex01's fixed-seed case: one 64 KiB key, read 297 s, then mixed 30 s
+	// at 0.98 emitted 327680 payload bytes; the expected-write bound gave 262144.
+	one := &LoadPattern{Clients: 1, Transport: "dc", Keys: 1, Distribution: "uniform", ObjectBytes: 64 << 10, RatePerClient: 10,
+		Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "read", DurationS: 297}, {Kind: "mixed", DurationS: 30, ReadRatio: 0.98}}}
+	if got := one.datasetBytes(); got < 327680 {
+		t.Fatalf("codex01's case bound %d, below the 327680 bytes it emitted", got)
+	}
+}
+
+// ProfileArgs reaches datasetBytes before the pattern is checked: an empty or
+// absurd pattern must not panic or overflow there.
+func TestDatasetBytesNeverPanicsOnAnUncheckedPattern(t *testing.T) {
+	for name, p := range map[string]*LoadPattern{
+		"empty":    {},
+		"NaN rate": {Keys: 1, ObjectBytes: 1, Clients: 1, RatePerClient: math.NaN(), Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "mixed", DurationS: 1}}},
+		"huge":     {Keys: 1 << 30, ObjectBytes: 1 << 30, Clients: 1 << 20, RatePerClient: 1e9, Phases: []LoadPhase{{}, {Kind: "mixed", DurationS: 1 << 30}}},
+	} {
+		if got := p.datasetBytes(); got < 0 {
+			t.Errorf("%s: %d", name, got)
+		}
 	}
 }
 

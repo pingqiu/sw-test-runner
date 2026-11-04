@@ -81,6 +81,43 @@ func TestM01RunsTheClientAndOptionallyAVolume(t *testing.T) {
 	}
 }
 
+// kv_load's capacity knobs and dataset bound reach every profile config of a
+// kv_load plan (lab_profile.py volume_nofile and storage()'s rotation check),
+// and no other plan's: absent keeps today's argv byte for byte.
+func TestKVLoadKnobsReachTheProfileConfigOnlyForKVLoad(t *testing.T) {
+	smoke := SmokeSettings{HelperDir: "/opt/profile/worker", NativeDir: "/opt/profile/native", Keys: 1, Length: 64}
+	pins := map[string]string{"/opt/profile/bin/weed": strings.Repeat("a", 64), "/opt/profile/bin/weed-volume": strings.Repeat("b", 64)}
+	pattern := lmcacheLike()
+	config := func(s SmokeSettings) (raw map[string]any) {
+		d := profileFixture(t)
+		d.Hosts[0].Roles = []string{"client", "volume"}
+		if s == smoke {
+			d.Hosts[0].Roles = []string{"client"}
+		}
+		args, err := ProfileArgs(d, "m01", "preflight", "", s, pins)
+		if err != nil || json.Unmarshal([]byte(args[3]), &raw) != nil {
+			t.Fatalf("preflight args: %v", err)
+		}
+		return raw
+	}
+	plain := config(smoke)
+	if _, ok := plain["volume_nofile"]; ok {
+		t.Fatalf("a plain profile carries volume_nofile: %v", plain)
+	}
+	if _, ok := plain["kv_load_bytes"]; ok {
+		t.Fatalf("a plain profile carries kv_load_bytes: %v", plain)
+	}
+	today := config(Plan{Smoke: smoke, Soak: &SoakPlan{Pattern: pattern}}.profileSettings(false))
+	if _, ok := today["volume_nofile"]; ok || today["kv_load_bytes"] != float64(2*4096*(64<<10)) {
+		t.Fatalf("kv_load without knobs: nofile %v, dataset %v; want absent and 512 MiB", today["volume_nofile"], today["kv_load_bytes"])
+	}
+	pattern.VolumeNofile = 4096
+	run2 := config(Plan{Smoke: smoke, Soak: &SoakPlan{Pattern: pattern}}.profileSettings(false))
+	if run2["volume_nofile"] != float64(4096) {
+		t.Fatalf("kv_load with nofile 4096: %v", run2["volume_nofile"])
+	}
+}
+
 // kv_load's M01 volume beside the client doesn't break the load's smoke
 // config: its endpoints stay M02's, whichever host comes first; two volumes
 // that aren't the client's are still refused.

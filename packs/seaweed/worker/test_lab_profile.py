@@ -423,6 +423,39 @@ class RotationConfig(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in root.iterdir()), [], 'no dir, config or generation file')
 
 
+class KVLoadRotationCheck(unittest.TestCase):
+    """kv_load: the disk's used bytes plus the dataset stay under the high
+    watermark, or rotation drains the volumes from the first cycle."""
+    GiB = 1 << 30
+
+    def fs(self, total_gib, avail_gib):
+        import types
+        return types.SimpleNamespace(f_frsize=4096, f_blocks=total_gib * self.GiB // 4096,
+                                     f_bavail=avail_gib * self.GiB // 4096)
+
+    def config(self, high, dataset=GiB):
+        return dict(rotation=dict(RotationConfig.ROTATION, high_watermark=high), kv_load_bytes=dataset)
+
+    def test_the_rerun_disk_under_r8b_watermark_refuses(self):
+        # M02 on 2026-11-04: about 223 GB, 87.5 GB free, used 0.6 against 0.068.
+        with self.assertRaisesRegex(ValueError, 'not above the disk used plus the dataset'):
+            profile.kv_load_rotation_check(self.config(0.0678), self.fs(223, 87))
+
+    def test_a_watermark_above_used_plus_dataset_passes_and_reports_the_ratio(self):
+        self.assertAlmostEqual(profile.kv_load_rotation_check(self.config(0.9), self.fs(100, 50)), 0.51, places=6)
+
+    def test_the_dataset_itself_can_tip_it(self):
+        # used 0.5: a 0.55 watermark holds for 1 GiB, not for 10 GiB.
+        profile.kv_load_rotation_check(self.config(0.55), self.fs(100, 50))
+        with self.assertRaises(ValueError):
+            profile.kv_load_rotation_check(self.config(0.55, 10 * self.GiB), self.fs(100, 50))
+
+    def test_malformed_input_refuses(self):
+        for bad in (dict(kv_load_bytes=0), dict(kv_load_bytes=True), dict(kv_load_bytes=1.5), dict(rotation=None)):
+            with self.assertRaises(ValueError, msg=bad):
+                profile.kv_load_rotation_check(dict(self.config(0.9), **bad), self.fs(100, 50))
+
+
 @unittest.skipUnless(sys.platform == 'linux', 'actual Linux fd-exec seam')
 class MasterReplacementState(unittest.TestCase):
     """R5: a replacement master reuses the original's retained state, never a
