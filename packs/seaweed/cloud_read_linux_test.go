@@ -64,15 +64,16 @@ type readSSH struct {
 	commandsRead           []string
 	stopDone, contTooEarly bool
 	*soakHost
-	muRead         sync.Mutex
-	seed, dc, http []byte
-	row            map[string]any
-	mode           string
-	pre            float64
-	replaced       bool
-	cancel         context.CancelFunc
-	cont           int
-	role           string
+	muRead                sync.Mutex
+	seed, dc, http        []byte
+	row                   map[string]any
+	mode                  string
+	pre                   float64
+	replaced              bool
+	cancel                context.CancelFunc
+	cont                  int
+	role                  string
+	tailRelease, tailDone chan struct{}
 }
 
 func (h *readSSH) exec(cmd string, ch ssh.Channel) uint32 {
@@ -83,6 +84,19 @@ func (h *readSSH) exec(cmd string, ch ssh.Channel) uint32 {
 	switch {
 	case strings.Contains(plain, "kill -STOP"):
 		h.pre, _ = controllerMono()
+		if h.tailRelease != nil {
+			h.muRead.Unlock()
+			if h.mode == "lost-stop" {
+				ch.Close() // Local reply lost; remote STOP has not happened yet.
+			} else {
+				ch.Read(make([]byte, 1)) // Wait for the client's deadline/transport close.
+			}
+			<-h.tailRelease
+			h.muRead.Lock()
+			h.stopDone, h.contTooEarly = true, h.cont != 0
+			close(h.tailDone)
+			return 0
+		}
 		if h.mode == "stop-unknown" {
 			return 23
 		}
@@ -275,7 +289,11 @@ func TestDirectReadCasesActualCallerAndCleanup(t *testing.T) {
 			}
 			h.muRead.Lock()
 			defer h.muRead.Unlock()
-			if tc.name == "volume-freeze" && h.cont != 1 {
+			wantCont := 1
+			if tc.mode == "stop-unknown" {
+				wantCont = 0
+			}
+			if tc.name == "volume-freeze" && h.cont != wantCont {
 				t.Fatalf("CONT calls=%d err%v", h.cont, err)
 			}
 			for _, cmd := range h.commandsRead {
@@ -331,5 +349,52 @@ func TestDirectReadJobsReuseProfileAndWorker(t *testing.T) {
 				t.Fatalf("new worker path: %+v", j)
 			}
 		}
+	}
+}
+
+// The fake remote retains a pending STOP after its reply channel is gone.
+// No real host/signal is involved; run() must fail and tear down both hosts.
+func TestDirectReadFreezeLostStopTail(t *testing.T) {
+	old := chaosSettle
+	chaosSettle = 0
+	defer func() { chaosSettle = old }()
+	for _, mode := range []string{"lost-stop", "deadline-stop"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h, _, ctx := readDirectFixture(t, "volume-freeze", mode)
+			h.tailRelease, h.tailDone = make(chan struct{}), make(chan struct{})
+			if mode == "deadline-stop" {
+				s.deadline = time.Now().Add(time.Second)
+			}
+			file, err := s.run(ctx)
+			close(h.tailRelease)
+			select {
+			case <-h.tailDone:
+			case <-time.After(time.Second):
+				t.Fatal("retained STOP tail did not settle")
+			}
+			h.muRead.Lock()
+			defer h.muRead.Unlock()
+			if err == nil || !strings.Contains(err.Error(), "UNKNOWN") || file != "" {
+				t.Errorf("uncertain STOP verdict: file=%s err=%v", file, err)
+			}
+			if !h.stopDone || h.cont != 0 || h.contTooEarly {
+				t.Errorf("late STOP: done=%v CONT=%d before-tail=%v", h.stopDone, h.cont, h.contTooEarly)
+			}
+			for _, host := range []string{"m01", "m02"} {
+				for _, name := range []string{"cloud-cleanup.json", "cloud-postflight.json"} {
+					b, e := os.ReadFile(filepath.Join(s.c.Output, host, name))
+					if e != nil {
+						t.Fatal(e)
+					}
+					var row struct {
+						Exit  int    `json:"exit_code"`
+						Error string `json:"error"`
+					}
+					if json.Unmarshal(b, &row) != nil || row.Exit != 0 || row.Error != "" {
+						t.Fatalf("cleanup %s/%s: %s", host, name, b)
+					}
+				}
+			}
+		})
 	}
 }

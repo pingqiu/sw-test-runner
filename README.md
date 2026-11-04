@@ -342,6 +342,7 @@ Restart cases check fresh DC and HTTP recovery; filer HTTP recovery checks
 retained metadata through the replacement. Freeze holds the volume for at least
 20 s and requires a real overlapping GET plus continuing load after validated
 resume; HTTP controls remain deferred for freeze. `read-case.json` in the output
-contains the result and receipts; step JSON files and per-host cleanup/postflight
-logs are alongside it. Wrong bytes, missing proof and unclean postflight fail;
-missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.
+contains the case-only result and receipts; overall success requires the CLI result
+and clean per-host cleanup/postflight logs. An uncertain STOP is UNKNOWN: teardown
+kills the victim without racing it with CONT. Wrong bytes, missing proof and unclean
+postflight fail; missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.

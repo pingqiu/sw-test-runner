@@ -84,7 +84,7 @@ func (s *directSoak) readReady(ctx context.Context, want tr.ProcessIdentity) err
 	return nil
 }
 
-// Fault dispatches own their connection until their bounded reply is joined.
+// Fault dispatches own their connection; a transport failure leaves STOP uncertain.
 func (s *directSoak) readSignal(ctx context.Context, name, command string) (string, error) {
 	n := s.c.node(s.hosts["m02"])
 	defer n.Close()
@@ -101,7 +101,7 @@ func (s *directSoak) readFreeze(ctx context.Context, victim string) (w freezeWin
 	if err != nil {
 		return w, err
 	}
-	attempted, stopping := false, false
+	attempted, stopped := false, false
 	resume := func(cx context.Context) error {
 		attempted = true
 		cmd := "test \"$(cat /proc/sys/kernel/random/boot_id)\" = " + cloudQuote(id.BootID) + "; " + chaosContScript(strconv.Itoa(id.PID), strconv.FormatUint(id.StartTime, 10))
@@ -116,7 +116,7 @@ func (s *directSoak) readFreeze(ctx context.Context, victim string) (w freezeWin
 		return nil
 	}
 	defer func() {
-		if stopping && !attempted {
+		if stopped && !attempted {
 			hard, _ := time.Parse(time.RFC3339Nano, s.d.Deadlines.Hard)
 			cleanup, cancel := context.WithDeadline(context.WithoutCancel(ctx), hard)
 			defer cancel()
@@ -134,14 +134,14 @@ func (s *directSoak) readFreeze(ctx context.Context, victim string) (w freezeWin
 	}
 	prefix := mainPID(s.unit(victim))
 	cmd := prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", id.PID, id.StartTime) + strings.TrimPrefix(chaosStopScript(s.unit(victim)), prefix)
-	// Join the bounded STOP dispatch before the cancellation cleanup may CONT.
+	// Only a successful STOP reply permits CONT; otherwise owned teardown kills it.
 	stop, cancel := context.WithDeadline(context.WithoutCancel(ctx), s.deadline)
 	defer cancel()
-	stopping = true
 	out, err := s.readSignal(stop, "read-stop", cmd)
 	if err != nil || !strings.HasSuffix(out, "STOPPED\n") {
-		return w, errors.Join(err, errors.New("read_case STOP not witnessed"))
+		return w, errors.Join(err, errors.New("read_case STOP UNKNOWN: not witnessed"))
 	}
+	stopped = true
 	w.Stopped, err = controllerMono()
 	if err != nil {
 		return w, err
@@ -178,7 +178,7 @@ func (s *directSoak) readCase(ctx context.Context) (string, error) {
 	if err := json.Unmarshal([]byte(s.b.Jobs["read-load"].Argv[3]), &c); err != nil {
 		return "", err
 	}
-	observed := map[string]any{"case": s.c.ReadCase}
+	observed := map[string]any{"case": s.c.ReadCase, "scope": "case-only"}
 	read := func(label, stage, route string) error {
 		e, err := s.step(ctx, label, 150)
 		if err != nil {
