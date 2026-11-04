@@ -259,14 +259,15 @@ func TestDirectSoakGate(t *testing.T) {
 		cfg    func(*CloudConfig)
 		want   string
 	}{
-		"one host":    {want: gate},
-		"with files":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Files = map[string]CloudFile{"weed": {}} }, want: gate},
-		"with ec":     {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.ECStage1 = true }, want: gate},
-		"with chaos":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Chaos = true }, want: gate},
-		"with repl":   {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Replication = "001" }, want: gate},
-		"no release":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakRelease = "" }, want: gate},
-		"no profile":  {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = filepath.Join(t.TempDir(), "absent.json") }, want: "no such file"},
-		"wrong input": {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = writeProfile(t, `{"requested_inventory":"{}"}`) }, want: "not the soak profile's requested inventory"},
+		"one host":           {want: gate},
+		"with files":         {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Files = map[string]CloudFile{"weed": {}} }, want: gate},
+		"with ec":            {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.ECStage1 = true }, want: gate},
+		"with master writes": {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.MasterWrites = true }, want: gate},
+		"with chaos":         {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Chaos = true }, want: gate},
+		"with repl":          {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.Replication = "001" }, want: gate},
+		"no release":         {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakRelease = "" }, want: gate},
+		"no profile":         {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = filepath.Join(t.TempDir(), "absent.json") }, want: "no such file"},
+		"wrong input":        {mutate: []func(*inventory.Document){two}, cfg: func(c *CloudConfig) { c.SoakProfile = writeProfile(t, `{"requested_inventory":"{}"}`) }, want: "not the soak profile's requested inventory"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := CloudConfig{KVSoak: true, SSHKey: key, Output: t.TempDir(), SoakRelease: t.TempDir()}

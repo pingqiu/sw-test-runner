@@ -90,7 +90,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", e
 	}
 	if c.KVSoak {
-		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
+		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.SoakRelease == "" || c.ECStage1 || c.MasterWrites || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
 			return "", errors.New("kv_soak requires a two-host onprem inventory and no other phase")
 		}
 		return runDirectSoak(ctx, raw, c)
