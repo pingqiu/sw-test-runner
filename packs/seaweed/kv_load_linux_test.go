@@ -40,18 +40,7 @@ func TestKVLoadPatternReachesTheAdmittedLoadArgv(t *testing.T) {
 // (datasetBytes) before anything checks the pattern, and bind's schedule check
 // then refuses the plan it built.
 func TestBuildProfileRefusesAnEmptyPatternWithoutPanic(t *testing.T) {
-	var in ProfileInput
-	soakProfile(t, 45*time.Minute, func(x *SoakPlan) { x.Pattern = &LoadPattern{} }, func(f *cpuFixture, d *inventory.Document) {
-		settings := *f.plan.Soak
-		settings.Setup, settings.Evidence, settings.Assess, settings.FaultReady = Step{}, Step{}, Step{}, nil
-		in = ProfileInput{Requested: f.plan.Requested, Resolved: f.plan.Resolved, Smoke: f.plan.Smoke, Files: map[string]map[string]string{}, Soak: &settings}
-		for _, dep := range f.policy.Deployments {
-			in.Files[dep.NodeID] = map[string]string{}
-			for _, file := range dep.Files {
-				in.Files[dep.NodeID][file.Path] = file.SHA256
-			}
-		}
-	})
+	in := soakInput(t, 45*time.Minute, func(x *SoakPlan) { x.Pattern = &LoadPattern{} })
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("BuildProfile panicked on pattern {}: %v", r)
