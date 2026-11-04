@@ -168,10 +168,19 @@ class Pattern:
     def draw(self):
         return min(bisect.bisect(self.cum, self.rng.random() * self.cum[-1]), self.p['keys'] - 1)
 
+    def finished(self, now):
+        """True once every declared phase ran to its end."""
+        phases = self.p['phases']
+        while 0 < self.phase < len(phases) and now >= self.started + phases[self.phase]['duration_s']:
+            self.phase, self.started = self.phase + 1, self.started + phases[self.phase]['duration_s']
+        return self.phase >= len(phases)
+
     def next(self, now, writing_allowed, pending_sets, latest, busy):
         """-> ('set', key, seed) | ('get', key) | None for this free client."""
         phases = self.p['phases']
         if self.phase == 0:
+            if self.cursor < self.p['keys'] and not writing_allowed:
+                return None  # past the write stop, write_once can't finish: finished() then fails the load
             if self.cursor < self.p['keys']:
                 key = self.key(self.cursor)
                 self.cursor += 1
@@ -179,9 +188,7 @@ class Pattern:
             if pending_sets:
                 return None  # every key is written once and acknowledged before the reads
             self.phase, self.started = 1, now
-        while self.phase < len(phases) and now >= self.started + phases[self.phase]['duration_s']:
-            self.phase, self.started = self.phase + 1, self.started + phases[self.phase]['duration_s']
-        if self.phase >= len(phases):
+        if self.finished(now):
             return None
         index = self.draw()
         key = self.key(index)
@@ -375,7 +382,8 @@ def run(config):
             for i in range(clients):
                 if i in commands or now < available.get(i, 0):
                     continue
-                key = next((k for k in verify if k not in busy), None)
+                # kv_load's write_once phase reads nothing, not even verification, until every write is ACKed
+                key = None if pattern and pattern.phase == 0 else next((k for k in verify if k not in busy), None)
                 if key is not None:
                     verify.remove(key)
                     send(i, 'get', key, oracle.latest[key].length, verification=True)
@@ -399,6 +407,8 @@ def run(config):
                         send(i, 'get', key, oracle.latest[key].length)
             time.sleep(.002)
         body_end = time.monotonic()
+        if pattern and not pattern.finished(body_end):
+            raise OracleError('kv_load phases did not complete within the load')
         log('op-events.jsonl', dict(event='body_end', mono=body_end))
         while time.monotonic() < end + config['quiescence_s']:  # drain, admit nothing
             for i in range(clients):

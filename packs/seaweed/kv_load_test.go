@@ -17,26 +17,28 @@ func TestLoadPatternBounds(t *testing.T) {
 		t.Fatalf("the default pattern was refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*LoadPattern){
-		"no clients":            func(p *LoadPattern) { p.Clients = 0 },
-		"65 clients":            func(p *LoadPattern) { p.Clients = 65 },
-		"transport":             func(p *LoadPattern) { p.Transport = "rdma" },
-		"no keys":               func(p *LoadPattern) { p.Keys = 0 },
-		"object past the limit": func(p *LoadPattern) { p.ObjectBytes = 32 << 20 },
-		"zero rate":             func(p *LoadPattern) { p.RatePerClient = 0 },
-		"NaN rate":              func(p *LoadPattern) { p.RatePerClient = math.NaN() },
-		"rate over 100":         func(p *LoadPattern) { p.RatePerClient = 101 },
-		"uniform with s":        func(p *LoadPattern) { p.Distribution = "uniform" },
-		"zipf s 0":              func(p *LoadPattern) { p.ZipfS = 0 },
-		"zipf s 3.5":            func(p *LoadPattern) { p.ZipfS = 3.5 },
-		"other distribution":    func(p *LoadPattern) { p.Distribution, p.ZipfS = "hot", 0 },
-		"reads first":           func(p *LoadPattern) { p.Phases[0] = LoadPhase{Kind: "read", DurationS: 60} },
-		"write_once timed":      func(p *LoadPattern) { p.Phases[0].DurationS = 60 },
-		"one phase":             func(p *LoadPattern) { p.Phases = p.Phases[:1] },
-		"five phases":           func(p *LoadPattern) { p.Phases = append(p.Phases, p.Phases[1], p.Phases[1], p.Phases[1]) },
-		"read without time":     func(p *LoadPattern) { p.Phases[1].DurationS = 0 },
-		"read with a ratio":     func(p *LoadPattern) { p.Phases[1].ReadRatio = 0.5 },
-		"mixed ratio 1":         func(p *LoadPattern) { p.Phases[1] = LoadPhase{Kind: "mixed", DurationS: 60, ReadRatio: 1} },
-		"phases overrun":        func(p *LoadPattern) { p.Phases[1].DurationS = 1790 }, // 4096/(32*10) = 12.8 s of writes first
+		"no clients":             func(p *LoadPattern) { p.Clients = 0 },
+		"65 clients":             func(p *LoadPattern) { p.Clients = 65 },
+		"transport":              func(p *LoadPattern) { p.Transport = "rdma" },
+		"http only":              func(p *LoadPattern) { p.Transport = "http" }, // the mandatory client kill needs a DC worker
+		"no keys":                func(p *LoadPattern) { p.Keys = 0 },
+		"object past the limit":  func(p *LoadPattern) { p.ObjectBytes = 32 << 20 },
+		"zero rate":              func(p *LoadPattern) { p.RatePerClient = 0 },
+		"NaN rate":               func(p *LoadPattern) { p.RatePerClient = math.NaN() },
+		"rate over 100":          func(p *LoadPattern) { p.RatePerClient = 101 },
+		"uniform with s":         func(p *LoadPattern) { p.Distribution = "uniform" },
+		"zipf s 0":               func(p *LoadPattern) { p.ZipfS = 0 },
+		"zipf s 3.5":             func(p *LoadPattern) { p.ZipfS = 3.5 },
+		"other distribution":     func(p *LoadPattern) { p.Distribution, p.ZipfS = "hot", 0 },
+		"reads first":            func(p *LoadPattern) { p.Phases[0] = LoadPhase{Kind: "read", DurationS: 60} },
+		"write_once timed":       func(p *LoadPattern) { p.Phases[0].DurationS = 60 },
+		"one phase":              func(p *LoadPattern) { p.Phases = p.Phases[:1] },
+		"five phases":            func(p *LoadPattern) { p.Phases = append(p.Phases, p.Phases[1], p.Phases[1], p.Phases[1]) },
+		"read without time":      func(p *LoadPattern) { p.Phases[1].DurationS = 0 },
+		"read with a ratio":      func(p *LoadPattern) { p.Phases[1].ReadRatio = 0.5 },
+		"mixed ratio 1":          func(p *LoadPattern) { p.Phases[1] = LoadPhase{Kind: "mixed", DurationS: 60, ReadRatio: 1} },
+		"phases overrun":         func(p *LoadPattern) { p.Phases[1].DurationS = 1790 },
+		"writes and their reads": func(p *LoadPattern) { p.Phases[1].DurationS = 1780 }, // 2*4096/(32*10) = 25.6 s before the reads
 	} {
 		p := lmcacheLike()
 		mutate(p)

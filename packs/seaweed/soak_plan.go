@@ -64,7 +64,8 @@ type LoadPhase struct {
 // at its declared rate, to fit inside the load's duration.
 func (p *LoadPattern) check(durationS int) error {
 	finite := func(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
-	if p.Clients < 1 || p.Clients > 64 || (p.Transport != "dc" && p.Transport != "http") || p.Keys < 1 || p.Keys > 1<<20 ||
+	// dc only: the worker's mandatory client kill takes a DC worker.
+	if p.Clients < 1 || p.Clients > 64 || p.Transport != "dc" || p.Keys < 1 || p.Keys > 1<<20 ||
 		p.ObjectBytes < 1 || p.ObjectBytes > 31<<20 || !finite(p.RatePerClient) || p.RatePerClient <= 0 || p.RatePerClient > 100 {
 		return errors.New("kv_load pattern clients, transport, keys, object_bytes or rate out of range")
 	}
@@ -74,7 +75,7 @@ func (p *LoadPattern) check(durationS int) error {
 	if len(p.Phases) < 2 || len(p.Phases) > 4 || p.Phases[0].Kind != "write_once" || p.Phases[0].DurationS != 0 || p.Phases[0].ReadRatio != 0 {
 		return errors.New("kv_load pattern starts with one write_once phase and has 2 to 4 phases")
 	}
-	need := float64(p.Keys) / (float64(p.Clients) * p.RatePerClient)
+	need := 2 * float64(p.Keys) / (float64(p.Clients) * p.RatePerClient) // each write, then its verification read
 	for _, ph := range p.Phases[1:] {
 		if ph.DurationS < 1 || ph.DurationS > durationS || !(ph.Kind == "read" && ph.ReadRatio == 0 ||
 			ph.Kind == "mixed" && finite(ph.ReadRatio) && ph.ReadRatio > 0 && ph.ReadRatio < 1) {

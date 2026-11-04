@@ -318,10 +318,38 @@ class PatternMode(unittest.TestCase):
         self.assertAlmostEqual(ops.count('set') / len(ops), .25, delta=.03)
         self.assertNotIn('set', [p.next(1, False, {}, latest, {})[0] for _ in range(400)])
 
+    def test_write_once_stops_at_the_write_stop(self):
+        p = self.pattern()
+        self.assertIsNone(p.next(0, False, {}, {}, {}))
+        self.assertEqual(p.cursor, 0)
+        self.assertFalse(p.finished(10 ** 6))
+
     def test_a_busy_key_is_skipped_not_doubled(self):
         p = self.pattern(keys=1, distribution='uniform', zipf_s=0)
         p.next(0, True, {}, {}, {})
         self.assertIsNone(p.next(1, True, {}, {p.key(0): 1}, {p.key(0): 2}))
+
+
+class KVLoadRun(unittest.TestCase):
+    """The real run() in pattern mode, with the fake native child."""
+    setUp, events = FaultWindowWorker.setUp, FaultWindowWorker.events
+    PATTERN = dict(clients=2, transport='dc', keys=6, distribution='uniform', object_bytes=64, rate_per_client=50,
+                   phases=[dict(kind='write_once'), dict(kind='read', duration_s=1)])
+
+    def test_every_write_is_acked_before_any_read_and_the_reads_run(self):
+        self.config['pattern'] = self.PATTERN
+        soak_load.run(self.config)
+        ops = self.events()
+        sets, gets = [e for e in ops if e['action'] == 'set'], [e for e in ops if e['action'] == 'get']
+        self.assertEqual(len({e['key'] for e in sets}), 6)
+        self.assertEqual(len(sets), 6)
+        self.assertTrue(gets)
+        self.assertLessEqual(max(e['completed'] for e in sets), min(e['dispatched'] for e in gets))
+
+    def test_phases_that_do_not_complete_fail_the_load(self):
+        self.config['pattern'] = dict(self.PATTERN, phases=[dict(kind='write_once'), dict(kind='read', duration_s=30)])
+        with self.assertRaisesRegex(soak_load.OracleError, 'did not complete'):
+            soak_load.run(self.config)
 
 
 if __name__ == '__main__':
