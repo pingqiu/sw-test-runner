@@ -18,7 +18,7 @@ flowchart TD
   cli --> engine["engine<br/>sequence phases"]
   engine --> registry["registry<br/>name + tier → handler"]
   registry --> actions["actions/*<br/>(core/chaos/io/iscsi/nvme/k8s)"]
-  registry --> packs["packs/*<br/>(block/v3block/kv/s3/v1weed)"]
+  registry --> packs["packs/*<br/>(block/v3block/kv/s3)"]
   actions --> node["infra.Node<br/>SSH or local exec"]
   packs --> node
   node --> lab["lab nodes<br/>(m01 / m02 / k3s)"]

@@ -8,7 +8,7 @@ Where things live, and how a scenario flows through the code.
 |---|---|---|
 | `*.go` (repo root) | `testrunner` | The **product-agnostic core**: scenario engine, parser, registry, reporting, run bundles, distributed coordination. |
 | `actions/` | `actions` | Cross-product **action handlers** grouped by tier (system, fault/chaos, io, iscsi, nvme, k8s, metrics, build, devops, results). |
-| `packs/` | per pack | **Per-product action plugins** — `block`, `kv`, `s3`, `v1weed`, `v3block`. Each exposes `RegisterPack(r *tr.Registry)`. |
+| `packs/` | per pack | **Per-product action plugins** — `block`, `kv`, `s3`, `v3block`. Each exposes `RegisterPack(r *tr.Registry)`. |
 | `cmd/` | `main` | **Per-product binaries** (see [Packs & Binaries](packs-and-binaries.md)). |
 | `cli/` | `cli` | Shared CLI dispatch (`run`, `list`, `validate`, `status`, `list-runs`, `cancel`, `console`). |
 | `infra/` | `infra` | Node abstraction (`Node` = SSH or local exec), daemon/target lifecycle, iSCSI client, artifact collection. |

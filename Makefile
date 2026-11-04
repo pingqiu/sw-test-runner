@@ -2,7 +2,7 @@
 # Recipes use real tabs (GNU make). Run `make help` for targets.
 
 BIN    := bin
-CMDS   := sw-test-runner seaweed-cloud swblock weedblock weedv1 sweeds3 testops-dashboard testops-controller
+CMDS   := sw-test-runner seaweed-cloud swblock weedblock sweeds3 testops-dashboard testops-controller
 GOFLAGS ?=
 
 .PHONY: all help build test vet clean wiki wiki-build $(addprefix build-,$(CMDS))

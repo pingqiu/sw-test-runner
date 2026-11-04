@@ -74,7 +74,6 @@ under `cmd/`:
 |---|---|---|
 | `swblock` | V3 seaweed-block | iSCSI / NVMe / CSI / K8s actions |
 | `weedblock` | V2 weed-block + KV | V2-shaped block actions |
-| `weedv1` | V1 stub | placeholder |
 | `sw-test-runner` | kitchen-sink | every pack registered |
 
 For an RDMA project, add `cmd/rdma/main.go` that registers the actions
