@@ -1004,6 +1004,12 @@ class KVLoadAssess(unittest.TestCase):
         inside = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['dispatched'] >= 1072)
         inside.update(dispatched=1071.5, submitted=1071.51, completed=1071.52)
         self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL')
+        # codex01: an op of a worker outside workers.json is foreign evidence, refused at the boundary: an old
+        # hit of worker 1 relabelled 99 must not quietly drop out of worker 1's generation.
+        ev = replacement_refused(outside_kill(kv_evidence()))
+        next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1)['worker'] = 99
+        with self.assertRaisesRegex(ValueError, 'op-event of a worker outside workers.json'):
+            self.run_on(ev)
 
     def test_op_events_are_bounded_by_the_declared_pattern_not_the_soak_caps(self):
         # kv_load run 2 (2026-11-04): a full 900 s load wrote 71.4 MB of op-events, over the soak's 64 MiB,

@@ -355,6 +355,8 @@ def assess(c):
     if not isinstance(workers, dict) or sorted(workers) != sorted(ids) or [typed(workers[i], pid=int, starttime=int, transport=str)
                                                                           ['transport'] for i in ids] != (['dc'] * len(ids) if pat else ['dc', 'dc', 'dc', 'http']):
         raise ValueError('workers.json is not the accepted client set')
+    if any(str(e['worker']) not in workers for e in ops):  # every op belongs to one admitted client
+        raise ValueError('op-event of a worker outside workers.json')
 
     # Oracle replay: every SET re-derived from its seed, every GET outcome exactly one recognised case.
     oracle, by_seq, wrong, misses, unknown, acked, hits, latest_raw = Oracle(), {}, [], [], [], {}, {}, {}
