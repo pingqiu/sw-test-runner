@@ -143,22 +143,24 @@ def rotation_boundaries(events, begin, end):
 
 
 def start_boundaries(events, begin, end, bounds):
-    """Per VID with a success boundary S, M02 epoch B of its FIRST retiring line ("retiring non-replicated cache
+    """Per VID with a success boundary S, M02 epoch B of its LAST retiring line ("retiring non-replicated cache
     Volume N", mono #969: logged after the seal, immediately before unpublish, the first step that can make reads
-    miss) strictly between the VID's birth and S. A resumed rotation logs it again; the first one bounds the earliest
-    possible reader-visible step. A VID without one keeps B = S, the stricter success boundary. History refusals are
-    rotation_boundaries': this only refines a VID that already passed them."""
+    miss) strictly between the VID's birth and S. A resumed rotation logs it again; an earlier attempt may have failed
+    at unpublish and left the Volume published, so only the last line, the attempt that reached the success, bounds
+    the miss (claude03 P3-1: never an earlier, possibly unpublish-failed one; a failed delete after a good unpublish
+    is then judged stricter, not looser). Any retiring line outside (birth, S), or none, keeps B = S, the stricter
+    success boundary. History refusals are rotation_boundaries': this only refines a VID that already passed them."""
     out = {}
     for vid, s in bounds.items():
         rows = {e['sha256']: e for e in events if e['vid'] == vid}.values()
         births = [t for e in rows if e['kind'] == 'birth' for t in log_instants(e['stamp'], begin, end)]
         starts = sorted(t for e in rows if e['kind'] == 'start' for t in log_instants(e['stamp'], begin, end))
         inside = [t for t in starts if births and births[0] < t < s]
-        out[vid] = inside[0] if inside and len(inside) == len(starts) else s
+        out[vid] = inside[-1] if inside and len(inside) == len(starts) else s
     return out
 
 
-def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_hits=None):
+def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
     """Decision 3 revision (e45019f9 + codex01 8c56cca4), per miss: qualified observed ordering under the stated limit,
     in M01 mono; not a retirement or durability proof and not parity. The stated limit, accepted by Ping: a real loss
     between the version's last exact read and S is excused. `hits` are exact GETs of this same version."""
@@ -171,7 +173,7 @@ def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, 
         late_b = (starts or {}).get(vid, bounds[vid]) - lo
         if not ack['completed'] < early or not e['submitted'] > late_b:
             return False
-        if any(t > e['completed'] for t in (vid_hits or {}).get(vid, ())):  # C9: the VID served a read after this miss
+        if (vid_last_hit or {}).get(vid, -math.inf) > e['completed']:  # C9: the VID served a read after this miss
             return False
         if not any(h['submitted'] > ack['completed'] and h['completed'] < early for h in hits):  # C5
             return False
@@ -314,15 +316,15 @@ def assess(c):
         clock_error = ''
     except (ValueError, OSError) as error:  # no usable clock evidence: every miss stays unexcused
         lo, hi, bounds, starts, clock_error = 0, 0, {}, {}, '; clock: %s' % str(error)[:120]
-    vid_hits = {}  # every exact hit's completion, per VID of the version it read
+    vid_last_hit = {}  # per VID, the latest completion of any exact hit on a version it holds (C9)
     for g in gets:
         v = get_case(g) == 'hit' and by_seq.get((g['key'], g['sequence']), (None, None))[0]
         for vid in {int(f.split(',')[0]) for f in (v.fids if v else ())}:
-            vid_hits.setdefault(vid, []).append(g['completed'])
+            vid_last_hit[vid] = max(vid_last_hit.get(vid, -math.inf), g['completed'])
     def excused(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
         return bool(v) and latest == v and list(e['fids']) == list(v.fids) and \
-            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_hits)
+            miss_excused(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
     unexcused = [e['op'] for e, latest in misses if not excused(e, latest)]
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), unexcused[:10], clock_error))
 

@@ -443,9 +443,9 @@ class SoakAssess(unittest.TestCase):
         self.assertEqual(self.ledger(*rows), {20: EPOCH + 1160})
         self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1159.9, places=5)
 
-    def test_start_boundary_is_the_first_retiring_line_of_a_resumed_rotation(self):
+    def test_start_boundary_is_the_last_retiring_line_of_a_resumed_rotation(self):  # claude03 P3-1
         rows = (line('birth', 20, 995), line('start', 20, 1150), line('start', 20, 1159.9), line('success', 20, 1160))
-        self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1150, places=5)
+        self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1159.9, places=5)  # never the earlier, maybe failed, attempt
 
     def test_start_boundary_falls_back_to_the_success_line(self):
         self.assertEqual(self.starts(line('birth', 20, 995), line('success', 20, 1160)), {20: EPOCH + 1160})  # no retiring line
@@ -469,8 +469,40 @@ class SoakAssess(unittest.TestCase):
 
     def test_c9_a_later_hit_on_the_same_vid_refuses(self):
         args = self.boundary_args(1159.95)
-        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: [1110.1, 1159.951]}))  # hit before the miss ends
-        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: [1110.1, 1159.96]}))  # the VID still served
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1159.951}))  # latest hit before the miss ends
+        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1159.96}))  # the VID still served
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {3: 1999.0}))  # another VID's later hit
+
+    # codex01 R2 on 3a0e87c: C9 through the full assessor, a different key on the miss's VID and on another VID.
+    def add_hit_on(self, ev, key, vid, submitted):
+        q = ev['events'][-1]
+        seq = max(a['sequence'] for a in ev['acks']) + 1
+        seed = 'seed-c9-%d' % seq
+        a = dict(key=key, writer=0, seed=seed, submitted=1104.95, completed=1105, sequence=seq, length=64,
+                 digest=digest(seed, 64), fids=['%d,cd' % vid])
+        ev['acks'].append(a)
+        for kind in ('set', 'get'):
+            q['dispatched'] += 1
+            row = dict(op=str(q['dispatched']), worker=0, key=key, action=kind)
+            row.update(dict(dispatched=1104.94, submitted=1104.95, completed=1105, ok=True) if kind == 'set' else
+                       dict(dispatched=submitted - 0.01, submitted=submitted, completed=submitted + 0.1, ok=True, length=64,
+                            sha256=a['digest'], sequence=seq))
+            ev['events'].insert(-3, row)
+
+    def test_c9_a_different_key_hit_on_the_miss_vid_after_the_miss_refuses(self):
+        self.mutate(lambda ev: self.add_hit_on(ev, 'other-on-20', 20, 1181), 'misses')
+
+    def test_c9_a_hit_on_another_vid_after_the_miss_changes_nothing(self):
+        ev = evidence()
+        self.add_hit_on(ev, 'other-on-3', 3, 1181)
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+
+    def test_c9_a_same_vid_hit_before_the_miss_changes_nothing(self):
+        ev = evidence()
+        self.add_hit_on(ev, 'other-on-20', 20, 1170)
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
 
     def test_a_miss_reporting_foreign_fids_is_refused(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(fids=['3,ab']), 'misses')
