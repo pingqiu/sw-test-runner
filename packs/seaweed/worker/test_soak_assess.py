@@ -366,6 +366,13 @@ class SoakAssess(unittest.TestCase):
         ev = evidence()
         ch(ev)
         self.assertIn('misses', self.failing(self.run_on(ev)))
+        # The ordinary soak keeps its semantics: a recorded budget-refusal cause excuses nothing here.
+        ev = evidence()
+        ch(ev)
+        for e in ev['events']:
+            if e.get('miss'):
+                e['cause'] = 'budget_refusal'
+        self.assertIn('misses', self.failing(self.run_on(ev)))
         hit = [dict(submitted=1110, completed=1110.1)]
         args = (dict(submitted=1180, completed=1180.1), MissVersion(['20,ab']), dict(completed=1100),
                 [dict(req=1178, done=1178.1, writables=[], present=[])], {20: EPOCH + 1175}, EPOCH - .1, EPOCH + .1)
@@ -932,14 +939,25 @@ class KVLoadAssess(unittest.TestCase):
             self.assertEqual(self.failing(row), [rule] if rule else [], (cause, row['criteria']))
 
     def test_an_all_refused_process_may_lack_a_route_and_every_flagged_one_is_reported(self):
-        ev = kv_evidence()
-        name = 'native-stats-11-1.jsonl'  # worker 1's original process
         refused = dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=0, direct_rc_reads=0, copied_reads=0, read_calls=40)
-        ev['stats'][name] = [dict(status='OBSERVED', stats=dict(loader=refused,
-                                                               native_budget_refusal_process=dict(missing_keys_refused=40, missing_keys_deadline=0)))]
-        self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'PASS')
-        ev['stats'][name][0]['stats']['native_budget_refusal_process']['missing_keys_refused'] = 39  # one read not refused
-        self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL')
+        def all_refused(ev, counter=40):  # worker 1's original process: zero DC reads, every read a refusal miss
+            ev['stats']['native-stats-11-1.jsonl'] = [dict(status='OBSERVED', stats=dict(
+                loader=refused, native_budget_refusal_process=dict(missing_keys_refused=counter, missing_keys_deadline=0)))]
+            return ev
+        def worker1_refused(ev):  # worker 1 has no hit in any generation: each of its GETs a recorded refusal miss
+            for e in ev['events']:
+                if e.get('action') == 'get' and e['worker'] == 1:
+                    e.update(ok=True, miss=True, results=[False], error='', fids=['3,ab'], cause='budget_refusal')
+            return ev
+        self.assertEqual(self.failing(self.run_on(worker1_refused(all_refused(kv_evidence())))), [])
+        # One read not refused, a malformed counter (-1 makes 41 + -1 == 40), or a fraction: a route is needed.
+        for counter in (39, -1, 39.9):
+            ev = worker1_refused(all_refused(kv_evidence(), counter))
+            if counter == -1:
+                ev['stats']['native-stats-11-1.jsonl'][0]['stats']['native_budget_refusal_process']['missing_keys_deadline'] = 41
+            self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL', counter)
+        # codex01: hits in an earlier generation of the worker still need the route, whatever the last snapshot says.
+        self.assertEqual(self.run_on(all_refused(kv_evidence()))['criteria']['routes']['outcome'], 'FAIL')
         # All flagged processes are named, not the first six.
         ev = kv_evidence()
         ev['files']['workers.json'] = {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)}

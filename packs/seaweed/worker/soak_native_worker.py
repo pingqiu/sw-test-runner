@@ -25,10 +25,24 @@ def finish(conn, future, timeout=30):
     raise TimeoutError('native completion deadline')
 
 
+def k8_refusal_misses(stats):
+    """The K8 budget-refusal miss counter (refusal, its deadline or a hold-off) of one stats object, or None
+    when malformed. The one strict decoder (worker and assessor): every present counter a non-negative,
+    non-bool int; no native_budget_refusal_process at all is 0 (a build without K8)."""
+    if not isinstance(stats,dict): return None
+    b=stats.get('native_budget_refusal_process')
+    if b is None: return 0
+    if not isinstance(b,dict): return None
+    total=0
+    for k in ('missing_keys_refused','missing_keys_deadline'):
+        v=b.get(k,0)
+        if isinstance(v,bool) or not isinstance(v,int) or v<0: return None
+        total+=v
+    return total
+
+
 def refusal_misses(conn):
-    """This process's K8 budget-refusal miss counter (refusal, its deadline or a hold-off; 0 without it)."""
-    b=json.loads(conn.stats_json()).get('native_budget_refusal_process') or {}
-    return int(b.get('missing_keys_refused',0))+int(b.get('missing_keys_deadline',0))
+    return k8_refusal_misses(json.loads(conn.stats_json()))
 
 
 def work(conn, command, submitted=None):
@@ -54,7 +68,8 @@ def work(conn, command, submitted=None):
     if action=='get':
         row.update(length=len(buf),sha256=hashlib.sha256(buf).hexdigest(),
                    untouched=buf==bytearray(v^255 for v in expected))
-        if refusal_misses(conn)>refused_before:
+        refused_after=refusal_misses(conn)
+        if refused_before is not None and refused_after is not None and refused_after>refused_before:
             row['cause']='budget_refusal'
     return row
 

@@ -11,7 +11,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     _module = sys.modules['soak_load'] = types.ModuleType('soak_load')
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
-from soak_native_worker import payload
+from soak_native_worker import k8_refusal_misses, payload
 from soak_oracle import Oracle
 from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
@@ -213,11 +213,15 @@ def stats_name(identity):
     return 'native-stats-%d-%d.jsonl' % (typed(identity, pid=int)['pid'], typed(identity, starttime=int)['starttime'])
 
 
-def assess_routes(root, workers, kills):
+def assess_routes(root, workers, kills, refused_only=frozenset()):
     """Exactly one native-stats series per worker generation (4 originals + each replacement), none foreign,
-    and each one's last observed loader counters in the accepted DC or HTTP identity."""
+    and each one's last observed loader counters in the accepted DC or HTTP identity. kv_load only: a DC
+    process of a worker in `refused_only` (no hit in any of its generations) may show no route when its
+    every read was a K8 refusal miss."""
     expected = {stats_name(w): w['transport'] for w in workers.values()}
     expected.update({stats_name(k['replacement']): workers[str(k['worker'])]['transport'] for k in kills})
+    owner = {stats_name(w): i for i, w in workers.items()}
+    owner.update({stats_name(k['replacement']): str(k['worker']) for k in kills})
     present = {p.name for p in root.iterdir() if p.name.startswith('native-stats-')}
     bad = sorted(present ^ set(expected))
     for name in sorted(present & set(expected)):
@@ -231,9 +235,8 @@ def assess_routes(root, workers, kills):
             # A process whose every read was a K8 refusal miss has no route to show: zero DC reads and
             # read_calls equal to its refusal-miss counter. Any process with a read that was not refused
             # still needs its DC route.
-            k8 = observed[-1].get('native_budget_refusal_process') or {}
-            refused = k8.get('missing_keys_refused', 0) + k8.get('missing_keys_deadline', 0) if isinstance(k8, dict) else -1
-            all_refused = dc == 0 and isinstance(last.get('read_calls'), int) and last['read_calls'] > 0 and last['read_calls'] == refused
+            refused, calls = k8_refusal_misses(observed[-1]), last.get('read_calls')
+            all_refused = owner[name] in refused_only and dc == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
             ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (dc > 0 or all_refused)                 and rc == 0 and copied == 0
         else:
             ok = last['transport'] == 'http' and dc == 0 and rc == 0 and copied > 0
@@ -424,9 +427,10 @@ def assess(c):
         clock_error += '; %d inside fault windows, reported' % len(inside)
     # A K8 budget-refusal miss is a cache outcome by design, excused only when its own event names the
     # cause (the worker's counter delta across that GET); nothing else is inferred.
-    refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
-    unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
-    clock_error += '; %d budget-refusal misses excused' % len(refused)
+    if pat:  # kv_load only: the ordinary soak keeps its semantics
+        refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
+        unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
+        clock_error += '; %d budget-refusal misses excused' % len(refused)
     mark('misses', not unexcused, '%d misses, unexcused %s%s' % (len(misses), [e['op'] for e in unexcused][:10], clock_error))
 
     # Coverage, body, client kill, rotation, master fault effect.
@@ -459,7 +463,9 @@ def assess(c):
         before = max((max(p['present'], default=0) for p in good if mf and p['req'] < mf['dispatch_mono']), default=0)
         after = max((max(p['present'], default=0) for p in good if mf and p['req'] > mf['ready_mono']), default=0)
         mark('max_vid_advanced', mf is not None and after > before, 'before %d after %d' % (before, after))
-    route_bad = assess_routes(root, workers, kills)
+    # kv_load: a worker with a hit in any generation always needs its route.
+    hit_workers = {str(e['worker']) for e in gets if get_case(e) == 'hit'}
+    route_bad = assess_routes(root, workers, kills, frozenset(set(workers) - hit_workers) if pat else frozenset())
     mark('routes', not route_bad, 'bad %s' % route_bad)
 
     # K7 (a FINDING, never a FAIL): the first non-HTTP SET after each fault's successful READY.

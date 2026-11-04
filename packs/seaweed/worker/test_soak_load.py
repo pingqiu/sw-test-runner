@@ -334,6 +334,21 @@ class RefusalCause(unittest.TestCase):
             _os.read(self.r, 1)
             return [self.done.pop()]
 
+    def test_the_counter_decoder_is_strict(self):
+        from soak_native_worker import k8_refusal_misses as k8
+        self.assertEqual(k8(dict(native_budget_refusal_process=dict(missing_keys_refused=3, missing_keys_deadline=2))), 5)
+        self.assertEqual(k8(dict()), 0)  # a build without K8
+        for bad in (-1, 0.9, True, '3', None):
+            self.assertIsNone(k8(dict(native_budget_refusal_process=dict(missing_keys_refused=bad))), bad)
+        self.assertIsNone(k8(dict(native_budget_refusal_process=[])))
+
+    def test_a_fractional_counter_names_no_cause(self):
+        import soak_native_worker
+        conn = self.Conn(True)
+        conn.refused = 0.9  # 0.9 -> 1.9 must not read as a refusal
+        cmd = dict(action='get', key='k', seed='s', length=8, operation_id='1')
+        self.assertNotIn('cause', soak_native_worker.work(conn, cmd))
+
     def test_a_refused_get_is_named_and_a_plain_miss_is_not(self):
         import soak_native_worker
         cmd = dict(action='get', key='k', seed='s', length=8, operation_id='1')
