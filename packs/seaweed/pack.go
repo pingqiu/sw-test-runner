@@ -48,11 +48,6 @@ func RegisterPack(r *tr.Registry) {
 	r.RegisterFunc("seaweed_plan", tr.TierDevOps, plan)
 }
 
-// leaseEnvelope lets a worker-owned run hold the lab past ten minutes only when
-// its pinned scenario is a valid KV soak plan under the same bind every phase
-// runs (here against the declared pins and boots that readback must later
-// equal). Anything else, including a soak label on another plan, is refused.
-
 func invalid(action string, err error) (map[string]string, error) {
 	const hint = "correct inventory against seaweed.inventory/v1 and preserve requested scope"
 	return result("refused", "INVENTORY_INVALID", hint, action, nil), fmt.Errorf("INVENTORY_INVALID: %w; remedy: %s", err, hint)

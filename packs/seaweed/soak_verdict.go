@@ -191,7 +191,3 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	}
 	return v, nil
 }
-
-// soakVerdict runs after the plan's ordinary collect jobs: the M02 evidence
-// job, its bounded output published into the M01 run root, then the M01
-// assessor. A FAIL or any error fails the pack; earlier failures already did.
