@@ -145,20 +145,25 @@ def rotation_boundaries(events, begin, end):
 
 
 def start_boundaries(events, begin, end, bounds):
-    """Per VID with a success boundary S, M02 epoch B of its LAST retiring line ("retiring non-replicated cache
-    Volume N", mono #969: logged after the seal, immediately before unpublish, the first step that can make reads
-    miss) strictly between the VID's birth and S. A resumed rotation logs it again; an earlier attempt may have failed
-    at unpublish and left the Volume published, so only the last line, the attempt that reached the success, bounds
-    the miss (claude03 P3-1: never an earlier, possibly unpublish-failed one; a failed delete after a good unpublish
-    is then judged stricter, not looser). Any retiring line outside (birth, S), or none, keeps B = S, the stricter
-    success boundary. History refusals are rotation_boundaries': this only refines a VID that already passed them."""
+    """Per VID with a success boundary S, M02 epoch B of its FIRST retiring line ("retiring before seal|unpublish:
+    cache Volume N": mono #972 logs it once per attempt, immediately before that attempt's first potentially
+    reader-visible step, i.e. before the seal on a fresh rotation and before unpublish on a resumed one) strictly
+    between the VID's birth and S. The line marks placement before the first potential effect, not proof it happened.
+    The seal's read fence is monotonic (a durable retirement intent is never cleared automatically), so the first
+    attempt's line bounds the earliest instant readers may lose the Volume, and a resumed rotation's later line can
+    only be later. An attempt whose seal or unpublish failed and left the Volume serving is refused only when C9
+    OBSERVES it (a later same-VID hit); without a later read such a miss is excused, inside the accepted
+    last-exact-read..S blind spot (decision 3's stated limit), never claimed as proof the fence held. Only #972's
+    text yields a start event (lab_profile.RETIRING); #969's form keeps B = S. Any retiring line outside (birth, S), or none,
+    keeps B = S, the stricter success boundary. History refusals are rotation_boundaries': this only refines a VID
+    that already passed them."""
     out = {}
     for vid, s in bounds.items():
         rows = {e['sha256']: e for e in events if e['vid'] == vid}.values()
         births = [t for e in rows if e['kind'] == 'birth' for t in log_instants(e['stamp'], begin, end)]
         starts = sorted(t for e in rows if e['kind'] == 'start' for t in log_instants(e['stamp'], begin, end))
         inside = [t for t in starts if births and births[0] < t < s]
-        out[vid] = inside[-1] if inside and len(inside) == len(starts) else s
+        out[vid] = inside[0] if inside and len(inside) == len(starts) else s
     return out
 
 
