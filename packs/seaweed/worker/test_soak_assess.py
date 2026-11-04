@@ -28,7 +28,8 @@ def stamp(mono, offset=EPOCH):
 
 
 def line(kind, vid, mono, gen=0, offset=EPOCH):
-    text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'success': 'rotated non-replicated cache Volume %d collection=lmcache'}[kind]
+    text = {'birth': 'Created Volume %d on', 'unwritable': 'Volume %d becomes unwritable', 'start': 'retiring non-replicated cache Volume %d collection=lmcache',
+            'success': 'rotated non-replicated cache Volume %d collection=lmcache'}[kind]
     raw = stamp(mono, offset) + ' ' + text % vid
     return dict(kind=kind, vid=vid, stamp=stamp(mono, offset), gen=gen, line=raw, sha256=hashlib.sha256(raw.encode()).hexdigest())
 
@@ -431,6 +432,77 @@ class SoakAssess(unittest.TestCase):
         for e in (a, b, c):
             e['line'] = 'same presentation prefix'
         self.assertEqual(self.ledger(a, b, c), {20: EPOCH + 1160})
+
+    # The retiring boundary B (mono #969) and C9 (claude02 miss analysis 2026-11-04).
+    def starts(self, *rows, begin=EPOCH + 900, end=EPOCH + 2900):
+        rows = list(rows)
+        return soak_assess.start_boundaries(rows, begin, end, soak_assess.rotation_boundaries(rows, begin, end))
+
+    def test_ledger_a_retiring_line_keeps_the_success_boundary(self):
+        rows = (line('birth', 20, 995), line('unwritable', 20, 1150), line('start', 20, 1159.9), line('success', 20, 1160))
+        self.assertEqual(self.ledger(*rows), {20: EPOCH + 1160})
+        self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1159.9, places=5)
+
+    def test_start_boundary_is_the_last_retiring_line_of_a_resumed_rotation(self):  # claude03 P3-1
+        rows = (line('birth', 20, 995), line('start', 20, 1150), line('start', 20, 1159.9), line('success', 20, 1160))
+        self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1159.9, places=5)  # never the earlier, maybe failed, attempt
+
+    def test_start_boundary_falls_back_to_the_success_line(self):
+        self.assertEqual(self.starts(line('birth', 20, 995), line('success', 20, 1160)), {20: EPOCH + 1160})  # no retiring line
+        # a retiring line after the success leaves the VID out entirely (rotation_boundaries' history rule)
+        self.assertEqual(self.starts(line('birth', 20, 995), line('success', 20, 1160), line('start', 20, 1161)), {})
+
+    def boundary_args(self, submitted):
+        # The field shape: exact reads up to shortly before the rotation, then a GET landing after B but before S.
+        hit = [dict(submitted=1110, completed=1110.1)]
+        return (dict(submitted=submitted, completed=submitted + 0.001), MissVersion(['20,ab']), dict(completed=1100),
+                [dict(req=1180, done=1180.1, writables=[], present=[])], {20: EPOCH + 1160}, EPOCH - .02, EPOCH + .02, set(), hit)
+
+    def test_c4_red_green_a_get_between_retiring_and_success(self):
+        args = self.boundary_args(1159.95)  # after late(B) = 1159.92, before late(S) = 1160.02
+        self.assertFalse(soak_assess.miss_excused(*args))  # red: the success line alone cannot order it
+        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1160}))  # B defaulted to S: still refused
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}))  # green: after the retiring line
+
+    def test_c4_a_get_straddling_the_retiring_line_still_refuses(self):
+        self.assertFalse(soak_assess.miss_excused(*self.boundary_args(1159.89), {20: EPOCH + 1159.9}))  # before late(B)
+
+    def test_c9_a_later_hit_on_the_same_vid_refuses(self):
+        args = self.boundary_args(1159.95)
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1159.951}))  # latest hit before the miss ends
+        self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1159.96}))  # the VID still served
+        self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {3: 1999.0}))  # another VID's later hit
+
+    # codex01 R2 on 3a0e87c: C9 through the full assessor, a different key on the miss's VID and on another VID.
+    def add_hit_on(self, ev, key, vid, submitted):
+        q = ev['events'][-1]
+        seq = max(a['sequence'] for a in ev['acks']) + 1
+        seed = 'seed-c9-%d' % seq
+        a = dict(key=key, writer=0, seed=seed, submitted=1104.95, completed=1105, sequence=seq, length=64,
+                 digest=digest(seed, 64), fids=['%d,cd' % vid])
+        ev['acks'].append(a)
+        for kind in ('set', 'get'):
+            q['dispatched'] += 1
+            row = dict(op=str(q['dispatched']), worker=0, key=key, action=kind)
+            row.update(dict(dispatched=1104.94, submitted=1104.95, completed=1105, ok=True) if kind == 'set' else
+                       dict(dispatched=submitted - 0.01, submitted=submitted, completed=submitted + 0.1, ok=True, length=64,
+                            sha256=a['digest'], sequence=seq))
+            ev['events'].insert(-3, row)
+
+    def test_c9_a_different_key_hit_on_the_miss_vid_after_the_miss_refuses(self):
+        self.mutate(lambda ev: self.add_hit_on(ev, 'other-on-20', 20, 1181), 'misses')
+
+    def test_c9_a_hit_on_another_vid_after_the_miss_changes_nothing(self):
+        ev = evidence()
+        self.add_hit_on(ev, 'other-on-3', 3, 1181)
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+
+    def test_c9_a_same_vid_hit_before_the_miss_changes_nothing(self):
+        ev = evidence()
+        self.add_hit_on(ev, 'other-on-20', 20, 1170)
+        row = self.run_on(ev)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
 
     def test_a_miss_reporting_foreign_fids_is_refused(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(fids=['3,ab']), 'misses')

@@ -614,6 +614,14 @@ class SoakCollect(unittest.TestCase):
         self.assertEqual(sorted((e['kind'], e['stamp'], e['gen']) for e in ev), [
             ('birth', '1102 09:10:16.000002', 0), ('success', '1102 09:25:16.146813', 0), ('unwritable', '1102 09:24:16.000001', 0)])
 
+    def test_the_retiring_line_is_a_start_event(self):  # mono #969's exact glog line, logged before unpublish
+        retiring = 'I1104 07:12:01.123456 master_cache_volume_rotation.go:580 retiring non-replicated cache Volume 22 collection=lmcache\n'
+        rotated = 'I1104 07:12:01.130001 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 22 collection=lmcache bytes=1\n'
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write(retiring + rotated)
+        ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 22]
+        self.assertEqual(sorted((e['kind'], e['stamp']) for e in ev), [('start', '1104 07:12:01.123456'), ('success', '1104 07:12:01.130001')])
+
     # codex01 review db5d4589: each generation's own sources must be complete; another's cannot stand in.
     def refused_collect(self):
         with self.assertRaises((ValueError, OSError)):
