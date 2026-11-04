@@ -29,6 +29,8 @@ type CloudConfig struct {
 	Files        map[string]CloudFile `json:"files"`
 
 	ECUnderQuorum bool `json:"ec_under_quorum,omitempty"`
+
+	ECVolumeImpl string `json:"ec_volume_impl,omitempty"`
 	// Chaos opts a ten-node run into the read-restart/freeze cases after the
 	// functional phases. Absent or false leaves the run unchanged.
 	Chaos bool `json:"chaos,omitempty"`
@@ -69,7 +71,7 @@ type CloudFile struct {
 // CheckFiles is local-only and runs before any billable create.
 func (c CloudConfig) CheckFiles() error {
 	if len(c.Files) != len(c.artifactNames()) {
-		return errors.New("require weed, weed-volume and native.tar")
+		return fmt.Errorf("require artifacts %v", c.artifactNames())
 	}
 	for _, name := range c.artifactNames() {
 		f, ok := c.Files[name]
@@ -93,6 +95,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if c.ECVolumeImpl != "" && (!c.ECStage1 || (c.ECVolumeImpl != "go" && c.ECVolumeImpl != "rust") || (c.ECVolumeImpl == "rust" && c.ECUnderQuorum)) {
+		return "", errors.New("ec_volume_impl requires EC stage1; Rust under-quorum is not qualified")
 	}
 	if c.ReadCase != "" {
 		if c.ReadCase != "volume-restart" && c.ReadCase != "filer-restart" && c.ReadCase != "volume-freeze" || c.KVSoak || c.KVLoad {
@@ -562,6 +567,9 @@ func servicePort(h inventory.Host, name string) int {
 
 func (c CloudConfig) artifactNames() []string {
 	if c.ECStage1 {
+		if c.ECVolumeImpl == "rust" {
+			return []string{"weed", "weed-volume"}
+		}
 		return []string{"weed"}
 	}
 	return []string{"weed", "weed-volume", "native.tar"}

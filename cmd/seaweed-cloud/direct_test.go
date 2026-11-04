@@ -116,3 +116,14 @@ func TestDirectECUnderQuorumSelectorReachesPack(t *testing.T) {
 		t.Fatalf("EC selector did not reach shared pack: %+v", out)
 	}
 }
+
+func TestDirectRustVolumeSelectorReachesPack(t *testing.T) {
+	dir := t.TempDir()
+	inv, cfg := filepath.Join(dir, "inv.json"), filepath.Join(dir, "cfg.json")
+	os.WriteFile(inv, []byte(`{"target":"onprem"}`), 0600)
+	os.WriteFile(cfg, []byte(`{"ssh_key":"k","host_key":"h","files":{},"ec_stage1":true,"ec_volume_impl":"rust"}`), 0600)
+	_, out := directCall(t, "--inventory", inv, "--config", cfg, "--out", filepath.Join(dir, "out"))
+	if out.Code != "FAIL" || strings.Contains(out.Error, "unknown field") {
+		t.Fatalf("EC selector did not reach shared pack: %+v", out)
+	}
+}

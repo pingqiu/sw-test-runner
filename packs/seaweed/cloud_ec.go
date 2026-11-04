@@ -63,7 +63,13 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		}
 		err = errors.Join(err, e)
 	}()
-	if _, err = run("ec-configure", "chmod 0700 "+q(root)+"; chmod 0755 "+q(root+"/weed")+"; printf '%s\\n' '[master.volume_growth]' 'copy_1=1' 'copy_2=1' 'copy_3=1' 'copy_other=1' 'threshold=0.9' > "+q(root+"/master.toml")); err != nil {
+	volumeName, executables := "weed", q(root+"/weed")
+	if c.ECVolumeImpl == "rust" {
+		volumeName = "weed-volume"
+		executables += " " + q(root+"/weed-volume")
+		report["implementation"], report["rust"] = "rust", "NOT_OBSERVED"
+	}
+	if _, err = run("ec-configure", "chmod 0700 "+q(root)+"; chmod 0755 "+executables+"; printf '%s\\n' '[master.volume_growth]' 'copy_1=1' 'copy_2=1' 'copy_3=1' 'copy_other=1' 'threshold=0.9' > "+q(root+"/master.toml")); err != nil {
 		return
 	}
 	holders := map[string]string{}
@@ -79,10 +85,17 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		services = append(services, role)
 		holders[role] = root + "/" + role
 		args[role] = []string{"-config_dir=" + root, "volume", "-ip=" + h.Data.Address, "-ip.bind=0.0.0.0", fmt.Sprint("-port=", servicePort(h, "volume_http")+i), fmt.Sprint("-port.grpc=", servicePort(h, "volume_grpc")+i), "-master=" + master, "-dir=" + root + "/" + role, "-max=3", "-preStopSeconds=0"}
+		if c.ECVolumeImpl == "rust" {
+			args[role] = args[role][2:]
+		}
 		urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d/status", servicePort(h, "volume_http")+i))
 	}
 	for _, role := range services {
-		cmd := leaf("ec_service.py", map[string]any{"root": root, "role": role, "exe": root + "/weed", "sha256": c.Files["weed"].SHA256, "args": args[role]})
+		name := "weed"
+		if strings.HasPrefix(role, "h") {
+			name = volumeName
+		}
+		cmd := leaf("ec_service.py", map[string]any{"root": root, "role": role, "exe": root + "/" + name, "sha256": c.Files[name].SHA256, "args": args[role]})
 		// The helper execs weed in-place, so systemd's MainPID is the captured holder.
 		if _, err = run("start-"+role, cloudStart(d, root, role, "--property=User="+q(h.Management.User)+" --property=UMask=0077 "+cmd)); err != nil {
 			return
@@ -127,7 +140,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	if _, err = run("ec-encode", leaf("ec_setup.py", map[string]any{"root": root, "stage": "encode", "weed": root + "/weed", "master": master, "manifest": manifest})); err != nil {
 		return
 	}
-	raw, err = run("ec-capture", leaf("ec_capture.py", map[string]any{"root": root, "run_id": d.RunID, "holders": holders, "volume_exe": root + "/weed", "volume_sha256": c.Files["weed"].SHA256, "under_quorum": c.ECUnderQuorum})+" "+q(manifest))
+	raw, err = run("ec-capture", leaf("ec_capture.py", map[string]any{"root": root, "run_id": d.RunID, "holders": holders, "volume_exe": root + "/" + volumeName, "volume_sha256": c.Files[volumeName].SHA256, "under_quorum": c.ECUnderQuorum})+" "+q(manifest))
 	if err != nil {
 		return
 	}
@@ -142,6 +155,9 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	}
 	if err = ecValidateSnapshot(seed, snap, services, strings.TrimSpace(boot)); err != nil {
 		return
+	}
+	if c.ECVolumeImpl == "rust" {
+		report["rust"] = "OBSERVED"
 	}
 	report["capture"], report["ack"] = snap, 64
 	if c.ECUnderQuorum {

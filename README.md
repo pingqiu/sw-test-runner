@@ -90,7 +90,9 @@ Controller config fields (keep credentials private; do not commit configs):
   artifact files and their actual SHA256 values. KV requires `weed`,
   `weed-volume`, and `native.tar` (containing `seaweedkv_native/`, compatible
   with the target's Python ABI and system libraries).
-- For EC set `ec_stage1: true` and supply **only** `weed` in `files`. It starts
+- For EC set `ec_stage1: true` and supply **only** `weed` in `files`.
+  For Rust holders, also set `ec_volume_impl: "rust"` and pin `weed-volume`
+  in `files`; master, filer and S3 still use Go `weed`. It starts
   one Go master/filer/S3 plus 14 holders, seeds 64 keys, encodes, rejects a
   planted wrong byte, checks both routes, then kills 1–4 holders cumulatively.
   S1 can PASS; S2 stays `NOT_COVERED` without a reconstruction marker.
