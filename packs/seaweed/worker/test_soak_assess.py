@@ -490,6 +490,39 @@ class SoakAssess(unittest.TestCase):
         soak_assess.miss_outcome = lambda e, *a: 'unexcused' if e['op'] == g2['op'] else orig(e, *a)
         self.assertEqual(self.failing(self.run_on(ev)), ['misses'])  # the same miss unexcused fails the row
 
+    # codex01 R2 on #110: rule A through the real assessor, no mocks. The fixture's measured samples give a +-0.1 s
+    # bracket; vid 20's S is at mono 1175. A #972 start line at 1174.5 makes B's bracket (1174.4, 1174.6].
+    def rule_a(self, submit, start=1174.5, narrow=False, later_hit=False):
+        ev = evidence()
+        if start is not None:
+            ev['files']['m02-collect.json']['events'].append(line('start', 20, start))
+        g2 = self.ev(ev, 'g2')
+        g2.update(dispatched=submit - 0.01, submitted=submit, completed=submit + 0.001)
+        if narrow:  # the same run measured with a +-0.01 s bracket
+            ev['files']['soak-clock-s1.json'] = sample(980, 990.02, 980.01, 10)
+            ev['files']['soak-clock-s2.json'] = sample(2870, 2870.02, 2870.01, 0)
+        if later_hit:
+            self.add_hit_on(ev, 'other-on-20', 20, submit + 0.5)
+        return self.run_on(ev), g2['op']
+
+    def test_rule_a_real_composition_undecidable_passes_and_is_reported(self):
+        row, op = self.rule_a(1174.55)
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        u = row['misses_undecidable']
+        self.assertEqual([(x['op'], x['vid']) for x in u], [(op, 20)])
+        self.assertAlmostEqual(u[0]['submit_minus_early_b_s'], 0.15, places=3)
+        self.assertAlmostEqual(u[0]['submit_minus_late_b_s'], -0.05, places=3)
+
+    def test_rule_a_real_composition_negatives(self):
+        for name, kw in {'a later same-VID hit': dict(later_hit=True), 'no retiring line': dict(start=None),
+                         'provably before early(B)': dict(submit=1174.3)}.items():
+            row, _ = self.rule_a(kw.pop('submit', 1174.55), **kw)
+            self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('FAIL', ['misses'], []), name)
+
+    def test_rule_a_the_measured_bracket_width_decides(self):  # control: the same miss, a narrower measured bracket
+        row, _ = self.rule_a(1174.55, narrow=True)  # late(B) = 1174.51 < 1174.55: ordered after B, plainly excused
+        self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('PASS', [], []), row['criteria'])
+
     def test_a_resumed_rotation_whose_first_attempt_left_the_volume_serving_is_c9s(self):  # claude03 P3-1, via C9
         args = self.boundary_args(1159.95)
         starts = {20: EPOCH + 1150}  # first line long before the miss
