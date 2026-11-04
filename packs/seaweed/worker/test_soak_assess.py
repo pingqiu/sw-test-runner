@@ -840,8 +840,9 @@ KV_PATTERN = dict(clients=2, transport='dc', keys=4, distribution='uniform', obj
                   phases=[dict(kind='write_once'), dict(kind='read', duration_s=100)])
 
 
-KV_RECEIPT = dict(State='REPLACEMENT_STARTED', Kill=dict(Identity=dict(Node='m02', PID=4242), AliveBefore=True, Signal='SIGKILL',
-                                                        AppliedAt='2026-11-04T07:00:00Z', PreKillMono=1010.5),
+KV_RECEIPT = dict(State='REPLACED',  # what directSoak.Restart (cloud_soak_linux.go) records on success
+                  Kill=dict(Identity=dict(Node='m02', PID=4242), AliveBefore=True, Signal='SIGKILL',
+                            AppliedAt='2026-11-04T07:00:00Z', PreKillMono=1010.5),
                   Replacement=dict(Node='m02', PID=5151))
 
 
@@ -970,6 +971,10 @@ class KVLoadAssess(unittest.TestCase):
             crit = self.forged(**change)
             with self.subTest(name):
                 self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
+
+    def test_the_approved_runners_success_state_also_qualifies(self):
+        crit = self.forged(receipt=receipt(State='REPLACEMENT_STARTED'))
+        self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('PASS', 'PASS'), crit)
 
     def test_a_duplicate_episode_cannot_stand_in_for_a_missing_one(self):
         self.declared = [dict(at_s=10, role='volume', episode='E1'), dict(at_s=60, role='master', episode='E2')]

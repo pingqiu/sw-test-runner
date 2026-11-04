@@ -218,14 +218,15 @@ def assess_routes(root, workers, kills):
 
 def kv_qualified(declared, faults, begin):
     """The plan's faults joined exactly to the evidence: one record per declared episode and nothing else,
-    each a successful restart (REPLACEMENT_STARTED, no error) of a live M02 victim, SIGKILL applied, a new
+    each a successful restart (REPLACED, as the direct path's Restart ends, or the approved runner's
+    REPLACEMENT_STARTED; no error) of a live M02 victim, SIGKILL applied, a new
     M02 replacement, dispatched within 15 s of the declared time, and dispatch <= PreKillMono <= READY
     within 60 s. Anything short of that for any fault: none qualifies, so no window opens."""
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
     def ok(f, d):
         r = f['receipt']
         kill, old, new = r.get('Kill') or {}, (r.get('Kill') or {}).get('Identity') or {}, r.get('Replacement') or {}
-        return f['role'] == d['role'] and r.get('State') == 'REPLACEMENT_STARTED' and not r.get('Error') \
+        return f['role'] == d['role'] and r.get('State') in ('REPLACED', 'REPLACEMENT_STARTED') and not r.get('Error') \
             and old.get('Node') == 'm02' and kill.get('AliveBefore') is True and kill.get('Signal') == 'SIGKILL' \
             and isinstance(kill.get('AppliedAt'), str) and not kill['AppliedAt'].startswith('0001') and new.get('Node') == 'm02' \
             and num(new.get('PID')) and new['PID'] > 0 and new['PID'] != old.get('PID') and num(kill.get('PreKillMono')) \
