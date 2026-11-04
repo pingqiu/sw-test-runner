@@ -409,7 +409,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	}
 	defer n.Close()
 	_, stop := cloudStep(ctx, n, c.Output, "cloud-cleanup.json", "cleanup",
-		60, "sudo systemctl stop "+units+"; sudo systemctl reset-failed "+units+" 2>/dev/null || true")
+		60, "sudo -n systemctl stop "+units+"; sudo -n systemctl reset-failed "+units+" 2>/dev/null || true")
 	ports := []string{}
 	for _, s := range h.Services {
 		ports = append(ports, strconv.Itoa(s.Port))
@@ -424,7 +424,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	// A probe that cannot run is a failure, never a count of zero: an empty
 	// listing from a failed systemctl, ss or grep would otherwise read as clean.
 	// grep -c exits 1 for no match (count 0) and 2 for an error.
-	check := "l=$(sudo systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
+	check := "l=$(sudo -n systemctl list-units --all --no-legend " + units + ") || { echo 'postflight: systemctl failed'; exit 3; }" +
 		"; u=$(printf '%s' \"$l\" | grep -c .) || [ $? -eq 1 ] || { echo 'postflight: grep failed'; exit 3; }; p=0"
 	if len(ports) > 0 {
 		check += "; s=$(ss -Hltn) || { echo 'postflight: ss failed'; exit 3; }" +

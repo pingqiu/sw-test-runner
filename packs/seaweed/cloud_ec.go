@@ -177,7 +177,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 			}
 		}
 		// Recheck the frozen generation, then signal only this unit's main process.
-		check := fmt.Sprintf("test \"$(sudo systemctl show -p MainPID --value %s)\" = %d; test \"$(cat /proc/sys/kernel/random/boot_id)\" = %s; test \"$(awk '{print $22}' /proc/%d/stat)\" = %d; sudo systemctl kill --kill-whom=main --signal=KILL %s; until [ \"$(sudo systemctl show -p MainPID --value %s)\" = 0 ]; do sleep .1; done; test \"$(sudo systemctl show -p ExecMainCode --value %s)\" = 2; test \"$(sudo systemctl show -p ExecMainStatus --value %s)\" = 9", unit, pid, q(strings.TrimSpace(boot)), pid, start, unit, unit, unit, unit)
+		check := fmt.Sprintf("test \"$(sudo -n systemctl show -p MainPID --value %s)\" = %d; test \"$(cat /proc/sys/kernel/random/boot_id)\" = %s; test \"$(awk '{print $22}' /proc/%d/stat)\" = %d; sudo -n systemctl kill --kill-whom=main --signal=KILL %s; until [ \"$(sudo -n systemctl show -p MainPID --value %s)\" = 0 ]; do sleep .1; done; test \"$(sudo -n systemctl show -p ExecMainCode --value %s)\" = 2; test \"$(sudo -n systemctl show -p ExecMainStatus --value %s)\" = 9", unit, pid, q(strings.TrimSpace(boot)), pid, start, unit, unit, unit, unit)
 		if _, err = run("ec-kill-"+victim, check); err != nil {
 			return
 		}

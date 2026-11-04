@@ -29,6 +29,9 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 		fmt.Fprint(c, string(out))
 		return 99
 	}
+	if strings.Contains(cmd, "systemctl show") && !strings.Contains(cmd, "sudo -n systemctl show") {
+		return 23
+	}
 	var output string
 	switch {
 	case strings.Contains(cmd, "--stage") && strings.Contains(cmd, "write-load"):
@@ -40,13 +43,16 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 		}
 	case strings.Contains(cmd, "echo GONE"):
 		output = "104.5\nOLD 100 1\nGONE\n"
-		if h.mode == "lost-kill" {
+		if h.mode == "lost-kill" || h.mode == "failed-kill-readback" {
 			return 23
 		}
 		if h.mode == "bad-clock" {
 			output = "NaN\nOLD 100 1\nGONE\n"
 		}
 	case strings.Contains(cmd, "echo \"NEW"):
+		if h.mode == "failed-ready-readback" {
+			return 23
+		}
 		output = "106.5\nNEW 101 2\n"
 		if h.mode == "same-generation" {
 			output = "106.5\nNEW 100 1\n"
@@ -72,7 +78,7 @@ func TestDirectMasterWritesReportAndCleanup(t *testing.T) {
 	old := masterWriteSettle
 	masterWriteSettle = 0
 	defer func() { masterWriteSettle = old }()
-	for _, mode := range []string{"positive", "failed-worker", "missing-terminal", "same-generation", "bad-clock", "lost-kill", "cancelled"} {
+	for _, mode := range []string{"positive", "failed-worker", "missing-terminal", "same-generation", "bad-clock", "lost-kill", "cancelled", "failed-kill-readback", "failed-ready-readback"} {
 		t.Run(mode, func(t *testing.T) {
 			h := &masterWriteHost{mode: mode}
 			address, pin, key, _ := cloudSSH(t, "", h.exec)
@@ -176,6 +182,22 @@ func TestDirectMasterWritesRefusesCombinedCases(t *testing.T) {
 			defer cancel()
 			if _, err := RunCloudHTTP(ctx, inv, c); err == nil || !strings.Contains(err.Error(), "master writes requires") {
 				t.Fatalf("mode%s: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestMainPIDReadbackSudoAndFailure(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/sh\ntest \"$1\" = -n || exit 90\nshift\nexec \"$@\"\n"), 0700)
+	os.WriteFile(filepath.Join(dir, "systemctl"), []byte(fmt.Sprintf("#!/bin/sh\ncase $READBACK in failed) exit 23;; empty) exit 0;; esac\necho %d\n", os.Getpid())), 0700)
+	for _, mode := range []string{"good", "failed", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := exec.Command("sh", "-ec", mainPID("unit")+"echo VERIFIED")
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "READBACK="+mode)
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (mode == "good") || strings.Contains(string(out), "VERIFIED") != (mode == "good") {
+				t.Fatalf("mode%s err%v output%s", mode, err, out)
 			}
 		})
 	}
