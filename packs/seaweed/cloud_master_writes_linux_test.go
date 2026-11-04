@@ -34,6 +34,8 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 	}
 	var output string
 	switch {
+	case strings.Contains(cmd, "sudo -n systemctl start"):
+		return 23 // a reset transient unit has no definition to start
 	case strings.Contains(cmd, "--stage") && strings.Contains(cmd, "write-load"):
 		if h.cancel != nil {
 			h.cancel()
@@ -50,6 +52,9 @@ func (h *masterWriteHost) exec(cmd string, c ssh.Channel) uint32 {
 			output = "NaN\nOLD 100 1\nGONE\n"
 		}
 	case strings.Contains(cmd, "echo \"NEW"):
+		if !strings.Contains(cmd, "-master-g2") {
+			return 23
+		}
 		if h.mode == "failed-ready-readback" {
 			return 23
 		}
@@ -142,6 +147,18 @@ func TestDirectMasterWritesReportAndCleanup(t *testing.T) {
 			}
 			if mode == "cancelled" && h.index("echo GONE") >= 0 {
 				t.Fatal("Kill after cancellation")
+			}
+			if mode == "positive" {
+				command := cloudServices(d.Hosts[0], d.Hosts[0], d.Hosts[0].RunRoot, false, "")["master"]
+				found := false
+				for _, cmd := range h.commands {
+					if strings.Contains(cmd, cloudQuote(cloudStart(d, d.Hosts[0].RunRoot, "master-g2", command))) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("replacement did not reuse cloudStart and the original master argv/mdir")
+				}
 			}
 			if h.index("-v=1 filer") < 0 {
 				t.Fatal("filer assign diagnostics absent")

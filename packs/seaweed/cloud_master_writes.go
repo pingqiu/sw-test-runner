@@ -49,7 +49,8 @@ func runDirectMasterWrites(ctx context.Context, d inventory.Document, h inventor
 	if err != nil || math.IsNaN(preKill) || math.IsInf(preKill, 0) {
 		return "", errors.New("invalid pre-Kill clock")
 	}
-	if _, err = run("master-restart", "sudo -n systemctl reset-failed "+q(unit)+"; sudo -n systemctl start "+q(unit)); err != nil {
+	unit += "-g2"
+	if _, err = run("master-restart", cloudStart(d, root, "master-g2", cloudServices(h, h, root, false, c.Replication)["master"])); err != nil {
 		return "", err
 	}
 	// No Assign probe: writes must meet the master's warm-up instead of waiting it out.
