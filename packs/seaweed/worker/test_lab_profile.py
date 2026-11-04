@@ -765,7 +765,7 @@ class SoakSetup(unittest.TestCase):
     """soak_setup against a fake master and a fake pinned weed product."""
     SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2)
 
-    def build(self, shell_rc=0, grow_count=None, settle=True, grow_delay=0):
+    def build(self, shell_rc=0, grow_count=None, settle=True, grow_delay=0, replication='000'):
         base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, base)
         self.root, release = base / 'run', base / 'release'
@@ -778,7 +778,7 @@ class SoakSetup(unittest.TestCase):
                            % (self.record, self.record, shell_rc))
         product.chmod(0o755)
         self.calls, state = [], dict(grown=False)
-        n = self.SETUP['grow_count']
+        n, copies = self.SETUP['grow_count'], 1 + sum(int(c) for c in replication)
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -788,10 +788,10 @@ class SoakSetup(unittest.TestCase):
                 if self.path.startswith('/vol/grow?'):
                     time.sleep(grow_delay)  # a real master answers only after allocating
                     state['grown'] = True
-                    body = dict(count=n if grow_count is None else grow_count)
+                    body = dict(count=n * copies if grow_count is None else grow_count)  # a real master counts copies
                 elif self.path == '/dir/status':
                     ids = list(range(1, n + 1)) if state['grown'] and settle else []
-                    body = dict(Topology=dict(Layouts=[dict(collection='lmcache', replication='000', ttl='2h',
+                    body = dict(Topology=dict(Layouts=[dict(collection='lmcache', replication=replication, ttl='2h',
                                                            writables=ids, live=ids)]))
                 raw = json.dumps(body).encode()
                 self.send_response(200)
@@ -811,7 +811,7 @@ class SoakSetup(unittest.TestCase):
         self.addCleanup(setattr, profile, 'services', original)
         return dict(LaunchContract().config(), root=str(self.root), release=str(release), roles=['master', 'filer', 'volume'],
                     address='127.0.0.1', server_address='127.0.0.1', services=services, server_services=services,
-                    products={'weed': hashlib.sha256(product.read_bytes()).hexdigest()}, soak_setup=dict(self.SETUP),
+                    products={'weed': hashlib.sha256(product.read_bytes()).hexdigest()}, soak_setup=dict(self.SETUP, replication=replication),
                     deadline=(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=30)).isoformat())
 
     def test_configures_grows_once_and_waits_for_exactly_n(self):
@@ -826,6 +826,19 @@ class SoakSetup(unittest.TestCase):
         self.assertEqual([c for c in self.calls if c.startswith('/vol/grow')],
                          ['/vol/grow?collection=lmcache&replication=000&ttl=2h&count=4'])
         self.assertEqual((self.root / 'fs-configure.stdout').read_text(), 'configured\n')
+
+    def test_a_replicated_layout_grows_by_its_copy_count(self):
+        # kv_load dry run 11-04: under 001 the shell refuses -volumeGrowthCount=1, and the master answers 2 x n.
+        row = profile.soak_setup(self.build(replication='001'))
+        self.assertEqual((row['status'], row['grow'], row['writables']), ('SOAK_SETUP', dict(count=4), [1, 2, 3, 4]))
+        self.assertEqual(Path(str(self.record) + '.stdin').read_text(),
+                         'fs.configure -locationPrefix=/lmcache -collection=lmcache -replication=001 -ttl=2h -volumeGrowthCount=2 -apply\n')
+        self.assertEqual([c for c in self.calls if c.startswith('/vol/grow')],
+                         ['/vol/grow?collection=lmcache&replication=001&ttl=2h&count=4'])
+
+    def test_a_replicated_grow_answering_logical_volumes_refuses(self):
+        with self.assertRaisesRegex(ValueError, 'answered count 4, want 8'):
+            profile.soak_setup(self.build(replication='001', grow_count=4))
 
     def test_a_grow_slower_than_the_2_s_read_cap_completes(self):
         # 11-02 parity run: an 8-volume grow took ~10 s and the 2 s per-read cap raised TimeoutError.

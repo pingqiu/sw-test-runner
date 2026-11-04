@@ -709,8 +709,11 @@ def soak_setup(config):
         with os.fdopen(os.dup(fd), 'rb') as stream:
             if stream_digest(stream) != config['products']['weed']:
                 raise ValueError('protected product hash mismatch')
-        command = 'fs.configure -locationPrefix=/%s -collection=%s -replication=%s -ttl=%s -volumeGrowthCount=1 -apply\n' % (
-            layout['collection'], layout['collection'], layout['replication'], layout['ttl'])
+        # One growth is one volume set, so its count is the copy count: 1 plus
+        # the replication's digits (000: 1; 001: 2, which the shell requires).
+        copies = 1 + sum(int(c) for c in layout['replication'])
+        command = 'fs.configure -locationPrefix=/%s -collection=%s -replication=%s -ttl=%s -volumeGrowthCount=%d -apply\n' % (
+            layout['collection'], layout['collection'], layout['replication'], layout['ttl'], copies)
         # Exec the hash-checked open file itself, never the path again.
         argv = ['/proc/self/fd/%d' % fd, 'shell',
                 '-master=%s:%d.%d' % (address, ports['master_http'], ports['master_grpc']),
@@ -731,8 +734,8 @@ def soak_setup(config):
     # The master answers a grow only after allocating every volume (~10 s for 8 on M02, r9 9.75 s): each read may
     # wait up to the 120 s step budget, still bounded by the original work deadline.
     grow = http_json(master + '/vol/grow?' + urlencode(dict(layout, count=n)), bounded(config, 120), read_limit=120)
-    if grow.get('count') != n:
-        raise ValueError('volume grow answered count %r, want %d' % (grow.get('count'), n))
+    if grow.get('count') != n * copies:  # the master answers physical copies: n logical volumes, each in copies
+        raise ValueError('volume grow answered count %r, want %d' % (grow.get('count'), n * copies))
     staged = bounded(config, 60)
     end = time.monotonic() + max(0, remaining(staged))
     last = None
