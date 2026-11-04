@@ -864,7 +864,7 @@ def kv_evidence(miss_at=None):
     events += [kill, dict(event='body_end', mono=1200), dict(event='quiescent', mono=1261, dispatched=op[0] + 1)]
     boot, dc = boot_id(), dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=5, direct_rc_reads=0, copied_reads=0)
     files = {'soak-load-start.json': dict(boot_id=boot, mono=1000), 'workers.json': {str(i): dict(pid=10 + i, starttime=1, transport='dc') for i in range(2)},
-             'faults.json': [dict(episode='E1', role='volume', dispatch_mono=1010, ready_mono=1015, receipt=dict(Kill=dict(PreKillMono=1010)))],
+             'faults.json': [dict(episode='E1', role='volume', dispatch_mono=1010, ready_mono=1015, receipt=dict(Kill=dict(PreKillMono=1010), Replacement=dict(Node='m02')))],
              'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[], events=[])}
     stats = {'native-stats-%d-1.jsonl' % pid: [dict(status='OBSERVED', stats=dict(loader=dc))] for pid in (10, 11, 77)}
     return dict(files=files, acks=acks, events=events, polls=[], stats=stats)
@@ -938,6 +938,31 @@ class KVLoadAssess(unittest.TestCase):
         ev = kv_evidence()
         ev['files']['faults.json'] = []
         self.assertEqual(self.row(ev, 'load_as_declared'), 'FAIL')
+
+    def forged(self, **change):
+        ev = kv_evidence(miss_at=20)  # a miss at 1015.01, inside the declared fault's window
+        ev['files']['faults.json'][0].update(change)
+        return self.run_on(ev)['criteria']
+
+    def test_a_forged_fault_opens_no_window_and_is_not_as_declared(self):
+        for name, change in (('empty kill receipt', dict(receipt=dict(Kill={}, Replacement=dict(Node='m02')))),
+                             ('replacement on M01', dict(receipt=dict(Kill=dict(PreKillMono=1010), Replacement=dict(Node='m01')))),
+                             ('READY 120 s after dispatch', dict(ready_mono=1130)),
+                             ('dispatched 30 s off the declared 10 s', dict(dispatch_mono=1040, ready_mono=1043)),
+                             ('another episode', dict(episode='E9'))):
+            crit = self.forged(**change)
+            with self.subTest(name):
+                self.assertEqual((crit['load_as_declared']['outcome'], crit['misses']['outcome']), ('FAIL', 'FAIL'), crit)
+
+    def test_rates_are_per_client_in_every_phase_not_balanced_across_them(self):
+        ev = kv_evidence()
+        for e in ev['events']:
+            if e.get('action') == 'get':
+                e['worker'] = 0 if e['dispatched'] < 1054 else 1  # one client per 50 s phase
+        self.assertEqual(self.row(ev, 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='read', duration_s=50),
+                                                                  dict(kind='read', duration_s=50)]), 'FAIL')
+        self.assertEqual(self.row(kv_evidence(), 'load_as_declared', phases=[dict(kind='write_once'), dict(kind='read', duration_s=50),
+                                                                             dict(kind='read', duration_s=50)]), 'PASS')
 
     def test_a_miss_outside_the_fault_windows_fails_even_if_the_soak_would_excuse_it(self):
         saved = soak_assess.miss_excused
