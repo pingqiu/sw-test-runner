@@ -750,7 +750,7 @@ def soak_setup(config):
 
 
 ROTATED = re.compile(r'rotated non-replicated cache Volume (\d+) collection=(\S+) ')  # r9 soak_server
-RETIRING = re.compile(r'retiring non-replicated cache Volume (\d+) collection=')  # mono #969, before unpublish
+RETIRING = re.compile(r'retiring non-replicated cache Volume (\d+) collection=')  # mono #969/#972: before the seal (fresh) or unpublish (resumed)
 EPISODE = ((re.compile(r'Created Volume (\d+) on'), 'birth'), (re.compile(r'Volume (\d+) becomes unwritable'), 'unwritable'),
            (RETIRING, 'start'), (ROTATED, 'success'))
 STAMP = re.compile(r'[IWEF](\d{4} \d\d:\d\d:\d\d\.\d+)')
