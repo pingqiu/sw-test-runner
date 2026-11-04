@@ -183,3 +183,11 @@ func TestTypedPlanIsLocalAndPreservesEveryPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestRetiredECApprovedActionIsNotRegistered(t *testing.T) {
+	r := tr.NewRegistry()
+	RegisterPack(r)
+	if _, err := r.Get("seaweed_ec_stage1"); err == nil {
+		t.Fatal("retired EC approved action registered")
+	}
+}
