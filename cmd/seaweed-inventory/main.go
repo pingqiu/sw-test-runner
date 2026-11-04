@@ -73,6 +73,6 @@ func execute(args []string, w io.Writer) int {
 		}
 	}
 	digest := sha256.Sum256(raw)
-	return emit(map[string]any{"schema": "seaweed.inventory-result/v1", "status": "valid_data_only", "code": "OK", "remedy": "validation grants no execution; obtain reviewed S0b admission before any effect", "state": d.State, "input_sha256": hex.EncodeToString(digest[:]), "execution_authorized": false}, 0)
+	return emit(map[string]any{"schema": "seaweed.inventory-result/v1", "status": "valid_data_only", "code": "OK", "remedy": "validation grants no execution; use seaweed-cloud direct with a supported target/profile", "state": d.State, "input_sha256": hex.EncodeToString(digest[:]), "execution_authorized": false}, 0)
 }
 func main() { os.Exit(execute(os.Args[1:], os.Stdout)) }

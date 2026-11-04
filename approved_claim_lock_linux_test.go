@@ -69,10 +69,6 @@ func TestApprovedWorkerSeparateClaimLockWithCanonicalHolder(t *testing.T) {
 			if err = os.WriteFile(adapter, body, 0700); err != nil {
 				t.Fatal(err)
 			}
-			digest := fmt.Sprintf("%x", sha256.Sum256(body))
-			if mode == "adapter-pin" {
-				digest = strings.Repeat("0", 64)
-			}
 			script, err := filepath.Abs("scripts/testops-ci-worker.sh")
 			if err != nil {
 				t.Fatal(err)
@@ -85,7 +81,8 @@ func TestApprovedWorkerSeparateClaimLockWithCanonicalHolder(t *testing.T) {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
-			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+state, "TESTOPS_LOCK_FILE="+filepath.Join(f.dir, "flock"), "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:", "TESTOPS_RDMA_CI_SCRIPT=/bin/true", "TESTOPS_APPROVED_ADAPTER="+adapter, "TESTOPS_APPROVED_ADAPTER_SHA256="+digest, "TESTOPS_APPROVED_POLICY="+f.profile)
+			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+state, "TESTOPS_LOCK_FILE="+filepath.Join(f.dir, "flock"), "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:")
+			cmd.Env = append(cmd.Env, approvedQueueHook(t, f.dir, queue, adapter, f.profile)...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("worker failure: %v %s", err, out)

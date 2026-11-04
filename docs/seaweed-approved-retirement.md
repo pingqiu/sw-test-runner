@@ -48,3 +48,14 @@ replication=001. C5 unknown copies never earn excusal; co-location is not host
 failure tolerance. C3/C6 are explicit NOT_RUN on direct; existing cloud paths stay.
 Network namespaces/platform extensions are not approved. Report before exceeding
 350 new production lines for the later process slice.
+
+## Queue source cleanup
+
+The current worker no longer dispatches an approved-run adapter. Nonempty
+TESTOPS_APPROVED_* settings refuse before queue claim/source, rather than
+falling through and interpreting old strict JSON as ordinary shell requests.
+The ordinary claim/flock/RUN_SCRIPT/status workflow remains. This changes
+repository source only; historical installed units/releases are untouched.
+seaweed-inventory now points to supported direct target/profile execution;
+validation itself still grants no execution. make build includes seaweed-cloud,
+and default CLI help names its existing direct entry.

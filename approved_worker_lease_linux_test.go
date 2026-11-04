@@ -198,7 +198,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					cmd.Env = append(cmd.Env, v)
 				}
 			}
-			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "S0B_CPU_CUSTODY="+mode, "S0B_CPU_CANONICAL_OBSERVED="+filepath.Join(f.dir, "canonical-observed"), "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+f.dir, "TESTOPS_LOCK_FILE="+lock, "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:", "TESTOPS_APPROVED_ADAPTER="+adapter, "TESTOPS_APPROVED_ADAPTER_SHA256="+digest, "TESTOPS_APPROVED_POLICY="+f.profile)
+			cmd.Env = append(cmd.Env, "S0B_CPU_ADAPTER=1", "S0B_CPU_CUSTODY="+mode, "S0B_CPU_CANONICAL_OBSERVED="+filepath.Join(f.dir, "canonical-observed"), "TESTOPS_QUEUE_DIR="+queue, "TESTOPS_STATE_DIR="+f.dir, "TESTOPS_LOCK_FILE="+lock, "TESTOPS_LOG_DIR="+filepath.Join(f.dir, "logs"), "TESTOPS_STATUS_DIR="+filepath.Join(f.dir, "status"), "TESTOPS_NOTIFY_CMD=:")
 			// Wrong/missing FD controls retain the real worker's canonical flock but
 			// point the protected bootstrap at a different inode or close FD9 only at
 			// the compiled test-entry seam, never via a deployed request flag.
@@ -255,6 +255,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			cmd.Env = append(cmd.Env, approvedQueueHook(t, f.dir, queue, adapter, f.profile)...)
 			var output bytes.Buffer
 			cmd.Stdout = &output
 			cmd.Stderr = &output

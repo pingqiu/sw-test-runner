@@ -25,3 +25,19 @@ func TestSeaweedApprovedCLIIsRetired(t *testing.T) {
 		t.Fatalf("retired entry did not refuse as unknown: code=%d called=%v stderr=%s err=%v", code, called, raw, err)
 	}
 }
+
+func TestDefaultHelpNamesExistingSeaweedDirectEntry(t *testing.T) {
+	old := os.Stderr
+	f, e := os.CreateTemp(t.TempDir(), "help")
+	if e != nil {
+		t.Fatal(e)
+	}
+	os.Stderr = f
+	code := Run(func(*tr.Registry) {}, []string{"help"})
+	os.Stderr = old
+	f.Close()
+	b, e := os.ReadFile(f.Name())
+	if e != nil || code != 0 || !strings.Contains(string(b), "seaweed-cloud direct --inventory") {
+		t.Fatalf("missing direct entry: code=%d err=%v help=%s", code, e, b)
+	}
+}
