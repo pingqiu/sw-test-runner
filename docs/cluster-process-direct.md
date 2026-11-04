@@ -12,14 +12,14 @@ physical hosts and their SSH/data addresses truthful. Each physical host
 that holds volumes declares volume_http and volume_grpc; the first also
 provides the metadata listener bases. Six volume process ports are the
 base plus 0..5, validated for range/collision. The physical inventory is
-saved unchanged; process-placement.json maps each role to its physical host.
+saved unchanged inside process-placement.json alongside the role/host map.
 Each role has a distinct run directory and transient-unit generation.
 Co-location is process tolerance, never host tolerance.
 
 The baseline reuses the cluster topology/writable-owner probe. Before the
 fault, all six volume statuses must show writable owners; each observed VID
 must have exactly two distinct volume-process owners. Every seed ACK's VID
-joins those captures and the master's lookup. Configuration 001 alone cannot
+joins those captures and the master's lookup and exercises all six owners. Configuration 001 alone cannot
 satisfy copies.json. Shared worker payloads and all existing assessors stay.
 
 Stage 1 keeps the three clients' 120 s HTTP load, prospective client-local P,

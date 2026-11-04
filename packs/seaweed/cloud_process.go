@@ -97,18 +97,13 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	if e != nil {
 		return "", e
 	}
-	if e = os.WriteFile(filepath.Join(c.Output, "physical-inventory.json"), processJSON(d), 0600); e != nil {
-		return "", e
-	}
-	if e = os.WriteFile(filepath.Join(c.Output, "process-placement.json"), processJSON(map[string]any{"roles": view.Hosts, "physical_host": physical, "host_tolerance": "NOT_CLAIMED"}), 0600); e != nil {
+	pins := processPins(view, c)
+	if e = os.WriteFile(filepath.Join(c.Output, "process-placement.json"), processJSON(map[string]any{"physical_inventory": d, "roles": view.Hosts, "physical_host": physical, "host_tolerance": "NOT_CLAIMED"}), 0600); e != nil {
 		return "", e
 	}
 	phase := func(label string, h inventory.Host) error {
 		hc := c
-		hc.HostKey = c.HostKey
-		if hc.HostKey == "" && h.Management.HostKey != nil {
-			hc.HostKey = *h.Management.HostKey
-		}
+		hc.HostKey = pins[h.ID]
 		hc.Output = filepath.Join(c.Output, label, h.ID)
 		hc.ChaosSet = "process" // upload the existing mixed-load leaf
 		if e := os.MkdirAll(hc.Output, 0700); e != nil {
@@ -119,7 +114,7 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		_, e := runCloudNode(ctx, rd, h, hc, label)
 		return e
 	}
-	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: processPins(view, c)}, append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...))
+	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: pins}, append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...))
 	if e != nil {
 		return "", e
 	}
@@ -134,10 +129,7 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	defer func() {
 		for _, h := range view.Hosts {
 			hc := c
-			hc.HostKey = c.HostKey
-			if hc.HostKey == "" && h.Management.HostKey != nil {
-				hc.HostKey = *h.Management.HostKey
-			}
+			hc.HostKey = pins[h.ID]
 			hc.Output = filepath.Join(c.Output, "cleanup", h.ID)
 			failure = errors.Join(failure, os.MkdirAll(hc.Output, 0700), directCleanup(hc, docs[h.ID], h))
 		}
@@ -262,9 +254,16 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 			}
 		}
 	}
-	if len(used) == 0 {
-		return errors.New("no seeded owner join")
+	exercised := map[string]bool{}
+	for vid := range used {
+		for _, url := range owners[vid] {
+			exercised[url] = true
+		}
 	}
+	if len(exercised) != 6 {
+		return errors.New("seeded ACKs do not exercise all six owners")
+	}
+
 	for vid := range used {
 		out, e := r.step(ctx, "meta", "lookup-"+vid, 30, "curl -fsS --max-time 10 "+cloudQuote("http://"+endpoint(hosts["meta"], "master_http")+"/dir/lookup?volumeId="+vid))
 		var lookup struct {

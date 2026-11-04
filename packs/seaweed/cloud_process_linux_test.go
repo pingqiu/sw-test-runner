@@ -174,6 +174,24 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 		if f.mixed != nil && strings.Contains(cmd, "chaos_load.py") {
 			return f.mixed.handle(id)(cmd, ch)
 		}
+		if strings.Contains(cmd, "kv_smoke.py") && strings.Contains(cmd, "--stage") && strings.Contains(cmd, "seed") {
+			inner := cmd
+			if i := strings.Index(cmd, "sh -ec '"); i >= 0 {
+				inner = strings.ReplaceAll(cmd[i+8:len(cmd)-1], `'"'"'`, `'`)
+			}
+			i := strings.Index(inner, `'--config' '`) + 12
+			var cfg SmokeConfig
+			if err := json.Unmarshal([]byte(inner[i:i+strings.Index(inner[i:], `'`)]), &cfg); err != nil {
+				panic(err)
+			}
+			fmt.Fprint(ch, chaosSeed(cfg, func(i int) int {
+				if f.variant == "idle-owner" {
+					return 3
+				}
+				return 3 + i%3
+			}))
+			return 0
+		}
 		return f.stage.handle(id)(cmd, ch)
 	}
 	if strings.Contains(cmd, "systemctl list-units") && f.variant == "dirty" {
@@ -244,7 +262,7 @@ func TestDirectProcessCases(t *testing.T) {
 	}
 }
 func TestDirectProcessRefusalsStillClean(t *testing.T) {
-	for _, v := range []string{"foreign-lookup", "single-copy", "start-fail", "pre-P", "dirty", "collect-fail"} {
+	for _, v := range []string{"foreign-lookup", "single-copy", "start-fail", "pre-P", "dirty", "collect-fail", "idle-owner"} {
 		t.Run(v, func(t *testing.T) {
 			f, _, err := processRun(t, "volume-restart", v)
 			if err == nil {
@@ -253,7 +271,7 @@ func TestDirectProcessRefusalsStillClean(t *testing.T) {
 			if f.index("systemctl stop") < 0 || f.index("systemctl list-units") < 0 {
 				t.Fatal("failure skipped cleanup")
 			}
-			if (v == "foreign-lookup" || v == "single-copy" || v == "start-fail") && f.index("kill -KILL") >= 0 {
+			if (v == "foreign-lookup" || v == "single-copy" || v == "start-fail" || v == "idle-owner") && f.index("kill -KILL") >= 0 {
 				t.Fatal("fault preceded owner proof")
 			}
 		})
