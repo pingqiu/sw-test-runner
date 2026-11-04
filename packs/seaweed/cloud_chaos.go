@@ -60,7 +60,7 @@ func chaosStopScript(unit string) string {
 
 func chaosContScript(pid, start string) string {
 	return `pid=` + pid + `; [ "$(` + chaosStat + `)" = ` + cloudQuote(start) + ` ]; sudo -n kill -CONT "$pid"; ` +
-		`for i in $(seq 200); do none=1; ` + chaosThreads + `if [ "$s" = T ]; then none=0; fi; done; if [ $none = 1 ]; then echo LIVE; exit 0; fi; sleep 0.05; done; exit 1`
+		`for i in $(seq 200); do none=1; ` + chaosThreads + `case "$s" in T|t|Z|X|x|'') none=0;; esac; done; if [ $none = 1 ] && [ "$(` + chaosStat + `)" = ` + cloudQuote(start) + ` ]; then echo LIVE; exit 0; fi; sleep 0.05; done; exit 1`
 }
 
 type chaosRun struct {

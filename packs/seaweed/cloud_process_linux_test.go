@@ -277,3 +277,18 @@ func TestDirectProcessRefusalsStillClean(t *testing.T) {
 		})
 	}
 }
+
+// LIVE must describe the same still-live generation, not an empty task glob
+// after a process dies while CONT is being dispatched.
+func TestProcessResumeCannotWitnessADeadVictim(t *testing.T) {
+	r := newScriptRig(t, `[ "$1" = -n ] && shift; if [ "$1" = kill ] && [ "$2" = -CONT ]; then kill -KILL "$3"; sleep 0.1; else exec "$@"; fi`)
+	r.victim("u")
+	out, err := r.run(chaosStopScript("u"))
+	f := strings.Fields(out)
+	if err != nil || len(f) != 4 {
+		t.Fatal("stop prerequisite", out, err)
+	}
+	if out, err = r.run(chaosContScript(f[1], f[2])); err == nil || strings.Contains(out, "LIVE") {
+		t.Fatal("dead victim earned LIVE", out, err)
+	}
+}

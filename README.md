@@ -348,3 +348,5 @@ contains the case-only result and receipts; overall success requires the CLI res
 and clean per-host cleanup/postflight logs. An uncertain STOP is UNKNOWN: teardown
 kills the victim without racing it with CONT. Wrong bytes, missing proof and unclean
 postflight fail; missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.
+
+HTTP process chaos on one existing container host or two physical hosts uses the same direct entry; see [cluster process cases](docs/cluster-process-direct.md) for `cluster_chaos_cases` and the observed two-copy gate.
