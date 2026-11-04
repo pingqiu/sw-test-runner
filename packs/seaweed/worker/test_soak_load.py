@@ -294,6 +294,72 @@ class PushPipes(unittest.TestCase):
                 soak_load.push_pipes(dict(push_pipes=bad))
 
 
+class HotKeyReads(unittest.TestCase):
+    """kv_load run 2 (2026-11-04): the top-1% of keys drew 0.540 of the reads, declared 0.590, because
+    a key with a read in flight was skipped and redrawn. Concurrent reads of one key are legitimate (a
+    hot-key load); only a write needs its key to itself."""
+
+    def test_the_oracle_admits_concurrent_reads_but_never_a_read_beside_a_write(self):
+        import soak_oracle
+        o = soak_oracle.Oracle()
+        o.begin_write('k', b'abc')
+        with self.assertRaises(soak_oracle.OracleError):
+            o.begin_read('k')  # pending write: no read
+        o.acknowledge('k', 1, 3, ['3,ab'])
+        first, second = o.begin_read('k'), o.begin_read('k')  # two readers, one version
+        self.assertEqual(first, second)
+        with self.assertRaises(soak_oracle.OracleError):
+            o.begin_write('k', b'xyz')  # a write waits for every reader
+        self.assertEqual(o.end_read('k'), first)
+        with self.assertRaises(soak_oracle.OracleError):
+            o.begin_write('k', b'xyz')  # one reader still in flight
+        self.assertEqual(o.finish_read('k', 200, b'abc'), 'hit')
+        self.assertNotIn('k', o.reading)
+        o.begin_write('k', b'xyz')  # no reader left
+        with self.assertRaises(soak_oracle.OracleError):
+            o.end_read('k')  # no read in flight
+
+    def test_a_key_with_a_read_in_flight_is_read_again(self):
+        import random
+        p = soak_load.Pattern(dict(PatternMode.BASE, keys=1, distribution='uniform', zipf_s=0), random.Random(7), 'p/')
+        p.next(0, True, {}, {}, {})
+        latest, busy = {p.key(0): 1}, {p.key(0): 1}  # one GET of the only key in flight
+        self.assertEqual(p.next(1, True, {}, latest, busy), ('get', p.key(0)))
+        self.assertIsNone(p.next(1, True, {p.key(0): 1}, latest, busy))  # a pending write still blocks it
+
+    def test_delivered_hot_key_share_matches_the_declared_zipf(self):
+        # soak_load.run's dispatch at run 2's settings: 32 clients at 10/s, 2 ms passes, each GET's key
+        # held for 13 ms (run 2's measured 4.5 ms mean plus the parent's completion pump). 120 s.
+        import heapq, random
+        pat = dict(clients=32, transport='dc', keys=4096, distribution='zipf', zipf_s=1.1, object_bytes=65536,
+                   rate_per_client=10, phases=[dict(kind='write_once'), dict(kind='read', duration_s=120)])
+        p = soak_load.Pattern(pat, random.Random(20261027), 'p/')
+        p.cursor, p.phase, p.started = pat['keys'], 1, 0.0
+        latest = {p.key(i): 1 for i in range(pat['keys'])}
+        index = {p.key(i): i for i in range(pat['keys'])}
+        busy, available, inflight, reads, now = {}, {}, [], [], 0.0
+        while now < 120:
+            while inflight and inflight[0][0] <= now:
+                _, key, i = heapq.heappop(inflight)
+                busy[key] -= 1
+                if not busy[key]:
+                    del busy[key]
+                available.pop(('in', i), None)
+            for i in range(32):
+                if ('in', i) in available or now < available.get(i, 0):
+                    continue
+                op = p.next(now, True, {}, latest, busy)
+                if op:
+                    busy[op[1]] = busy.get(op[1], 0) + 1
+                    heapq.heappush(inflight, (now + 0.013, op[1], i))
+                    available[i], available[('in', i)] = now + 0.1, True
+                    reads.append(index[op[1]])
+            now += 0.002
+        w = [(k + 1) ** -1.1 for k in range(4096)]
+        share, declared = sum(r < 40 for r in reads) / len(reads), sum(w[:40]) / sum(w)
+        self.assertAlmostEqual(share, declared, delta=0.01, msg='top-1%% share %.3f, declared %.3f' % (share, declared))
+
+
 class PatternMode(unittest.TestCase):
     """kv_load's client pattern: what a free client issues next."""
     BASE = dict(clients=4, transport='dc', keys=100, distribution='zipf', zipf_s=1.1, object_bytes=64 << 10,
@@ -351,10 +417,16 @@ class PatternMode(unittest.TestCase):
         self.assertEqual(p.cursor, 0)
         self.assertFalse(p.finished(10 ** 6))
 
-    def test_a_busy_key_is_skipped_not_doubled(self):
-        p = self.pattern(keys=1, distribution='uniform', zipf_s=0)
+    def test_a_busy_key_is_never_written_beside_another_op(self):
+        # Reads of a busy key may overlap (HotKeyReads); a write needs its key to itself.
+        p = self.pattern(keys=1, distribution='uniform', zipf_s=0,
+                         phases=[dict(kind='write_once'), dict(kind='mixed', duration_s=60, read_ratio=0.5)])
         p.next(0, True, {}, {}, {})
-        self.assertIsNone(p.next(1, True, {}, {p.key(0): 1}, {p.key(0): 2}))
+        latest = {p.key(0): 1}
+        ops = [p.next(1, True, {}, latest, {p.key(0): 1}) for _ in range(200)]
+        self.assertNotIn('set', [op[0] for op in ops if op])  # every write draw skipped while busy
+        self.assertIn(('get', p.key(0)), ops)  # the read draws still read it
+        self.assertEqual(p.versions, {})
 
 
 class KVLoadRun(unittest.TestCase):
