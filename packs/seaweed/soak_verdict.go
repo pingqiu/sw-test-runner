@@ -187,10 +187,12 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
 		return v, errors.New("soak verdict without its misses qualification")
 	}
-	for _, u := range v.MissesUndecidable { // rule A rows: every member present; offsets finite and inside the bracket
+	// Rule A rows: every member present, typed and finite. The offsets are rounded diagnostics: the Python
+	// assessor alone classifies, so the sign is not judged again here (codex01 on 66da7699).
+	for _, u := range v.MissesUndecidable {
 		if u.Op == "" || u.Vid == nil || *u.Vid <= 0 || u.SubmitMinusEarlyBS == nil || u.SubmitMinusLateBS == nil ||
 			math.IsNaN(*u.SubmitMinusEarlyBS) || math.IsInf(*u.SubmitMinusEarlyBS, 0) || math.IsNaN(*u.SubmitMinusLateBS) ||
-			math.IsInf(*u.SubmitMinusLateBS, 0) || !(*u.SubmitMinusEarlyBS > 0) || *u.SubmitMinusLateBS > 0 {
+			math.IsInf(*u.SubmitMinusLateBS, 0) {
 			return v, errors.New("soak verdict undecidable miss malformed")
 		}
 	}

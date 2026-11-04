@@ -49,6 +49,20 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if v, err := decodeVerdict(captured([]byte(undecidable)), testBinding, soakCriteria); err != nil || v.Status != "PASS" || len(v.MissesUndecidable) != 1 {
 		t.Fatalf("PASS with an undecidable miss: %+v %v", v.MissesUndecidable, err)
 	}
+	// codex01 on 66da7699: the offsets are rounded diagnostics, not a second classifier. A submit 0.1 us after
+	// early(B) rounds to an early offset of 0.0, and a multi-VID op reports a VID already after B with a positive
+	// late offset; both are valid producer rows and must decode.
+	for name, edit := range map[string]func(map[string]any){
+		"early offset rounded to 0": func(u map[string]any) { u["submit_minus_early_b_s"] = 0.0 },
+		"multi-VID, one VID after B": func(u map[string]any) {
+			u["vid"], u["submit_minus_early_b_s"], u["submit_minus_late_b_s"] = 27, 9.93, 9.88
+		},
+	} {
+		row := passRow(t, func(r map[string]any) { r["misses_undecidable"] = []any{undecidableRow(nil), undecidableRow(edit)} })
+		if v, err := decodeVerdict(captured([]byte(row)), testBinding, soakCriteria); err != nil || len(v.MissesUndecidable) != 2 {
+			t.Fatalf("%s refused: %v", name, err)
+		}
+	}
 	errRow := passRow(t, func(r map[string]any) {
 		r["status"], r["criteria"], r["error"] = "FAIL", map[string]any{}, "ValueError('x')"
 	})
@@ -112,12 +126,6 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		}),
 		"undecidable OP alias": passRow(t, func(r map[string]any) {
 			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["OP"] = "x" })}
-		}),
-		"undecidable before B": passRow(t, func(r map[string]any) {
-			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["submit_minus_early_b_s"] = -0.01 })}
-		}),
-		"undecidable after B": passRow(t, func(r map[string]any) {
-			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["submit_minus_late_b_s"] = 0.01 })}
 		}),
 		"undecidable not array": passRow(t, func(r map[string]any) { r["misses_undecidable"] = undecidableRow(nil) }),
 		"not JSON":              "garbage",
