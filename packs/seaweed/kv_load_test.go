@@ -98,18 +98,38 @@ func TestLoadPatternRefusesANullKnob(t *testing.T) {
 	}
 }
 
-// The preflight bound covers the pattern's full declared writes: write_once
-// plus every mixed phase at its rate, not just one copy of the keys.
-func TestDatasetBytesCoverEveryDeclaredWrite(t *testing.T) {
+// The preflight bound is the most the declared pattern can write: write_once
+// plus every mixed operation counted as a write, whatever its read ratio.
+func TestDatasetBytesBoundEveryPossibleWrite(t *testing.T) {
 	p := lmcacheLike() // write_once then read: the keys only
 	if got, want := p.datasetBytes(), int64(2*4096*(64<<10)); got != want {
 		t.Fatalf("write_once + read: %d, want %d", got, want)
 	}
-	// codex01's case: a mixed phase writing 10% of 32 x 10/s for 1500 s adds
-	// 48000 writes, about 3 GiB of payload after the 4096 keys.
+	// A mixed phase of 32 x 10/s for 1500 s: all 480000 operations count.
 	p.Phases = append(p.Phases, LoadPhase{Kind: "mixed", DurationS: 1500, ReadRatio: 0.9})
-	if got, want := p.datasetBytes(), int64(2*(4096+48000)*(64<<10)); got != want {
+	if got, want := p.datasetBytes(), int64(2*(4096+480000)*(64<<10)); got != want {
 		t.Fatalf("with a mixed phase: %d, want %d", got, want)
+	}
+	// codex01's fixed-seed case: one 64 KiB key, read 297 s, then mixed 30 s
+	// at 0.98 emitted 327680 payload bytes; the expected-write bound gave 262144.
+	one := &LoadPattern{Clients: 1, Transport: "dc", Keys: 1, Distribution: "uniform", ObjectBytes: 64 << 10, RatePerClient: 10,
+		Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "read", DurationS: 297}, {Kind: "mixed", DurationS: 30, ReadRatio: 0.98}}}
+	if got := one.datasetBytes(); got < 327680 {
+		t.Fatalf("codex01's case bound %d, below the 327680 bytes it emitted", got)
+	}
+}
+
+// ProfileArgs reaches datasetBytes before the pattern is checked: an empty or
+// absurd pattern must not panic or overflow there.
+func TestDatasetBytesNeverPanicsOnAnUncheckedPattern(t *testing.T) {
+	for name, p := range map[string]*LoadPattern{
+		"empty":    {},
+		"NaN rate": {Keys: 1, ObjectBytes: 1, Clients: 1, RatePerClient: math.NaN(), Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "mixed", DurationS: 1}}},
+		"huge":     {Keys: 1 << 30, ObjectBytes: 1 << 30, Clients: 1 << 20, RatePerClient: 1e9, Phases: []LoadPhase{{}, {Kind: "mixed", DurationS: 1 << 30}}},
+	} {
+		if got := p.datasetBytes(); got < 0 {
+			t.Errorf("%s: %d", name, got)
+		}
 	}
 }
 

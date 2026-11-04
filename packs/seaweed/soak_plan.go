@@ -79,18 +79,25 @@ func (p *LoadPattern) UnmarshalJSON(raw []byte) error {
 	return dec.Decode((*plain)(p))
 }
 
-// datasetBytes bounds the bytes the declared pattern writes onto one volume
-// disk: write_once's keys plus every mixed phase's writes at its declared
-// rate (an overwrite leaves the old needle's bytes until vacuum), all on that
-// disk, with as much again for needle overhead and slack.
+// datasetBytes is the most the declared pattern can write onto one volume
+// disk: write_once's keys plus every operation of every mixed phase at the
+// declared rate counted as a write (an overwrite leaves the old needle's bytes
+// until vacuum), all on that disk, with as much again for needle overhead and
+// slack. ProfileArgs reaches it before the pattern is checked, so it never
+// indexes the phases and saturates instead of overflowing; check() refuses
+// such a pattern later.
 func (p *LoadPattern) datasetBytes() int64 {
 	writes := float64(p.Keys)
-	for _, ph := range p.Phases[1:] {
-		if ph.Kind == "mixed" {
-			writes += float64(p.Clients) * p.RatePerClient * float64(ph.DurationS) * (1 - ph.ReadRatio)
+	for i, ph := range p.Phases {
+		if i > 0 && ph.Kind == "mixed" {
+			writes += float64(p.Clients) * p.RatePerClient * float64(ph.DurationS)
 		}
 	}
-	return 2 * int64(math.Ceil(writes)) * int64(p.ObjectBytes)
+	bytes := 2 * math.Ceil(writes) * float64(p.ObjectBytes)
+	if math.IsNaN(bytes) || bytes < 0 || bytes > math.MaxInt64/2 {
+		return math.MaxInt64 / 2
+	}
+	return int64(bytes)
 }
 
 // LoadPhase: write_once writes every key exactly once, then read reads for
