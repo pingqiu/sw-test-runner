@@ -34,21 +34,36 @@ type directSoak struct {
 	b        ProfileBundle
 	in       ProfileInput
 	deadline time.Time
-	load     string // the one task's job label
+	load     string                 // the one task's job label
+	nodes    map[string]*infra.Node // one connection per host, opened by open
+	hosts    map[string]inventory.Host
 }
 
 func (s *directSoak) unit(label string) string { return "sw-cloud-" + s.d.RunID + "-" + label }
 
-func (s *directSoak) host(id string) inventory.Host {
+// open connects to each host once for the run (cleanup opens its own) and
+// prepares it: a private run root and every declared file checked against its
+// pin. Binaries are copied before the run (the lab process); a missing or
+// different file refuses the run here, before any service starts.
+func (s *directSoak) open(ctx context.Context) (err error) {
+	s.nodes, s.hosts = map[string]*infra.Node{}, map[string]inventory.Host{}
 	for _, h := range s.d.Hosts {
-		if h.ID == id {
-			return h
+		n, sums := s.c.node(h), ""
+		s.nodes[h.ID], s.hosts[h.ID] = n, h
+		for p, sum := range s.in.Files[h.ID] {
+			sums += sum + "  " + p + "\n"
+		}
+		if err = n.ConnectContext(ctx); err == nil {
+			_, err = cloudStep(ctx, n, s.c.Output, "soak-prepare-"+h.ID+".json", "prepare-"+h.ID, 120,
+				"sudo install -d -m 0700 -o "+cloudQuote(h.Management.User)+" "+cloudQuote(h.RunRoot)+
+					"; printf %s "+cloudQuote(sums)+" | sha256sum -c --quiet -")
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return inventory.Host{}
+	return nil
 }
-
-func (s *directSoak) node(id string) *infra.Node { return s.c.node(s.host(id)) }
 
 func (s *directSoak) command(label string) (tr.JobPin, string, error) {
 	pin, ok := s.b.Jobs[label]
@@ -68,7 +83,7 @@ func (s *directSoak) step(ctx context.Context, label string, seconds int) (tr.Ex
 	if err != nil {
 		return tr.ExitInfo{}, err
 	}
-	out, err := cloudStep(ctx, s.node(pin.Node), s.c.Output, "soak-"+label+".json", label, seconds, cmd)
+	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-"+label+".json", label, seconds, cmd)
 	e := exitInfo(out, 0)
 	if err != nil {
 		e.Code = 1
@@ -77,8 +92,7 @@ func (s *directSoak) step(ctx context.Context, label string, seconds int) (tr.Ex
 }
 
 func exitInfo(out string, code int) tr.ExitInfo {
-	sum := sha256.Sum256([]byte(out))
-	return tr.ExitInfo{Code: code, Settled: true, Output: tr.CapturedOutput{Complete: true, StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sum)}}
+	return tr.ExitInfo{Code: code, Settled: true, Output: tr.CapturedOutput{Complete: true, StdoutBase64: base64.StdEncoding.EncodeToString([]byte(out)), StdoutSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(out)))}}
 }
 
 // start runs a job as a transient unit owned by the ssh user, stdout to a file.
@@ -87,20 +101,19 @@ func (s *directSoak) start(ctx context.Context, label string) error {
 	if err != nil {
 		return err
 	}
-	h := s.host(pin.Node)
-	out := path.Join(h.RunRoot, label+".stdout")
-	_, err = cloudStep(ctx, s.node(pin.Node), s.c.Output, "soak-start-"+label+".json", "start-"+label, 30,
+	h := s.hosts[pin.Node]
+	_, err = cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-start-"+label+".json", "start-"+label, 30,
 		"sudo systemd-run --unit="+cloudQuote(s.unit(label))+" --uid="+cloudQuote(h.Management.User)+
-			" --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+out)+" "+cmd)
+			" --property=WorkingDirectory="+cloudQuote(h.RunRoot)+" --property=StandardOutput="+cloudQuote("file:"+path.Join(h.RunRoot, label+".stdout"))+" "+cmd)
 	return err
 }
 
 // identity is a unit's main process as lab_profile.process() reads it.
 func (s *directSoak) identity(ctx context.Context, node, label string) (tr.ProcessIdentity, error) {
-	out, err := cloudStep(ctx, s.node(node), s.c.Output, "soak-identity-"+label+".json", "identity-"+label, 20,
+	out, err := cloudStep(ctx, s.nodes[node], s.c.Output, "soak-identity-"+label+".json", "identity-"+label, 20,
 		"p=$(systemctl show -p MainPID --value "+cloudQuote(s.unit(label))+"); test \"$p\" -gt 0; "+
 			"for i in $(seq 50); do case $(readlink /proc/$p/exe) in */weed|*/weed-volume) break;; esac; sleep 0.1; done; "+
-			"echo $p $(awk '{print $22}' /proc/$p/stat) $(cat /proc/sys/kernel/random/boot_id) $(sha256sum /proc/$p/exe | cut -d' ' -f1)")
+			"echo $p $(sed 's/.*) //' /proc/$p/stat | cut -d' ' -f20) $(cat /proc/sys/kernel/random/boot_id) $(sha256sum /proc/$p/exe | cut -d' ' -f1)")
 	f := strings.Fields(out)
 	if err != nil || len(f) != 4 {
 		return tr.ProcessIdentity{}, errors.Join(err, fmt.Errorf("soak: no process identity for %s", label))
@@ -119,14 +132,10 @@ func (s *directSoak) StartTask(ctx context.Context, label string) (tr.JobHandle,
 // end, then returns its exit status and stdout. A failed transient unit stays
 // loaded with its status; a clean exit unloads it and reads as status 0.
 func (s *directSoak) WaitTask(ctx context.Context, _ tr.JobHandle) (tr.ExitInfo, error) {
-	pin, _, err := s.command(s.load)
-	if err != nil {
-		return tr.ExitInfo{}, err
-	}
-	u := cloudQuote(s.unit(s.load))
-	out, err := cloudStep(ctx, s.node(pin.Node), s.c.Output, "soak-wait.json", "wait-"+s.load, int(time.Until(s.deadline)/time.Second)+60,
+	pin, u := s.b.Jobs[s.load], cloudQuote(s.unit(s.load)) // StartTask checked the label
+	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-wait.json", "wait-"+s.load, int(time.Until(s.deadline)/time.Second)+60,
 		"while systemctl is-active -q "+u+"; do sleep 2; done; systemctl show -p ExecMainStatus --value "+u+
-			"; cat "+cloudQuote(path.Join(s.host(pin.Node).RunRoot, s.load+".stdout")))
+			"; cat "+cloudQuote(path.Join(s.hosts[pin.Node].RunRoot, s.load+".stdout")))
 	code, body, _ := strings.Cut(out, "\n")
 	rc, cerr := strconv.Atoi(strings.TrimSpace(code))
 	return exitInfo(body, rc), errors.Join(err, cerr)
@@ -136,13 +145,10 @@ func (s *directSoak) WaitTask(ctx context.Context, _ tr.JobHandle) (tr.ExitInfo,
 // the controller clock read immediately before the kill (fault_errors needs it).
 func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle) (tr.JobHandle, tr.GenerationRestartReceipt, error) {
 	plan, ok := s.b.Restarts[episode]
+	victim, known := s.b.Jobs[plan.Victim]
 	r := tr.GenerationRestartReceipt{Plan: plan}
-	if !ok || plan.Hold {
+	if !ok || !known || plan.Hold {
 		return tr.JobHandle{}, r, fmt.Errorf("soak: no replace plan for %s", episode)
-	}
-	victim, _, err := s.command(plan.Victim)
-	if err != nil {
-		return tr.JobHandle{}, r, err
 	}
 	old, err := s.identity(ctx, victim.Node, plan.Victim)
 	var pre float64
@@ -150,7 +156,7 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 		pre, err = controllerMono()
 	}
 	if u := cloudQuote(s.unit(plan.Victim)); err == nil {
-		_, err = cloudStep(ctx, s.node(victim.Node), s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20,
+		_, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20,
 			"sudo systemctl kill -s KILL "+u+"; while systemctl is-active -q "+u+"; do sleep 0.1; done")
 	}
 	if err != nil {
@@ -173,20 +179,6 @@ func (s *directSoak) Now() time.Time                         { return time.Now()
 func (s *directSoak) After(d time.Duration) <-chan time.Time { return time.After(d) }
 func (s *directSoak) WorkDeadline() time.Time                { return s.deadline }
 
-// prepare makes the host's private run root and checks every declared file
-// against its pin. Binaries are copied before the run (the lab process); a
-// missing or different file refuses the run here, before any service starts.
-func (s *directSoak) prepare(ctx context.Context, h inventory.Host) error {
-	sums := ""
-	for p, sum := range s.in.Files[h.ID] {
-		sums += sum + "  " + p + "\n"
-	}
-	_, err := cloudStep(ctx, s.c.node(h), s.c.Output, "soak-prepare-"+h.ID+".json", "prepare-"+h.ID, 120,
-		"sudo install -d -m 0700 -o "+cloudQuote(h.Management.User)+" "+cloudQuote(h.RunRoot)+
-			"; printf %s "+cloudQuote(sums)+" | sha256sum -c --quiet -")
-	return err
-}
-
 // runDirectSoak is the kv_soak phase of the direct entry, in the approved
 // path's order: preflight, deploy and READY, setup (clock S1), the fault
 // schedule, collect, then M02 evidence (clock S2) and the assessor.
@@ -203,30 +195,39 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 	if err = errors.Join(err, berr); err != nil {
 		return "", err
 	}
-	p := b.Plan
 	d, err := inventory.Join([]byte(in.Requested), []byte(in.Resolved))
-	if err != nil || p.Soak == nil {
+	if err != nil || b.Plan.Soak == nil {
 		return "", errors.Join(err, errors.New("kv_soak needs a soak profile input"))
 	}
 	boot := observedBoot(d, "m01")
 	if local, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err != nil || boot == "" || string(bytes.TrimSpace(local)) != boot {
 		return "", errors.New("kv_soak: the controller must run on the admitted M01 boot")
 	}
-	deadline, _ := ctx.Deadline()
+	deadline, err := time.Parse(time.RFC3339Nano, d.Deadlines.Work) // the work deadline the role commands obey
+	if err != nil {
+		return "", err
+	}
 	c.localHost = "m01"
-	s := &directSoak{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}},
-		c: c, d: d, b: b, in: in, deadline: deadline}
-	defer func() { // every host is cleaned and checked, each into its own output dir
+	return (&directSoak{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}},
+		c: c, d: d, b: b, in: in, deadline: deadline}).run(ctx)
+}
+
+// run executes the plan, then always cleans up and postflights every host,
+// each into its own output directory.
+func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
+	p, d, c := s.b.Plan, s.d, s.c
+	defer func() {
 		for _, h := range d.Hosts {
+			if n := s.nodes[h.ID]; n != nil {
+				n.Close()
+			}
 			hc := c
 			hc.Output = filepath.Join(c.Output, h.ID)
 			failure = errors.Join(failure, os.MkdirAll(hc.Output, 0700), directCleanup(hc, *d, h))
 		}
 	}()
-	for _, h := range d.Hosts {
-		if err = s.prepare(ctx, h); err != nil {
-			return "", err
-		}
+	if err := s.open(ctx); err != nil {
+		return "", err
 	}
 	// In order, stopping at the first failure; a deploy job is a long-running
 	// unit (the approved runtime's "background"), every other job a bounded step.
@@ -242,14 +243,14 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 		}
 		return err
 	}
-	if err = steps(p.Preflight, p.Deploy, p.Ready); err != nil {
+	if err := steps(p.Preflight, p.Deploy, p.Ready); err != nil {
 		return "", err
 	}
-	if err = s.clocked(ctx, p.Soak.Setup.Job, s.root, "soak-clock-s1.json", ""); err != nil {
+	if err := s.clocked(ctx, p.Soak.Setup.Job, s.root, "soak-clock-s1.json", ""); err != nil {
 		return "", err
 	}
-	records, _, serr := runSoak(ctx, s, p, tr.PackInputs{Jobs: b.Jobs, Restarts: b.Restarts, Files: in.Files}, map[string]tr.JobHandle{})
-	if err = errors.Join(serr, publishFile(filepath.Join(s.root, "faults.json"), records)); err != nil {
+	records, _, err := runSoak(ctx, s, p, tr.PackInputs{Jobs: s.b.Jobs, Restarts: s.b.Restarts, Files: s.in.Files}, map[string]tr.JobHandle{})
+	if err = errors.Join(err, publishFile(filepath.Join(s.root, "faults.json"), records)); err != nil {
 		return "", err
 	}
 	if err = steps(p.Collect); err != nil {
