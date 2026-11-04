@@ -26,7 +26,9 @@ def request(url, data=None, method='GET'):
                 if remaining<=0:raise TimeoutError('whole-operation30s deadline')
                 # Linux's operation alarm also bounds headers, EOF and chunk framing.
                 chunk=r.read1(min(65536,chaos.S3_LENGTH+1-len(body)))
-                if not chunk:break
+                if not chunk:
+                    if r.length not in (None,0):raise http.client.IncompleteRead(bytes(body),r.length)
+                    break
                 body.extend(chunk)
             if time.monotonic()>deadline:raise TimeoutError('whole-operation30s deadline')
             return r.status,bytes(body)
