@@ -22,6 +22,7 @@ type directConfig struct {
 	ECStage1     bool `json:"ec_stage1,omitempty"`
 	// KVSoak runs the two-host KV soak from SoakProfile (a profile input).
 	KVSoak      bool                         `json:"kv_soak,omitempty"`
+	KVLoad      bool                         `json:"kv_load,omitempty"` // the soak pipeline with the profile's client pattern
 	SoakProfile string                       `json:"soak_profile,omitempty"`
 	SoakRelease string                       `json:"soak_release,omitempty"` // the local release tree the profile pins
 	SSHKey      string                       `json:"ssh_key"`
@@ -87,7 +88,7 @@ func runDirect(args []string, w io.Writer) int {
 	defer cancel()
 	ctx, stop := context.WithTimeout(ctx, *timeout)
 	defer stop()
-	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
+	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()

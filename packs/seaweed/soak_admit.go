@@ -48,11 +48,15 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 		return nil, errors.New("soak load needs a master and the M01 run root")
 	}
 	l := x.Layout
-	raw, err := json.Marshal(map[string]any{"root": runRoot(d, "m01"), "smoke": c, "master_http": "http://" + endpoint(*master, "master_http"),
+	config := map[string]any{"root": runRoot(d, "m01"), "smoke": c, "master_http": "http://" + endpoint(*master, "master_http"),
 		"native": map[string]any{"filer_grpc": c.FilerGRPC, "filer_http": c.FilerHTTP, "native_options": map[string]any{
 			"capacity_bytes": 1, "root": "/" + l.Collection, "collection": l.Collection, "replication": l.Replication}},
 		"layout": l, "duration_s": x.DurationS, "pacing_s": x.PacingS, "quiescence_s": int(QuiescenceReserve.Seconds()),
-		"client_kill_at_s": x.ClientKillAtS, "key_prefix": soakLoadKeyPrefix, "write_stop_s": 30})
+		"client_kill_at_s": x.ClientKillAtS, "key_prefix": soakLoadKeyPrefix, "write_stop_s": 30}
+	if x.Pattern != nil {
+		config["pattern"] = x.Pattern // absent for the soak, so its argv is unchanged
+	}
+	raw, err := json.Marshal(config)
 	if err != nil {
 		return nil, err
 	}
