@@ -272,6 +272,26 @@ class FaultWindowWorker(unittest.TestCase):
 
 
 
+class PushPipes(unittest.TestCase):
+    def setUp(self):
+        import os
+        self.addCleanup(os.environ.__setitem__, 'SW_RDMA_KVCACHE_PUSH_PIPES', os.environ.get('SW_RDMA_KVCACHE_PUSH_PIPES', ''))
+        os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'] = '8'  # as kv_smoke.configure() leaves it
+
+    def test_absent_keeps_configure_and_present_overrides(self):
+        import os
+        soak_load.push_pipes(None)
+        soak_load.push_pipes(dict(clients=32))
+        self.assertEqual(os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'], '8')
+        soak_load.push_pipes(dict(push_pipes=2))
+        self.assertEqual(os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'], '2')
+
+    def test_out_of_range_refuses(self):
+        for bad in (0, 9, True, '2', 2.0):
+            with self.assertRaises(ValueError, msg=bad):
+                soak_load.push_pipes(dict(push_pipes=bad))
+
+
 class PatternMode(unittest.TestCase):
     """kv_load's client pattern: what a free client issues next."""
     BASE = dict(clients=4, transport='dc', keys=100, distribution='zipf', zipf_s=1.1, object_bytes=64 << 10,
@@ -281,12 +301,17 @@ class PatternMode(unittest.TestCase):
         import random
         return soak_load.Pattern(dict(self.BASE, **change), random.Random(7), 'p/')
 
-    def test_write_once_writes_every_key_once_in_order_then_waits_for_the_acks(self):
+    def test_write_once_writes_every_key_once_in_a_seeded_shuffle_then_waits_for_the_acks(self):
+        import random
         p = self.pattern()
         sets = [p.next(0, True, {}, {}, {}) for _ in range(100)]
-        self.assertEqual([s[1] for s in sets], [p.key(i) for i in range(100)])
+        self.assertEqual(sorted(s[1] for s in sets), sorted(p.key(i) for i in range(100)))
+        self.assertNotEqual([s[1] for s in sets], [p.key(i) for i in range(100)])  # not rank order
         self.assertEqual({s[0] for s in sets}, {'set'})
-        self.assertEqual(len({s[2] for s in sets}), 100)
+        self.assertEqual([s[2] for s in sets], ['kv-load-%d-0' % i for i in p.order])  # seed names its key
+        self.assertEqual(p.order, soak_load.Pattern(self.BASE, random.Random(8), 'p/').order)  # not the read rng
+        hot = [p.order.index(i) for i in range(10)]  # the 10 hottest keys' write positions
+        self.assertGreaterEqual(max(hot), 50, hot)  # not all in the oldest writes
         latest = {p.key(i): 1 for i in range(100)}
         self.assertIsNone(p.next(1, True, {'pending': 1}, latest, {}))  # reads wait for every ACK
         op = p.next(2, True, {}, latest, {})

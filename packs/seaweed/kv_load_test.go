@@ -39,12 +39,22 @@ func TestLoadPatternBounds(t *testing.T) {
 		"mixed ratio 1":          func(p *LoadPattern) { p.Phases[1] = LoadPhase{Kind: "mixed", DurationS: 60, ReadRatio: 1} },
 		"phases overrun":         func(p *LoadPattern) { p.Phases[1].DurationS = 1790 },
 		"writes and their reads": func(p *LoadPattern) { p.Phases[1].DurationS = 1780 }, // 2*4096/(32*10) = 25.6 s before the reads
+		"nofile under 1024":      func(p *LoadPattern) { p.VolumeNofile = 1023 },
+		"nofile over product":    func(p *LoadPattern) { p.VolumeNofile = 1048577 },
+		"negative nofile":        func(p *LoadPattern) { p.VolumeNofile = -1 },
+		"pipes over 8":           func(p *LoadPattern) { p.PushPipes = 9 },
+		"negative pipes":         func(p *LoadPattern) { p.PushPipes = -1 },
 	} {
 		p := lmcacheLike()
 		mutate(p)
 		if err := p.check(1800); err == nil || !strings.Contains(err.Error(), "kv_load pattern") {
 			t.Errorf("%s: err %v, want a kv_load pattern refusal", name, err)
 		}
+	}
+	knobs := lmcacheLike()
+	knobs.VolumeNofile, knobs.PushPipes = 4096, 2 // run 2's capacity
+	if err := knobs.check(1800); err != nil {
+		t.Fatalf("nofile 4096 and 2 pipes were refused: %v", err)
 	}
 	mixed := lmcacheLike()
 	mixed.Distribution, mixed.ZipfS = "uniform", 0

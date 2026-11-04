@@ -50,6 +50,18 @@ type LoadPattern struct {
 	ObjectBytes   int         `json:"object_bytes"`
 	RatePerClient float64     `json:"rate_per_client"`
 	Phases        []LoadPhase `json:"phases"`
+	// Capacity knobs, absent (0) for today's values. VolumeNofile is the
+	// volumes' soft RLIMIT_NOFILE (their RDMA connection budget is soft/8,
+	// clamped 8..256; inherited is 1024, so 128). PushPipes is each client's
+	// SW_RDMA_KVCACHE_PUSH_PIPES (kv_smoke.configure sets 8).
+	VolumeNofile int `json:"volume_nofile,omitempty"`
+	PushPipes    int `json:"push_pipes,omitempty"`
+}
+
+// datasetBytes bounds the bytes write_once leaves on one volume disk: every
+// key on that disk, with as much again for needle overhead and slack.
+func (p *LoadPattern) datasetBytes() int64 {
+	return 2 * int64(p.Keys) * int64(p.ObjectBytes)
 }
 
 // LoadPhase: write_once writes every key exactly once, then read reads for
@@ -77,6 +89,9 @@ func (p *LoadPattern) check(durationS int) error {
 	}
 	if !(p.Distribution == "uniform" && p.ZipfS == 0 || p.Distribution == "zipf" && finite(p.ZipfS) && p.ZipfS > 0 && p.ZipfS <= 3) {
 		return errors.New("kv_load pattern distribution must be uniform, or zipf with 0 < zipf_s <= 3")
+	}
+	if p.VolumeNofile != 0 && (p.VolumeNofile < 1024 || p.VolumeNofile > 1048576) || p.PushPipes < 0 || p.PushPipes > 8 {
+		return errors.New("kv_load pattern volume_nofile must be absent or 1024..1048576, push_pipes absent or 1..8")
 	}
 	if len(p.Phases) < 2 || len(p.Phases) > 4 || p.Phases[0].Kind != "write_once" || p.Phases[0].DurationS != 0 || p.Phases[0].ReadRatio != 0 {
 		return errors.New("kv_load pattern starts with one write_once phase and has 2 to 4 phases")
@@ -177,6 +192,9 @@ func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 	s.filerVerbose = p.Restart != nil && p.Restart.Writes
 	if p.Soak != nil {
 		s.rotation, s.kvLoad = p.Soak.Rotation, p.Soak.Pattern != nil
+		if x := p.Soak.Pattern; x != nil {
+			s.volumeNofile, s.kvLoadBytes = x.VolumeNofile, x.datasetBytes()
+		}
 		if faultReady {
 			s.readyAssign = p.Soak.ReadyAssign
 		}

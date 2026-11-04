@@ -28,7 +28,11 @@ type SmokeSettings struct {
 	rotation    *Rotation
 	readyAssign *AssignLayout
 	kvLoad      bool // the plan's soak carries a client pattern: M01 may also run a volume
-	soakSetup   *SoakSetup
+	// kv_load only: the volumes' soft open-file limit (0 inherits), and the
+	// dataset bound every volume host's preflight checks against rotation.
+	volumeNofile int
+	kvLoadBytes  int64
+	soakSetup    *SoakSetup
 	// Master-writes plans only, set by Plan.profileSettings from Plan.Restart.
 	filerVerbose bool
 }

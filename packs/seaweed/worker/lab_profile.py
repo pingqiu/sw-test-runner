@@ -260,14 +260,36 @@ def storage(config):
         fs = os.statvfs(root)
         if fs.f_bavail * fs.f_frsize < 512 * 1024 * 1024:
             raise ValueError('smoke filesystem free space below 512 MiB')
-        rows.append(dict(id=disk['id'], mount=str(mount), device_id=str(device),
-                         resolved_device=str(device.resolve()),
-                         major=os.major(device_info.st_rdev), minor=os.minor(device_info.st_rdev),
-                         available_bytes=fs.f_bavail * fs.f_frsize,
-                         format_allowed=False))
+        row = dict(id=disk['id'], mount=str(mount), device_id=str(device),
+                   resolved_device=str(device.resolve()),
+                   major=os.major(device_info.st_rdev), minor=os.minor(device_info.st_rdev),
+                   available_bytes=fs.f_bavail * fs.f_frsize,
+                   format_allowed=False)
+        if 'volume' in config['roles'] and 'kv_load_bytes' in config:
+            row['kv_load_ratio'] = kv_load_rotation_check(config, fs)
+        rows.append(row)
     if 'volume' in config['roles'] and not rows:
         raise ValueError('volume backing device not declared')
     return rows
+
+
+def kv_load_rotation_check(config, fs):
+    """kv_load: rotation must change which keys exist only through the
+    load, never from the disk's own fill. The master's ratio is the whole
+    filesystem's used/total (master_cache_volume_rotation.go usedRatio), so
+    the disk's used bytes plus the dataset bound must stay under the high
+    watermark, or the volumes would drain from the first cycle."""
+    rotation, dataset = config.get('rotation'), config['kv_load_bytes']
+    if isinstance(dataset, bool) or not isinstance(dataset, int) or dataset < 1:
+        raise ValueError('kv_load_bytes must be a positive integer')
+    if not isinstance(rotation, dict):
+        raise ValueError('kv_load needs a rotation block')
+    total = fs.f_blocks * fs.f_frsize
+    ratio = (total - fs.f_bavail * fs.f_frsize + dataset) / total
+    if ratio >= rotation['high_watermark']:
+        raise ValueError('kv_load rotation high_watermark %r is not above the disk used plus the dataset (%.4f)'
+                         % (rotation['high_watermark'], ratio))
+    return round(ratio, 6)
 
 
 def free_service_ports(config):

@@ -36,6 +36,10 @@ type ProfileConfig struct {
 	Rotation    *Rotation     `json:"rotation,omitempty"`
 	ReadyAssign *AssignLayout `json:"ready_assign,omitempty"`
 	SoakSetup   *SoakSetup    `json:"soak_setup,omitempty"`
+	// kv_load only (lab_profile.py volume_nofile, and storage()'s rotation
+	// check); absent otherwise.
+	VolumeNofile int   `json:"volume_nofile,omitempty"`
+	KVLoadBytes  int64 `json:"kv_load_bytes,omitempty"`
 	// Master-writes plans only: the filer logs its assign retry schedule at V(1).
 	FilerVerbose bool `json:"filer_verbose,omitempty"`
 }
@@ -103,6 +107,7 @@ func ProfileArgs(d *inventory.Document, host, action, role string, s SmokeSettin
 		c.SoakSetup = s.soakSetup
 	}
 	c.FilerVerbose = s.filerVerbose
+	c.VolumeNofile, c.KVLoadBytes = s.volumeNofile, s.kvLoadBytes
 	// Fixed M01/M02 profile identity from the sealed bbb01f8 packet's
 	// observations/{m01,m02}-fabric-evidence.json, manifest 60f4f17f.
 	// A replacement requires a new reviewed profile, never historical credit.
