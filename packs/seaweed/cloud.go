@@ -443,6 +443,9 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
 		}
 		if len(c.ClusterChaosCases) > 0 {
+			if len(h.Services) == 0 {
+				command = ":"
+			}
 			command += " && find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.journal' -type f -print -exec cat {} +"
 		}
 		logs, err := cloudStep(ctx, n, c.Output, "cloud-collect.json", "collect-services", int(directCollectBound/time.Second), command)

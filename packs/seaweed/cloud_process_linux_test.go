@@ -67,6 +67,16 @@ func TestProcessPlacementKeepsPhysicalInventory(t *testing.T) {
 		}
 		roots[h.RunRoot] = true
 	}
+	two := d
+	second := d.Hosts[0]
+	second.ID = "node2"
+	second.Management.Address = "127.0.0.2"
+	second.Data.Address = "10.84.1.11"
+	two.Hosts = append(append([]inventory.Host{}, d.Hosts...), second)
+	_, _, mapped, err := processPlacement(two)
+	if err != nil || mapped["vol4"] != "node2" || mapped["client2"] != "node2" || mapped["meta"] != d.Hosts[0].ID || mapped["vol3"] != d.Hosts[0].ID {
+		t.Fatal("two physical host role placement", mapped, err)
+	}
 	d.Hosts[0].Services = append(d.Hosts[0].Services, inventory.Service{Name: "unused", Port: 1})
 	for i := range d.Hosts[0].Services {
 		if d.Hosts[0].Services[i].Name == "volume_http" {
@@ -99,6 +109,9 @@ func (f *processFake) exec(cmd string, ch ssh.Channel) uint32 {
 	f.directHost.mu.Lock()
 	f.commands = append(f.commands, cmd)
 	f.directHost.mu.Unlock()
+	if strings.Contains(cmd, "journalctl") && regexp.MustCompile(`client[1-3]-`).MatchString(cmd) {
+		return 1
+	} // no unit journal exists for SSH-only clients
 	if f.variant == "collect-fail" && strings.Contains(cmd, "journalctl") {
 		return 23
 	}
