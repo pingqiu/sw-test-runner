@@ -35,7 +35,26 @@ type CloudConfig struct {
 	Replication string `json:"replication,omitempty"`
 	// ChaosSet "A" (C1-C3) or "B" (C4-C6) runs stage 2 under replication 001.
 	ChaosSet string `json:"chaos_set,omitempty"`
+	// KVSoak runs the two-host KV soak from SoakProfile, the profile input
+	// the bundle is built from; its declared files are copied beforehand.
+	KVSoak      bool   `json:"kv_soak,omitempty"`
+	SoakProfile string `json:"-"`
+	localHost   string // the host the controller itself runs on: reached locally, not over ssh
 }
+
+// node reaches a host: locally for the controller's own host, else over ssh
+// with the configured pin or, failing that, the inventory's own pin.
+func (c CloudConfig) node(h inventory.Host) *infra.Node {
+	if h.ID == c.localHost && c.localHost != "" {
+		return &infra.Node{IsNative: true}
+	}
+	pin := c.HostKey
+	if pin == "" && h.Management.HostKey != nil {
+		pin = *h.Management.HostKey
+	}
+	return cloudNode(h, c.SSHKey, pin)
+}
+
 type CloudFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -68,6 +87,12 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if c.KVSoak {
+		if d.Target != "onprem" || len(d.Hosts) != 2 || len(c.Files) != 0 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "" {
+			return "", errors.New("kv_soak requires a two-host onprem inventory and no other phase")
+		}
+		return runDirectSoak(ctx, raw, c)
 	}
 	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != len(c.artifactNames()) {
 		return "", errors.New("one Azure, onprem or docker HTTP host and three artifacts required")
@@ -389,7 +414,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	collect := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), directCollectBound)
 		defer cancel()
-		n := cloudNode(h, c.SSHKey, c.HostKey)
+		n := c.node(h)
 		if err := n.ConnectContext(ctx); err != nil {
 			return fmt.Errorf("service-log capture did not reach the host: %w", err)
 		}
@@ -403,7 +428,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), directTeardownBound)
 	defer cancel()
-	n := cloudNode(h, c.SSHKey, c.HostKey)
+	n := c.node(h)
 	if err := n.ConnectContext(ctx); err != nil {
 		return errors.Join(collect, fmt.Errorf("cleanup did not reach the host: %w", err))
 	}
