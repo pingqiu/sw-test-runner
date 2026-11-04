@@ -861,6 +861,15 @@ KV_PATTERN = dict(clients=2, transport='dc', keys=4, distribution='uniform', obj
                   phases=[dict(kind='write_once'), dict(kind='read', duration_s=100)])
 
 
+def outside_kill(ev):
+    """kv_evidence dispatches one GET of worker 1 at 1071.5, inside its own kill (1071 .. 1072), which no real
+    run can do (the worker is dead); the per-generation route rule refuses to attribute it. Move it just past."""
+    for e in ev['events']:
+        if e.get('action') == 'get' and e['worker'] == 1 and 1071 <= e['dispatched'] < 1072:
+            e.update(dispatched=1072.0, submitted=1072.01, completed=1072.02)
+    return ev
+
+
 KV_RECEIPT = dict(State='REPLACED',  # what directSoak.Restart (cloud_soak_linux.go) records on success
                   Kill=dict(Identity=dict(Node='m02', PID=4242), AliveBefore=True, Signal='SIGKILL',
                             AppliedAt='2026-11-04T07:00:00Z', PreKillMono=1010.5),
@@ -949,18 +958,19 @@ class KVLoadAssess(unittest.TestCase):
                 if e.get('action') == 'get' and e['worker'] == 1:
                     e.update(ok=True, miss=True, results=[False], error='', fids=['3,ab'], cause='budget_refusal')
             return ev
-        self.assertEqual(self.failing(self.run_on(worker1_refused(all_refused(kv_evidence())))), [])
+        self.assertEqual(self.failing(self.run_on(worker1_refused(all_refused(outside_kill(kv_evidence()))))), [])
         # One read not refused, a malformed counter (-1 makes 41 + -1 == 40), or a fraction: a route is needed.
         for counter in (39, -1, 39.9):
-            ev = worker1_refused(all_refused(kv_evidence(), counter))
+            ev = worker1_refused(all_refused(outside_kill(kv_evidence()), counter))
             if counter == -1:
                 ev['stats']['native-stats-11-1.jsonl'][0]['stats']['native_budget_refusal_process']['missing_keys_deadline'] = 41
             self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL', counter)
         # codex01: hits in an earlier generation of the worker still need the route, whatever the last snapshot says.
-        self.assertEqual(self.run_on(all_refused(kv_evidence()))['criteria']['routes']['outcome'], 'FAIL')
+        # (outside_kill: so the hits in the SAME process, not the mid-kill GET, are what deny it)
+        self.assertEqual(self.run_on(all_refused(outside_kill(kv_evidence())))['criteria']['routes']['outcome'], 'FAIL')
         # codex01: no hit is not all refused. One plain miss of worker 1 inside E1's window (excused there as
         # reported) keeps its route requirement.
-        ev = worker1_refused(all_refused(kv_evidence()))
+        ev = worker1_refused(all_refused(outside_kill(kv_evidence())))
         plain = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['submitted'] > 1010)
         del plain['cause']
         row = self.run_on(ev)
@@ -973,6 +983,27 @@ class KVLoadAssess(unittest.TestCase):
             ev['stats'][n] = [dict(status='OBSERVED', stats=dict(loader=dict(refused, read_calls=1)))]
         reason = self.run_on(ev)['criteria']['routes']['reason']
         self.assertTrue(all(n in reason for n in names), reason)
+
+    def test_the_route_exemption_is_per_process_generation(self):
+        # Fresh kv_load run 1 (2026-11-04): killed worker 2's replacement had 1,934 GETs, every one a recorded
+        # refusal miss, while its original generation had 715 hits; the worker-level rule flagged the replacement.
+        # kv_evidence kills worker 1 at 1071 (finished 1072); its replacement series is native-stats-77-1.
+        refused = dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=0, direct_rc_reads=0, copied_reads=0, read_calls=33)
+        def replacement_refused(ev):
+            ev['stats']['native-stats-77-1.jsonl'] = [dict(status='OBSERVED', stats=dict(
+                loader=refused, native_budget_refusal_process=dict(missing_keys_refused=33, missing_keys_deadline=0)))]
+            for e in ev['events']:  # every GET of worker 1 after the kill: a recorded refusal miss
+                if e.get('action') == 'get' and e['worker'] == 1 and e['dispatched'] >= 1072:
+                    e.update(ok=True, miss=True, results=[False], error='', fids=['3,ab'], cause='budget_refusal')
+            return ev
+        row = self.run_on(replacement_refused(outside_kill(kv_evidence())))
+        self.assertEqual(self.failing(row), [], row['criteria'])  # the original keeps its hits and its route
+        # A GET of worker 1 dispatched inside the kill (killed 1071 .. finished 1072) belongs to no one generation:
+        # fail closed, the replacement must show a route.
+        ev = replacement_refused(outside_kill(kv_evidence()))
+        inside = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['dispatched'] >= 1072)
+        inside.update(dispatched=1071.5, submitted=1071.51, completed=1071.52)
+        self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL')
 
     def test_op_events_are_bounded_by_the_declared_pattern_not_the_soak_caps(self):
         # kv_load run 2 (2026-11-04): a full 900 s load wrote 71.4 MB of op-events, over the soak's 64 MiB,
