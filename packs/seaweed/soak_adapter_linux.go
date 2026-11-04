@@ -7,9 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,12 +22,9 @@ import (
 // (the controller runs on M01, boot-checked). Its publish/read pair is the Go
 // side of soak_load.py's publish/read_bound contract, not a second rule.
 type soakAdapter struct {
+	soakWindow
 	a        *tr.ActionContext
-	root     string // the M01 run root
-	runID    string
-	bootID   string // the admitted M01 boot
 	deadline time.Time
-	roles    map[string]string // episode -> role, bound by Pause
 }
 
 func (s *soakAdapter) StartTask(ctx context.Context, label string) (tr.JobHandle, error) {
@@ -63,7 +58,7 @@ func (r *runtimePack) soak(ctx context.Context, a *tr.ActionContext, p Plan, d *
 	if b, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err != nil || boot == "" || string(bytes.TrimSpace(b)) != boot {
 		return refusal("seaweed_kv_soak", "BINDING_REFUSED", errors.New("runner is not the admitted M01 clock"))
 	}
-	ops := &soakAdapter{a: a, root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, deadline: in.Binding.WorkDeadline, roles: map[string]string{}}
+	ops := &soakAdapter{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}}, a: a, deadline: in.Binding.WorkDeadline}
 	records, _, err := runSoak(ctx, ops, p, in, sess.jobs)
 	if perr := publishFile(filepath.Join(ops.root, "faults.json"), records); err == nil {
 		err = perr
@@ -72,52 +67,6 @@ func (r *runtimePack) soak(ctx context.Context, a *tr.ActionContext, p Plan, d *
 		return refusal("seaweed_kv_soak", "SOAK_FAILED", err)
 	}
 	return admittedResult("completed", "OK", "soak load and fault schedule completed; the verdict is computed at collect", "seaweed_kv_soak", d), nil
-}
-
-// LoadStart reads the worker's witness: this boot, a finite positive clock.
-func (s *soakAdapter) LoadStart(ctx context.Context) (float64, error) {
-	var w struct {
-		BootID string  `json:"boot_id"`
-		Mono   float64 `json:"mono"`
-	}
-	if err := pollBound(ctx, filepath.Join(s.root, "soak-load-start.json"), &w); err != nil {
-		return 0, err
-	}
-	if w.BootID != s.bootID || math.IsNaN(w.Mono) || math.IsInf(w.Mono, 0) || w.Mono <= 0 {
-		return 0, errors.New("soak: load-start witness foreign or malformed")
-	}
-	return w.Mono, nil
-}
-
-func (s *soakAdapter) binding(episode string) map[string]any {
-	return map[string]any{"run_id": s.runID, "boot_id": s.bootID, "episode": episode, "role": s.roles[episode]}
-}
-func (s *soakAdapter) Pause(episode, role string, pauseMono float64) error {
-	s.roles[episode] = role
-	b := s.binding(episode)
-	b["pause_mono"] = pauseMono
-	return publishFile(filepath.Join(s.root, "fault-pause-"+episode+".json"), b)
-}
-func (s *soakAdapter) Close(episode string, endMono float64) error {
-	b := s.binding(episode)
-	b["end_mono"] = endMono
-	return publishFile(filepath.Join(s.root, "fault-close-"+episode+".json"), b)
-}
-func (s *soakAdapter) Ack(ctx context.Context, episode string) (SoakAck, error) {
-	var raw map[string]json.RawMessage
-	var a SoakAck
-	path := filepath.Join(s.root, "fault-ack-"+episode+".json")
-	if err := pollBound(ctx, path, &raw); err != nil {
-		return a, err
-	}
-	for k, want := range s.binding(episode) {
-		var got string
-		if json.Unmarshal(raw[k], &got) != nil || got != want {
-			return a, fmt.Errorf("soak: fault-window ack binding differs on %s", k)
-		}
-	}
-	body, _ := json.Marshal(raw)
-	return a, json.Unmarshal(body, &a)
 }
 
 // readBound reads one fault-window/witness file: no symlink, a regular file,
