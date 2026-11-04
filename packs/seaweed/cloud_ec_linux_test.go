@@ -27,6 +27,18 @@ type ecDirectHost struct {
 }
 
 func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
+	if h.mode == "rust-positive" && strings.Contains(cmd, "ec_service.py") && strings.Contains(cmd, `"role":`) {
+		holder := strings.Contains(cmd, `"role":"h`)
+		if holder && (!strings.Contains(cmd, `/weed-volume"`) || strings.Contains(cmd, `"-config_dir=`) || strings.Contains(cmd, `"volume",`)) {
+			return 23
+		}
+		if !holder && !strings.Contains(cmd, `/weed"`) {
+			return 23
+		}
+	}
+	if h.mode == "rust-positive" && strings.Contains(cmd, "ec_capture.py") && strings.Contains(cmd, `"volume_exe":`) && !strings.Contains(cmd, `/weed-volume"`) {
+		return 23
+	}
 	if strings.Contains(cmd, "systemctl kill") {
 		h.lost++
 		if h.killed == nil {
@@ -192,6 +204,21 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	if strings.HasPrefix(mode, "under-") {
 		json.Unmarshal([]byte(`{"ec_under_quorum":true}`), &config)
 	}
+	if strings.HasPrefix(mode, "rust-") || mode == "go-explicit" {
+		impl := "rust"
+		if mode == "rust-invalid" {
+			impl = "bad"
+		}
+		if mode == "go-explicit" {
+			impl = "go"
+		}
+		json.Unmarshal([]byte(fmt.Sprintf(`{"ec_volume_impl":%q}`, impl)), &config)
+		if mode == "rust-positive" {
+			v := filepath.Join(t.TempDir(), "weed-volume")
+			os.WriteFile(v, []byte("rust"), 0600)
+			config.Files["weed-volume"] = CloudFile{Path: v, SHA256: hash([]byte("rust"))}
+		}
+	}
 	_, e := RunCloudHTTP(ctx, inv, config)
 	return h, e
 }
@@ -235,6 +262,24 @@ func TestDirectECUnderQuorumCaller(t *testing.T) {
 			}
 			if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
 				t.Fatal("cleanup/postflight skipped")
+			}
+		})
+	}
+}
+
+func TestDirectRustVolumeSelectorAndCleanup(t *testing.T) {
+	for _, mode := range []string{"rust-positive", "rust-missing", "rust-invalid", "go-explicit"} {
+		t.Run(mode, func(t *testing.T) {
+			h, e := runECFake(t, mode)
+			positive := mode == "rust-positive" || mode == "go-explicit"
+			if (e == nil) != positive {
+				t.Errorf("%s: %v", mode, e)
+			}
+			if positive && (h.lost != 4 || h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0) {
+				t.Fatal("run/cleanup/postflight missing")
+			}
+			if !positive && (h.lost != 0 || h.index("sudo install -d") >= 0) {
+				t.Fatal("invalid selector/artifact reached effects")
 			}
 		})
 	}
