@@ -307,3 +307,25 @@ func TestMasterReadyRealHTTPResponseSchema(t *testing.T) {
 		})
 	}
 }
+
+// A failed or malformed /proc read must refuse before the signal boundary.
+func TestMasterKillIdentityBeforeSignal(t *testing.T) {
+	for _, mode := range []string{"failed", "empty", "nonnumeric", "valid"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			sudo := "#!/bin/sh\ntest \"$1\" = -n || exit 90\nshift\ncase $1 in systemctl) echo 123;; kill) echo SIGNAL_REACHED; exit 97;; *) exit 91;; esac\n"
+			sed := "#!/bin/sh\ncase $READBACK in failed) exit 23;; empty) exit 0;; nonnumeric) echo 'S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 bad';; valid) echo 'S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 456';; esac\n"
+			for name, body := range map[string]string{"sudo": sudo, "sed": sed} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh", "-ec", chaosKillScript("unit"))
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "READBACK="+mode)
+			out, err := cmd.CombinedOutput()
+			if err == nil || strings.Contains(string(out), "SIGNAL_REACHED") != (mode == "valid") {
+				t.Fatalf("mode%s err%v output%s", mode, err, out)
+			}
+		})
+	}
+}

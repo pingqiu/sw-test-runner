@@ -134,8 +134,8 @@ above about 1 s during warm-up would mean queueing behind stalled SETs.
 
 Use `seaweed-cloud direct` with `master_writes:true`, one onprem/docker HTTP
 host and the default three KV artifacts. This optional case replaces the default
-smoke with the same 120s write-load schedule over loader-http. The master unit
-and data directory are retained across one SIGKILL/restart; readiness observes
+smoke with the same 120s write-load schedule over loader-http. A fresh master generation
+retains the data directory and argv across one SIGKILL/restart; readiness observes
 its HTTP leader status without an Assign probe. The same client host stamps
 P before Kill and READY after the leader probe. Filer -v=1 records assignment
 retry diagnostics. `master-writes.json` uses the report-only contract above;
