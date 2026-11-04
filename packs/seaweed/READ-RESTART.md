@@ -141,7 +141,7 @@ confirmed GONE after Kill and READY after the leader probe. First ACK delays are
 reported separately from GONE and from READY; pre-GONE completions cannot win. Filer -v=1 records assignment
 retry diagnostics. `master-writes.json` uses the report-only contract above;
 no latency/error-rate SLA or RDMA claim is introduced. The existing DC
-approved-run case remains until its later migration.
+approved-run execution wrapper is retired; the direct case remains.
 
 The direct timing case uses 64 KiB values: at most 480 paced SETs write 30 MiB
 logically in 120s. This fits the default smoke volume capacity and avoids

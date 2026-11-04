@@ -1,5 +1,7 @@
 # S0b-min PR3: existing worker admission and retained cleanup
 
+> Historical Seaweed approved-path record. The Seaweed CLI/registry execution entry is retired; use `seaweed-cloud direct`. Generic runner authority machinery and historical evidence remain unchanged.
+
 This stacks on PR2 `4b61546e1f40` and S0a `eef35ec2`. It implements the
 accepted S0b-min proposal and amendment `0766b2d4`: one controller, the existing
 queue/claim/flock/result transitions, and one S0a RunScope. It adds no broker,

@@ -1,5 +1,5 @@
-// seaweed-pack exposes local planning only. Runtime uses approved-run's strict
-// service adapter; there is no run, SSH, upload, apply or fallback command here.
+// seaweed-pack exposes local planning only. Runtime uses seaweed-cloud direct;
+// there is no run, SSH, upload, apply or fallback command here.
 package main
 
 import (

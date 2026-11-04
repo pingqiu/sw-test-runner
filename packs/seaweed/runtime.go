@@ -2,7 +2,6 @@ package seaweed
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -12,16 +11,14 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
-// Plan is data embedded in scenario.metadata.seaweed_plan, therefore pinned by
-// S0b's independent GO. It cannot nominate an executor, authority or credential.
-// Protected installation is a separate prerequisite; deploy starts owned jobs.
+// Plan is shared scenario/profile data. It cannot nominate an executor,
+// authority or credential and grants no execution permission.
 type Plan struct {
 	Version   string        `json:"version"`
 	Profile   string        `json:"profile,omitempty"`
@@ -297,143 +294,6 @@ func contains(a []string, s string) bool {
 	return false
 }
 
-type session struct {
-	mu         sync.Mutex
-	planHash   string
-	next       int
-	terminal   error
-	cleanupErr error
-	jobs       map[string]tr.JobHandle
-	admitted   time.Time // the first phase's admission: the one clock every budget is charged against
-}
-
-// clock is the admission clock; CPU controls advance it to prove elapsed phases.
-var clock = time.Now
-
-// soakPhase is the seaweed_kv_soak controller; CPU controls replace it only to
-// prove the phase transition into collect (the real one needs the M01 clock).
-var soakPhase = (*runtimePack).soak
-
-type runtimePack struct {
-	mu       sync.Mutex
-	sessions map[*tr.RunScope]*session
-	pause    func() <-chan time.Time // Production uses 30 s; CPU controls replace time only.
-}
-
-func (r *runtimePack) run(ctx context.Context, a *tr.ActionContext, act tr.Action) (out map[string]string, returned error) {
-	defer func() {
-		if returned != nil {
-			a.FailApprovedPack(returned)
-		}
-	}()
-	in, err := a.ApprovedPackInputs()
-	if err != nil {
-		return unavailable(ctx, a, act)
-	}
-	if len(act.Params) != 0 {
-		return refusal(act.Action, "PLAN_INVALID", errors.New("runtime phases take no caller parameters"))
-	}
-	var sealed tr.Scenario
-	if err := yaml.Unmarshal(in.Scenario, &sealed); err != nil {
-		return refusal(act.Action, "PLAN_INVALID", err)
-	}
-	raw := sealed.Metadata["seaweed_plan"]
-	r.mu.Lock()
-	s := r.sessions[a.Safety]
-	r.mu.Unlock()
-	admitted := clock()
-	if s != nil {
-		admitted = s.admitted // budgets are charged once, at the session's first admission; later phases rebind identity and shape
-	}
-	p, d, err := decodePlan(raw)
-	if err == nil {
-		err = bind(p, d, in, admitted)
-	}
-	if err != nil {
-		return refusal(act.Action, "BINDING_REFUSED", err)
-	}
-	r.mu.Lock()
-	s = r.sessions[a.Safety]
-	if s == nil {
-		s = &session{planHash: hash([]byte(raw)), jobs: map[string]tr.JobHandle{}, admitted: admitted}
-		r.sessions[a.Safety] = s
-	}
-	r.mu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if act.Action == phases[4] {
-		err = a.Safety.Close()
-		s.cleanupErr = errors.Join(s.cleanupErr, err)
-		if s.cleanupErr != nil {
-			return refusal(act.Action, "CLEANUP_UNPROVEN", s.cleanupErr)
-		}
-		s.next = 5
-		return admittedResult("settled", "OK", "owned issuers settled; no cloud or disk deletion performed", act.Action, d), nil
-	}
-	if s.terminal != nil || s.planHash != hash([]byte(raw)) || s.next >= 4 || sealed.Phases[s.next].Actions[0].Action != act.Action {
-		return refusal(act.Action, "PHASE_ORDER_REFUSED", errors.New("phase repeated, reordered or changed"))
-	}
-	if act.Action == "seaweed_kv_soak" || act.Action == "seaweed_read_restart" {
-		phase := (*runtimePack).restart
-		if act.Action == "seaweed_kv_soak" {
-			phase = soakPhase
-		}
-		out, err = phase(r, ctx, a, p, d, in, s)
-		s.terminal = err
-		if err == nil {
-			s.next++
-		}
-		return out, err
-	}
-	for _, step := range p.steps(act.Action) {
-		if err = ctx.Err(); err != nil {
-			s.terminal = err
-			return refusal(act.Action, "OWNED_JOB_FAILED", err)
-		}
-		background := act.Action == phases[1] && containsStep(p.Deploy, step.Job)
-		var h tr.JobHandle
-		setup := p.Soak != nil && step.Job == p.Soak.Setup.Job // the first clock sample (decision 3 r6)
-		var t1, t4 float64
-		if setup {
-			if t1, err = controllerMono(); err != nil {
-				s.terminal = err
-				return refusal(act.Action, "OWNED_JOB_FAILED", err)
-			}
-		}
-		var e tr.ExitInfo
-		if h, e, err = a.RunApprovedPackJob(ctx, step.Job, background); err != nil {
-			s.terminal = err
-			return refusal(act.Action, "OWNED_JOB_FAILED", err)
-		}
-		if setup {
-			if t4, err = controllerMono(); err == nil {
-				var row []byte
-				var auth float64
-				if row, _, err = e.Output.Decode(); err == nil {
-					if auth, err = authorizeT1(ctx, a, h, e); err == nil {
-						err = publishSoakClock(runRoot(d, "m01"), "soak-clock-s1.json", d.RunID, row, t1, auth, t4)
-					}
-				}
-			}
-			if err != nil {
-				s.terminal = err
-				return refusal(act.Action, "OWNED_JOB_FAILED", err)
-			}
-		}
-		if background {
-			s.jobs[step.Job] = h
-		}
-	}
-	if act.Action == phases[3] && p.Soak != nil {
-		v, err := r.soakVerdict(ctx, a, p, d)
-		if err != nil {
-			s.terminal = err
-			return refusal(act.Action, "SOAK_VERDICT_FAIL", fmt.Errorf("%w (verdict %+v)", err, v))
-		}
-	}
-	s.next++
-	return admittedResult("completed", "OK", "inspect S0b authority/job receipts and owned stdout artifacts", act.Action, d), nil
-}
 func containsStep(a []Step, label string) bool {
 	for _, s := range a {
 		if s.Job == label {
@@ -442,13 +302,9 @@ func containsStep(a []Step, label string) bool {
 	}
 	return false
 }
-func refusal(action, code string, err error) (map[string]string, error) {
-	const hint = "restore exact approved inventory/plan/deployment/lease; preserve UNKNOWN and cleanup evidence"
-	return result("refused", code, hint, action, nil), fmt.Errorf("%s: %w; remedy: %s", code, err, hint)
-}
 
 // MarshalPlan is the common producer path; no cloud-specific deployment path.
-// It checks inventory Join. S0b binding and all job pins are checked at execution.
+// It checks inventory Join and grants no execution permission.
 func MarshalPlan(p Plan) ([]byte, error) {
 	b, err := json.Marshal(p)
 	if err != nil {
@@ -456,13 +312,4 @@ func MarshalPlan(p Plan) ([]byte, error) {
 	}
 	_, _, err = decodePlan(string(b))
 	return bytes.Clone(b), err
-}
-
-func admittedResult(status, code, remedy, action string, d *inventory.Document) map[string]string {
-	r := Result{Schema: "seaweed.pack-result/v1", Status: status, Code: code, Remedy: remedy, Action: action, ExecutionAuthorized: true, Effects: []string{"owned_jobs_only"}, State: d.State, Transport: d.Transport}
-	if status == "settled" {
-		r.Effects = []string{"settle_owned_issuers"}
-	}
-	b, _ := json.Marshal(r)
-	return map[string]string{"value": string(b), "execution_authorized": "true"}
 }

@@ -13,8 +13,7 @@ import (
 
 // soakWindow is the fault-window side of soakOps: the load-start witness and
 // the pause/ack/close files in the M01 run root, bound to the run, the M01
-// boot and the episode. It needs no runner job, so the approved adapter and
-// the direct ssh adapter share it.
+// boot and the episode. It needs no runner job; direct ssh uses it unchanged.
 type soakWindow struct {
 	root   string // the M01 run root
 	runID  string

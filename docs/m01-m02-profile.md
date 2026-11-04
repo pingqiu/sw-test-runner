@@ -1,5 +1,7 @@
 # M01/M02 profile (implementation in progress)
 
+> Historical Seaweed approved-path record. The Seaweed CLI/registry execution entry is retired; use `seaweed-cloud direct`. Generic runner authority machinery and historical evidence remain unchanged.
+
 As-built starting point: d5ba4535b5b05f05da6baf1560aed8a75365289b, accepted inventory 0664d799, accepted S0b 1d88dca1. Assigned by Claude01 6ae4d29b9c9fd1ba9ca54501. No installation, native operation or runtime launch is authorized here.
 
 Responsibility: LC2-C actual host/boot/device inventory binding; LC3-E exact smoke/path evidence; LC5-A/E owned settlement and export; LC6-B observations across boot/restart. Reuse the accepted pack, custody, worker and KV oracle. No new execution driver or scheduler. The lease/worker canonical-flock handoff remains a separate blocker.
