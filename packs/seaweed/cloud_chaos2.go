@@ -211,6 +211,7 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 	victims := append([]string{}, x.Victims...)
 	sort.Strings(victims)
 	results := map[string]any{}
+	eligibleKeys, affectedReads := 0, 0
 	for _, id := range chaosClients {
 		lines := strings.Split(strings.TrimSpace(loads[id]), "\n")
 		var out struct {
@@ -238,17 +239,29 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 				if json.Unmarshal([]byte(line), &a) != nil || len(a.FIDs) == 0 {
 					continue // unknown placement is never excused
 				}
-				vid, _, _ := strings.Cut(a.FIDs[0], ",")
-				held := append([]string{}, placement[vid]...)
-				sort.Strings(held)
-				w.Unavailable[a.Key] = strings.Join(held, ",") == strings.Join(victims, ",")
+				unavailable := true
+				for _, fid := range a.FIDs {
+					vid, _, ok := strings.Cut(fid, ",")
+					held := append([]string{}, placement[vid]...)
+					sort.Strings(held)
+					unavailable = unavailable && ok && strings.Join(held, ",") == strings.Join(victims, ",")
+				}
+				w.Unavailable[a.Key] = unavailable
 			}
 		}
 		if e := checkChaosOps(out.Outcomes, w); e != nil {
 			return fmt.Errorf("%s: %w", id, e)
 		}
+		for _, eligible := range w.Unavailable {
+			if eligible {
+				eligibleKeys++
+			}
+		}
 		failed := 0
 		for _, o := range out.Outcomes {
+			if !o.Exact && w.Unavailable[o.Key] && (o.Kind == "kv_get" || o.Kind == "s3_get") && o.Started >= w.Marks[0] && o.Ended <= w.ReadyMono+60 {
+				affectedReads++
+			}
 			if !o.Exact {
 				failed++
 			}
@@ -263,6 +276,13 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		if !strings.Contains(out, `"status": "PASS"`) {
 			return fmt.Errorf("%s read-back did not PASS", id)
 		}
+	}
+	if x.Name == "C5-two-kill" {
+		status := "NOT_COVERED"
+		if affectedReads > 0 {
+			status = "COVERED"
+		}
+		r.unavailableKeys = map[string]any{"status": status, "eligible_keys": eligibleKeys, "affected_reads": affectedReads}
 	}
 	return r.save("result.json", results)
 }

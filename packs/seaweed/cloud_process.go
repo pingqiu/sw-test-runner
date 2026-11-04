@@ -87,8 +87,17 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 			selected = &v
 		}
 	}
-	if selected == nil && name != "C1-single-kill" {
-		return "", fmt.Errorf("%s NOT_RUN on direct: only stage 1 and C1 implemented; C3/C6 remain cloud-only", name)
+	var mixed *chaos2Case
+	for _, set := range chaos2Sets {
+		for _, x := range set {
+			if x.Name == name && x.Kind != "partition" && x.Kind != "netem" {
+				v := x
+				mixed = &v
+			}
+		}
+	}
+	if selected == nil && mixed == nil {
+		return "", fmt.Errorf("%s NOT_RUN on direct: only process cases implemented; C3/C6 remain cloud-only", name)
 	}
 	if e := c.CheckFiles(); e != nil {
 		return "", e
@@ -166,7 +175,7 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	if selected != nil {
 		e = runChaosCase(ctx, view, *selected, hosts, map[string]int{"volume": 1, "filer": 1}, r)
 	} else {
-		e = runChaos2Case(ctx, view, chaos2Sets["A"][0], hosts, r.gens, r)
+		e = runChaos2Case(ctx, view, *mixed, hosts, r.gens, r)
 		if e == nil {
 			journals, err := r.each(ctx, "actual-journal", 30, func(id string) string { return "cat " + cloudQuote(hosts[id].RunRoot+"/chaos-"+name+".journal") })
 			if err != nil {
@@ -179,7 +188,11 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		return "", e
 	}
 	result = filepath.Join(c.Output, "process-result.json")
-	e = os.WriteFile(result, processJSON(map[string]any{"case": name, "status": "PASS", "C3": "NOT_RUN", "C6": "NOT_RUN", "host_tolerance": "NOT_CLAIMED"}), 0600)
+	row := map[string]any{"case": name, "status": "PASS", "C3": "NOT_RUN", "C6": "NOT_RUN", "host_tolerance": "NOT_CLAIMED"}
+	if name == "C5-two-kill" {
+		row["process_recovery"], row["unavailable_keys"] = "PASS", r.unavailableKeys
+	}
+	e = os.WriteFile(result, processJSON(row), 0600)
 	return result, e // Overall direct PASS also requires the deferred clean postflight.
 }
 
