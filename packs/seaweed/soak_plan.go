@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
@@ -206,7 +207,50 @@ const (
 	DeployReserve     = 300 * time.Second
 	OverdueTolerance  = 5 * time.Second
 	WitnessWait       = 10 * time.Second
+	// DirectSoakHorizon bounds a soak that seaweed-cloud direct runs (#1002: the 2 h and 8 h gates).
+	// The approved (S0b) path and its worker lease envelope keep SoakHorizon.
+	DirectSoakHorizon = 9 * time.Hour
 )
+
+// directSoakBudget refuses, before anything deploys, a direct soak whose work deadline or
+// controller timeout (--timeout) can't hold it: deploy, the load, quiescence and the trailing
+// collection and assessment, plus the cleanup reserve for the timeout. Unsized, an 8 h run
+// would fail hours in.
+func directSoakBudget(x *SoakPlan, now, work, timeout time.Time) error {
+	if err := x.checkScheduleWithin(DirectSoakHorizon); err != nil {
+		return err
+	}
+	need := DeployReserve + WitnessWait + secs(x.DurationS) + QuiescenceReserve + LoadExitGrace + trailingReserve(x.DurationS, true)
+	if work.Sub(now) < need {
+		return fmt.Errorf("soak needs %s of work time; the inventory's work deadline leaves %s", need, work.Sub(now).Round(time.Second))
+	}
+	if timeout.Sub(now) < need+CleanupReserve {
+		return fmt.Errorf("soak needs a direct --timeout of at least %s; it leaves %s", need+CleanupReserve, timeout.Sub(now).Round(time.Second))
+	}
+	return nil
+}
+
+// assessTimeout bounds the direct path's assessor step: 120 s per 30 minutes of soak.
+func assessTimeout(durationS int) time.Duration {
+	return 120 * time.Second * time.Duration(soakScale(durationS))
+}
+
+// trailingReserve is the work time a soak keeps after its load for collection and assessment.
+// The approved path and any 30-minute soak keep CollectReserve, as before. A longer direct soak
+// also reserves its whole scaled assessor step (#1002), whose evidence grows with the duration.
+// The predeploy budget, the load admission and every fault check use this one value.
+func trailingReserve(durationS int, direct bool) time.Duration {
+	if direct && soakScale(durationS) > 1 {
+		return CollectReserve + assessTimeout(durationS)
+	}
+	return CollectReserve
+}
+
+// soakScale is how many 30-minute soaks the plan's duration spans (at least 1): the factor by which the
+// soak's duration-bound evidence and the assessor's step grow (#1002).
+func soakScale(durationS int) int {
+	return max(1, (durationS+1799)/1800)
+}
 
 var (
 	soakName        = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -263,8 +307,12 @@ func secs(n int) time.Duration { return time.Duration(n) * time.Second }
 // checkSchedule bounds every number before any arithmetic on it (codex01 R1:
 // an at_s near MaxInt64 overflowed the seconds math). bindSoak and runSoak
 // both call it, so a direct runSoak call can't dispatch an unchecked plan.
-func (x *SoakPlan) checkSchedule() error {
-	if x == nil || x.DurationS <= 0 || x.DurationS > int(SoakHorizon/time.Second) {
+func (x *SoakPlan) checkSchedule() error { return x.checkScheduleWithin(SoakHorizon) }
+
+// checkScheduleWithin is checkSchedule under the executor's horizon: SoakHorizon on the approved path,
+// DirectSoakHorizon under seaweed-cloud direct.
+func (x *SoakPlan) checkScheduleWithin(horizon time.Duration) error {
+	if x == nil || x.DurationS <= 0 || x.DurationS > int(horizon/time.Second) {
 		return errors.New("soak duration out of range")
 	}
 	if t := x.ReadTransport; t != "" && t != "dc" && t != "rc" || t == "rc" && x.Pattern != nil {

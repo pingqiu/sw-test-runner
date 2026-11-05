@@ -222,6 +222,9 @@ func (s *directSoak) Now() time.Time                         { return time.Now()
 func (s *directSoak) After(d time.Duration) <-chan time.Time { return time.After(d) }
 func (s *directSoak) WorkDeadline() time.Time                { return s.deadline }
 
+// Horizon is the direct path's soak horizon (#1002); runSoak's schedule check and waits use it.
+func (s *directSoak) Horizon() time.Duration { return DirectSoakHorizon }
+
 // runDirectSoak is the kv_soak phase of the direct entry, in the approved
 // path's order: preflight, deploy and READY, setup (clock S1), the fault
 // schedule, collect, then M02 evidence (clock S2) and the assessor.
@@ -252,6 +255,11 @@ func runDirectSoak(ctx context.Context, inventoryRaw []byte, c CloudConfig) (row
 	deadline, err := time.Parse(time.RFC3339Nano, d.Deadlines.Work) // the work deadline the role commands obey
 	if err != nil {
 		return "", err
+	}
+	if timeout, bounded := ctx.Deadline(); b.Plan.Soak != nil && bounded {
+		if err = directSoakBudget(b.Plan.Soak, time.Now(), deadline, timeout); err != nil {
+			return "", err // before any deploy: an unsized long soak would fail hours in
+		}
 	}
 	c.localHost = "m01"
 	executor := &directSoak{soakWindow: soakWindow{root: runRoot(d, "m01"), runID: d.RunID, bootID: boot, roles: map[string]string{}},
@@ -322,7 +330,7 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	if err != nil {
 		return "", err
 	}
-	e, err := s.step(ctx, p.Soak.Assess.Job, 120)
+	e, err := s.step(ctx, p.Soak.Assess.Job, int(assessTimeout(p.Soak.DurationS)/time.Second)) // reserved by trailingReserve
 	if err != nil {
 		return "", err
 	}

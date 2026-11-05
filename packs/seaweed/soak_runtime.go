@@ -175,11 +175,30 @@ func (c *soakClock) now() (float64, error) {
 	return m, err
 }
 
+// soakHorizon is the executor's horizon: an executor may declare its own (the direct path's
+// DirectSoakHorizon); any other keeps SoakHorizon.
+func soakHorizon(ops soakOps) time.Duration {
+	if h, ok := ops.(interface{ Horizon() time.Duration }); ok {
+		return h.Horizon()
+	}
+	return SoakHorizon
+}
+
+// declaresHorizon reports an executor with its own horizon: the direct path, whose long soaks
+// reserve their scaled assessor in trailingReserve.
+func declaresHorizon(ops soakOps) bool {
+	_, ok := ops.(interface{ Horizon() time.Duration })
+	return ok
+}
+
 // checkedSpan converts seconds to a Duration only inside the soak horizon,
 // so no float can wrap the conversion. A past (negative) span waits 0 and is
 // judged by the overdue rule as before.
-func checkedSpan(s float64) (time.Duration, error) {
-	if math.IsNaN(s) || s < -SoakHorizon.Seconds() || s > SoakHorizon.Seconds() {
+func checkedSpan(s float64) (time.Duration, error) { return checkedSpanWithin(s, SoakHorizon) }
+
+// checkedSpanWithin is checkedSpan under the executor's horizon (soakHorizon).
+func checkedSpanWithin(s float64, h time.Duration) (time.Duration, error) {
+	if math.IsNaN(s) || s < -h.Seconds() || s > h.Seconds() {
 		return 0, errors.New("soak: derived wait outside the soak horizon")
 	}
 	return time.Duration(max(s, 0) * float64(time.Second)), nil
@@ -220,13 +239,15 @@ type readyRow struct {
 // under the live action context, never from cleanup or a detached context.
 func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims map[string]tr.JobHandle) (records []FaultRecord, exit tr.ExitInfo, err error) {
 	x := p.Soak
-	if err = x.checkSchedule(); err != nil { // before any arithmetic or effect
+	horizon := soakHorizon(ops)
+	if err = x.checkScheduleWithin(horizon); err != nil { // before any arithmetic or effect
 		return nil, exit, err
 	}
+	trailing := trailingReserve(x.DurationS, declaresHorizon(ops)) // only for a checked, non-nil plan
 	duration := secs(x.DurationS)
 	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline. The load's end is not known
 	// until its start witness, up to WitnessWait away.
-	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+CollectReserve {
+	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+trailing {
 		return nil, exit, errors.New("soak: not enough work time left to admit the load")
 	}
 	clk := &soakClock{ops: ops}
@@ -271,7 +292,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 			if tries == 3 {
 				return records, exit, errors.New("soak: fault timer fired early repeatedly")
 			}
-			wait, e := checkedSpan(due - now)
+			wait, e := checkedSpanWithin(due-now, horizon)
 			if e != nil {
 				return records, exit, e
 			}
@@ -285,7 +306,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if now > due+OverdueTolerance.Seconds() {
 			return records, exit, errors.New("soak: fault overdue; no catch-up")
 		}
-		tail, e := checkedSpan(endpoint - now)
+		tail, e := checkedSpanWithin(endpoint-now, horizon)
 		if e != nil {
 			return records, exit, e
 		}
@@ -293,13 +314,13 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if i+1 < len(x.Faults) {
 			post = start + float64(x.Faults[i+1].AtS) - now
 		}
-		postSpan, e := checkedSpan(post)
+		postSpan, e := checkedSpanWithin(post, horizon)
 		if e != nil {
 			return records, exit, e
 		}
 		// Two separate needs: this fault's spacing, and the whole load tail plus collection.
 		left := ops.WorkDeadline().Sub(ops.Now())
-		if left < FaultBudget+postSpan+CollectReserve || left < tail+CollectReserve {
+		if left < FaultBudget+postSpan+trailing || left < tail+trailing {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
 		}
 		ack, err := pauseAndAck(ctx, ops, clk, f)
@@ -339,7 +360,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if err != nil {
 		return records, exit, err
 	}
-	final, err := checkedSpan(endpoint - now)
+	final, err := checkedSpanWithin(endpoint-now, horizon)
 	if err != nil {
 		return records, exit, err
 	}
