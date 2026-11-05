@@ -125,7 +125,8 @@ type MissUndecidable struct {
 var verdictFields = []string{"status", "criteria", "k7", "resources", "binding", "error", "outcome", "reason", "schema", "run_id", "boot_id", "root",
 	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono", // the clock row is decoded by encoding/json too
 	"misses_qualification", "method", "limit",
-	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s"}
+	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s",
+	"file", "bytes", "sha256"} // the M02 evidence reference row (#1002)
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.

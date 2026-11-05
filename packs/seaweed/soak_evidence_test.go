@@ -17,6 +17,16 @@ import (
 // twoHourCollect is an M02 collect row of the 2 h shape (#1002): 180 rotations, 540 episode lines.
 func twoHourCollect(t *testing.T) []byte {
 	t.Helper()
+	body := collectRow(t, 180)
+	if len(body) <= tr.MaxCapturedOutputBytes {
+		t.Fatalf("fixture is not 2 h shaped: %d bytes", len(body))
+	}
+	return body
+}
+
+// collectRow is an M02 collect row with the given number of rotations (three episode lines each).
+func collectRow(t *testing.T, rotations int) []byte {
+	t.Helper()
 	type line struct {
 		VID  int    `json:"vid"`
 		Line string `json:"line"`
@@ -39,7 +49,7 @@ func twoHourCollect(t *testing.T) []byte {
 		Clock   map[string]any   `json:"clock"`
 	}{Status: "SOAK_COLLECTED", Coll: "lmcache", DatVIDs: []int{3}, Sources: []map[string]any{{"path": "/r/master.stderr", "bytes": 1}},
 		Clock: map[string]any{"boot_id": "b", "entry_epoch": 1.0, "exit_epoch": 2.0, "entry_mono": 3.0, "exit_mono": 4.0}}
-	for vid := 100; vid < 280; vid++ {
+	for vid := 100; vid < 100+rotations; vid++ {
 		text := fmt.Sprintf("I1105 16:%02d:%02d.%06d master_cache_volume_rotation.go:279 rotated non-replicated cache Volume %d collection=lmcache bytes=33554432", vid%60, vid%60, vid, vid)
 		row.Rotated = append(row.Rotated, line{vid, text})
 		for _, kind := range []string{"birth", "unwritable", "success"} {
@@ -50,9 +60,6 @@ func twoHourCollect(t *testing.T) []byte {
 	body, err := json.Marshal(row)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(row.Events) < 500 || len(body) <= tr.MaxCapturedOutputBytes {
-		t.Fatalf("fixture is not 2 h shaped: %d events, %d bytes", len(row.Events), len(body))
 	}
 	return body
 }
@@ -124,9 +131,33 @@ func TestM02EvidenceRefusesAnyMismatchOrMalformedReference(t *testing.T) {
 		"two values in the file": {refRow(malformed, nil), fetch(malformed)},
 		"a failed collect file":  {refRow(wrongStatus, nil), fetch(wrongStatus)},
 		"a failed fetch":         {refRow(body, nil), func(string) (string, error) { return "", errors.New("ssh: gone") }},
+		// codex01 R3: a case-folded alias of a reference field is refused, not decoded into it.
+		"a Bytes alias":  {aliased(refRow(body, nil), `"bytes"`, `"Bytes"`), fetch(body)},
+		"a FILE alias":   {aliased(refRow(body, nil), `"file"`, `"FILE"`), fetch(body)},
+		"a SHA256 alias": {aliased(refRow(body, nil), `"sha256"`, `"SHA256"`), fetch(body)},
+		"a Clock alias":  {aliased(refRow(body, nil), `"clock"`, `"Clock"`), fetch(body)},
+		// codex01 R1: both clocks valid, and the file's the same as the reference row's.
+		"another boot in the file":       {refRow(reclocked(body, `"boot_id":"b"`, `"boot_id":"c"`), nil), fetch(reclocked(body, `"boot_id":"b"`, `"boot_id":"c"`))},
+		"another exit stamp in the file": {refRow(reclocked(body, `"exit_mono":4`, `"exit_mono":5`), nil), fetch(reclocked(body, `"exit_mono":4`, `"exit_mono":5`))},
+		"no clock in the file":           {refRow(reclocked(body, `"clock":{`, `"clock_x":{`), nil), fetch(reclocked(body, `"clock":{`, `"clock_x":{`))},
+		"an invalid reference clock":     {refRow(body, func(m map[string]any) { m["clock"].(map[string]any)["entry_mono"] = 0.0 }), fetch(body)},
+		"a reference clock with no boot": {refRow(body, func(m map[string]any) { m["clock"].(map[string]any)["boot_id"] = "" }), fetch(body)},
 	} {
 		if got, err := m02Evidence(c.row, "m02-collect.json", c.fetch); err == nil {
 			t.Errorf("%s: published %d bytes", name, len(got))
 		}
 	}
+}
+
+// aliased replaces one exact key with its case variant.
+func aliased(row []byte, key, alias string) []byte {
+	return []byte(strings.Replace(string(row), key, alias, 1))
+}
+
+// reclocked changes the collect body's own clock; refRow still carries the default reference clock.
+func reclocked(body []byte, from, to string) []byte {
+	if !strings.Contains(string(body), from) {
+		panic("fixture has no " + from)
+	}
+	return []byte(strings.Replace(string(body), from, to, 1))
 }

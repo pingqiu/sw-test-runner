@@ -22,17 +22,20 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // referenced ones, within the assessor's bound, and one strict SOAK_COLLECTED value.
 func m02Evidence(row []byte, file string, fetch func(name string) (string, error)) ([]byte, error) {
 	var ref struct {
-		Status string          `json:"status"`
-		File   string          `json:"file"`
-		Bytes  int             `json:"bytes"`
-		SHA256 string          `json:"sha256"`
-		Clock  json.RawMessage `json:"clock"`
+		Status string       `json:"status"`
+		File   string       `json:"file"`
+		Bytes  int          `json:"bytes"`
+		SHA256 string       `json:"sha256"`
+		Clock  *clockSample `json:"clock"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(row))
 	dec.DisallowUnknownFields()
 	if oneStrictValue(row) != nil || dec.Decode(&ref) != nil || ref.Status != "SOAK_COLLECTED" || ref.File != file ||
-		ref.Bytes <= 0 || ref.Bytes > m02EvidenceBound || !sha256Hex.MatchString(ref.SHA256) || len(ref.Clock) == 0 {
+		ref.Bytes <= 0 || ref.Bytes > m02EvidenceBound || !sha256Hex.MatchString(ref.SHA256) || ref.Clock == nil {
 		return nil, errors.New("soak M02 evidence reference failed, truncated or malformed")
+	}
+	if _, err := clockEvidence(row, "check", 1, 2); err != nil { // the S2 sample's own validity
+		return nil, err
 	}
 	got, err := fetch(file)
 	if err != nil {
@@ -44,10 +47,18 @@ func m02Evidence(row []byte, file string, fetch func(name string) (string, error
 		return nil, errors.New("soak M02 evidence file differs from its reference")
 	}
 	var probe struct {
-		Status string `json:"status"`
+		Status string       `json:"status"`
+		Clock  *clockSample `json:"clock"`
 	}
-	if oneStrictValue(body) != nil || json.Unmarshal(body, &probe) != nil || probe.Status != "SOAK_COLLECTED" {
+	if oneStrictValue(body) != nil || json.Unmarshal(body, &probe) != nil || probe.Status != "SOAK_COLLECTED" || probe.Clock == nil {
 		return nil, errors.New("soak M02 evidence file malformed")
+	}
+	if _, err := clockEvidence(body, "check", 1, 2); err != nil {
+		return nil, err
+	}
+	// The file's clock is the one the S2 sample is built from: the same job, the same boot, the same stamps.
+	if *probe.Clock != *ref.Clock {
+		return nil, errors.New("soak M02 evidence file clock differs from its reference row")
 	}
 	return body, nil
 }
