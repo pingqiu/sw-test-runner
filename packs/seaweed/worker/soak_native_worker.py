@@ -91,14 +91,15 @@ def validate_api(cls):
         if not callable(getattr(cls,name,None)):raise TypeError('native connector API missing '+name)
 
 def child(pipe,config):
-    # Only these two modes were qualified by this soak. In particular 'rc'
-    # must never silently become loader-http; an RC adapter constructs its
-    # own loader-rdma connector explicitly.
-    if config.get('transport') not in ('dc','http'):
+    # 'rc' (#999) must never silently become loader-http: it is loader-rdma
+    # with DC push off, which the parent's read_route set and this asserts.
+    if config.get('transport') not in ('dc','rc','http'):
         raise ValueError('unsupported soak transport: '+repr(config.get('transport')))
+    if config['transport']=='rc' and os.environ.get('SW_RDMA_KVCACHE_PUSH_DC')!='0':
+        raise ValueError('rc soak worker needs SW_RDMA_KVCACHE_PUSH_DC=0')
     from seaweedkv_native._native import SeaweedKVConnector
     validate_api(SeaweedKVConnector)
-    backing='loader-rdma' if config['transport']=='dc' else 'loader-http'
+    backing='loader-http' if config['transport']=='http' else 'loader-rdma'
     if config['transport']=='http':os.environ['SW_RDMA_KVCACHE_PUSH_DC']='0'
     conn=SeaweedKVConnector(config['filer_grpc'],backing,4,json.dumps(config['native_options']))
     import threading

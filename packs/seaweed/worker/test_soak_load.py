@@ -305,6 +305,74 @@ class PushPipes(unittest.TestCase):
                 soak_load.push_pipes(dict(push_pipes=bad))
 
 
+class ReadRoute(unittest.TestCase):
+    """#999: the soak's read route. 'rc' turns DC push off for the workers and drops every DC selector."""
+    DC_ENV = dict(SW_RDMA_KVCACHE_PUSH_DC='1', SW_RDMA_KVCACHE_PUSH_DC_CONTROL_ADDR='10.0.0.2:18093',
+                  SW_RDMA_KVCACHE_PUSH_DC_DEVICE='mlx5_0', SW_RDMA_KVCACHE_PUSH_DC_PORT='1',
+                  SW_RDMA_KVCACHE_PUSH_DC_GID_INDEX='3', SW_RDMA_KVCACHE_PUSH_RDMA_ADDR='10.0.0.2:18091')
+
+    def setUp(self):
+        import os
+        saved = {k: v for k, v in os.environ.items() if k.startswith('SW_RDMA_KVCACHE_PUSH')}
+        def restore():
+            for k in [k for k in os.environ if k.startswith('SW_RDMA_KVCACHE_PUSH')]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        os.environ.update(self.DC_ENV)  # as kv_smoke.configure() leaves a DC smoke
+
+    def env(self):
+        import os
+        return {k: v for k, v in os.environ.items() if k.startswith('SW_RDMA_KVCACHE_PUSH')}
+
+    def test_absent_or_dc_keeps_the_dc_environment(self):
+        for config in (dict(), dict(read_transport='dc')):
+            self.assertEqual((soak_load.read_route(config), self.env()), ('dc', self.DC_ENV), config)
+
+    def test_rc_turns_dc_push_off_and_drops_the_dc_selectors(self):
+        self.assertEqual(soak_load.read_route(dict(read_transport='rc')), 'rc')
+        self.assertEqual(self.env(), dict(SW_RDMA_KVCACHE_PUSH_DC='0', SW_RDMA_KVCACHE_PUSH_RDMA_ADDR='10.0.0.2:18091'))
+
+    def test_anything_else_and_rc_with_a_pattern_refuse(self):
+        for config in (dict(read_transport='RC'), dict(read_transport='http'), dict(read_transport=None),
+                       dict(read_transport=''), dict(read_transport='rc', pattern=dict(clients=32))):
+            with self.assertRaises(ValueError, msg=config):
+                soak_load.read_route(config)
+            self.assertEqual(self.env(), self.DC_ENV, config)  # refused before touching the environment
+
+
+class WorkerChildTransport(unittest.TestCase):
+    """#999: the worker child takes 'rc' only as loader-rdma with DC push off; the guard runs before the native
+    import, so a refusal is a ValueError and an accepted transport reaches the (absent here) native module."""
+
+    def setUp(self):
+        import os
+        before = os.environ.get('SW_RDMA_KVCACHE_PUSH_DC')
+        self.addCleanup(lambda: os.environ.pop('SW_RDMA_KVCACHE_PUSH_DC', None) if before is None
+                        else os.environ.__setitem__('SW_RDMA_KVCACHE_PUSH_DC', before))
+
+    def child(self, transport, push_dc):
+        import os
+        import soak_native_worker
+        if push_dc is None:
+            os.environ.pop('SW_RDMA_KVCACHE_PUSH_DC', None)
+        else:
+            os.environ['SW_RDMA_KVCACHE_PUSH_DC'] = push_dc
+        soak_native_worker.child(None, dict(transport=transport))
+
+    def test_rc_needs_dc_push_off(self):
+        for push_dc in ('1', None, ''):
+            with self.assertRaisesRegex(ValueError, 'SW_RDMA_KVCACHE_PUSH_DC=0', msg=push_dc):
+                self.child('rc', push_dc)
+        with self.assertRaises(ImportError):  # past the guard: only the native module is missing here
+            self.child('rc', '0')
+
+    def test_only_dc_rc_and_http(self):
+        for bad in ('RC', 'loader-http', None, ''):
+            with self.assertRaisesRegex(ValueError, 'unsupported soak transport', msg=bad):
+                self.child(bad, '0')
+
+
 class RefusalCause(unittest.TestCase):
     """soak_native_worker.work names a GET's miss cause from the process's own budget-refusal counter:
     one op in flight per worker process, so the delta across the GET is that GET's."""

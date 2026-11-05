@@ -56,6 +56,9 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 	if x.Pattern != nil {
 		config["pattern"] = x.Pattern // absent for the soak, so its argv is unchanged
 	}
+	if x.rc() {
+		config["read_transport"] = "rc" // absent is DC: a DC soak's argv is unchanged
+	}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		return nil, err
