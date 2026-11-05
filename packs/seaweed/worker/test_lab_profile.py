@@ -794,6 +794,65 @@ class SoakCollect(unittest.TestCase):
             profile.soak_collect(self.config)
 
 
+    # #1002: at 2 h the row was 151 KB (492 episode lines), past the controller's 128 KiB capture bound for a job's
+    # stdout. The row goes to its file; stdout carries only the reference the controller checks the fetched file by.
+    def two_hour_row(self):
+        lines = []
+        for vid in range(100, 280):  # 180 rotations: 540 episode lines (birth, unwritable, success) and 180 rotated
+            lines += ['I1105 15:%02d:%02d.%06d x.go:1 Created Volume %d on topo\n' % (vid % 60, vid % 60, vid, vid),
+                      'I1105 16:%02d:%02d.%06d volume_layout.go:1270 Volume %d becomes unwritable\n' % (vid % 60, vid % 60, vid, vid),
+                      'I1105 16:%02d:%02d.%06d master_cache_volume_rotation.go:279 rotated non-replicated cache Volume %d '
+                      'collection=lmcache bytes=33554432\n' % (vid % 60, vid % 60, vid + 1, vid)]
+        with (self.root / 'master.stderr').open('a') as f:
+            f.write(''.join(lines))
+        row = profile.soak_collect(self.config)
+        row['clock'] = dict(boot_id='boot-m02', entry_epoch=1.0, exit_epoch=2.0, entry_mono=3.0, exit_mono=4.0)
+        return row
+
+    def test_a_two_hour_collect_goes_to_its_file_and_stdout_carries_only_the_reference(self):
+        row = self.two_hour_row()
+        self.assertGreaterEqual(len(row['events']), 500)
+        body = json.dumps(row, sort_keys=True).encode()
+        self.assertGreater(len(body), 128 << 10)  # the 2 h shape that broke the capture bound
+        ref = profile.evidence_ref(self.config, row)
+        on_disk = (self.root / profile.EVIDENCE_FILE).read_bytes()
+        self.assertEqual(on_disk, body)  # exactly the row the assessor reads, clock included
+        self.assertEqual(ref, dict(status='SOAK_COLLECTED', file='m02-collect.json', bytes=len(body),
+                                   sha256=hashlib.sha256(body).hexdigest(), clock=row['clock']))
+        self.assertLess(len(json.dumps(ref, sort_keys=True)), 1024)
+        self.assertEqual(oct((self.root / profile.EVIDENCE_FILE).stat().st_mode & 0o777), '0o600')
+        self.assertFalse((self.root / (profile.EVIDENCE_FILE + '.tmp')).exists())
+
+    def test_the_evidence_file_is_written_once(self):
+        row = self.two_hour_row()
+        profile.evidence_ref(self.config, row)
+        first = (self.root / profile.EVIDENCE_FILE).read_bytes()
+        with self.assertRaises(FileExistsError):
+            profile.evidence_ref(self.config, dict(row, dat_vids=[1]))
+        self.assertEqual((self.root / profile.EVIDENCE_FILE).read_bytes(), first)
+        self.assertFalse((self.root / (profile.EVIDENCE_FILE + '.tmp')).exists())
+
+    def test_the_soak_collect_action_prints_only_the_reference(self):
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'], boot_id=boot)
+        self.gen('master-replacement-generation.json', 4343, ['master-replacement.stdout', 'master-replacement.stderr'], boot_id=boot)
+        config = dict(self.config, boot_id=boot, deadline=(datetime.datetime.now(datetime.timezone.utc)
+                      + datetime.timedelta(minutes=5)).isoformat().replace('+00:00', 'Z'))
+        import io, contextlib
+        out = io.StringIO()
+        argv = sys.argv
+        self.addCleanup(setattr, sys, 'argv', argv)
+        sys.argv = ['lab_profile.py', '--config', json.dumps(config), '--action', 'soak_collect']
+        with contextlib.redirect_stdout(out):
+            profile.main()
+        ref = json.loads(out.getvalue())
+        body = (self.root / profile.EVIDENCE_FILE).read_bytes()
+        self.assertEqual(sorted(ref), ['bytes', 'clock', 'file', 'sha256', 'status'])
+        self.assertEqual((ref['status'], ref['bytes'], ref['sha256']), ('SOAK_COLLECTED', len(body), hashlib.sha256(body).hexdigest()))
+        self.assertEqual(json.loads(body)['clock'], ref['clock'])
+        self.assertEqual([r['vid'] for r in json.loads(body)['rotated']], [2, 4, 9])
+
+
 class SoakSetup(unittest.TestCase):
     """soak_setup against a fake master and a fake pinned weed product."""
     SETUP = dict(collection='lmcache', replication='000', ttl='2h', grow_count=4, master_generations=2)

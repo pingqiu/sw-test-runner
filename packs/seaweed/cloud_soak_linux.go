@@ -343,6 +343,18 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	return rows, err
 }
 
+// fetchM02Evidence reads the named evidence file from a host's run root through the step path, bounded
+// at the source: at most m02EvidenceBound+1 bytes ever reach memory or the step journal, and more than
+// m02EvidenceBound is refused.
+func fetchM02Evidence(ctx context.Context, n *infra.Node, outDir, runRoot, name string) (string, error) {
+	out, err := cloudStep(ctx, n, outDir, "soak-fetch-"+name, "fetch-"+name, 120,
+		fmt.Sprintf("head -c %d %s", m02EvidenceBound+1, cloudQuote(path.Join(runRoot, name))))
+	if err == nil && len(out) > m02EvidenceBound {
+		err = fmt.Errorf("soak M02 evidence %s exceeds %d bytes", name, m02EvidenceBound)
+	}
+	return out, err
+}
+
 // clocked runs one M02 job inside a paired clock sample: t1 at the ssh exec,
 // t4 on return. With evidence set, its row is first published as that file.
 func (s *directSoak) clocked(ctx context.Context, label, root, clock, evidence string) error {
@@ -360,13 +372,16 @@ func (s *directSoak) clocked(ctx context.Context, label, root, clock, evidence s
 	}
 	row, _, err := e.Output.Decode()
 	if err == nil && evidence != "" {
-		var probe struct {
-			Status string `json:"status"`
+		// #1002: the row is the evidence file's reference; the file itself, past the 128 KiB a job's stdout may
+		// carry at 2 h, is read back through the same step path and checked against it before publication.
+		node := s.b.Jobs[label].Node
+		var body []byte
+		body, err = m02Evidence(row, evidence, func(name string) (string, error) {
+			return fetchM02Evidence(ctx, s.nodes[node], s.c.Output, s.hosts[node].RunRoot, name)
+		})
+		if err == nil {
+			err = clockPublish(path.Join(root, evidence), body)
 		}
-		if oneStrictValue(row) != nil || json.Unmarshal(row, &probe) != nil || probe.Status != "SOAK_COLLECTED" {
-			return errors.New("soak M02 evidence failed, truncated or malformed")
-		}
-		err = clockPublish(path.Join(root, evidence), row)
 	}
 	if err != nil {
 		return err

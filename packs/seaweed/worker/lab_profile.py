@@ -784,6 +784,30 @@ STAMP = re.compile(r'[IWEF](\d{4} \d\d:\d\d:\d\d\.\d+)')
 LOG_BOUND, ROTATED_BOUND = 256 << 20, 4000
 
 
+EVIDENCE_FILE = 'm02-collect.json'
+
+
+def evidence_ref(config, row):
+    """#1002: the soak_collect row grows with every rotation and episode line (151 KB at 2 h), past the
+    controller's 128 KiB capture bound for a job's stdout. The whole row goes to EVIDENCE_FILE in the private
+    root, written once; stdout carries only its reference (status, file, bytes, sha256) and the clock, which
+    the controller checks against the file it fetches through its existing step path."""
+    body = json.dumps(row, sort_keys=True).encode()
+    root = private_root(config)
+    tmp, final = root / (EVIDENCE_FILE + '.tmp'), root / EVIDENCE_FILE
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(body)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.link(tmp, final)  # never replaces an earlier collect's file
+    finally:
+        os.unlink(tmp)
+    return dict(status=row['status'], file=EVIDENCE_FILE, bytes=len(body), sha256=hashlib.sha256(body).hexdigest(),
+                clock=row['clock'])
+
+
 def soak_collect(config):
     """M02, after the soak: the rotation lines of THIS run's own master
     generations (stdout/stderr, and glog INFO files in the private tmp/ named
@@ -917,6 +941,8 @@ def main():
     if args.action in ('soak_setup', 'soak_collect'):
         leave = clock_stamp()
         row['clock'] = dict(boot_id=config['boot_id'], entry_epoch=entry[0], exit_epoch=leave[0], entry_mono=entry[1], exit_mono=leave[1])
+    if args.action == 'soak_collect':
+        row = evidence_ref(config, row)
     print(json.dumps(row, sort_keys=True), flush=True)
 
 
