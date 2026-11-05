@@ -1092,6 +1092,7 @@ class KVLoadAssess(unittest.TestCase):
         # Without a pattern (the soak) the caps are today's.
         self.assertEqual(soak_assess.op_event_bounds(None), (100, 20000))
 
+
     def test_write_once_needs_every_key_once_and_no_read_before_the_barrier(self):
         ev = kv_evidence()  # key 3's first version recorded as key 2's: one key twice, one never (wrong_reads fails too)
         ev['acks'][3]['seed'] = 'kv-load-2-0'
@@ -1378,6 +1379,41 @@ class SoakAssessRC(unittest.TestCase):
         self.assertEqual(soak_assess.assess_routes(root, workers, [], frozenset()), [name])  # not flagged: needs its RC route
         write_series(direct_dc_reads=1)  # exempt from its own route, never from showing another
         self.assertEqual(soak_assess.assess_routes(root, workers, [], frozenset({name})), [name])
+
+
+class LongSoakCaps(unittest.TestCase):
+    """#1002: the soak's op-events caps scale with ceil(duration_s / 1800), never below today's."""
+
+    def setUp(self):
+        self.addCleanup(setattr, soak_assess, 'ROWS', soak_assess.ROWS)
+
+    def test_the_caps_scale_by_thirty_minute_spans(self):
+        rows, file = soak_assess.ROWS, soak_assess.FILE
+        for duration, scale in ((1, 1), (1800, 1), (1801, 2), (7200, 4), (28800, 16)):
+            self.assertEqual(soak_assess.op_event_bounds(None, duration), (rows * scale, file * scale), duration)
+        self.assertEqual(soak_assess.op_event_bounds(None), (rows, file))  # absent: today's 30-min caps
+
+    def test_rows_over_a_30_min_cap_are_refused_at_1800_s_and_read_at_3600_s(self):
+        ev = evidence()
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, ev)
+        soak_assess.ROWS = len(ev['events']) - 1  # this evidence is one row over the 30-min cap
+        with self.assertRaisesRegex(ValueError, 'over bound: op-events.jsonl'):
+            soak_assess.lines(root, 'op-events.jsonl', soak_assess.op_event_bounds(None, 1800))
+        rows = soak_assess.lines(root, 'op-events.jsonl', soak_assess.op_event_bounds(None, 3600))
+        self.assertEqual(len(rows), len(ev['events']))
+
+    def test_the_assessor_bounds_op_events_by_the_plans_duration(self):
+        seen = []
+        real = soak_assess.op_event_bounds
+        self.addCleanup(setattr, soak_assess, 'op_event_bounds', real)
+        soak_assess.op_event_bounds = lambda *a: seen.append(a) or real(*a)
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, evidence())
+        self.assertEqual(soak_assess.assess(config(root))['status'], 'PASS')
+        self.assertEqual(seen, [(None, 1800)])
 
 
 if __name__ == '__main__':

@@ -40,13 +40,15 @@ def typed(row, **spec):
     return row
 
 
-def op_event_bounds(pat):
-    """(rows, bytes) op-events.jsonl may hold. The soak: its fixed caps. kv_load: what its declared
-    pattern can write (each key's write and its verification, every operation of every timed phase at
-    the declared rate, a margin per client and for the marks), at OP_ROW bytes a row, never below the
-    soak's caps. A full kv_load writes more than 64 MiB."""
+def op_event_bounds(pat, duration_s=1800):
+    """(rows, bytes) op-events.jsonl may hold. The soak: its fixed caps per 30 minutes of load, times
+    ceil(duration_s / 1800) and never below them (#1002: a 30-min soak wrote 56k rows, 22 MB, so 2 h and
+    8 h outgrow the 30-min caps). kv_load: what its declared pattern can write (each key's write and its
+    verification, every operation of every timed phase at the declared rate, a margin per client and for
+    the marks), at OP_ROW bytes a row, never below the soak's caps. A full kv_load writes more than 64 MiB."""
     if not pat:
-        return ROWS, FILE
+        scale = max(1, -(-duration_s // 1800))
+        return ROWS * scale, FILE * scale
     ops = 2 * pat['keys'] + sum(pat['clients'] * pat['rate_per_client'] * ph['duration_s'] for ph in pat['phases'][1:])
     rows = math.ceil(ops) + 2 * pat['clients'] + 16
     return max(ROWS, rows), max(FILE, rows * OP_ROW)
@@ -356,7 +358,7 @@ def assess(c):
     begin = typed(read_bound(root / WITNESS, dict(boot_id=c['boot_id'])) or {}, mono=float)['mono']
     acks = [typed(a, key=str, writer=int, seed=str, submitted=float, completed=float, sequence=int, length=int,
                   digest=str, fids=list) for a in lines(root, 'ack-journal.jsonl')]
-    events = [typed(e) for e in lines(root, 'op-events.jsonl', op_event_bounds(c.get('pattern')))]
+    events = [typed(e) for e in lines(root, 'op-events.jsonl', op_event_bounds(c.get('pattern'), c['duration_s']))]
     ops = [typed(e, op=str, action=str, key=str, worker=int, dispatched=float, submitted=float, completed=float, ok=bool)
            for e in events if 'action' in e]
     marks = [typed(e, event=str) for e in events if 'action' not in e]
