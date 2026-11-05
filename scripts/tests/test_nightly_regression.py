@@ -60,7 +60,14 @@ FAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
 p=pathlib.Path(os.environ['FAKE_STATE']); args=sys.argv[1:]; tool=pathlib.Path(sys.argv[0]).name
 with (p/'commands').open('a') as f:f.write(json.dumps([tool]+args)+'\n')
-if tool=='jq':print(json.loads(pathlib.Path(args[-1]).read_text())[args[-2][1:]])
+if tool=='df':
+ if os.environ.get('MODE')=='df-fails':print('disk read failed',file=sys.stderr);sys.exit(23)
+ print('Filesystem 1024-blocks Used Available Capacity Mounted on')
+ for name in args[-2:]:
+  full=(os.environ.get('MODE')=='disk-nvme-full' and name=='/data/nvme') or (os.environ.get('MODE')=='disk-docker-full' and name=='/fixture-docker-root')
+  used=86 if full else (85 if os.environ.get('MODE')=='boundary-85' else 50)
+  print(f'fixture 100 50 50 {used}% {name}')
+elif tool=='jq':print(json.loads(pathlib.Path(args[-1]).read_text())[args[-2][1:]])
 elif tool=='timeout':os.execv('/usr/bin/timeout',sys.argv)
 elif tool=='tar':
  d=pathlib.Path(args[args.index('-C')+1]);(d/'enterprise/seaweed-volume').mkdir(parents=True,exist_ok=True)
@@ -74,7 +81,10 @@ elif tool=='cargo':
  d=pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'release';d.mkdir(parents=True);(d/'weed-volume').write_text('volume')
 elif tool=='docker':
  state=p/'containers';names=json.loads(state.read_text()) if state.exists() else []
- if args[0]=='run':names.append(args[args.index('--name')+1])
+ if args[0]=='info':
+  if os.environ.get('MODE')=='info-fails':print('Docker root unavailable',file=sys.stderr);sys.exit(23)
+  print('/fixture-docker-root')
+ elif args[0]=='run':names.append(args[args.index('--name')+1])
  elif args[0]=='rm':
   if os.environ.get('MODE')=='rm-fails':sys.exit(23)
   names.remove(args[-1])
@@ -103,7 +113,7 @@ class NightlyCommand(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.bin = self.root / 'fake-bin'
         self.bin.mkdir()
-        for tool in ('docker', 'tar', 'make', 'go', 'cargo', 'jq', 'timeout'):
+        for tool in ('docker', 'df', 'tar', 'make', 'go', 'cargo', 'jq', 'timeout'):
             path = self.bin / tool
             path.write_text(FAKE)
             path.chmod(0o755)
@@ -120,6 +130,42 @@ class NightlyCommand(unittest.TestCase):
     def run_night(self, mode=''):
         return subprocess.run(['bash', str(SCRIPT.with_suffix('.sh')), str(self.root)],
                               env=dict(self.env, MODE=mode), capture_output=True, timeout=30)
+
+    def test_full_data_disk_reports_environment_without_starting_any_cell(self):
+        result = self.run_night('disk-nvme-full')
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
+        self.assertFalse(any(c[0] in ('make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
+        self.assertFalse((self.root / 'work').exists())
+
+    def test_full_docker_disk_also_blocks_the_whole_run(self):
+        result = self.run_night('disk-docker-full')
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        self.assertIn('/fixture-docker-root', (out / 'disk-preflight.txt').read_text())
+        calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
+        self.assertFalse(any(c[0] in ('make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
+
+    def test_failed_docker_root_inspection_is_an_environment_refusal(self):
+        result = self.run_night('info-fails')
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        self.assertIn('Docker root unavailable', (out / 'disk-preflight.stderr').read_text())
+
+    def test_failed_disk_measurement_is_an_environment_refusal(self):
+        result = self.run_night('df-fails')
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        self.assertIn('disk read failed', (out / 'disk-preflight.stderr').read_text())
 
     def test_failed_cleanup_readback_cannot_pass_or_start_the_next_cell(self):
         result = self.run_night('ps-fails')
@@ -184,8 +230,8 @@ class NightlyCommand(unittest.TestCase):
         self.assertEqual((output / 'EXIT').read_text().strip(), '19')
         self.assertFalse((self.root / 'work').exists())
 
-    def test_all_pass_has_a_complete_table_and_verifiable_local_checksums(self):
-        result = self.run_night()
+    def test_all_pass_at_85_percent_has_a_complete_table_and_verifiable_local_checksums(self):
+        result = self.run_night('boundary-85')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         output = self.root / ('results/' + 'a' * 40)
         self.assertEqual((output / 'TABLE.md').read_text().count('| PASS |'), 11)
