@@ -4,9 +4,9 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 if [[ ${1:-} == cell ]]; then
   work=$2 out=$3 cell=$4 sha=$5 image=$6
-  name="sw-reg-${sha:0:12}-$cell"; echo "$name" > "$out/container"
+  name=$7; echo "$name" > "$out/container"
   echo container > "$out/phase"
-  docker run -d --pull=never --name "$name" --label seaweed.nightly=true --privileged --cgroupns=host --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$work:/input:ro" "$image" /sbin/init
+  docker run -d --pull=never --name "$name" --label "seaweed.nightly=$name" --privileged --cgroupns=host --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$work:/input:ro" "$image" /sbin/init
   docker exec "$name" sh -ec 'mkdir /root/controller; cd /root/controller; ln -s /input/artifacts artifacts; install -d -m700 -o testdev -g testdev /home/testdev/.ssh; ssh-keygen -q -t ed25519 -N "" -f key; cat key.pub >> /home/testdev/.ssh/authorized_keys; chown testdev:testdev /home/testdev/.ssh/authorized_keys; chmod 600 /home/testdev/.ssh/authorized_keys; cp /etc/ssh/ssh_host_ed25519_key.pub host.pub'
   echo prepare > "$out/phase"
   docker exec "$name" python3 /input/runner/scripts/nightly-regression.py prepare /root/controller /input/runner/inventory/testdata/http.requested.json "$cell" "$sha"
@@ -32,6 +32,8 @@ dispose() {
   local name=$1 left
   left=$(timeout -k5 30 docker ps -a --filter "name=^/$name$" --format '{{.Names}}' 2>> "$out/cleanup.log") || return 1
   [[ -n $left ]] || return 0
+  left=$(timeout -k5 30 docker inspect --format '{{index .Config.Labels "seaweed.nightly"}}' "$name" 2>> "$out/cleanup.log") || return 1
+  [[ $left == "$name" ]] || return 1
   timeout -k5 90 docker rm -f "$name" >> "$out/cleanup.log" 2>&1 || return 1
   left=$(timeout -k5 30 docker ps -a --filter "name=^/$name$" --format '{{.Names}}' 2>> "$out/cleanup.log") || return 1
   [[ -z $left ]]
@@ -66,8 +68,8 @@ cp "$root/inbox/native.tar" "$work/artifacts/native.tar"
 sha256sum "$work/artifacts/"* "$work/runner/bin/seaweed-cloud" > "$out/artifacts.sha256"
 for cell in "${cells[@]}"; do
   stage=$cell; dir="$out/$cell"; mkdir "$dir"; start=$SECONDS; rc=0
-  current="sw-reg-${sha:0:12}-$cell"
-  timeout -k5 1650 bash "$script_dir/nightly-regression.sh" cell "$work" "$dir" "$cell" "$sha" "$image" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  current="sw-reg-${sha:0:12}-$(date -u +%s)-$$-$cell"
+  timeout -k5 1650 bash "$script_dir/nightly-regression.sh" cell "$work" "$dir" "$cell" "$sha" "$image" "$current" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
   failure=$(cat "$dir/phase")
   for item in result inventory.json; do timeout -k5 90 docker cp "$current:/root/controller/$item" "$dir/$item" >> "$dir/collect.log" 2>&1 || { if [[ $rc == 0 ]]; then failure=collect; rc=1; fi; }; done
   timeout -k5 30 docker exec "$current" sh -ec 'ps -eo pid,ppid,args; ss -Hltn' > "$dir/processes-ports.txt" 2>&1 || { if [[ $rc == 0 ]]; then failure=observation; rc=1; fi; }

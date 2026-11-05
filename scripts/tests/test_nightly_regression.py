@@ -81,6 +81,7 @@ elif tool=='docker':
  elif args[0]=='ps':
   if os.environ.get('MODE')=='ps-fails':sys.exit(23)
   wanted=args[args.index('--filter')+1][7:-1];print('\n'.join(n for n in names if n==wanted))
+ elif args[0]=='inspect':print('FOREIGN' if os.environ.get('MODE')=='foreign-label' else args[-1])
  elif args[0]=='cp':
   if '-ec-go:' in args[1] and os.environ.get('MODE')=='collect-fails':sys.exit(22)
   d=pathlib.Path(args[-1])
@@ -202,6 +203,12 @@ class NightlyCommand(unittest.TestCase):
         path.write_text(json.dumps(doc))
         self.assertEqual(self.run_night().returncode, 0)
         self.assertFalse((self.root / ('results/' + 'b' * 40)).exists())
+
+    def test_foreign_container_label_is_never_deleted(self):
+        self.assertNotEqual(self.run_night('foreign-label').returncode, 0)
+        calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
+        self.assertFalse(any(c[:2] == ['docker', 'rm'] for c in calls))
+        self.assertTrue((self.root / 'cleanup-required').exists())
 
 
 if __name__ == '__main__':

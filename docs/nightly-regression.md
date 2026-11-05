@@ -64,7 +64,8 @@ master timing is REPORT_ONLY. Rust2a, DC lab cases and C3/C6 are not included.
 hashes and SHA256SUMS. EXIT is the terminal job status, written after checksums
 and excluded from its own evidence manifest; a missing/nonzero EXIT is not
 success even when some component rows passed. Build failure leaves all cells
-NOT_RUN with the build failure noted. Container removal is followed by a
+NOT_RUN with the build failure noted. Per-attempt container names and an exact
+owner-label check prevent deleting a foreign same-name container. Removal is followed by a
 successful independent absence query. Only that attempt's source/target/binaries
 are removed. Failed disposal preserves work plus `cleanup-required` and stops
 new work; hard interruption leaving work also requires operator disposition.
