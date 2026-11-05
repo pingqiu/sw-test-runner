@@ -15,7 +15,7 @@ import (
 
 // EC is one local HTTP phase; its additional listeners are checked by the
 // existing direct postflight, without changing the shared inventory schema.
-func ecDirectPorts(h inventory.Host) ([]string, error) {
+func ecDirectPorts(h inventory.Host, metrics ...bool) ([]string, error) {
 	ports, seen := []string{}, map[int]bool{}
 	add := func(p int) error {
 		if p < 1 || p > 65535 || seen[p] {
@@ -34,6 +34,11 @@ func ecDirectPorts(h inventory.Host) ([]string, error) {
 		return nil, e
 	}
 	for i := 0; i < 14; i++ {
+		if len(metrics) > 0 && metrics[0] {
+			if e := add(servicePort(h, "volume_http") + 20000 + i); e != nil {
+				return nil, e
+			}
+		}
 		for _, role := range []string{"volume_http", "volume_grpc"} {
 			if e := add(servicePort(h, role) + i); e != nil {
 				return nil, e
@@ -85,6 +90,10 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		services = append(services, role)
 		holders[role] = root + "/" + role
 		args[role] = []string{"-config_dir=" + root, "volume", "-ip=" + h.Data.Address, "-ip.bind=0.0.0.0", fmt.Sprint("-port=", servicePort(h, "volume_http")+i), fmt.Sprint("-port.grpc=", servicePort(h, "volume_grpc")+i), "-master=" + master, "-dir=" + root + "/" + role, "-max=3", "-preStopSeconds=0"}
+		if c.ECReconstruction {
+			args[role] = append(args[role], fmt.Sprint("-metricsPort=", servicePort(h, "volume_http")+20000+i), "-metricsIp=127.0.0.1")
+			urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d/metrics", servicePort(h, "volume_http")+20000+i))
+		}
 		if c.ECVolumeImpl == "rust" {
 			args[role] = args[role][2:]
 		}
@@ -179,12 +188,32 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		return
 	}
 	report["wrong_byte_control"] = "WRONG_BYTE_REJECTED"
+	var baseline ecCounters
+	if c.ECReconstruction {
+		baseline, err = ecScrape(h, snap, nil, "baseline", run)
+		if err != nil {
+			return
+		}
+	}
 	for _, route := range []string{"s3", "volume"} {
 		if err = read("ec-s1-"+route, route, false); err != nil {
 			return
 		}
 	}
 	report["s1"] = "PASS"
+	if c.ECReconstruction {
+		after, e := ecScrape(h, snap, nil, "intact", run)
+		if e != nil {
+			err = e
+			return
+		}
+		a, b, e := ecCounterDelta(baseline, after)
+		if e != nil || a != 0 || b != 0 {
+			err = errors.New("EC intact baseline reconstructed")
+			return
+		}
+		report["intact_counters"] = after
+	}
 	victims := []string{"h0", "h1", "h2", "h3"}
 	if c.ECUnderQuorum {
 		byShard := map[int]string{}
@@ -192,6 +221,14 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 			byShard[shard.Shard] = shard.Job
 		}
 		victims = []string{byShard[10], byShard[11], byShard[12], byShard[13], byShard[0]}
+	}
+	if c.ECReconstruction {
+		for _, shard := range snap.Shards {
+			if shard.Shard == 0 {
+				victims = []string{shard.Job}
+				break
+			}
+		}
 	}
 	dead := map[string]bool{}
 	for i, victim := range victims {
@@ -211,7 +248,7 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		report["holders_killed"] = i + 1
 		dead[victim] = true
 		port := servicePort(h, "volume_http") + i + 1
-		if c.ECUnderQuorum {
+		if c.ECUnderQuorum || c.ECReconstruction {
 			port = servicePort(h, "volume_http")
 			for n := 0; dead[fmt.Sprint("h", n)]; n++ {
 				port++
@@ -219,12 +256,35 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 		}
 		config["volume"] = fmt.Sprintf("http://127.0.0.1:%d", port)
 		for _, route := range []string{"s3", "volume"} {
+			var before ecCounters
+			if c.ECReconstruction {
+				before, err = ecScrape(h, snap, dead, "before-"+route, run)
+				if err != nil {
+					return
+				}
+			}
 			if err = read(fmt.Sprintf("ec-s2-%d-%s", i+1, route), route, false); err != nil {
 				return
+			}
+			if c.ECReconstruction {
+				after, e := ecScrape(h, snap, dead, "after-"+route, run)
+				if e != nil {
+					err = e
+					return
+				}
+				a, b, e := ecCounterDelta(before, after)
+				report["reconstruction_"+route] = map[string]any{"before": before, "after": after, "success_delta": a, "failure_delta": b}
+				if e != nil || a <= 0 || b != 0 {
+					err = errors.New("EC reconstruction NOT_COVERED or counter failure")
+					return
+				}
 			}
 		}
 	}
 	report["mandatory_bytes_deadlines"], report["exact"], report["wrong"] = "PASS", 640, 0
+	if c.ECReconstruction {
+		report["s2"], report["exposure"], report["exact"] = "PASS", "OBSERVED", 256
+	}
 	if c.ECUnderQuorum {
 		report["s2a"], report["survivors"] = "PASS", 9
 		report["stage1_exact"] = 640
