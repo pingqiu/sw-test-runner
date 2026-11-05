@@ -355,6 +355,12 @@ func TestReconstructionExactWithoutCounterCannotPass(t *testing.T) {
 	if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
 		t.Fatal("cleanup missing")
 	}
+	var r map[string]any
+	raw, _ := os.ReadFile(filepath.Join(h.output, "ec-stage1.json"))
+	json.Unmarshal(raw, &r)
+	if r["reconstruction_s3"].(map[string]any)["outcome"] != "NOT_COVERED" || h.lost != 1 || h.metrics != 4 {
+		t.Fatalf("did not reach zero-delta decision: %v", r)
+	}
 }
 
 func TestDirectReconstructionCounterRows(t *testing.T) {
