@@ -54,6 +54,26 @@ class SoakStats(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 3)
         self.assertTrue(all(r['status'] == 'OBSERVED' and r['identity']['pid'] == os.getpid() for r in rows))
 
+    def test_proc_memory_reads_pinned_locked_and_resident_kb(self):
+        # #997: pinned memory per client process, beside the native counters.
+        status = self.root / 'status'
+        lines = ['Name:\tpython3', 'VmLck:\t     12 kB', 'VmPin:\t2457600 kB', 'VmRSS:\t  81920 kB', 'Threads:\t4']
+        status.write_text('\n'.join(lines) + '\n')
+        self.assertEqual(soak_stats.proc_memory(status), dict(vm_pin_kB=2457600, vm_lck_kB=12, vm_rss_kB=81920))
+        status.write_text('Name:\tpython3\nVmRSS:\t 100 kB\n')  # a kernel without VmPin: absent, not 0
+        self.assertEqual(soak_stats.proc_memory(status), dict(vm_rss_kB=100))
+        self.assertIsNone(soak_stats.proc_memory(self.root / 'absent'))
+
+    def test_every_row_carries_this_process_memory(self):
+        self.witness()
+        soak_stats.native_stats(FakeConn(), self.root, threading.Event(), horizon_s=0.1)
+        rows = self.rows()
+        self.assertTrue(rows and all(isinstance(r['memory'].get('vm_rss_kB'), int) and 'vm_pin_kB' in r['memory'] for r in rows), rows)
+        for p in self.root.glob('native-stats-*.jsonl'):
+            p.unlink()
+        soak_stats.native_stats(FakeConn(fail=True), self.root, threading.Event(), horizon_s=0.05)
+        self.assertTrue(all(r['status'] == 'NOT_OBSERVED' and 'memory' in r for r in self.rows()))
+
     def test_a_failing_stats_call_is_recorded_not_raised(self):
         self.witness()
         soak_stats.native_stats(FakeConn(fail=True), self.root, threading.Event(), horizon_s=0.05)

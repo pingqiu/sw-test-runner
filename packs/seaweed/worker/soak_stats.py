@@ -42,6 +42,26 @@ def read_witness(root):
     return row
 
 
+MEMORY_FIELDS = (('VmPin:', 'vm_pin_kB'), ('VmLck:', 'vm_lck_kB'), ('VmRSS:', 'vm_rss_kB'))
+
+
+def proc_memory(status='/proc/self/status'):
+    """This process's pinned (VmPin: RDMA-registered pages), locked and resident
+    memory in kB, as /proc reports them; a field the kernel doesn't report is
+    absent, never 0. None when the file can't be read."""
+    try:
+        lines = Path(status).read_text().splitlines()
+    except OSError:
+        return None
+    out = {}
+    for line in lines:
+        for field, key in MEMORY_FIELDS:
+            parts = line.split()
+            if line.startswith(field) and len(parts) >= 2 and parts[1].isdigit():
+                out[key] = int(parts[1])
+    return out
+
+
 def native_stats(conn, root, stop, horizon_s, wait_s=60):
     """Write one stats row per TICK_S from the load start until horizon_s
     (duration + quiescence). Returns early when stop is set. Never unbounded:
@@ -64,7 +84,8 @@ def native_stats(conn, root, stop, horizon_s, wait_s=60):
         while tick * TICK_S <= horizon_s and not stop.is_set():
             if stop.wait(max(0, start + tick * TICK_S - time.monotonic())):
                 return
-            row = dict(mono=time.monotonic(), body_elapsed=tick * TICK_S, identity=identity(os.getpid()))
+            row = dict(mono=time.monotonic(), body_elapsed=tick * TICK_S, identity=identity(os.getpid()),
+                       memory=proc_memory())  # #997: pinned bytes per client process
             try:
                 row['stats'] = json.loads(conn.stats_json())
                 row['status'] = 'OBSERVED'
