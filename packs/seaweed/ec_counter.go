@@ -29,11 +29,11 @@ func ecObserve(h inventory.Host, snap ecSnapshot, dead map[string]bool, label st
 		if !ok || len(before) != len(after) || a[0] < b[0] || a[1] < b[1] {
 			return nil, errors.New("EC counter reset/cohort changed")
 		}
-		s, f = s+a[0]-b[0], f+a[1]-b[1]
+		s, f = s+(a[0]-b[0]), f+(a[1]-b[1])
 		deltas[k] = [2]float64{a[0] - b[0], a[1] - b[1]}
 	}
 	row := map[string]any{"before": before, "after": after, "per_holder_delta": deltas, "success_delta": s, "failure_delta": f, "outcome": "FAIL"}
-	if f != 0 || (label == "intact" && s != 0) {
+	if math.IsInf(s, 0) || math.IsInf(f, 0) || f != 0 || (label == "intact" && s != 0) {
 		return row, errors.New("EC reconstruction counter failure")
 	}
 	if label != "intact" && s <= 0 {

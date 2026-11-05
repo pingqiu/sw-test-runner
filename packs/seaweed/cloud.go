@@ -98,6 +98,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
+	if c.ECReconstruction && (!c.ECStage1 || c.ECUnderQuorum) {
+		return "", errors.New("EC reconstruction needs stage1 without under-quorum")
+	}
 	if len(c.ClusterChaosCases) > 0 {
 		return runDirectProcess(ctx, *d, c)
 	}
@@ -123,9 +126,6 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	}
 	if c.MasterWrites && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
 		return "", errors.New("master writes requires one direct HTTP host without other phases")
-	}
-	if c.ECReconstruction && (!c.ECStage1 || c.ECUnderQuorum) {
-		return "", errors.New("EC reconstruction needs stage1 without under-quorum")
 	}
 	if c.ECUnderQuorum && !c.ECStage1 {
 		return "", errors.New("ec_under_quorum requires ec_stage1")
