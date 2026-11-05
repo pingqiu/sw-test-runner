@@ -360,13 +360,17 @@ func (s *directSoak) clocked(ctx context.Context, label, root, clock, evidence s
 	}
 	row, _, err := e.Output.Decode()
 	if err == nil && evidence != "" {
-		var probe struct {
-			Status string `json:"status"`
+		// #1002: the row is the evidence file's reference; the file itself, past the 128 KiB a job's stdout may
+		// carry at 2 h, is read back through the same step path and checked against it before publication.
+		node := s.b.Jobs[label].Node
+		var body []byte
+		body, err = m02Evidence(row, evidence, func(name string) (string, error) {
+			return cloudStep(ctx, s.nodes[node], s.c.Output, "soak-fetch-"+name, "fetch-"+name, 120,
+				"cat "+cloudQuote(path.Join(s.hosts[node].RunRoot, name)))
+		})
+		if err == nil {
+			err = clockPublish(path.Join(root, evidence), body)
 		}
-		if oneStrictValue(row) != nil || json.Unmarshal(row, &probe) != nil || probe.Status != "SOAK_COLLECTED" {
-			return errors.New("soak M02 evidence failed, truncated or malformed")
-		}
-		err = clockPublish(path.Join(root, evidence), row)
 	}
 	if err != nil {
 		return err
