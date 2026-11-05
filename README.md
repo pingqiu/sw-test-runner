@@ -42,6 +42,8 @@ sw-test-runner validate-bundle results/RUN # offline result/status check
 
 ## How to run `seaweed-cloud direct`
 
+For the operator-staged tp01 nightly sweep, see [Nightly local regression](docs/nightly-regression.md).
+
 Use one existing Linux host with SSH, systemd, passwordless sudo, Python 3,
 `curl`, `tar`, `sha256sum`, and `ss`. A local container reached over SSH with
 real systemd is an **onprem** host: set `target: "onprem"`, not `docker`.
