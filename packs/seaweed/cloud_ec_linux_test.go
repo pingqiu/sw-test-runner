@@ -201,6 +201,9 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	config := CloudConfig{ECStage1: true, SSHKey: key, HostKey: pin, Output: out, Files: map[string]CloudFile{"weed": {Path: p, SHA256: hash([]byte("weed"))}}}
+	if strings.HasPrefix(mode, "reconstruction-") {
+        json.Unmarshal([]byte(`{"ec_reconstruction":true}`), &config)
+    }
 	if strings.HasPrefix(mode, "under-") {
 		json.Unmarshal([]byte(`{"ec_under_quorum":true}`), &config)
 	}
@@ -283,4 +286,10 @@ func TestDirectRustVolumeSelectorAndCleanup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconstructionExactWithoutCounterCannotPass(t *testing.T) {
+    h, err := runECFake(t, "reconstruction-zero")
+    if err == nil { t.Fatal("exact 200s without reconstruction counters earned qualification") }
+    if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 { t.Fatal("cleanup missing") }
 }
