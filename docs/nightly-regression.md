@@ -55,6 +55,14 @@ inspection/collection/disposal operations. Expected wall time is 50–60min;
 these finite per-phase bounds also bound the complete job, without an extra
 controller. Any failed cell is recorded once and later cells continue.
 
+Before any build or container starts, a bounded preflight discovers the Docker
+root and measures it plus `/data/nvme` with `df -P`. A reported Use% above85
+(on either filesystem), or an inspection failure, yields exit78,
+`CLASSIFICATION=ENVIRONMENT`, and eleven NOT_RUN rows. `docker-root`,
+`disk-preflight.txt` and `disk-preflight.stderr` retain the observations.
+Exactly85% is allowed. Existing one-attempt/head/night bookkeeping is unchanged;
+a blocked attempt is not permission to retry automatically.
+
 The eleven cells are EC stage1 Go/Rust, EC2a Go, master_writes, HTTP chaos
 volume-restart, C1/C2/C4/C5, and EC reconstruction Go/Rust. Existing schedules
 and component limits remain: ordinary S2 and C5 exposure can be NOT_COVERED;
@@ -80,7 +88,12 @@ than hashing payloads back. Then post TABLE.md on mono #998 with overall job
 status, versions, coverage qualifications and archive path. Do not repeat a
 table already posted for that SHA. Retain local evidence if collection fails.
 
-For each failing cell, use the exact title `<selector>/<impl>: <failing row>`;
+If `CLASSIFICATION` says `ENVIRONMENT`, post the whole NOT_RUN table and disk
+observations on #998 only; **do not create or comment on stability issues**.
+This is an environment refusal, not a product finding. Keep its nonzero EXIT
+and the original evidence even after space is restored.
+
+For other failing cells, use the exact title `<selector>/<impl>: <failing row>`;
 use `go`/`rust` for EC, `mixed` for Go metadata/Rust-volume HTTP cases. Inspect
 the raw CLI error to name the first failing row; a job/build failure is also a
 finding, not eleven product failures. List **all** open mono issues labelled
