@@ -244,6 +244,9 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	h.dirty = mode == "extra-holder-port"
 	address, pin, key, _ := cloudSSH(t, "", h.exec)
 	inv := directInput(t, address)
+	if mode == "reconstruction-port-range" {
+		inv = []byte(strings.Replace(string(inv), `"port":8080`, `"port":50000`, 1))
+	}
 	var d struct {
 		RunID string `json:"run_id"`
 	}
@@ -262,6 +265,12 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	config := CloudConfig{ECStage1: true, SSHKey: key, HostKey: pin, Output: out, Files: map[string]CloudFile{"weed": {Path: p, SHA256: hash([]byte("weed"))}}}
 	if strings.HasPrefix(mode, "reconstruction-") {
 		json.Unmarshal([]byte(`{"ec_reconstruction":true}`), &config)
+	}
+	if mode == "reconstruction-mutual" {
+		config.ECUnderQuorum = true
+	}
+	if mode == "reconstruction-no-stage1" {
+		config.ECStage1 = false
 	}
 	if strings.HasPrefix(mode, "under-") {
 		json.Unmarshal([]byte(`{"ec_under_quorum":true}`), &config)
@@ -398,11 +407,25 @@ func TestDirectReconstructionCounterRows(t *testing.T) {
 					if r["success_delta"] != float64(2) || r["failure_delta"] != float64(0) || len(r["after"].(map[string]any)) != 13 {
 						t.Fatal(r)
 					}
+					if len(r["per_holder_delta"].(map[string]any)) != 13 {
+						t.Fatal("holder deltas missing")
+					}
 				}
 				post := h.commands[h.index("systemctl list-units")]
 				if !strings.Contains(post, "28093") {
 					t.Fatal("metrics ports absent from cleanup")
 				}
+			}
+		})
+	}
+}
+
+func TestDirectReconstructionInvalidBeforeEffects(t *testing.T) {
+	for _, mode := range []string{"mutual", "no-stage1", "port-range"} {
+		t.Run(mode, func(t *testing.T) {
+			h, err := runECFake(t, "reconstruction-"+mode)
+			if err == nil || h.index("sudo install -d") >= 0 || h.lost != 0 || h.metrics != 0 {
+				t.Fatalf("invalid reached effects: %v", err)
 			}
 		})
 	}
