@@ -26,7 +26,11 @@ from soak_native_worker import child, payload
 from soak_oracle import Oracle, OracleError
 from soak_stats import WITNESS, boot_id, identity
 
-MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)')
+# NOT_FOUND (status 1) in exactly the two spellings a soak read can carry: the DC batch push read, and the RC
+# push-read slot fetch (#999, sw-rdma push_read.rs), whose full message is required so no other status or push form
+# (status 10, bykey, direct, kv slab, the unbatched DC) can pass as a miss.
+MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)'
+                  r'|(?<!DC )(?<!batch )push-read response status 1 pipe=\d+ request_id=\d+ fid=\S+ offset=\d+ length=\d+ slot=\d+')
 TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
 EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'completions.jsonl')
 
@@ -75,8 +79,8 @@ def poll_topology(config, stop, out):
 def classify_get(row, acked_pending):
     """r9's GET rule, ported exactly (archived soak_workload.py sha 6a4bbb6b, lines 54-64 and 74-99): a hit is ok with
     results None or [True]; ok=True with any other results is a MISS CANDIDATE (r9: the not-hit branch, judged by
-    retirement proof; here by the decision-3 join in 3b); ok=False is a miss only in the DC push-read status-1 shape
-    (results [False], untouched, r9's error text), else a credited fault-window error, else fatal."""
+    retirement proof; here by the decision-3 join in 3b); ok=False is a miss only in the push-read status-1 shape
+    (results [False], untouched, r9's DC error text or the RC fetch's), else a credited fault-window error, else fatal."""
     if row['ok'] and row['results'] in (None, [True]):
         return 'hit'
     if row['ok'] is True:
@@ -220,12 +224,26 @@ def push_pipes(pat):
     os.environ['SW_RDMA_KVCACHE_PUSH_PIPES'] = str(pipes)
 
 
+def read_route(config):
+    """The soak's RDMA read route (#999): absent is 'dc'. 'rc' turns DC push off for every worker (they
+    inherit this environment) and drops the DC selectors, so no worker can reach DC by accident."""
+    route = config.get('read_transport', 'dc')
+    if route not in ('dc', 'rc') or (route == 'rc' and config.get('pattern')):
+        raise ValueError('soak read_transport must be dc or rc, and rc is the soak only')
+    if route == 'rc':
+        for key in [k for k in os.environ if k.startswith('SW_RDMA_KVCACHE_PUSH_DC_')]:
+            del os.environ[key]
+        os.environ['SW_RDMA_KVCACHE_PUSH_DC'] = '0'
+    return route
+
+
 def run(config):
     import sys
     sys.path[:0] = [config['smoke']['helper_dir'], config['smoke']['native_dir']]
     from kv_smoke import configure
     configure(config['smoke'])  # the smoke task's exact RDMA environment, inherited by the workers
     push_pipes(config.get('pattern'))
+    route = read_route(config)
     root = Path(config['root'])
     files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
@@ -233,7 +251,7 @@ def run(config):
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
     pat = config.get('pattern')  # kv_load's client pattern; absent, the soak's own mix
     clients, gap = (pat['clients'], 1 / pat['rate_per_client']) if pat else (4, .125)
-    transport = (lambda i: pat['transport']) if pat else (lambda i: 'http' if i == 3 else 'dc')
+    transport = (lambda i: pat['transport']) if pat else (lambda i: 'http' if i == 3 else route)
     pattern = Pattern(pat, rng, config['key_prefix']) if pat else None
     writers, key_writers, submissions, kills = {i: 0 for i in range(clients)}, {}, {}, []
     stop = threading.Event()
@@ -361,9 +379,9 @@ def run(config):
                 raise RuntimeError('worker error ' + repr(row)[:300])
 
     def client_kill(started):
-        """r9's rule: kill a DC worker only while its GET is submitted and pending."""
+        """r9's rule: kill an RDMA (DC or RC) worker only while its GET is submitted and pending."""
         while time.monotonic() - started < 60:
-            for i in (i for i in range(clients) if transport(i) == 'dc'):
+            for i in (i for i in range(clients) if transport(i) in ('dc', 'rc')):
                 pump(i)
                 if i in commands and commands[i]['action'] == 'get' and i in submissions:
                     witness, cmd = submissions.pop(i), commands.pop(i)

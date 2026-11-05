@@ -80,6 +80,9 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if x.Pattern != nil {
 		config["pattern"], config["faults"] = x.Pattern, x.Faults // kv_load: judged by its own rows; absent for the soak
 	}
+	if x.rc() {
+		config["read_transport"] = "rc" // the RC soak's routes and client kill; absent is DC
+	}
 	raw, err := json.Marshal(config)
 	return []string{"-I", path.Join(s.HelperDir, "soak_assess.py"), "--config", string(raw)}, err
 }

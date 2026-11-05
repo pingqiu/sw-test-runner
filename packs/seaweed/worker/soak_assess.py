@@ -229,7 +229,7 @@ def stats_name(identity):
 
 def assess_routes(root, workers, kills, refused_only=frozenset()):
     """Exactly one native-stats series per worker generation (4 originals + each replacement), none foreign,
-    and each one's last observed loader counters in the accepted DC or HTTP identity. kv_load only: a DC
+    and each one's last observed loader counters in the accepted DC, RC or HTTP identity. kv_load only: a DC
     process (series name) in `refused_only` (every GET of its own generation a recorded refusal miss) may
     show no route when its every read was a K8 refusal miss."""
     expected = {stats_name(w): w['transport'] for w in workers.values()}
@@ -243,13 +243,14 @@ def assess_routes(root, workers, kills, refused_only=frozenset()):
             continue
         last = typed(typed(observed[-1], loader=dict)['loader'], transport=str, **{k: int for k in COUNTERS})
         dc, rc, copied = (last[k] for k in COUNTERS)
-        if expected[name] == 'dc':
-            # A process whose every read was a K8 refusal miss has no route to show: zero DC reads and
-            # read_calls equal to its refusal-miss counter. Any process with a read that was not refused
-            # still needs its DC route.
+        if expected[name] in ('dc', 'rc'):
+            # An RDMA process shows its own route (DC, or RC for #999) and no other. A process whose every
+            # read was a K8 refusal miss has no route to show: zero reads on its route and read_calls equal
+            # to its refusal-miss counter. Any process with a read that was not refused still needs its route.
+            own, other = (dc, rc) if expected[name] == 'dc' else (rc, dc)
             refused, calls = k8_refusal_misses(observed[-1]), last.get('read_calls')
-            all_refused = name in refused_only and dc == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
-            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (dc > 0 or all_refused)                 and rc == 0 and copied == 0
+            all_refused = name in refused_only and own == 0 and refused is not None and not isinstance(calls, bool)                 and isinstance(calls, int) and calls > 0 and calls == refused
+            ok = last['transport'] == 'rdma' and last.get('http_fallback_allowed') is False and (own > 0 or all_refused)                 and other == 0 and copied == 0
         else:
             ok = last['transport'] == 'http' and dc == 0 and rc == 0 and copied > 0
         if not ok or min(dc, rc, copied) < 0:
@@ -344,6 +345,9 @@ def kv_load_rows(pat, declared_faults, acks, ops, faults):
 
 def assess(c):
     root, crit = Path(c['root']), {}
+    route = c.get('read_transport', 'dc')  # the soak's RDMA route for clients 0-2 (#999); absent is DC
+    if route not in ('dc', 'rc') or (route == 'rc' and c.get('pattern')):
+        raise ValueError('read_transport must be dc or rc, and rc is the soak only')
     def mark(name, ok, reason=''):
         crit[name] = dict(outcome='PASS' if ok else 'FAIL', reason=reason)
     run = dict(run_id=c['run_id'], boot_id=c['boot_id'])
@@ -367,7 +371,7 @@ def assess(c):
     workers, pat = obj(root, 'workers.json'), c.get('pattern')  # kv_load: its own clients, all DC
     ids = [str(i) for i in range(pat['clients'] if pat else 4)]
     if not isinstance(workers, dict) or sorted(workers) != sorted(ids) or [typed(workers[i], pid=int, starttime=int, transport=str)
-                                                                          ['transport'] for i in ids] != (['dc'] * len(ids) if pat else ['dc', 'dc', 'dc', 'http']):
+                                                                          ['transport'] for i in ids] != (['dc'] * len(ids) if pat else [route] * 3 + ['http']):
         raise ValueError('workers.json is not the accepted client set')
     if any(str(e['worker']) not in workers for e in ops):  # every op belongs to one admitted client
         raise ValueError('op-event of a worker outside workers.json')
@@ -499,7 +503,7 @@ def assess(c):
     k = kills[0] if len(kills) == 1 else None
     w = k and k['witness']
     original = k and workers.get(str(k['worker']))
-    ok = bool(k) and (original or {}).get('transport') == 'dc' and k['started'] - begin >= c['client_kill_at_s'] and 0 <= k['killed'] - k['started'] <= 60 \
+    ok = bool(k) and (original or {}).get('transport') == ('dc' if pat else route) and k['started'] - begin >= c['client_kill_at_s'] and 0 <= k['killed'] - k['started'] <= 60 \
         and 0 <= k['finished'] - k['killed'] <= 30 and w.get('event') == 'submitted' and w.get('action') == 'get' \
         and w.get('pid') == original['pid'] and k['replacement'].get('pid') != original['pid']
     mark('client_kill', ok, '%d kills' % len(kills))

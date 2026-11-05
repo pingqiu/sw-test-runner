@@ -1284,5 +1284,101 @@ class RealWorkerFiles(unittest.TestCase):
         self.assertEqual(row['status'], 'FAIL')  # routes/rotation/client kill: not produced by this fake run
 
 
+def rc_evidence():
+    """The synthetic soak read over RC push (#999): clients 0-2 and the kill's replacement show RC reads."""
+    ev = evidence()
+    for i in range(3):
+        ev['files']['workers.json'][str(i)]['transport'] = 'rc'
+    for pid in (10, 11, 12, 77):
+        ev['stats']['native-stats-%d-1.jsonl' % pid][0]['stats']['loader'].update(direct_dc_reads=0, direct_rc_reads=5)
+    return ev
+
+
+class SoakAssessRC(unittest.TestCase):
+    """#999: an RC soak is judged on the same 12 rows; its RDMA clients must show RC and only RC."""
+
+    def run_on(self, ev, **kw):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, ev)
+        return soak_assess.assess(dict(config(root), **kw))
+
+    def failing(self, row):
+        return sorted(k for k, v in row['criteria'].items() if v['outcome'] != 'PASS')
+
+    def test_the_rc_soak_passes_every_criterion_with_the_soak_set(self):
+        row = self.run_on(rc_evidence(), read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        self.assertEqual(sorted(row['criteria']), sorted(soak_assess.MANDATORY))
+
+    def mutate(self, change, rule):
+        ev = rc_evidence()
+        change(ev)
+        row = self.run_on(ev, read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('FAIL', [rule]), row['criteria'])
+
+    def test_an_rc_series_showing_dc_reads_fails_routes(self):
+        self.mutate(lambda ev: ev['stats']['native-stats-10-1.jsonl'][0]['stats']['loader'].update(direct_dc_reads=500), 'routes')
+
+    def test_an_rc_series_showing_http_copies_fails_routes(self):
+        self.mutate(lambda ev: ev['stats']['native-stats-11-1.jsonl'][0]['stats']['loader'].update(copied_reads=3), 'routes')
+
+    def test_an_rc_series_with_no_rc_read_fails_routes(self):
+        self.mutate(lambda ev: ev['stats']['native-stats-12-1.jsonl'][0]['stats']['loader'].update(direct_rc_reads=0), 'routes')
+
+    def test_an_rc_series_on_http_or_with_fallback_fails_routes(self):
+        self.mutate(lambda ev: ev['stats']['native-stats-77-1.jsonl'][0]['stats']['loader'].update(transport='http'), 'routes')
+        self.mutate(lambda ev: ev['stats']['native-stats-10-1.jsonl'][0]['stats']['loader'].update(http_fallback_allowed=True), 'routes')
+
+    def test_the_client_sets_must_match_the_plan(self):
+        with self.assertRaises(ValueError):  # an RC plan with DC clients
+            self.run_on(evidence(), read_transport='rc')
+        with self.assertRaises(ValueError):  # a DC plan (absent or explicit) with RC clients
+            self.run_on(rc_evidence())
+        with self.assertRaises(ValueError):
+            self.run_on(rc_evidence(), read_transport='dc')
+        self.assertEqual(self.run_on(evidence(), read_transport='dc')['status'], 'PASS')  # explicit dc is today's soak
+
+    def test_a_dc_plan_seeing_rc_reads_still_fails_routes(self):
+        ev = evidence()
+        ev['stats']['native-stats-10-1.jsonl'][0]['stats']['loader'].update(direct_dc_reads=0, direct_rc_reads=5)
+        row = self.run_on(ev)
+        self.assertEqual(self.failing(row), ['routes'], row['criteria'])
+
+    def test_only_dc_or_rc_and_rc_only_without_a_pattern(self):
+        for bad in ('RC', 'http', None, ''):
+            with self.assertRaises(ValueError, msg=bad):
+                self.run_on(rc_evidence(), read_transport=bad)
+        with self.assertRaises(ValueError):
+            self.run_on(rc_evidence(), read_transport='rc', pattern=dict(clients=4))
+
+    def test_an_rc_not_found_miss_is_judged_like_the_dc_one(self):
+        rc = 'rdma: push-read response status 1 pipe=2 request_id=17 fid=3,01637037d6 offset=0 length=1048576 slot=5'
+        def miss_error(error):
+            ev = rc_evidence()
+            next(e for e in ev['events'] if e.get('label') == 'g2').update(error=error)
+            return ev
+        row = self.run_on(miss_error(rc), read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        row = self.run_on(miss_error(rc.replace('status 1 ', 'status 10 ')), read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('FAIL', ['get_outcomes']), row['criteria'])
+
+    def test_the_k8_exemption_follows_the_rc_route(self):
+        """The all-refused exemption reads the process's own route: zero RC reads and every call a refusal miss."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        loader = dict(transport='rdma', http_fallback_allowed=False, direct_dc_reads=0, direct_rc_reads=0, copied_reads=0, read_calls=40)
+        name = 'native-stats-21-1.jsonl'
+        workers = {'0': dict(pid=21, starttime=1, transport='rc')}
+        def write_series(**over):
+            stats = dict(loader=dict(loader, **over), native_budget_refusal_process=dict(missing_keys_refused=40, missing_keys_deadline=0))
+            (root / name).write_text(json.dumps(dict(status='OBSERVED', stats=stats)) + '\n')
+        write_series()
+        self.assertEqual(soak_assess.assess_routes(root, workers, [], frozenset({name})), [])
+        self.assertEqual(soak_assess.assess_routes(root, workers, [], frozenset()), [name])  # not flagged: needs its RC route
+        write_series(direct_dc_reads=1)  # exempt from its own route, never from showing another
+        self.assertEqual(soak_assess.assess_routes(root, workers, [], frozenset({name})), [name])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -38,7 +38,27 @@ type SoakPlan struct {
 	// Pattern makes the load kv_load's configurable client pattern; nil keeps
 	// the soak's own fixed mix, byte for byte.
 	Pattern *LoadPattern `json:"pattern,omitempty"`
+	// ReadTransport is the soak's RDMA read route for clients 0-2 (client 3
+	// stays HTTP): absent is "dc", today's soak byte for byte; "rc" reads over
+	// RC push (#999). kv_load keeps its pattern's own transport.
+	ReadTransport SoakTransport `json:"read_transport,omitempty"`
 }
+
+// SoakTransport decodes only "dc" or "rc": null, "" and anything else refuse,
+// so a typo or a null can never fall back to DC silently.
+type SoakTransport string
+
+func (t *SoakTransport) UnmarshalJSON(raw []byte) error {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || (s != "dc" && s != "rc") {
+		return errors.New(`soak read_transport must be "dc" or "rc"`)
+	}
+	*t = SoakTransport(s)
+	return nil
+}
+
+// rc reports a soak that reads over RC push.
+func (x *SoakPlan) rc() bool { return x != nil && x.ReadTransport == "rc" }
 
 // LoadPattern is kv_load's client pattern: Clients workers on one transport,
 // Keys keys drawn uniformly or by zipf(ZipfS), ObjectBytes each, at most
@@ -246,6 +266,9 @@ func secs(n int) time.Duration { return time.Duration(n) * time.Second }
 func (x *SoakPlan) checkSchedule() error {
 	if x == nil || x.DurationS <= 0 || x.DurationS > int(SoakHorizon/time.Second) {
 		return errors.New("soak duration out of range")
+	}
+	if t := x.ReadTransport; t != "" && t != "dc" && t != "rc" || t == "rc" && x.Pattern != nil {
+		return errors.New(`soak read_transport must be "dc" or "rc", and "rc" is the soak's only (not kv_load's)`)
 	}
 	if x.Pattern != nil {
 		if err := x.Pattern.check(x.DurationS); err != nil {
