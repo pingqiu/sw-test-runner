@@ -17,6 +17,31 @@ var ecMetricSample = regexp.MustCompile(`^` + ecMetric + `\{result="(success|fai
 
 type ecCounters map[string][2]float64
 
+func ecObserve(h inventory.Host, snap ecSnapshot, dead map[string]bool, label string, before ecCounters, run func(string, string) (string, error)) (map[string]any, error) {
+	after, err := ecScrape(h, snap, dead, label, run)
+	if err != nil {
+		return nil, err
+	}
+	var s, f float64
+	for k, b := range before {
+		a, ok := after[k]
+		if !ok || len(before) != len(after) || a[0] < b[0] || a[1] < b[1] {
+			return nil, errors.New("EC counter reset/cohort changed")
+		}
+		s, f = s+a[0]-b[0], f+a[1]-b[1]
+	}
+	row := map[string]any{"before": before, "after": after, "success_delta": s, "failure_delta": f, "outcome": "FAIL"}
+	if f != 0 || (label == "intact" && s != 0) {
+		return row, errors.New("EC reconstruction counter failure")
+	}
+	if label != "intact" && s <= 0 {
+		row["outcome"] = "NOT_COVERED"
+		return row, errors.New("EC reconstruction NOT_COVERED")
+	}
+	row["outcome"] = "PASS"
+	return row, nil
+}
+
 func ecScrape(h inventory.Host, snap ecSnapshot, dead map[string]bool, label string, run func(string, string) (string, error)) (ecCounters, error) {
 	cmd := `check() {
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$boot"
@@ -70,19 +95,4 @@ case "$s" in *"pid=$pid,"*) ;; *) return 1;; esac
 		return nil, errors.New("EC metrics missing holder")
 	}
 	return values, nil
-}
-
-func ecCounterDelta(before, after ecCounters) (float64, float64, error) {
-	var s, f float64
-	if len(before) != len(after) {
-		return 0, 0, errors.New("EC counter cohort changed")
-	}
-	for k, b := range before {
-		a, ok := after[k]
-		if !ok || a[0] < b[0] || a[1] < b[1] {
-			return 0, 0, errors.New("EC counter reset/missing holder")
-		}
-		s, f = s+a[0]-b[0], f+a[1]-b[1]
-	}
-	return s, f, nil
 }

@@ -202,17 +202,10 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 	}
 	report["s1"] = "PASS"
 	if c.ECReconstruction {
-		after, e := ecScrape(h, snap, nil, "intact", run)
-		if e != nil {
-			err = e
+		report["intact_counters"], err = ecObserve(h, snap, nil, "intact", baseline, run)
+		if err != nil {
 			return
 		}
-		a, b, e := ecCounterDelta(baseline, after)
-		if e != nil || a != 0 || b != 0 {
-			err = errors.New("EC intact baseline reconstructed")
-			return
-		}
-		report["intact_counters"] = after
 	}
 	victims := []string{"h0", "h1", "h2", "h3"}
 	if c.ECUnderQuorum {
@@ -267,15 +260,8 @@ func runDirectEC(d inventory.Document, h inventory.Host, c CloudConfig, run func
 				return
 			}
 			if c.ECReconstruction {
-				after, e := ecScrape(h, snap, dead, "after-"+route, run)
-				if e != nil {
-					err = e
-					return
-				}
-				a, b, e := ecCounterDelta(before, after)
-				report["reconstruction_"+route] = map[string]any{"before": before, "after": after, "success_delta": a, "failure_delta": b}
-				if e != nil || a <= 0 || b != 0 {
-					err = errors.New("EC reconstruction NOT_COVERED or counter failure")
+				report["reconstruction_"+route], err = ecObserve(h, snap, dead, "after-"+route, before, run)
+				if err != nil {
 					return
 				}
 			}
