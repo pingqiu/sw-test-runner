@@ -213,13 +213,14 @@ const (
 )
 
 // directSoakBudget refuses, before anything deploys, a direct soak whose work deadline or
-// controller timeout (--timeout) can't hold it: deploy, the load, quiescence and collection,
-// plus the cleanup reserve for the timeout. Unsized, an 8 h run would fail hours in.
+// controller timeout (--timeout) can't hold it: deploy, the load, quiescence and the trailing
+// collection and assessment, plus the cleanup reserve for the timeout. Unsized, an 8 h run
+// would fail hours in.
 func directSoakBudget(x *SoakPlan, now, work, timeout time.Time) error {
 	if err := x.checkScheduleWithin(DirectSoakHorizon); err != nil {
 		return err
 	}
-	need := DeployReserve + WitnessWait + secs(x.DurationS) + QuiescenceReserve + LoadExitGrace + CollectReserve
+	need := DeployReserve + WitnessWait + secs(x.DurationS) + QuiescenceReserve + LoadExitGrace + trailingReserve(x.DurationS, true)
 	if work.Sub(now) < need {
 		return fmt.Errorf("soak needs %s of work time; the inventory's work deadline leaves %s", need, work.Sub(now).Round(time.Second))
 	}
@@ -227,6 +228,22 @@ func directSoakBudget(x *SoakPlan, now, work, timeout time.Time) error {
 		return fmt.Errorf("soak needs a direct --timeout of at least %s; it leaves %s", need+CleanupReserve, timeout.Sub(now).Round(time.Second))
 	}
 	return nil
+}
+
+// assessTimeout bounds the direct path's assessor step: 120 s per 30 minutes of soak.
+func assessTimeout(durationS int) time.Duration {
+	return 120 * time.Second * time.Duration(soakScale(durationS))
+}
+
+// trailingReserve is the work time a soak keeps after its load for collection and assessment.
+// The approved path and any 30-minute soak keep CollectReserve, as before. A longer direct soak
+// also reserves its whole scaled assessor step (#1002), whose evidence grows with the duration.
+// The predeploy budget, the load admission and every fault check use this one value.
+func trailingReserve(durationS int, direct bool) time.Duration {
+	if direct && soakScale(durationS) > 1 {
+		return CollectReserve + assessTimeout(durationS)
+	}
+	return CollectReserve
 }
 
 // soakScale is how many 30-minute soaks the plan's duration spans (at least 1): the factor by which the

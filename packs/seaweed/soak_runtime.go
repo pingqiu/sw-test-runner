@@ -184,6 +184,13 @@ func soakHorizon(ops soakOps) time.Duration {
 	return SoakHorizon
 }
 
+// declaresHorizon reports an executor with its own horizon: the direct path, whose long soaks
+// reserve their scaled assessor in trailingReserve.
+func declaresHorizon(ops soakOps) bool {
+	_, ok := ops.(interface{ Horizon() time.Duration })
+	return ok
+}
+
 // checkedSpan converts seconds to a Duration only inside the soak horizon,
 // so no float can wrap the conversion. A past (negative) span waits 0 and is
 // judged by the overdue rule as before.
@@ -232,14 +239,14 @@ type readyRow struct {
 // under the live action context, never from cleanup or a detached context.
 func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims map[string]tr.JobHandle) (records []FaultRecord, exit tr.ExitInfo, err error) {
 	x := p.Soak
-	horizon := soakHorizon(ops)
+	horizon, trailing := soakHorizon(ops), trailingReserve(x.DurationS, declaresHorizon(ops))
 	if err = x.checkScheduleWithin(horizon); err != nil { // before any arithmetic or effect
 		return nil, exit, err
 	}
 	duration := secs(x.DurationS)
 	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline. The load's end is not known
 	// until its start witness, up to WitnessWait away.
-	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+CollectReserve {
+	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+trailing {
 		return nil, exit, errors.New("soak: not enough work time left to admit the load")
 	}
 	clk := &soakClock{ops: ops}
@@ -312,7 +319,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		}
 		// Two separate needs: this fault's spacing, and the whole load tail plus collection.
 		left := ops.WorkDeadline().Sub(ops.Now())
-		if left < FaultBudget+postSpan+CollectReserve || left < tail+CollectReserve {
+		if left < FaultBudget+postSpan+trailing || left < tail+trailing {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
 		}
 		ack, err := pauseAndAck(ctx, ops, clk, f)

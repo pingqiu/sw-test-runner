@@ -73,12 +73,18 @@ func TestRunSoakRunsATwoHourPlanOnlyUnderTheExecutorsHorizon(t *testing.T) {
 	}
 }
 
-// directSoakBudget refuses, before any deploy, an 8 h soak whose work deadline or --timeout can't hold it.
+// directSoakBudget refuses, before any deploy, an 8 h soak whose work deadline or --timeout can't hold it,
+// including its whole scaled assessor step (codex01 P2 on fe027da4).
 func TestDirectSoakBudgetSizesTheTimeoutAndTheWorkDeadline(t *testing.T) {
 	p, _ := soakTestPlan()
 	p.Soak.DurationS = 28800
 	now := time.Unix(1_800_000_000, 0)
-	need := DeployReserve + WitnessWait + 8*time.Hour + QuiescenceReserve + LoadExitGrace + CollectReserve
+	// The corrected 8 h sizing: deploy 300 + witness 10 + load 28800 + quiescence 60 + exit grace 30
+	// + trailing (collect 120 + assessor 16 x 120 = 1920) = 31240 s of work; the timeout adds cleanup 120.
+	need := 31240 * time.Second
+	if got := DeployReserve + WitnessWait + 8*time.Hour + QuiescenceReserve + LoadExitGrace + trailingReserve(28800, true); got != need {
+		t.Fatalf("8 h need = %v, want %v", got, need)
+	}
 	if err := directSoakBudget(p.Soak, now, now.Add(need), now.Add(need+CleanupReserve)); err != nil {
 		t.Fatalf("the exact budget was refused: %v", err)
 	}
@@ -88,12 +94,61 @@ func TestDirectSoakBudgetSizesTheTimeoutAndTheWorkDeadline(t *testing.T) {
 	if err := directSoakBudget(p.Soak, now, now.Add(need), now.Add(need+CleanupReserve-time.Second)); err == nil || !strings.Contains(err.Error(), "--timeout") {
 		t.Fatalf("a short --timeout passed: %v", err)
 	}
+	// Composed control: the fixed-CollectReserve budget (fe027da4's) no longer admits 8 h, because the
+	// assessor alone may use 32 min.
+	legacy := DeployReserve + WitnessWait + 8*time.Hour + QuiescenceReserve + LoadExitGrace + CollectReserve
+	if err := directSoakBudget(p.Soak, now, now.Add(legacy), now.Add(legacy+CleanupReserve)); err == nil {
+		t.Fatal("8 h admitted without reserving its scaled assessor")
+	}
 	if err := directSoakBudget(p.Soak, now, now.Add(70*time.Minute), now.Add(70*time.Minute)); err == nil {
 		t.Fatal("an 8 h soak passed with today's 70 min timeout")
 	}
 	p.Soak.DurationS = 32401
 	if err := directSoakBudget(p.Soak, now, now.Add(10*time.Hour), now.Add(10*time.Hour)); err == nil {
 		t.Fatal("a soak past the direct horizon passed the budget")
+	}
+}
+
+// One trailing reserve: CollectReserve on the approved path and for any 30-minute soak (unchanged);
+// plus the whole scaled assessor step for a longer direct soak.
+func TestTrailingReserveCoversTheScaledAssessorOnlyForLongDirectSoaks(t *testing.T) {
+	for _, c := range []struct {
+		d      int
+		direct bool
+		want   time.Duration
+	}{{1800, false, CollectReserve}, {7200, false, CollectReserve}, {1800, true, CollectReserve},
+		{1801, true, CollectReserve + 240*time.Second}, {7200, true, CollectReserve + 480*time.Second},
+		{28800, true, CollectReserve + 1920*time.Second}} {
+		if got := trailingReserve(c.d, c.direct); got != c.want {
+			t.Errorf("trailingReserve(%d, %v) = %v, want %v", c.d, c.direct, got, c.want)
+		}
+		if c.direct && assessTimeout(c.d) != 120*time.Second*time.Duration(soakScale(c.d)) {
+			t.Errorf("assessTimeout(%d) = %v", c.d, assessTimeout(c.d))
+		}
+	}
+}
+
+// runSoak admits the load with the same trailing reserve: a 2 h direct soak whose work deadline only
+// holds the fixed CollectReserve is refused before any effect; a 30-minute direct soak keeps today's
+// admission exactly (the 45 min fixture deadline still passes, with both faults).
+func TestRunSoakReservesTheScaledAssessorAtLoadAdmission(t *testing.T) {
+	f := newFakeSoak(t)
+	f.exitAt = f.start + 7200 + 60.01
+	legacy := WitnessWait + 2*time.Hour + QuiescenceReserve + LoadExitGrace + CollectReserve
+	f.deadline = f.wall.Add(legacy + time.Minute) // enough for fe027da4's admission, not for the 480 s assessor
+	p, in := soakTestPlan()
+	p.Soak.DurationS = 7200
+	if _, _, err := runSoak(context.Background(), directHorizon{f}, p, in, map[string]tr.JobHandle{}); err == nil || !strings.Contains(err.Error(), "not enough work time left to admit the load") || f.started != 0 {
+		t.Fatalf("a 2 h direct soak was admitted without its assessor reserve: err=%v started=%d", err, f.started)
+	}
+	f = newFakeSoak(t) // 30 min, 45 min deadline: as on the approved path
+	ctx, cancel := context.WithCancel(context.Background())
+	f.cancel = cancel
+	defer cancel()
+	p, in = soakTestPlan()
+	records, _, err := runSoak(ctx, directHorizon{f}, p, in, map[string]tr.JobHandle{})
+	if err != nil || strings.Join(f.restarts, ",") != "E1,E2" || len(records) != 2 {
+		t.Fatalf("a 30-min direct soak changed: err=%v restarts=%v", err, f.restarts)
 	}
 }
 

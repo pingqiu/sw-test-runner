@@ -330,7 +330,7 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	if err != nil {
 		return "", err
 	}
-	e, err := s.step(ctx, p.Soak.Assess.Job, 120*soakScale(p.Soak.DurationS)) // its evidence grows with the duration
+	e, err := s.step(ctx, p.Soak.Assess.Job, int(assessTimeout(p.Soak.DurationS)/time.Second)) // reserved by trailingReserve
 	if err != nil {
 		return "", err
 	}
