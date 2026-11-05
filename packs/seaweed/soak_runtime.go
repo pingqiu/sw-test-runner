@@ -239,10 +239,11 @@ type readyRow struct {
 // under the live action context, never from cleanup or a detached context.
 func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims map[string]tr.JobHandle) (records []FaultRecord, exit tr.ExitInfo, err error) {
 	x := p.Soak
-	horizon, trailing := soakHorizon(ops), trailingReserve(x.DurationS, declaresHorizon(ops))
+	horizon := soakHorizon(ops)
 	if err = x.checkScheduleWithin(horizon); err != nil { // before any arithmetic or effect
 		return nil, exit, err
 	}
+	trailing := trailingReserve(x.DurationS, declaresHorizon(ops)) // only for a checked, non-nil plan
 	duration := secs(x.DurationS)
 	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline. The load's end is not known
 	// until its start witness, up to WitnessWait away.

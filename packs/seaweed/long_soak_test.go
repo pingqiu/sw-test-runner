@@ -159,3 +159,32 @@ func TestSoakScaleCountsThirtyMinuteSpans(t *testing.T) {
 		}
 	}
 }
+
+// codex01 R2 on ab54b6d4: runSoak validates the plan before any arithmetic on it. A nil plan and
+// out-of-range plans return the range error with no effect, on both executors, instead of panicking.
+func TestRunSoakRefusesNilAndOutOfRangePlansBeforeAnyArithmeticOrEffect(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		for name, soak := range map[string]*SoakPlan{"nil": nil, "zero": {DurationS: 0}, "negative": {DurationS: -1},
+			"past the direct horizon": {DurationS: 32401}} {
+			f := newFakeSoak(t)
+			var ops soakOps = f
+			if direct {
+				ops = directHorizon{f}
+			}
+			p, in := soakTestPlan()
+			p.Soak = soak
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("direct=%v %s: runSoak panicked: %v", direct, name, r)
+					}
+				}()
+				_, _, err = runSoak(context.Background(), ops, p, in, map[string]tr.JobHandle{})
+			}()
+			if err == nil || !strings.Contains(err.Error(), "duration out of range") || f.started != 0 || len(f.restarts) != 0 {
+				t.Errorf("direct=%v %s: err=%v started=%d restarts=%v", direct, name, err, f.started, f.restarts)
+			}
+		}
+	}
+}
