@@ -214,6 +214,22 @@ class FaultWindowWorker(unittest.TestCase):
         last = self.completions()[-1]  # the stop is attributable: its raw row was written first
         self.assertEqual((last['action'], last['row']['ok'], last['row']['error']), ('get', False, ''))
 
+    def test_an_rc_not_found_records_a_miss_and_its_status_10_stops_the_run(self):
+        # #999 (codex01 on #114): the RC fetch's NOT_FOUND is a miss through the real pump and op events.
+        (self.root / 'fake-status1').write_text(MissShape.RC)
+        self.toggle('fake-status1', 1.0, 1.5)
+        summary = soak_load.run(self.config)
+        misses = [e for e in self.events() if e.get('miss')]
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        self.assertTrue(misses and all(e['ok'] is False and e['results'] == [False] and e['fids'] for e in misses), misses)
+
+    def test_an_rc_status_10_is_still_fatal(self):
+        (self.root / 'fake-status1').write_text(MissShape.RC.replace('status 1 ', 'status 10 '))
+        self.toggle('fake-status1', 1.0, 10)
+        with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
+            soak_load.run(self.config)
+
+
     def test_every_completion_is_written_raw(self):
         soak_load.run(self.config)
         self.assertEqual(sorted(c['op'] for c in self.completions()), sorted(e['op'] for e in self.events()))
@@ -281,6 +297,34 @@ class FaultWindowWorker(unittest.TestCase):
         after = [e for e in self.events() if float(e['submitted']) > ack['observed_mono']]
         self.assertEqual(after, [], 'operations dispatched after the pause without a close')
 
+
+
+class MissShape(unittest.TestCase):
+    """classify_get's ok=False miss: results [False], untouched, and NOT_FOUND in one of the two exact spellings."""
+    DC = 'DC batch push-read response status 1'
+    RC = 'rdma: push-read response status 1 pipe=2 request_id=17 fid=3,01637037d6 offset=0 length=1048576 slot=5'
+
+    def case(self, error, results=(False,), untouched=True):
+        return soak_load.classify_get(dict(ok=False, results=list(results), untouched=untouched, error=error), False)
+
+    def test_both_not_found_spellings_are_misses(self):
+        for error in (self.DC, self.RC, "RuntimeError('%s')" % self.RC):
+            self.assertEqual(self.case(error), 'miss', error)
+
+    def test_every_other_status_or_push_form_stays_unexpected(self):
+        for error in (self.RC.replace('status 1 ', 'status 10 '), self.RC.replace('status 1 ', 'status 2 '),
+                      self.RC.replace(' slot=5', ''),  # truncated: the full RC message is required
+                      'rdma: DC push-read response status 1', 'rdma: DC batch push-read response status 10',
+                      'rdma: push-read(bykey) status 1 pipe=2 request_id=17 max_len=64',
+                      'rdma: push-read(direct) status 1 pipe=2 request_id=17 fid=3,01 len=64',
+                      'rdma: push-read(kv slab) status 1 pipe=2 request_id=17 max_len=64',
+                      'permission denied', ''):
+            self.assertEqual(self.case(error), 'unexpected', error)
+
+    def test_the_rc_spelling_keeps_the_result_and_untouched_guards(self):
+        self.assertEqual(self.case(self.RC, results=(True,)), 'unexpected')
+        self.assertEqual(self.case(self.RC, untouched=False), 'unexpected')  # a written buffer is no miss
+        self.assertEqual(self.case(self.RC, untouched=None), 'unexpected')
 
 
 class PushPipes(unittest.TestCase):

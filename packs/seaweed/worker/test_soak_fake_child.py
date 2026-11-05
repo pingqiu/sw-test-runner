@@ -31,6 +31,8 @@ def child(pipe, cfg):
             row.update(results=[False], error='', cause='budget_refusal')
         elif (root / 'fake-notfound').exists():  # r9's miss-candidate shape: ok, the key not returned, no error text
             row.update(results=[False], error='')
+        elif (root / 'fake-status1').exists():  # a native NOT_FOUND-shaped failure; the file holds its error text
+            row.update(ok=False, error=(root / 'fake-status1').read_text(), results=[False], untouched=True)
         elif (root / 'fake-fail-empty').exists():  # a failed GET with an EMPTY error (the 11-02 r2 stop)
             row.update(ok=False, error='', results=[False], untouched=False)
         elif (root / 'fake-fail').exists():  # its content, if any, is the error text

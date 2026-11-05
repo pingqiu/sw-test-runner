@@ -26,7 +26,11 @@ from soak_native_worker import child, payload
 from soak_oracle import Oracle, OracleError
 from soak_stats import WITNESS, boot_id, identity
 
-MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)')
+# NOT_FOUND (status 1) in exactly the two spellings a soak read can carry: the DC batch push read, and the RC
+# push-read slot fetch (#999, sw-rdma push_read.rs), whose full message is required so no other status or push form
+# (status 10, bykey, direct, kv slab, the unbatched DC) can pass as a miss.
+MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)'
+                  r'|(?<!DC )(?<!batch )push-read response status 1 pipe=\d+ request_id=\d+ fid=\S+ offset=\d+ length=\d+ slot=\d+')
 TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
 EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'completions.jsonl')
 
@@ -75,8 +79,8 @@ def poll_topology(config, stop, out):
 def classify_get(row, acked_pending):
     """r9's GET rule, ported exactly (archived soak_workload.py sha 6a4bbb6b, lines 54-64 and 74-99): a hit is ok with
     results None or [True]; ok=True with any other results is a MISS CANDIDATE (r9: the not-hit branch, judged by
-    retirement proof; here by the decision-3 join in 3b); ok=False is a miss only in the DC push-read status-1 shape
-    (results [False], untouched, r9's error text), else a credited fault-window error, else fatal."""
+    retirement proof; here by the decision-3 join in 3b); ok=False is a miss only in the push-read status-1 shape
+    (results [False], untouched, r9's DC error text or the RC fetch's), else a credited fault-window error, else fatal."""
     if row['ok'] and row['results'] in (None, [True]):
         return 'hit'
     if row['ok'] is True:

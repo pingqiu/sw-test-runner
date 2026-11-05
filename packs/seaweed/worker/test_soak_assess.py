@@ -1352,6 +1352,17 @@ class SoakAssessRC(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_on(rc_evidence(), read_transport='rc', pattern=dict(clients=4))
 
+    def test_an_rc_not_found_miss_is_judged_like_the_dc_one(self):
+        rc = 'rdma: push-read response status 1 pipe=2 request_id=17 fid=3,01637037d6 offset=0 length=1048576 slot=5'
+        def miss_error(error):
+            ev = rc_evidence()
+            next(e for e in ev['events'] if e.get('label') == 'g2').update(error=error)
+            return ev
+        row = self.run_on(miss_error(rc), read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        row = self.run_on(miss_error(rc.replace('status 1 ', 'status 10 ')), read_transport='rc')
+        self.assertEqual((row['status'], self.failing(row)), ('FAIL', ['get_outcomes']), row['criteria'])
+
     def test_the_k8_exemption_follows_the_rc_route(self):
         """The all-refused exemption reads the process's own route: zero RC reads and every call a refusal miss."""
         root = Path(tempfile.mkdtemp())
