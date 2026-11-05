@@ -29,7 +29,8 @@ type CloudConfig struct {
 	Output            string               `json:"-"`
 	Files             map[string]CloudFile `json:"files"`
 
-	ECUnderQuorum bool `json:"ec_under_quorum,omitempty"`
+	ECUnderQuorum    bool `json:"ec_under_quorum,omitempty"`
+	ECReconstruction bool `json:"ec_reconstruction,omitempty"`
 
 	ECVolumeImpl string `json:"ec_volume_impl,omitempty"`
 	// Chaos opts a ten-node run into the read-restart/freeze cases after the
@@ -97,6 +98,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
+	if c.ECReconstruction && (!c.ECStage1 || c.ECUnderQuorum) {
+		return "", errors.New("EC reconstruction needs stage1 without under-quorum")
+	}
 	if len(c.ClusterChaosCases) > 0 {
 		return runDirectProcess(ctx, *d, c)
 	}
@@ -130,7 +134,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", errors.New("EC stage1 requires one direct HTTP host without other phases")
 	}
 	if c.ECStage1 {
-		if _, e = ecDirectPorts(d.Hosts[0]); e != nil {
+		if _, e = ecDirectPorts(d.Hosts[0], c.ECReconstruction); e != nil {
 			return "", e
 		}
 	}
@@ -199,6 +203,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		}
 		if c.ECUnderQuorum && strings.HasPrefix(name, "ec-s2-5-") {
 			seconds = 600
+		}
+		if strings.HasPrefix(name, "ec-metrics-") {
+			seconds = 30
 		}
 		if phase == "load" {
 			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.
@@ -465,7 +472,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		ports = append(ports, strconv.Itoa(s.Port))
 	}
 	if c.ECStage1 {
-		extra, err := ecDirectPorts(h)
+		extra, err := ecDirectPorts(h, c.ECReconstruction)
 		if err != nil {
 			return errors.Join(collect, stop, err)
 		}

@@ -51,6 +51,31 @@ Python worker leaves remain in use by direct. Expected rows are 64 ACKs,
 four cumulative holder losses. The planted control adds 64 real original
 GETs, for 704 total. S2 remains NOT_COVERED without the product marker.
 
+## Counter-observed stage 2 (Go or Rust)
+
+Add `ec_reconstruction:true` with `ec_stage1:true` on the normal direct
+entry; set `ec_volume_impl:"rust"` for Rust holders. This option is exclusive
+with `ec_under_quorum`. Keep the frozen manifest and the post-encode
+planted-byte control. After the ordinary S1 reads, an intact counter control
+requires zero reconstruction deltas. The selected cell kills only the frozen
+holder of data shard 0, not a hard-coded role, then reads every key on S3 and
+volume HTTP. It does not continue stage 1's four-loss loop.
+
+The option adds fourteen loopback metrics ports at volume HTTP base+20000;
+all 48 ports must be distinct/free and are checked at postflight. Each metrics
+listener is joined to the captured PID/start/boot. For each route, the same
+thirteen survivors are sampled before and after its reads. Untouched result
+children may be absent (zero); a failed scrape, malformed/duplicate/nonfinite
+sample, reset or changed identity refuses qualification. Samples and per-holder
+deltas are retained in `ec-stage1.json` and raw cloud-step output.
+
+Each route needs positive `success` delta, zero `failure` delta and every read
+byte-exact/in bounds. Zero success delta is NOT_COVERED; counter failures or
+wrong bytes fail. Both route rows must pass for `s2:PASS/exposure:OBSERVED`.
+This counter counts reconstructed intervals, not validated needles or objects,
+and has no key/VID labels: the claim is reconstruction during the isolated
+route phase, not per-key attribution. The same oracle remains mandatory.
+Without this option, existing stage 1 and stage 2a behavior is unchanged.
 ## Under-quorum stage 2a (Go, local first)
 
 Add `ec_under_quorum:true` alongside `ec_stage1:true`; use `--timeout 25m`,

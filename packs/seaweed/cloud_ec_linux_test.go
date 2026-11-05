@@ -20,13 +20,71 @@ import (
 // CLI/container run is separately required for product qualification.
 type ecDirectHost struct {
 	directHost
-	seed   EC1aManifest
-	lost   int
-	killed map[int]bool
-	mode   string
+	seed    EC1aManifest
+	lost    int
+	killed  map[int]bool
+	mode    string
+	metrics int
+	output  string
 }
 
 func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
+	if strings.Contains(cmd, "# EC_HOLDER") {
+		h.metrics++
+		if h.mode == "reconstruction-scrape-error" && h.metrics == 4 {
+			return 23
+		}
+		value, failure := 0, 0
+		if h.metrics >= 4 {
+			value = 2
+		}
+		if h.metrics == 6 {
+			value = 4
+		}
+		switch h.mode {
+		case "reconstruction-zero":
+			value = 0
+		case "reconstruction-volume-zero":
+			if h.metrics == 6 {
+				value = 2
+			}
+		case "reconstruction-intact":
+			if h.metrics == 2 {
+				value = 1
+			}
+		case "reconstruction-reset":
+			if h.metrics == 3 {
+				value = 10
+			}
+		case "reconstruction-failure":
+			if h.metrics == 4 {
+				failure = 1
+			}
+		}
+		first := true
+		for i := 0; i < 14; i++ {
+			if !strings.Contains(cmd, fmt.Sprintf("# EC_HOLDER h%d\\n", i)) {
+				continue
+			}
+			if h.mode == "reconstruction-missing" && h.metrics == 4 && first {
+				first = false
+				continue
+			}
+			fmt.Fprintf(c, "# EC_HOLDER h%d\n", i)
+			if first {
+				v := fmt.Sprint(value)
+				if h.mode == "reconstruction-nonfinite" && h.metrics == 4 {
+					v = "NaN"
+				}
+				fmt.Fprintf(c, "%s{result=\"success\"} %s\n%s{result=\"failure\"} %d\n", ecMetric, v, ecMetric, failure)
+				if h.mode == "reconstruction-duplicate" && h.metrics == 4 {
+					fmt.Fprintf(c, "%s{result=\"success\"} %s\n", ecMetric, v)
+				}
+			}
+			first = false
+		}
+		return 0
+	}
 	if h.mode == "rust-positive" && strings.Contains(cmd, "ec_service.py") && strings.Contains(cmd, `"role":`) {
 		holder := strings.Contains(cmd, `"role":"h`)
 		if holder && (!strings.Contains(cmd, `/weed-volume"`) || strings.Contains(cmd, `"-config_dir=`) || strings.Contains(cmd, `"volume",`)) {
@@ -66,7 +124,7 @@ func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
 	}
 	if strings.Contains(cmd, "ec_chaos.py") {
 		port := 8080 + h.lost
-		if strings.HasPrefix(h.mode, "under-") {
+		if strings.HasPrefix(h.mode, "under-") || strings.HasPrefix(h.mode, "reconstruction-") {
 			for i := 0; i < 14; i++ {
 				if !h.killed[i] {
 					port = 8080 + i
@@ -146,7 +204,7 @@ func (h *ecDirectHost) exec(cmd string, c ssh.Channel) uint32 {
 			role := fmt.Sprint("h", i)
 			holders = append(holders, map[string]any{"Job": role, "PID": 100 + i, "starttime": uint64(i + 1), "boot_id": "boot"})
 			shardRole := role
-			if h.mode == "under-rotated" {
+			if h.mode == "under-rotated" || h.mode == "reconstruction-rotated" {
 				shardRole = fmt.Sprint("h", (i+3)%14)
 			}
 			if h.mode == "five-holder-topology" && i >= 4 {
@@ -186,6 +244,9 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 	h.dirty = mode == "extra-holder-port"
 	address, pin, key, _ := cloudSSH(t, "", h.exec)
 	inv := directInput(t, address)
+	if mode == "reconstruction-port-range" {
+		inv = []byte(strings.Replace(string(inv), `"port":8080`, `"port":50000`, 1))
+	}
 	var d struct {
 		RunID string `json:"run_id"`
 	}
@@ -196,15 +257,25 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 		h.seed.Objects = append(h.seed.Objects, EC1aObject{Key: k, FID: fmt.Sprintf("1,%xaabbccdd", i+1), Length: 262144, SHA256: hash(ecPayload(d.RunID, k)), ACK: true})
 	}
 	out := t.TempDir()
+	h.output = out
 	p := filepath.Join(t.TempDir(), "weed")
 	os.WriteFile(p, []byte("weed"), 0600)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	config := CloudConfig{ECStage1: true, SSHKey: key, HostKey: pin, Output: out, Files: map[string]CloudFile{"weed": {Path: p, SHA256: hash([]byte("weed"))}}}
+	if strings.HasPrefix(mode, "reconstruction-") {
+		json.Unmarshal([]byte(`{"ec_reconstruction":true}`), &config)
+	}
+	if mode == "reconstruction-mutual" {
+		config.ECUnderQuorum = true
+	}
+	if mode == "reconstruction-no-stage1" {
+		config.ECStage1 = false
+	}
 	if strings.HasPrefix(mode, "under-") {
 		json.Unmarshal([]byte(`{"ec_under_quorum":true}`), &config)
 	}
-	if strings.HasPrefix(mode, "rust-") || mode == "go-explicit" {
+	if strings.HasPrefix(mode, "rust-") || mode == "go-explicit" || mode == "reconstruction-rust" {
 		impl := "rust"
 		if mode == "rust-invalid" {
 			impl = "bad"
@@ -213,7 +284,7 @@ func runECFake(t *testing.T, mode string) (*ecDirectHost, error) {
 			impl = "go"
 		}
 		json.Unmarshal([]byte(fmt.Sprintf(`{"ec_volume_impl":%q}`, impl)), &config)
-		if mode == "rust-positive" {
+		if mode == "rust-positive" || mode == "reconstruction-rust" {
 			v := filepath.Join(t.TempDir(), "weed-volume")
 			os.WriteFile(v, []byte("rust"), 0600)
 			config.Files["weed-volume"] = CloudFile{Path: v, SHA256: hash([]byte("rust"))}
@@ -280,6 +351,81 @@ func TestDirectRustVolumeSelectorAndCleanup(t *testing.T) {
 			}
 			if !positive && (h.lost != 0 || h.index("sudo install -d") >= 0) {
 				t.Fatal("invalid selector/artifact reached effects")
+			}
+		})
+	}
+}
+
+func TestReconstructionExactWithoutCounterCannotPass(t *testing.T) {
+	h, err := runECFake(t, "reconstruction-zero")
+	if err == nil {
+		t.Fatal("exact 200s without reconstruction counters earned qualification")
+	}
+	if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
+		t.Fatal("cleanup missing")
+	}
+	var r map[string]any
+	raw, _ := os.ReadFile(filepath.Join(h.output, "ec-stage1.json"))
+	json.Unmarshal(raw, &r)
+	if r["reconstruction_s3"].(map[string]any)["outcome"] != "NOT_COVERED" || h.lost != 1 || h.metrics != 4 {
+		t.Fatalf("did not reach zero-delta decision: %v", r)
+	}
+}
+
+func TestDirectReconstructionCounterRows(t *testing.T) {
+	for _, mode := range []string{"positive", "rust", "rotated", "volume-zero", "intact", "reset", "failure", "duplicate", "nonfinite", "missing", "scrape-error"} {
+		t.Run(mode, func(t *testing.T) {
+			h, err := runECFake(t, "reconstruction-"+mode)
+			ok := mode == "positive" || mode == "rust" || mode == "rotated"
+			if (err == nil) != ok {
+				t.Fatalf("err=%v", err)
+			}
+			if h.index("systemctl stop") < 0 || h.index("systemctl list-units") < 0 {
+				t.Fatal("teardown missing")
+			}
+			if ok {
+				var report map[string]any
+				raw, e := os.ReadFile(filepath.Join(h.output, "ec-stage1.json"))
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = json.Unmarshal(raw, &report); e != nil {
+					t.Fatal(e)
+				}
+				if report["exposure"] != "OBSERVED" || report["s2"] != "PASS" || h.lost != 1 || h.metrics != 6 {
+					t.Fatalf("bad coverage: %v lost%d metrics%d", report, h.lost, h.metrics)
+				}
+				victim := 0
+				if mode == "rotated" {
+					victim = 3
+				}
+				if !h.killed[victim] {
+					t.Fatal("not captured data0 holder")
+				}
+				for _, route := range []string{"s3", "volume"} {
+					r := report["reconstruction_"+route].(map[string]any)
+					if r["success_delta"] != float64(2) || r["failure_delta"] != float64(0) || len(r["after"].(map[string]any)) != 13 {
+						t.Fatal(r)
+					}
+					if len(r["per_holder_delta"].(map[string]any)) != 13 {
+						t.Fatal("holder deltas missing")
+					}
+				}
+				post := h.commands[h.index("systemctl list-units")]
+				if !strings.Contains(post, "28093") {
+					t.Fatal("metrics ports absent from cleanup")
+				}
+			}
+		})
+	}
+}
+
+func TestDirectReconstructionInvalidBeforeEffects(t *testing.T) {
+	for _, mode := range []string{"mutual", "no-stage1", "port-range"} {
+		t.Run(mode, func(t *testing.T) {
+			h, err := runECFake(t, "reconstruction-"+mode)
+			if err == nil || h.index("sudo install -d") >= 0 || h.lost != 0 || h.metrics != 0 {
+				t.Fatalf("invalid reached effects: %v", err)
 			}
 		})
 	}
