@@ -352,3 +352,39 @@ kills the victim without racing it with CONT. Wrong bytes, missing proof and unc
 postflight fail; missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.
 
 HTTP process chaos on one existing container host or two physical hosts uses the same direct entry; see [cluster process cases](docs/cluster-process-direct.md) for `cluster_chaos_cases` and the observed two-copy gate.
+
+
+### KV smoke through the product CLI (M2)
+
+The direct entry can use the mono `swctl` CLI for KV smoke deployment and
+teardown. Keep the usual direct SSH settings and inventory, and select:
+
+```json
+{"files":{},"swctl":{"binary":{"path":"/controller/bin/swctl","sha256":"<sha256>"},"cluster":"/controller/cluster.yaml","artifacts_dir":"/controller/release"}}
+```
+
+Run the same `bin/seaweed-cloud direct --inventory INV.json --config CFG.json
+--out NEW_DIR`. This selector accepts an onprem RC/DC inventory matching the
+cluster's manifest digest, hosts, roles, data endpoints and pinned SSH identities
+(standard port 22). It freezes the cluster file before any apply. Other direct
+selectors and the default HTTP smoke keep their existing deployment path.
+
+The bounded smoke retains its original 16 keys, 1 MiB payloads, native worker
+and oracle. Its fixed client tuple requires explicit `num_workers: 4`, `pipes:
+8`, and `source_range_mr: true`. Filer JWT and gRPC TLS refs are refused by this
+adapter because the unchanged smoke has no credential channel; `swctl` itself
+supports their installation. Secret values are resolved only by `swctl`.
+
+The adapter calls plan/install, records doctor's complete per-host rows, runs
+the unchanged smoke, requires the extra native probe's `PROBE_EXACT`, then
+uninstalls and checks for owned units/listeners. The intentional
+`native.stats/UNKNOWN/NATIVE_STATS_ABSENT` and quiet-window NOT_PROVEN rows remain
+visible in `swctl-doctor.json`; they are not relabelled as PASS. Other unexpected
+doctor rows fail the run. Oracle or probe failure still runs teardown. A refused
+or unconfirmed install never triggers deletion of a predecessor: retain its
+journal for exact CLI reconciliation.
+
+Outputs include the original `cloud-kv.jsonl`, `swctl-*.json`, the private frozen
+`swctl-cluster.yaml` and `swctl-state/`, plus helper and postflight receipts.
+An unconfirmed uninstall or dirty postflight fails the whole direct run. Data
+paths remain governed by the CLI's stopped-snapshot preservation contract.
