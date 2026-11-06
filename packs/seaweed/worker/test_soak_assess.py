@@ -5,6 +5,7 @@ import copy
 import datetime
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -121,6 +122,26 @@ def write(root, ev):
         (root / name).write_text(''.join(json.dumps(r) + '\n' for r in ev[key]))
     for name, rs in ev['stats'].items():
         (root / name).write_text(''.join(json.dumps(r) + '\n' for r in rs))
+
+
+def split(ev, fids):
+    """The fixture's miss g2 of version m, with m's chunks on the given FIDs (the 2 h re-run's shape)."""
+    m = next(a for a in ev['acks'] if a['key'] == 'm')
+    m['fids'] = list(fids)
+    for label in ('g2',):
+        next(e for e in ev['events'] if e.get('label') == label)['fids'] = list(fids)
+    return ev
+
+
+def split_evidence(rule_a=False):
+    """Bridge fixture (Go control): m split over VID 20 (rotated) and VID 3 (never rotated); with rule_a, g2 lands
+    inside the clock bracket around a #972 retiring line of VID 20, so the miss is undecidable on VID 20 only."""
+    ev = split(evidence(), ['20,ab', '3,cd'])
+    if rule_a:
+        ev['files']['m02-collect.json']['events'].append(line('start', 20, 1174.5))
+        g2 = next(e for e in ev['events'] if e.get('label') == 'g2')
+        g2.update(dispatched=1174.54, submitted=1174.55, completed=1174.551)
+    return ev
 
 
 class SoakAssess(unittest.TestCase):
@@ -480,14 +501,14 @@ class SoakAssess(unittest.TestCase):
     def test_rule_a_an_undecidable_miss_passes_the_row_and_is_reported(self):
         ev = evidence()
         g2 = self.ev(ev, 'g2')
-        orig = soak_assess.miss_outcome
-        self.addCleanup(setattr, soak_assess, 'miss_outcome', orig)
-        soak_assess.miss_outcome = lambda e, *a: 'undecidable' if e['op'] == g2['op'] else orig(e, *a)
+        orig = soak_assess.miss_judgement
+        self.addCleanup(setattr, soak_assess, 'miss_judgement', orig)
+        soak_assess.miss_judgement = lambda e, *a: ('undecidable', [20]) if e['op'] == g2['op'] else orig(e, *a)
         row = self.run_on(ev)
         self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
         self.assertEqual([u['op'] for u in row['misses_undecidable']], [g2['op']])
         self.assertIn('1 undecidable', row['criteria']['misses']['reason'])
-        soak_assess.miss_outcome = lambda e, *a: 'unexcused' if e['op'] == g2['op'] else orig(e, *a)
+        soak_assess.miss_judgement = lambda e, *a: ('unexcused', []) if e['op'] == g2['op'] else orig(e, *a)
         self.assertEqual(self.failing(self.run_on(ev)), ['misses'])  # the same miss unexcused fails the row
 
     # codex01 R2 on #110: rule A through the real assessor, no mocks. The fixture's measured samples give a +-0.1 s
@@ -785,12 +806,10 @@ class SoakAssess(unittest.TestCase):
     def test_cx10_two_success_lines_are_refused(self):
         self.mutate(lambda ev: self.collected(ev)['events'].append(line('success', 20, 1176)), 'misses')
 
-    def test_cx11_a_second_vid_without_s_is_refused(self):
-        def ch(ev):
-            m = next(a for a in ev['acks'] if a['key'] == 'm')
-            m['fids'] = ['20,ab', '3,cd']
-            self.ev(ev, 'g2')['fids'] = list(m['fids'])
-        self.mutate(ch, 'misses')
+    def test_cx11_a_second_vid_without_s_no_longer_refuses_a_witnessed_miss(self):
+        # Runner #119 (Ping 2026-11-06): was refused under the all-VID rule. VID 20 alone is a fully qualified
+        # retirement witness, so the whole-value miss is excused although VID 3 never rotates.
+        self.passes(lambda ev: split(ev, ['20,ab', '3,cd']))
 
     def test_cx12_never_read_back_before_s_is_refused(self):
         def ch(ev):
@@ -972,6 +991,93 @@ def kv_evidence(miss_at=None):
              'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[], events=[])}
     stats = {'native-stats-%d-1.jsonl' % pid: [dict(status='OBSERVED', stats=dict(loader=dc))] for pid in (10, 11, 77)}
     return dict(files=files, acks=acks, events=events, polls=[], stats=stats)
+
+
+class AnyVidWitness(unittest.TestCase):
+    """Runner #119 (Ping 2026-11-06): a multi-chunk miss is excused when ANY chunk VID is a fully qualified retirement
+    witness on its own; guards never mix VIDs; rule A is reported per witness VID only; one VID is judged as before."""
+
+    def run_on(self, ev):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, ev)
+        return soak_assess.assess(config(root))
+
+    def failing(self, row):
+        return sorted(k for k, v in row['criteria'].items() if v['outcome'] != 'PASS')
+
+    def test_full_assessor_split_positive_in_every_fid_order(self):
+        for fids in (['20,ab', '3,cd'], ['3,cd', '20,ab']):
+            row = self.run_on(split(evidence(), fids))
+            self.assertEqual((row['status'], self.failing(row)), ('PASS', []), (fids, row['criteria']['misses']))
+
+    def test_a_later_witness_refuses(self):
+        # The only rotated VID retires after the GET (cx07's shape: submitted before late(S), no retiring line).
+        ev = split(evidence(), ['20,ab', '3,cd'])
+        next(e for e in ev['events'] if e.get('label') == 'g2').update(dispatched=1170.9, submitted=1171, completed=1171.1)
+        self.assertEqual(self.failing(self.run_on(ev)), ['misses'])
+
+    def test_a_later_full_version_hit_refuses(self):
+        # The same split version read back exactly after the miss: the value was not gone (C9 on the witness VID).
+        ev = split(evidence(), ['20,ab', '3,cd'])
+        g2 = next(e for e in ev['events'] if e.get('label') == 'g2')
+        m = next(a for a in ev['acks'] if a['key'] == 'm')
+        q = ev['events'][-1]
+        q['dispatched'] += 1
+        ev['events'].insert(-3, dict(op=str(q['dispatched']), worker=1, action='get', key='m', dispatched=g2['completed'] + 0.4,
+                                     submitted=g2['completed'] + 0.5, completed=g2['completed'] + 0.6, sequence=m['sequence'],
+                                     ok=True, length=64, sha256=m['digest']))
+        self.assertIn('misses', self.failing(self.run_on(ev)))
+
+    def test_no_cross_vid_mixing_of_witness_guards(self):
+        # VID 20 passes every guard but C6 (still present after its S); VID 21 passes C6 but its S comes after the
+        # GET (C3/C4 fail). Each guard holds on SOME VID, but no single VID holds them all: unexcused.
+        base = SoakAssess('test_c4_red_green_a_get_between_retiring_and_success').boundary_args(1159.95)
+        e, _, ack, _, _, lo, hi, dat, hits = base
+        bounds = {20: EPOCH + 1160, 21: EPOCH + 1300}
+        polls = [dict(req=1180, done=1180.1, writables=[], present=[20])]  # 20 still listed after late(S20)
+        v = MissVersion(['20,ab', '21,cd'])
+        starts = {20: EPOCH + 1159.9, 21: EPOCH + 1299.9}
+        self.assertEqual(soak_assess.vid_outcome(e, 20, ack, polls, bounds, lo, hi, dat, hits, starts), 'unexcused')  # C6
+        self.assertEqual(soak_assess.vid_outcome(e, 21, ack, polls, bounds, lo, hi, dat, hits, starts), 'unexcused')  # C4
+        self.assertEqual(soak_assess.miss_judgement(e, v, ack, polls, bounds, lo, hi, dat, hits, starts), ('unexcused', []))
+        clean = [dict(req=1180, done=1180.1, writables=[], present=[])]
+        self.assertEqual(soak_assess.miss_judgement(e, v, ack, clean, bounds, lo, hi, dat, hits, starts), ('excused', [20]))
+
+    def test_rule_a_on_the_witness_with_an_unrotated_sibling_is_reported_on_the_witness_only(self):
+        row = self.run_on(split_evidence(rule_a=True))
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+        u = row['misses_undecidable']
+        self.assertEqual([x['vid'] for x in u], [20])  # never VID 3, which has no B (no None arithmetic)
+        self.assertTrue(all(isinstance(x[k], float) and math.isfinite(x[k])
+                            for x in u for k in ('submit_minus_early_b_s', 'submit_minus_late_b_s')))
+
+    def test_an_excused_witness_outranks_an_undecidable_one(self):
+        args = SoakAssess('test_c4_red_green_a_get_between_retiring_and_success').boundary_args(1159.90)
+        e, _, ack, good, _, lo, hi, dat, hits = args
+        bounds = {20: EPOCH + 1160, 22: EPOCH + 1160}
+        starts = {20: EPOCH + 1159.9, 22: EPOCH + 1159.8}  # 1159.90 is inside B20's bracket, after late(B22) = 1159.82
+        v = MissVersion(['20,ab', '22,cd'])
+        self.assertEqual(soak_assess.miss_judgement(e, v, ack, good, bounds, lo, hi, dat, hits, starts), ('excused', [22]))
+        self.assertEqual(soak_assess.miss_judgement(e, MissVersion(['20,ab']), ack, good, bounds, lo, hi, dat, hits, starts),
+                         ('undecidable', [20]))
+
+    def test_one_vid_is_judged_as_before(self):
+        # Legacy: for a single-VID version the existential and the all-VID rule coincide; the existing boundary
+        # tests (C3-C9, rule A) run unchanged. Here the same five shapes, side by side with the old per-VID verdicts.
+        case = SoakAssess('test_c4_red_green_a_get_between_retiring_and_success')
+        for submitted, starts, last_hit, want in ((1159.95, {20: EPOCH + 1159.9}, None, 'excused'),
+                                                  (1159.95, {20: EPOCH + 1160}, None, 'unexcused'),
+                                                  (1159.90, {20: EPOCH + 1159.9}, {20: 1110.1}, 'undecidable'),
+                                                  (1159.95, {20: EPOCH + 1159.9}, {20: 1159.96}, 'unexcused'),
+                                                  (1159.85, {20: EPOCH + 1159.9}, None, 'unexcused')):
+            args = case.boundary_args(submitted)
+            self.assertEqual(soak_assess.miss_outcome(*args, starts, last_hit), want, (submitted, starts, last_hit))
+
+    def test_a_version_with_no_fid_is_unexcused(self):
+        args = SoakAssess('test_c4_red_green_a_get_between_retiring_and_success').boundary_args(1159.95)
+        e, _, ack, good, bounds, lo, hi, dat, hits = args
+        self.assertEqual(soak_assess.miss_judgement(e, MissVersion([]), ack, good, bounds, lo, hi, dat, hits), ('unexcused', []))
 
 
 class KVLoadAssess(unittest.TestCase):

@@ -4,6 +4,7 @@ package seaweed
 
 import (
 	"github.com/pingqiu/sw-test-runner/inventory"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,5 +61,44 @@ func TestTheAdmittedAssessorPassRowDecodes(t *testing.T) {
 	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root}, soakCriteria)
 	if err != nil || v.Status != "PASS" || !strings.Contains(v.MissesQualification.Method, "no parity claim") {
 		t.Fatalf("want the real PASS row decoded, got %+v %v\n%s", v, err, raw)
+	}
+}
+
+// Runner #119 (Ping 2026-11-06), the Go bridge control: the real assessor on a split version (VID 20 rotated, VID 3
+// never), its miss inside rule A's bracket on VID 20, decodes as a PASS whose undecidable row names the witness VID
+// only, with finite offsets: never the unrotated sibling (no B, no None arithmetic).
+func TestTheAdmittedAssessorSplitWitnessRowDecodes(t *testing.T) {
+	helpers, _ := filepath.Abs("worker")
+	root := t.TempDir()
+	write := exec.Command("python3", "-B", "-c", "import sys, test_soak_assess as t; from pathlib import Path; t.write(Path(sys.argv[1]), t.split_evidence(rule_a=True))", root)
+	write.Dir = helpers
+	if out, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("split evidence: %v %s", err, out)
+	}
+	bootRaw, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot := strings.TrimSpace(string(bootRaw))
+	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: root}},
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: boot}, {HostID: "m02", BootID: "m02-boot"}}}}
+	argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: helpers}, &SoakPlan{DurationS: 1800, ClientKillAtS: 1320, Layout: AssignLayout{Collection: "lmcache"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", argv...)
+	cmd.Dir = t.TempDir()
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("admitted argv failed: %v", err)
+	}
+	v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root}, soakCriteria)
+	if err != nil || v.Status != "PASS" || len(v.MissesUndecidable) != 1 {
+		t.Fatalf("want a PASS with one undecidable row, got %+v %v\n%s", v, err, raw)
+	}
+	u := v.MissesUndecidable[0]
+	if u.Vid == nil || *u.Vid != 20 || u.SubmitMinusEarlyBS == nil || u.SubmitMinusLateBS == nil ||
+		math.IsNaN(*u.SubmitMinusEarlyBS) || math.IsInf(*u.SubmitMinusLateBS, 0) {
+		t.Fatalf("the undecidable row must name witness VID 20 with finite offsets: %+v", u)
 	}
 }
