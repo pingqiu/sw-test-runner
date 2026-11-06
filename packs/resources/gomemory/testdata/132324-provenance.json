@@ -1,0 +1,44 @@
+{
+  "run": "V:\\share\\testops\\exec\\evidence\\codex03-chaos-soak-v2-warm-20261029\\harness\\kv-candidate-20261029T132324Z",
+  "archive_sha256": "991964146b4eface2ef003b78e647854fb234b9f0d99441889753cb9be20bfc8",
+  "assessment_sha256": "bf4df69f1c7f479560cf72e68110bbcb6b5452aa9e8df99aab7e21fa1a09bc6c",
+  "members": [
+    {
+      "path": "go-memory/generations.json",
+      "sha256": "4f885f1a741d54842f0e31223b6c667293e3b1a526d8ddb68ed7a89690fb2fee"
+    },
+    {
+      "path": "go-memory/filer-77325-3022343-warm.heap",
+      "sha256": "6179670d811dae16932a78f5791c83dc4accf777b39cf62dfed398f5a7a21e3d"
+    },
+    {
+      "path": "go-memory/filer-102807-3323065-warm.heap",
+      "sha256": "5f1c14d1102576bb8fd0884c189f75442bc8cdbe789da1df4cbe90dcc2995774"
+    },
+    {
+      "path": "go-memory/filer-111649-3532558-warm.heap",
+      "sha256": "bf508af2a8763e976779c6d19123593e77f50f11860b046fdef183bc382f4e64"
+    },
+    {
+      "path": "go-memory/filer-111649-3532558-quiescent_gc.heap",
+      "sha256": "582ffe2baf5fb7d7266fd514481044c0c8934a0c7794ded9be350f8556da008c"
+    },
+    {
+      "path": "go-memory/master-77299-3022141-warm.heap",
+      "sha256": "7e230c89c57002bd9eed6a99c531b074527fc1b69c76049bf354b9798287e06a"
+    },
+    {
+      "path": "go-memory/master-107212-3424162-warm.heap",
+      "sha256": "33aa3e93d3524546377e80f06b4d573888655d32e6592022046defe49868e969"
+    },
+    {
+      "path": "go-memory/master-107212-3424162-quiescent_gc.heap",
+      "sha256": "30b543026018c5228969f6c5981dc430b169ca4019c16f20b4af5a513f8cf7c2"
+    }
+  ],
+  "reference": {
+    "go_memory_gate.py": "8ef0fd67726961dfdb7b0eac951130f1050de22a55c26592f55deef2a66c4a31",
+    "go_memory_r6b.py": "a7c9e5796f386a76a8c402fe4f6fe6acd55c18218f6db0991bd2bfe9399b7f3f"
+  },
+  "scope": "Every master/filer group included in the original RSS/FD assessment; not the full run/resource verdict"
+}
