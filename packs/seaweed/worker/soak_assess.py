@@ -185,39 +185,57 @@ def start_boundaries(events, begin, end, bounds):
     return out
 
 
+def vid_outcome(e, vid, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
+    """One chunk VID as this miss's retirement witness, every guard on that VID alone (never mixed with a sibling's):
+    'excused', 'undecidable' or 'unexcused'. Decision 3 revision (e45019f9 + codex01 8c56cca4): qualified observed
+    ordering under the stated limit, in M01 mono; not a retirement or durability proof and not parity. The stated
+    limit, accepted by Ping: a real loss between the version's last exact read and S is excused. `hits` are exact
+    GETs of this same version. Rule A (Ping, 2026-11-04): a GET submitted inside the clock bracket around B, i.e. in
+    (early(B), late(B)], cannot be ordered against B either way; it is 'undecidable', which does not fail the row,
+    only when every other check holds, C9 included, AND the VID has its #972 retiring line (B < S). A GET provably
+    before early(B), or inside the bracket without a retiring line, is unexcused."""
+    if vid not in bounds or vid in dat:  # C2 (ledger), C8
+        return 'unexcused'
+    early, late = bounds[vid] - hi, bounds[vid] - lo
+    b = (starts or {}).get(vid, bounds[vid])  # B: the first #972 retiring line, defaulting to S
+    if not ack['completed'] < early:  # C3 against S
+        return 'unexcused'
+    if (vid_last_hit or {}).get(vid, -math.inf) > e['completed']:  # C9: the VID served a read after this miss
+        return 'unexcused'  # (any later exact hit of this version marks this VID too, so it also refuses here)
+    if not any(h['submitted'] > ack['completed'] and h['completed'] < early for h in hits):  # C5
+        return 'unexcused'
+    after = [p for p in good if p['req'] > late]  # successful polls only; a failed reply is no evidence
+    if any(vid in p['writables'] or vid in p['present'] for p in after):  # C6
+        return 'unexcused'
+    gone = next((p for p in after if vid not in p['present']), None)
+    if not gone or gone['done'] > e['completed'] + 25:  # C7: requested after late(S)
+        return 'unexcused'
+    if e['submitted'] > b - lo:  # C4: submitted after late(B); submission, so a straddling GET does not count
+        return 'excused'
+    if e['submitted'] > b - hi and b < bounds[vid]:  # rule A: inside the bracket around a real retiring line
+        return 'undecidable'
+    return 'unexcused'  # provably before early(B), or inside the bracket without a retiring line
+
+
+def miss_judgement(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
+    """Per miss, existential over its version's chunk VIDs (Ping 2026-11-06, runner #119): a whole-value miss is
+    explained when ANY one chunk's VID is a fully qualified retirement witness on its own ('excused'); else, if any is
+    'undecidable' under rule A, the miss is undecidable; else it is unexcused. Cache-availability semantics, not
+    product-loss clearance: the full-value read does not identify the missing chunk, so a concurrent loss of another
+    chunk is invisible (accepted by Ping with the existing latent-loss limit). A single-VID version is judged exactly
+    as before. Returns (outcome, witnesses): the VIDs that carry the outcome, in VID order; none when unexcused."""
+    per = {vid: vid_outcome(e, vid, ack, good, bounds, lo, hi, dat, hits, starts, vid_last_hit)
+           for vid in sorted({int(fid.split(',')[0]) for fid in version.fids})}
+    for state in ('excused', 'undecidable'):
+        witnesses = [vid for vid, o in per.items() if o == state]
+        if witnesses:
+            return state, witnesses
+    return 'unexcused', []  # also a version with no FID at all: nothing can witness it
+
+
 def miss_outcome(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
-    """Decision 3 revision (e45019f9 + codex01 8c56cca4), per miss: qualified observed ordering under the stated limit,
-    in M01 mono; not a retirement or durability proof and not parity. The stated limit, accepted by Ping: a real loss
-    between the version's last exact read and S is excused. `hits` are exact GETs of this same version.
-    'excused', 'undecidable' or 'unexcused'. Rule A (Ping, 2026-11-04): a GET submitted inside the clock bracket
-    around B, i.e. in (early(B), late(B)], cannot be ordered against B either way; it is 'undecidable', which does
-    not fail the row, only when every other check holds, C9 included, AND the VID has its #972 retiring line (B < S).
-    A GET provably before early(B), or inside the bracket without a retiring line, is unexcused."""
-    state = 'excused'
-    for vid in {int(fid.split(',')[0]) for fid in version.fids}:
-        if vid not in bounds or vid in dat:  # C2 (ledger), C8
-            return 'unexcused'
-        early, late = bounds[vid] - hi, bounds[vid] - lo
-        b = (starts or {}).get(vid, bounds[vid])  # B: the first #972 retiring line, defaulting to S
-        if not ack['completed'] < early:  # C3 against S
-            return 'unexcused'
-        if (vid_last_hit or {}).get(vid, -math.inf) > e['completed']:  # C9: the VID served a read after this miss
-            return 'unexcused'
-        if not any(h['submitted'] > ack['completed'] and h['completed'] < early for h in hits):  # C5
-            return 'unexcused'
-        after = [p for p in good if p['req'] > late]  # successful polls only; a failed reply is no evidence
-        if any(vid in p['writables'] or vid in p['present'] for p in after):  # C6
-            return 'unexcused'
-        gone = next((p for p in after if vid not in p['present']), None)
-        if not gone or gone['done'] > e['completed'] + 25:  # C7: requested after late(S)
-            return 'unexcused'
-        if e['submitted'] > b - lo:  # C4: submitted after late(B); submission, so a straddling GET does not count
-            continue
-        if e['submitted'] > b - hi and b < bounds[vid]:  # rule A: inside the bracket around a real retiring line
-            state = 'undecidable'
-            continue
-        return 'unexcused'  # provably before early(B), or inside the bracket without a retiring line
-    return state
+    """'excused', 'undecidable' or 'unexcused': miss_judgement's outcome."""
+    return miss_judgement(e, version, ack, good, bounds, lo, hi, dat, hits, starts, vid_last_hit)[0]
 
 
 def miss_excused(e, version, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
@@ -458,18 +476,18 @@ def assess(c):
         v = get_case(g) == 'hit' and by_seq.get((g['key'], g['sequence']), (None, None))[0]
         for vid in {int(f.split(',')[0]) for f in (v.fids if v else ())}:
             vid_last_hit[vid] = max(vid_last_hit.get(vid, -math.inf), g['completed'])
-    def outcome(e, latest):
+    def judgement(e, latest):
         v, a = by_seq.get((e['key'], e['sequence']), (None, None))
         if not (v and latest == v and list(e['fids']) == list(v.fids)):
-            return 'unexcused'
-        return miss_outcome(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
-    judged = [(e, outcome(e, latest)) for e, latest in misses]
-    unexcused = [e for e, o in judged if o == 'unexcused']
-    undecidable = []  # rule A: reported per op, separately from excused and unexcused
-    for e, o in judged:
+            return 'unexcused', []
+        return miss_judgement(e, v, a, good, bounds, lo, hi, dat, hits.get((e['key'], e['sequence']), []), starts, vid_last_hit)
+    judged = [(e, *judgement(e, latest)) for e, latest in misses]
+    unexcused = [e for e, o, _ in judged if o == 'unexcused']
+    undecidable = []  # rule A: reported per op and per WITNESS VID, separately from excused and unexcused
+    for e, o, witnesses in judged:
         if o == 'undecidable':
-            for vid in sorted({int(f.split(',')[0]) for f in e['fids']}):
-                b = starts.get(vid, bounds.get(vid))
+            for vid in witnesses:  # only the VIDs that carry rule A; an unrotated sibling has no B and is not reported
+                b = starts.get(vid, bounds[vid])
                 undecidable.append(dict(op=e['op'], vid=vid, submit_minus_early_b_s=round(e['submitted'] - (b - hi), 6),
                                         submit_minus_late_b_s=round(e['submitted'] - (b - lo), 6)))
     if pat:  # kv_load: every miss outside the qualified fault windows fails (no soak retirement excusal); inside, reported
