@@ -1155,5 +1155,58 @@ class VolumeNofile(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in root.iterdir()), [])
 
 
+class LogEvidence(unittest.TestCase):
+    """#1002: the final collect hashes each owned volume log streaming under LOG_BOUND. An 8 h run's volume stdout
+    was 172 KB, past the old fixed 64 KiB, and the run failed at collect. Size, digest and markers stay exact."""
+
+    def setUp(self):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        self.root = base / 'run'
+        self.root.mkdir()
+
+    def write(self, name, body):
+        (self.root / name).write_bytes(body)
+        return dict(logs=[str(self.root / name)])
+
+    @staticmethod
+    def whole_file_markers(body):  # the old, whole-file semantics the markers must keep
+        return [line for line in body.decode('utf-8', 'replace').splitlines()
+                if 'RDMA DC push-read writer active' in line or 'RDMA listener bound on ' in line]
+
+    def test_a_one_mib_volume_log_is_hashed_whole_with_every_marker(self):
+        writer = b'I1106 01:43:57 rdma.rs:1 RDMA DC push-read writer active on mlx5_0\n'
+        filler = b'I1106 02:00:00 x.rs:1 ' + b'z' * 100 + b'\n'
+        body = writer + filler * (((1 << 20) - 200) // len(filler))
+        # a marker line straddling the 1 MiB read-chunk boundary, a CRLF-terminated one, and an unterminated last one
+        body = body[:(1 << 20) - 20] + b'\nI1106 02:30:00 rdma.rs:2 RDMA listener bound on 10.0.2.3:18980\n' + body[(1 << 20) - 20:]
+        body += b'I1106 03:00:00 rdma.rs:3 RDMA listener bound on 10.0.2.3:18981\r\n' + filler * 10
+        body += b'I1106 09:44:00 rdma.rs:4 RDMA DC push-read writer active again'
+        self.assertGreater(len(body), 1 << 20)
+        [log] = profile.log_evidence(self.root, self.write('replacement-m02-volume.stdout', body))
+        self.assertEqual((log['bytes'], log['sha256']), (len(body), hashlib.sha256(body).hexdigest()))
+        self.assertEqual(log['markers'], self.whole_file_markers(body))
+        self.assertEqual(len(log['markers']), 4)
+
+    def test_a_log_over_log_bound_is_refused(self):
+        self.addCleanup(setattr, profile, 'LOG_BOUND', profile.LOG_BOUND)
+        profile.LOG_BOUND = 4096
+        gen = self.write('v.stdout', b'x' * 4097)
+        with self.assertRaisesRegex(ValueError, 'bound/type'):
+            profile.log_evidence(self.root, gen)
+        self.assertEqual(profile.log_evidence(self.root, self.write('w.stdout', b'x' * 4096))[0]['bytes'], 4096)
+
+    def test_a_non_regular_or_foreign_log_is_refused(self):
+        odd = self.root / 'v.stdout'
+        odd.mkdir()  # not a regular file
+        with self.assertRaisesRegex(ValueError, 'bound/type'):
+            profile.log_evidence(self.root, dict(logs=[str(odd)]))
+        other = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other)
+        (other / 'v.stdout').write_bytes(b'x')
+        with self.assertRaisesRegex(ValueError, 'outside owned output root'):
+            profile.log_evidence(self.root, dict(logs=[str(other / 'v.stdout')]))
+
+
 if __name__ == '__main__':
     unittest.main()
