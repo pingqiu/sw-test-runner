@@ -1,0 +1,2 @@
+# Receipt/provenance byte identities must survive Windows checkout unchanged.
+testdata/* -text

@@ -1,0 +1,62 @@
+{
+  "scope": "Selected real receipt subset from ACCEPTED v2 132324Z; terminal-read completeness remains NOT_PROVEN",
+  "run": "kv-candidate-20261029T132324Z",
+  "source": "a9ad629a",
+  "module": "9b5d0dca",
+  "review": "V:/share/rdma/codex01-chaos-result-132324Z-review-20261029/REVIEW.md",
+  "review_sha256": "fbadabcc09955842bf7637b23f3123ddd1b2dafcab76dc3293b67d2fb4813d7d",
+  "archive_sha256": "716183d2f9c6ebab8d6fab7b18ac969a89a4135fc9bfa692166ec3dd5a0744af",
+  "fixture_sha256": "a7901bdda3d3fcf4c0ab363529c79da6a7c8513f995c9bc0242704eeada85858",
+  "selected_rows": [
+    {
+      "source": "operation-events.jsonl",
+      "line": 10,
+      "sha256": "7a2e8db22b43ed6c444b6b10a67e5a0b00f594d63c4b838a47c6ee6e826506b3"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 16,
+      "sha256": "aad04b17ba7cec1988ae244658f8e6ba7807af08760f0c7250991e39bb2ab508"
+    },
+    {
+      "source": "ack-journal.jsonl",
+      "line": 1,
+      "sha256": "f2009f367ce30f120b582fcb8e8b50dfdf2b72249cc3033982d8f909ba192f0b"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 17,
+      "sha256": "e6e2b3bf711294760a32a06d52c5a9a7f8936d7e7a22b1e3ee5f2cffa0c97915"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 19,
+      "sha256": "317777f2a9a6f5fc53819c0f0bea475f2efd04f65a1a0edac5e3b559f20a0e78"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 115,
+      "sha256": "753044ef7ceb4e86e831ba70825b8222f0f8104241c812f2f74033cca2fa1183"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 119,
+      "sha256": "4bc32481fcce28a11d3f87f8dbe9b3b28e9f95b2853f1e1a86307ce87569670e"
+    },
+    {
+      "source": "ack-journal.jsonl",
+      "line": 2,
+      "sha256": "f82da72e054b02ea2f4186fe9ac8b759f2eb609f69c80e9363a5320a83dd7997"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 121,
+      "sha256": "cda0c365c27d82ded72f1e652124dd3cfdcfd3ae1676b8e1b9bfd07f35fcbfe9"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 124,
+      "sha256": "93eb22aa89c855bb2ee7fb3ce2bc0586547567304bef29824e4c3a3c037626de"
+    }
+  ]
+}
