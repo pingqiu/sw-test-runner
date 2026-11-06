@@ -80,8 +80,8 @@ func TestDirectSoakBudgetSizesTheTimeoutAndTheWorkDeadline(t *testing.T) {
 	p.Soak.DurationS = 28800
 	now := time.Unix(1_800_000_000, 0)
 	// The corrected 8 h sizing: deploy 300 + witness 10 + load 28800 + quiescence 60 + exit grace 30
-	// + trailing (collect 120 + assessor 16 x 120 = 1920) = 31240 s of work; the timeout adds cleanup 120.
-	need := 31240 * time.Second
+	// + trailing (collect 120 + assessor 15 x 16^2 = 3840) = 33160 s of work; the timeout adds cleanup 120.
+	need := 33160 * time.Second
 	if got := DeployReserve + WitnessWait + 8*time.Hour + QuiescenceReserve + LoadExitGrace + trailingReserve(28800, true); got != need {
 		t.Fatalf("8 h need = %v, want %v", got, need)
 	}
@@ -95,7 +95,7 @@ func TestDirectSoakBudgetSizesTheTimeoutAndTheWorkDeadline(t *testing.T) {
 		t.Fatalf("a short --timeout passed: %v", err)
 	}
 	// Composed control: the fixed-CollectReserve budget (fe027da4's) no longer admits 8 h, because the
-	// assessor alone may use 32 min.
+	// assessor alone may use 64 min.
 	legacy := DeployReserve + WitnessWait + 8*time.Hour + QuiescenceReserve + LoadExitGrace + CollectReserve
 	if err := directSoakBudget(p.Soak, now, now.Add(legacy), now.Add(legacy+CleanupReserve)); err == nil {
 		t.Fatal("8 h admitted without reserving its scaled assessor")
@@ -118,12 +118,23 @@ func TestTrailingReserveCoversTheScaledAssessorOnlyForLongDirectSoaks(t *testing
 		want   time.Duration
 	}{{1800, false, CollectReserve}, {7200, false, CollectReserve}, {1800, true, CollectReserve},
 		{1801, true, CollectReserve + 240*time.Second}, {7200, true, CollectReserve + 480*time.Second},
-		{28800, true, CollectReserve + 1920*time.Second}} {
+		{28800, true, CollectReserve + 3840*time.Second}} {
 		if got := trailingReserve(c.d, c.direct); got != c.want {
 			t.Errorf("trailingReserve(%d, %v) = %v, want %v", c.d, c.direct, got, c.want)
 		}
-		if c.direct && assessTimeout(c.d) != 120*time.Second*time.Duration(soakScale(c.d)) {
-			t.Errorf("assessTimeout(%d) = %v", c.d, assessTimeout(c.d))
+	}
+}
+
+// The assessor step covers its measured runtime with a 2x margin at both measured durations (#1002: offline on
+// tp01 with the real evidence and a clock bracket, 2 h 91 s, 8 h 1552 s; the miss join is ~quadratic), and keeps
+// the 30-minute and 2 h steps unchanged.
+func TestAssessTimeoutCoversTheMeasuredMissJoinWithMargin(t *testing.T) {
+	for _, c := range []struct {
+		d               int
+		measured, exact time.Duration
+	}{{1800, 0, 120 * time.Second}, {7200, 91 * time.Second, 480 * time.Second}, {28800, 1552 * time.Second, 3840 * time.Second}} {
+		if got := assessTimeout(c.d); got != c.exact || got < 2*c.measured {
+			t.Errorf("assessTimeout(%d) = %v, want %v and at least 2 x %v", c.d, got, c.exact, c.measured)
 		}
 	}
 }
