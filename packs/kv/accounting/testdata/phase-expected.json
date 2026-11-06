@@ -1,0 +1,20 @@
+{
+  "source": "V:\\share\\rdma\\codex03-kv-v3a-followup-20261029\\LOAD-BREAKDOWN.json",
+  "source_sha256": "25a6bbd400a52a983da94845a5b9489cee38906477704a21282e83ace0dd9a91",
+  "windows": [
+    {
+      "SET": 0.013120898178645543,
+      "QueueAndPreparation": 0.000628797286827605,
+      "NativeWait": 0.010392215286888782,
+      "ReceiptAndChecks": 0.0020585173652285624,
+      "Journal": 4.1371300106956844e-05
+    },
+    {
+      "SET": 0.010480600534026156,
+      "QueueAndPreparation": 0.00047998851736450626,
+      "NativeWait": 0.007956195877116058,
+      "ReceiptAndChecks": 0.0020026054578958096,
+      "Journal": 4.180436281813789e-05
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "status": "NOT_COVERED",
+  "windows": [
+    {
+      "window": [
+        300,
+        600
+      ],
+      "aggregate_ack_s": 0.28,
+      "aggregate_bytes_s": 314572.97,
+      "rc_ack_s": 0.21,
+      "rc_bytes_s": 241172.59333333332,
+      "reads": [
+        2304,
+        2306,
+        2312,
+        2305
+      ],
+      "status": "NOT_COVERED"
+    },
+    {
+      "window": [
+        600,
+        840
+      ],
+      "aggregate_ack_s": 0.4041666666666667,
+      "aggregate_bytes_s": 436906.87916666665,
+      "rc_ack_s": 0.3,
+      "rc_bytes_s": 327680.14166666666,
+      "reads": [
+        1220,
+        1231,
+        1208,
+        1258
+      ],
+      "status": "NOT_COVERED"
+    }
+  ],
+  "no_retune": true
+}
