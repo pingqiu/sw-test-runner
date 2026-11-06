@@ -600,7 +600,13 @@ def services(config):
     return facts
 
 
+LOG_MARKERS = ('RDMA DC push-read writer active', 'RDMA listener bound on ')
+
+
 def log_evidence(root, generation):
+    """Each owned service log, read once and streaming under LOG_BOUND (the bound soak_collect applies to the same
+    run's logs): its size, its whole-file sha256, and its marker lines. A log over the bound, not a regular file, or
+    changed during the read refuses. (#1002: an 8 h run's volume stdout was 172 KB, past the old fixed 64 KiB.)"""
     output = []
     for name in generation['logs']:
         file = Path(name)
@@ -609,16 +615,25 @@ def log_evidence(root, generation):
         fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_size > 65536:
+            if not stat.S_ISREG(before.st_mode) or before.st_size > LOG_BOUND:
                 raise ValueError('smoke service log bound/type')
-            body = os.pread(fd, before.st_size, 0)
+            digest, markers, size, tail = hashlib.sha256(), [], 0, b''
+            while size < before.st_size:
+                chunk = os.pread(fd, min(1 << 20, before.st_size - size), size)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+                *lines, tail = (tail + chunk).split(b'\n')  # a line split across chunks is completed by the next
+                markers += [text for text in (line.decode('utf-8', 'replace').rstrip('\r') for line in lines)
+                            if any(m in text for m in LOG_MARKERS)]
+            last = tail.decode('utf-8', 'replace').rstrip('\r')
+            if any(m in last for m in LOG_MARKERS):
+                markers.append(last)
             after = os.fstat(fd)
-            if len(body) != before.st_size or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            if size != before.st_size or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
                 raise ValueError('service log changed during snapshot')
-            output.append(dict(path=name, bytes=len(body), sha256=hashlib.sha256(body).hexdigest(),
-                               markers=[line for line in body.decode('utf-8', 'replace').splitlines()
-                                        if 'RDMA DC push-read writer active' in line or
-                                        'RDMA listener bound on ' in line]))
+            output.append(dict(path=name, bytes=size, sha256=digest.hexdigest(), markers=markers))
         finally:
             os.close(fd)
     return output

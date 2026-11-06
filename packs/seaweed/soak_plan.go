@@ -230,9 +230,13 @@ func directSoakBudget(x *SoakPlan, now, work, timeout time.Time) error {
 	return nil
 }
 
-// assessTimeout bounds the direct path's assessor step: 120 s per 30 minutes of soak.
+// assessTimeout bounds the direct path's assessor step: 120 s per 30 minutes of soak, or 15 s times the
+// square of that count when larger. The per-miss join grows about quadratically with the duration (#1002,
+// offline on the real evidence: 2 h 163k misses 91 s, 8 h 760k misses 1552 s), so a linear step leaves
+// 8 h at 81% of its 1920 s; the square gives 3840 s there and keeps 30 min and 2 h unchanged.
 func assessTimeout(durationS int) time.Duration {
-	return 120 * time.Second * time.Duration(soakScale(durationS))
+	k := time.Duration(soakScale(durationS))
+	return max(120*time.Second*k, 15*time.Second*k*k)
 }
 
 // trailingReserve is the work time a soak keeps after its load for collection and assessment.
