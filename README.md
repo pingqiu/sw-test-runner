@@ -371,7 +371,7 @@ selectors and the default HTTP smoke keep their existing deployment path.
 
 The bounded smoke retains its original 16 keys, 1 MiB payloads, native worker
 and oracle. Its fixed client tuple requires explicit `num_workers: 4`, `pipes:
-8`, and `source_range_mr: true`. Filer JWT and gRPC TLS refs are refused by this
+8`, and `push_source_range_mr: true`. Filer JWT and gRPC TLS refs are refused by this
 adapter because the unchanged smoke has no credential channel; `swctl` itself
 supports their installation. Secret values are resolved only by `swctl`.
 

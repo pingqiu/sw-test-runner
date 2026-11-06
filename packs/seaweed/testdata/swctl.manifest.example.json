@@ -1,0 +1,21 @@
+{
+  "schema": "swctl.release-manifest/v1",
+  "bundle": "kv-2026.11.0",
+  "profile": "kv",
+  "ga_criteria_revision": "SeaweedFS KV: positioning and release criteria, rev 8 (2026-11-06)",
+  "source": {"repo": "seaweedfs/seaweed-mono", "commit": "ff6010b8"},
+  "artifacts": [
+    {"name": "weed", "kind": "binary", "edition": "enterprise", "version": "EXAMPLE", "go_version": "go1.26.6",
+     "build_tags": ["5BytesOffset"], "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    {"name": "weed-volume", "kind": "binary", "version": "EXAMPLE", "features": ["rdma", "rdma-dc", "kvcache"],
+     "rust": "1.98.1", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    {"name": "seaweedkv_native", "kind": "python-wheel", "version": "EXAMPLE", "python_abi": "cp312-manylinux_2_35_x86_64",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "native_lib": {"name": "libseaweedfs_sw_rdma_nixl.so", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    {"name": "lmcache", "kind": "python-wheel", "version": "0.5.6", "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "c_header_revision": "3e11e108"}
+  ],
+  "supported_os": [{"ID": "ubuntu", "VERSION_ID": "24.04", "kernel": {"min": "EXAMPLE", "max_exclusive": "EXAMPLE"}}],
+  "upgrade_edges_ref": "upgrade-edges.yaml",
+  "note": "Example only: every sha256 here is a placeholder. A real manifest's own sha256 is pinned in cluster.yaml release.manifest_sha256; a mismatch refuses (65 REL_MANIFEST_MISMATCH)."
+}

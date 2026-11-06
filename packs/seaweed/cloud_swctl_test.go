@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -79,8 +81,17 @@ func swctlAdapterFixture(t *testing.T, mode string) ([]byte, CloudConfig, *swctl
 	d.ManagedResourceIDs = []string{}
 	d.Observation = nil
 	d.RunID = "swctl-m2-fixture"
-	d.ArtifactManifestSHA256 = strings.Repeat("a", 64)
+	manifest, e := os.ReadFile("testdata/swctl.manifest.example.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	manifestDigest := sha256.Sum256(manifest)
+	d.ArtifactManifestSHA256 = fmt.Sprintf("%x", manifestDigest)
 	h := inventory.Host{ID: "fixture", Roles: []string{"master", "filer", "volume", "client"}, Management: inventory.Management{Address: "127.0.0.1", Port: 22, User: "testdev", CredentialRef: "fixture", HostKey: &pin}, Data: inventory.DataNetwork{Address: "10.0.2.1", NIC: "eth0", MTU: 1500}, RunRoot: filepath.ToSlash(t.TempDir()), Disks: []inventory.Disk{{ID: "data", Mount: "/data/nvme", FormatAllowed: &no}}, RDMA: inventory.RDMA{Status: "requested", Device: "mlx5_0", Port: 1, GIDIndex: &gid, Capabilities: []string{"dc"}}, Services: []inventory.Service{{Name: "master_http", Port: 9333}, {Name: "master_grpc", Port: 19333}, {Name: "filer_http", Port: 8888}, {Name: "filer_grpc", Port: 18888}, {Name: "volume_http", Port: 8080}, {Name: "volume_grpc", Port: 18080}, {Name: "rdma", Port: 18516}, {Name: "rdma_control", Port: 18517}, {Name: "dc_control", Port: 18520}}}
+	if mode == "success-rc" {
+		d.Transport = "rc"
+		h.RDMA.Capabilities = []string{"rc"}
+	}
 	d.Hosts = []inventory.Host{h}
 	raw, _ = json.Marshal(d)
 	if _, e = inventory.Decode(raw); e != nil {
@@ -91,7 +102,29 @@ func swctlAdapterFixture(t *testing.T, mode string) ([]byte, CloudConfig, *swctl
 	binary := filepath.Join(root, "swctl")
 	calls := filepath.Join(root, "calls.jsonl")
 	identity := filepath.Join(root, "key-ref-not-read")
-	profile := fmt.Sprintf("name: fixture-cluster\nservice_user: testdev\nrelease: {manifest_sha256: '%s'}\nssh: {user: testdev, identity_ref: 'controller-file:%s'}\nhosts:\n- name: fixture\n  address: 127.0.0.1\n  host_key_sha256: %s\n  roles: [master, filer, volume, lmcache]\n  rdma: {data_address: 10.0.2.1, device: mlx5_0, gid_index: 3}\nkv:\n  filer: {port: 8888, grpc_port: 18888}\n  volume: {rdma: {port: 18516, push: {port: 18519, control_port: 18517}, dc: {push_control_port: 18520}}}\n  security: {}\n  lmcache:\n    adapter_params: {filer_grpc: '10.0.2.1:18888', num_workers: 4, pipes: 8, source_range_mr: true}\n    client_dc: {enabled: true, control_addr: '10.0.2.1:18520', device: mlx5_0, port: 1, gid_index: 3}\n", d.ArtifactManifestSHA256, identity, ssh.FingerprintSHA256(key))
+	manifestPath := filepath.Join(root, "manifest.json")
+	if e = os.WriteFile(manifestPath, manifest, 0600); e != nil {
+		t.Fatal(e)
+	}
+	source, e := os.ReadFile("testdata/swctl.cluster.example.yaml")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var spec map[string]any
+	if e = yaml.Unmarshal(source, &spec); e != nil {
+		t.Fatal(e)
+	}
+	if mode == "success-rc" {
+		spec["kv"].(map[string]any)["lmcache"].(map[string]any)["client_dc"].(map[string]any)["enabled"] = false
+	}
+	spec["release"] = map[string]any{"manifest_ref": "controller-file:" + manifestPath, "manifest_sha256": d.ArtifactManifestSHA256}
+	spec["ssh"] = map[string]any{"user": "testdev", "identity_ref": "controller-file:" + identity}
+	spec["hosts"].([]any)[0].(map[string]any)["host_key_sha256"] = ssh.FingerprintSHA256(key)
+	encoded, e := yaml.Marshal(spec)
+	if e != nil {
+		t.Fatal(e)
+	}
+	profile := string(encoded)
 	if mode == "foreign-owner" {
 		profile = strings.Replace(profile, "address: 127.0.0.1", "address: 127.0.0.2", 1)
 	}
@@ -119,6 +152,7 @@ func TestSWCtlSmokeActualCallerPreservesOracleAndAlwaysClassifiesTeardown(t *tes
 		pass  bool
 		calls []string
 	}{
+		{"success-rc", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
 		{"success", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
 		{"changed-source", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
 		{"wrong-bytes", false, []string{"plan install", "install", "doctor", "uninstall"}},
@@ -170,12 +204,12 @@ func TestSWCtlSmokeActualCallerPreservesOracleAndAlwaysClassifiesTeardown(t *tes
 			for _, cmd := range host.commands {
 				if strings.Contains(cmd, "kv_smoke.py") && strings.Contains(cmd, "--config") {
 					ran = true
-					if !strings.Contains(cmd, `"keys":16`) || !strings.Contains(cmd, `"length":1048576`) || !strings.Contains(cmd, `"transport":"dc"`) {
+					if !strings.Contains(cmd, `"keys":16`) || !strings.Contains(cmd, `"length":1048576`) || !strings.Contains(cmd, `"transport":"`+map[bool]string{true: "rc", false: "dc"}[tc.mode == "success-rc"]+`"`) {
 						t.Fatalf("workload changed %s", cmd)
 					}
 				}
 			}
-			shouldRun := tc.mode == "success" || tc.mode == "changed-source" || tc.mode == "wrong-bytes" || tc.mode == "probe-wrong" || tc.mode == "probe-missing" || tc.mode == "uninstall-unknown" || tc.mode == "uninstall-partial" || tc.mode == "dirty"
+			shouldRun := tc.mode == "success" || tc.mode == "success-rc" || tc.mode == "changed-source" || tc.mode == "wrong-bytes" || tc.mode == "probe-wrong" || tc.mode == "probe-missing" || tc.mode == "uninstall-unknown" || tc.mode == "uninstall-partial" || tc.mode == "dirty"
 			if ran != shouldRun {
 				t.Fatalf("worker dispatch %t expected %t", ran, shouldRun)
 			}
@@ -212,7 +246,7 @@ action=' '.join(sys.argv[1:3]) if sys.argv[1]=='plan' else sys.argv[1]
 path=pathlib.Path(sys.argv[sys.argv.index('--cluster')+1])
 with CALLS.open('a') as f:f.write(json.dumps({'Action':action,'SHA':hashlib.sha256(path.read_bytes()).hexdigest()})+'\n')
 if MODE=='changed-source' and action=='plan install':ORIGINAL.write_text('changed original must not redirect the bound copy')
-r={'schema':'swctl.result/v1','command':action,'cluster':'fixture-cluster','status':'PASS','partial':False,'items':[{'id':'fixture-effect','host':'fixture','status':'PASS','code':'OK'}]};exit=0
+r={'schema':'swctl.result/v1','command':action,'cluster':'fixture-cluster','status':'PASS','partial':False,'mutating':action not in ['plan install','doctor'],'items':[{'id':'fixture-effect','host':'fixture','status':'PASS','code':'OK'}]};exit=0
 if action=='install' and MODE.startswith('install-'):
  r['status']='REFUSED' if MODE=='install-refused' else 'UNKNOWN';r['partial']=MODE=='install-unknown';exit=65 if MODE=='install-refused' else 2
 if action=='doctor':
@@ -222,6 +256,7 @@ if action=='doctor':
   if name in ['dc.route','kv.budget_refusals']:status='NOT_PROVEN';code='KV_COUNTER_NO_TRAFFIC'
   if name in ['rotation.headroom','rotation.activity']:status='NOT_APPLICABLE';code='MODE_OFF'
   if name=='native.stats':status='UNKNOWN';code='NATIVE_STATS_ABSENT'
+  if MODE=='success-rc' and name=='dc.route':status='NOT_APPLICABLE';code='MODE_OFF'
   rows.append({'id':name,'host':'fixture','status':status,'code':code})
  for role in ['master','filer','volume','lmcache']:rows.append({'id':'cfg.nonpublic','host':'fixture','status':'PASS','code':'OK','observed':{'unit':'swctl-fixture-cluster-'+role+'.service'}})
  if MODE=='doctor-bad':rows[0]['status']='UNKNOWN';rows[0]['code']='RDMA_UNREADABLE'
@@ -236,3 +271,39 @@ if action=='uninstall' and MODE=='uninstall-partial':r['partial']=True
 if action=='uninstall' and MODE=='uninstall-unknown':r['status']='UNKNOWN';r['partial']=True;exit=2
 print(json.dumps(r));sys.exit(exit)
 `
+
+// Optional cross-repository static integration: real reviewed CLI, all apply
+// actions still excluded. Ordinary CI retains the explicit process stand-in.
+func TestSWCtlAdapterFixturePassesProductStaticPlan(t *testing.T) {
+	binary := os.Getenv("SWCTL_PLAN_BINARY")
+	if binary == "" {
+		t.Skip("set reviewed mono CLI for read-only plan integration")
+	}
+	expected := os.Getenv("SWCTL_PLAN_SHA256")
+	raw, e := os.ReadFile(binary)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sum := sha256.Sum256(raw)
+	if expected == "" || fmt.Sprintf("%x", sum) != expected {
+		t.Fatal("static-plan binary pin mismatch")
+	}
+	for _, mode := range []string{"success", "success-rc"} {
+		for _, operation := range []string{"install", "uninstall", "probe"} {
+			t.Run(mode+"/"+operation, func(t *testing.T) {
+				_, c, _, _ := swctlAdapterFixture(t, mode)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				q := exec.CommandContext(ctx, binary, "plan", operation, "--cluster", c.SWCtl.Cluster, "--json")
+				output, e := q.CombinedOutput()
+				if e != nil {
+					t.Fatalf("real plan %s: %v %s", operation, e, output)
+				}
+				var r swctlReply
+				if json.Unmarshal(output, &r) != nil || r.Status != "PASS" || r.Command != "plan "+operation || r.Cluster != "fixture-cluster" {
+					t.Fatalf("real plan %s", output)
+				}
+			})
+		}
+	}
+}

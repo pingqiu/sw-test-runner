@@ -75,7 +75,7 @@ type swctlCluster struct {
 				Filer   string `yaml:"filer_grpc"`
 				Workers int    `yaml:"num_workers"`
 				Pipes   int
-				Range   *bool `yaml:"source_range_mr"`
+				Range   *bool `yaml:"push_source_range_mr"`
 			} `yaml:"adapter_params"`
 			DC struct {
 				Enabled bool
