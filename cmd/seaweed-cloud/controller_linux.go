@@ -10,9 +10,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pingqiu/sw-test-runner/provision/smoke"
 )
 
 // controllerIdentity binds a running `direct` to one process. A PID alone can
@@ -96,11 +99,14 @@ func writeNew(name string, body []byte) error {
 	return errors.Join(err, f.Sync(), f.Close())
 }
 
-// directStatus answers whether the controller recorded in DIR is still the
-// running process: RUNNING (exit 0) only when the same boot, PID, start time,
-// exe and exe digest all still match; EXITED (exit 10) with the recorded
-// result once result.json exists; GONE_NO_RESULT (exit 11) when the recorded
-// process is gone or replaced without a result; INPUT_REFUSED (exit 2).
+// directStatus answers whether the controller recorded in DIR for run ID is
+// still the running process: RUNNING (exit 0) only when the same boot, PID,
+// start time, exe and exe digest all still match; EXITED (exit 10) with the
+// recorded PASS or FAIL once result.json exists; GONE_NO_RESULT (exit 11) when
+// the recorded process no longer exists or its PID is now another process;
+// INPUT_REFUSED (exit 2) for anything else: a missing, partial, foreign or
+// non-strict record, an unknown result code, or any inspection error other
+// than "does not exist".
 func directStatus(args []string, w io.Writer) int {
 	out := struct {
 		Schema string `json:"schema"`
@@ -111,42 +117,55 @@ func directStatus(args []string, w io.Writer) int {
 		Reason string `json:"reason,omitempty"`
 	}{Schema: "seaweed.direct-status/v1", State: "INPUT_REFUSED"}
 	emit := func(rc int) int { _ = json.NewEncoder(w).Encode(out); return rc }
+	refuse := func(err error) int {
+		out.State, out.Code, out.Reason = "INPUT_REFUSED", "", err.Error()
+		return emit(2)
+	}
 	fs := flag.NewFlagSet("seaweed-cloud direct-status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("out", "", "the direct run's output directory")
+	run := fs.String("run", "", "the run ID the record must carry")
+	if err := fs.Parse(args); err != nil {
+		return refuse(err)
+	}
+	if fs.NArg() != 0 || *dir == "" || *run == "" {
+		return refuse(errors.New("use: direct-status --out DIR --run ID"))
+	}
 	var rec controllerIdentity
-	err := fs.Parse(args)
-	if err == nil && (fs.NArg() != 0 || *dir == "") {
-		err = errors.New("use: direct-status --out DIR")
-	}
-	var body []byte
+	body, err := os.ReadFile(filepath.Join(*dir, controllerFile))
 	if err == nil {
-		body, err = os.ReadFile(filepath.Join(*dir, controllerFile))
+		err = smoke.StrictJSON(body, &rec)
 	}
-	if err == nil {
-		err = json.Unmarshal(body, &rec)
-	}
-	if err == nil && (rec.Schema != "seaweed.direct-controller/v1" || rec.PID <= 0 || rec.StartTime == "" || rec.Exe == "" || rec.ExeSHA256 == "" || rec.BootID == "") {
+	if err == nil && (rec.Schema != "seaweed.direct-controller/v1" || rec.RunID == "" || rec.PID <= 0 || rec.StartTime == "" || rec.Exe == "" || len(rec.ExeSHA256) != 64 || rec.BootID == "") {
 		err = errors.New("controller record incomplete")
 	}
+	if err == nil && rec.RunID != *run {
+		err = fmt.Errorf("controller record is for run %q, not %q", rec.RunID, *run)
+	}
 	if err != nil {
-		out.Reason = err.Error()
-		return emit(2)
+		return refuse(err)
 	}
 	out.RunID, out.PID = rec.RunID, rec.PID
-	if body, err := os.ReadFile(filepath.Join(*dir, resultFile)); err == nil {
+	switch body, err := os.ReadFile(filepath.Join(*dir, resultFile)); {
+	case err == nil:
 		var r directResult
-		if err = json.Unmarshal(body, &r); err != nil || r.Code == "" {
-			out.Reason = "result record unreadable"
-			return emit(2)
+		if err = smoke.StrictJSON(body, &r); err == nil && (r.Schema != "seaweed.direct-run/v1" || r.Code != "PASS" && r.Code != "FAIL") {
+			err = fmt.Errorf("result record schema %q code %q", r.Schema, r.Code)
+		}
+		if err != nil {
+			return refuse(err)
 		}
 		out.State, out.Code = "EXITED", r.Code
 		return emit(10)
+	case !errors.Is(err, iofs.ErrNotExist): // only "absent" means no result yet
+		return refuse(err)
 	}
 	now, err := processIdentity(rec.PID)
 	switch {
+	case errors.Is(err, iofs.ErrNotExist):
+		out.Reason = "recorded process gone"
 	case err != nil:
-		out.Reason = "recorded process gone: " + err.Error()
+		return refuse(err)
 	case now.BootID != rec.BootID:
 		out.Reason = "host rebooted since the record"
 	case now.StartTime != rec.StartTime:

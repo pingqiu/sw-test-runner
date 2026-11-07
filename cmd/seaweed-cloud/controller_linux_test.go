@@ -12,11 +12,16 @@ import (
 	"testing"
 )
 
-// status runs direct-status on dir and returns its state and exit code.
+// status runs direct-status on dir for run r1 and returns its state and exit code.
 func status(t *testing.T, dir string) (string, string, int) {
 	t.Helper()
+	return statusOf(t, dir, "r1")
+}
+
+func statusOf(t *testing.T, dir, run string) (string, string, int) {
+	t.Helper()
 	var b bytes.Buffer
-	rc := directStatus([]string{"--out", dir}, &b)
+	rc := directStatus([]string{"--out", dir, "--run", run}, &b)
 	var out struct{ State, Code, Reason string }
 	if err := json.Unmarshal(b.Bytes(), &out); err != nil {
 		t.Fatalf("direct-status printed %q: %v", b.String(), err)
@@ -128,7 +133,7 @@ func TestDirectLeavesItsIdentityAndResult(t *testing.T) {
 	if err != nil || json.Unmarshal(body, &id) != nil || id.PID != os.Getpid() || id.RunID != "r-fail" {
 		t.Fatalf("controller record %s: %v", body, err)
 	}
-	if state, code, rc := status(t, out); state != "EXITED" || code != "FAIL" || rc != 10 {
+	if state, code, rc := statusOf(t, out, "r-fail"); state != "EXITED" || code != "FAIL" || rc != 10 {
 		t.Fatalf("status %s %s rc=%d, want EXITED FAIL", state, code, rc)
 	}
 }
@@ -151,7 +156,7 @@ func TestDirectRecordsItselfOnceAndStatusNeedsTheRecord(t *testing.T) {
 	if err := json.Unmarshal(body, &id); err != nil || id.PID != os.Getpid() || id.RunID != "claude-test-run" || len(id.ExeSHA256) != 64 {
 		t.Fatalf("record %s: %v", body, err)
 	}
-	if state, why, rc := status(t, dir); state != "RUNNING" || rc != 0 {
+	if state, why, rc := statusOf(t, dir, "claude-test-run"); state != "RUNNING" || rc != 0 {
 		t.Fatalf("this test process: %s %s rc=%d", state, why, rc)
 	}
 	partial := t.TempDir()
@@ -160,5 +165,53 @@ func TestDirectRecordsItselfOnceAndStatusNeedsTheRecord(t *testing.T) {
 	}
 	if state, _, rc := status(t, partial); state != "INPUT_REFUSED" || rc != 2 {
 		t.Fatalf("partial record: %s rc=%d", state, rc)
+	}
+}
+
+// codex01's negatives on 42d315e: every record that is not exactly what
+// direct writes, and every inspection error other than "absent", refuses;
+// nothing reads as RUNNING or as a PASS that was not recorded.
+func TestDirectStatusRefusesAnythingButExactRecords(t *testing.T) {
+	live := start(t, "sleep", "60")
+	pid := live.Process.Pid
+	for _, c := range []struct {
+		name   string
+		run    string
+		edit   func(*controllerIdentity)
+		result string // written verbatim as result.json; "dir" makes it a directory
+	}{
+		{"empty run_id", "r1", func(id *controllerIdentity) { id.RunID = "" }, ""},
+		{"another run", "r2", nil, ""},
+		{"result wrong schema", "r1", nil, `{"schema":"seaweed.other/v1","code":"PASS"}`},
+		{"result missing schema", "r1", nil, `{"code":"PASS"}`},
+		{"result duplicate code FAIL then PASS", "r1", nil, `{"schema":"seaweed.direct-run/v1","code":"FAIL","code":"PASS"}`},
+		{"result unknown code", "r1", nil, `{"schema":"seaweed.direct-run/v1","code":"BANANA"}`},
+		{"result not a file", "r1", nil, "dir"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			record(t, dir, pid, c.edit)
+			switch c.result {
+			case "":
+			case "dir":
+				if err := os.Mkdir(filepath.Join(dir, resultFile), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := writeNew(filepath.Join(dir, resultFile), []byte(c.result)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state, why, rc := statusOf(t, dir, c.run); state != "INPUT_REFUSED" || rc != 2 {
+				t.Fatalf("%s rc=%d (%s), want INPUT_REFUSED", state, rc, why)
+			}
+		})
+	}
+	dir := t.TempDir()
+	if err := writeNew(filepath.Join(dir, controllerFile), []byte(`{"schema":"seaweed.direct-controller/v1","run_id":"r1","pid":1,"starttime":"1","boot_id":"b","exe":"/x","exe_sha256":"`+strings.Repeat("0", 64)+`","extra":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, rc := status(t, dir); state != "INPUT_REFUSED" || rc != 2 {
+		t.Fatalf("controller record with an unknown field: %s rc=%d", state, rc)
 	}
 }
