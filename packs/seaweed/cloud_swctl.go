@@ -106,7 +106,7 @@ func (s SWCtlConfig) call(ctx context.Context, c CloudConfig, action string) (sw
 	}
 	args := strings.Fields(action)
 	args = append(args, "--cluster", s.Cluster, "--json")
-	if !strings.HasPrefix(action, "plan ") {
+	if action == "install" || action == "uninstall" || action == "probe" {
 		args = append(args, "--state-dir", filepath.Join(c.Output, "swctl-state"))
 	}
 	if action == "install" {

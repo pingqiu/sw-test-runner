@@ -396,7 +396,7 @@ and each smoke use `env -i` with explicit PATH/HOME/library path and the overlay
 `python -I -B`; inherited PYTHONPATH/PYTHONHOME are absent. The worker's
 native_dir is this checked site-packages path. Missing or escaping modules
 refuse with teardown, and swctl-python.json retains the readback.
-The native probe follows. Uninstall and independent postflight still run on any
+Only install/uninstall/probe receive `--state-dir`; doctor retains its read-only CLI arguments. The native probe follows. Uninstall and independent postflight still run on any
 later failure. The pre-smoke rows are in swctl-doctor-before.json; the traffic
 window is swctl-doctor.json. Contracted native.stats UNKNOWN and other allowed
 uncertainties remain explicit; they are never relabelled PASS. A refused or
