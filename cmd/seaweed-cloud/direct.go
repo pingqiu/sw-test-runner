@@ -68,12 +68,13 @@ func runDirect(args []string, w io.Writer) int {
 	if err == nil {
 		inv, err = os.ReadFile(*invPath)
 	}
+	var target struct {
+		Target string `json:"target"`
+		RunID  string `json:"run_id"`
+	}
 	if err == nil {
 		// direct only ever reaches an existing host it then cleans up; a cloud
 		// VM is created and destroyed by plan/run/destroy, never here.
-		var target struct {
-			Target string `json:"target"`
-		}
 		if json.Unmarshal(inv, &target) != nil || target.Target != "onprem" && target.Target != "docker" {
 			err = errors.New("direct runs only an onprem or docker inventory")
 		}
@@ -86,6 +87,10 @@ func runDirect(args []string, w io.Writer) int {
 	}
 	if err == nil {
 		err = os.Mkdir(*outDir, 0o700) // a fresh directory: never mixes two runs' journals
+	}
+	if err == nil {
+		// Who this run is, before any effect: `direct-status` binds to it.
+		err = recordController(*outDir, target.RunID)
 	}
 	if err != nil {
 		out.Error = err.Error()
@@ -100,6 +105,9 @@ func runDirect(args []string, w io.Writer) int {
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()
+	}
+	if e := writeResult(*outDir, out); e != nil && err == nil {
+		err = e
 	}
 	if e := json.NewEncoder(w).Encode(out); e != nil || err != nil {
 		return 1
