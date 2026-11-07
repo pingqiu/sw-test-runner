@@ -33,6 +33,9 @@ func run(args []string, w io.Writer) int {
 	if len(args) > 0 && args[0] == "direct" {
 		return runDirect(args[1:], w)
 	}
+	if len(args) > 0 && args[0] == "direct-status" {
+		return directStatus(args[1:], w)
+	}
 	if len(args) > 0 && args[0] == "pins" && fs.Parse(args[1:]) == nil && fs.NArg() == 0 {
 		_, pin, e := smoke.Sources(*source)
 		b, ve := os.ReadFile(*variables)
