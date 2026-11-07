@@ -1,4 +1,4 @@
-# Offline fixture from mono M0/M2 contract f3528889; no host installation.
+# Offline fixture from mono M0/M2 contract 5590395b; no host installation.
 apiVersion: seaweedfs.io/cluster/v1
 profile: kv
 name: fixture-cluster
@@ -79,6 +79,7 @@ kv:
       cert_ref: null
       key_ref: null
   lmcache:
+    base_python: /opt/vllm/bin/python
     mode: mp
     servers_per_node: 1
     cuda_visible_devices: all

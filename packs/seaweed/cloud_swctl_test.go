@@ -1,11 +1,13 @@
 package seaweed
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"os"
@@ -289,6 +291,33 @@ func TestSWCtlAdapterFixturePassesProductStaticPlan(t *testing.T) {
 		t.Fatal("static-plan binary pin mismatch")
 	}
 	for _, mode := range []string{"success", "success-rc"} {
+		t.Run(mode+"/missing-base", func(t *testing.T) {
+			_, c, _, _ := swctlAdapterFixture(t, mode)
+			raw, err := os.ReadFile(c.SWCtl.Cluster)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var spec map[string]any
+			if err := yaml.Unmarshal(raw, &spec); err != nil {
+				t.Fatal(err)
+			}
+			delete(spec["kv"].(map[string]any)["lmcache"].(map[string]any), "base_python")
+			raw, err = yaml.Marshal(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(c.SWCtl.Cluster, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			q := exec.CommandContext(ctx, binary, "plan", "install", "--cluster", c.SWCtl.Cluster, "--json")
+			output, err := q.CombinedOutput()
+			var refused *exec.ExitError
+			if !errors.As(err, &refused) || refused.ExitCode() != 65 || !bytes.Contains(output, []byte("TARGET_BASE_ENV_MISSING")) {
+				t.Fatalf("missing base plan must refuse65: %v %s", err, output)
+			}
+		})
 		for _, operation := range []string{"install", "uninstall", "probe"} {
 			t.Run(mode+"/"+operation, func(t *testing.T) {
 				_, c, _, _ := swctlAdapterFixture(t, mode)

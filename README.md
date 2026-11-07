@@ -369,6 +369,13 @@ cluster's manifest digest, hosts, roles, data endpoints and pinned SSH identitie
 (standard port 22). It freezes the cluster file before any apply. Other direct
 selectors and the default HTTP smoke keep their existing deployment path.
 
+The cluster must declare absolute `kv.lmcache.base_python` on its LMCache host,
+pointing to an existing dependency-bearing environment qualified by `swctl`.
+The CLI installs the pinned LMCache/native wheels offline into an overlay; it
+never installs dependencies into that base. The adapter freezes this field with
+the rest of the cluster file and delegates strict validation to the real CLI.
+A missing/unqualified base refuses before apply with `TARGET_BASE_ENV_MISSING`.
+
 The bounded smoke retains its original 16 keys, 1 MiB payloads, native worker
 and oracle. Its fixed client tuple requires explicit `num_workers: 4`, `pipes:
 8`, and `push_source_range_mr: true`. Filer JWT and gRPC TLS refs are refused by this
