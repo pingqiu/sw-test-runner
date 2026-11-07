@@ -540,6 +540,23 @@ class SoakAssess(unittest.TestCase):
             row, _ = self.rule_a(kw.pop('submit', 1174.55), **kw)
             self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('FAIL', ['misses'], []), name)
 
+    # mono #1096 (ls8h3): a fresh value lost at its key's first-write + TTL shortly before its VID retired (B - loss:
+    # median 30 s, 2 to 276 s), with no later read on that VID, so C9 cannot see it. A later rotation must not excuse
+    # it. Two guards cover this: C7 (the gone poll must land within 25 s of the miss) refuses misses well before the
+    # retirement, and inside those 25 s only C4's ordering (excused only after late(B)) does.
+    # In the rule_a fixture vid 20's gone poll is done at 1176.05, so C7 passes any miss completed after 1151.05: a
+    # miss from there up to early(B) 1174.4 is refused by C4 alone.
+    C4_ONLY_BEFORE_B = (10.0, 0.2)
+
+    def test_a_loss_shortly_before_the_retiring_line_is_not_excused_by_the_later_rotation(self):
+        for before_b in self.C4_ONLY_BEFORE_B + (30.0,):
+            row, op = self.rule_a(1174.5 - before_b)
+            self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('FAIL', ['misses'], []),
+                             before_b)
+            self.assertIn(op, row['criteria']['misses']['reason'], before_b)
+        row, _ = self.rule_a(1174.7)  # control: the same miss after late(B) 1174.6 is a rotation miss, excused
+        self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
+
     def test_rule_a_the_measured_bracket_width_decides(self):  # control: the same miss, a narrower measured bracket
         row, _ = self.rule_a(1174.55, narrow=True)  # late(B) = 1174.51 < 1174.55: ordered after B, plainly excused
         self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('PASS', [], []), row['criteria'])
