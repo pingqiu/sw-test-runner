@@ -28,6 +28,7 @@ type swctlAdapterHost struct {
 	uploads      map[string][]byte
 	wrong, dirty bool
 	connections  int
+	traffic      string
 }
 
 func (h *swctlAdapterHost) ConnectContext(context.Context) error { h.connections++; return nil }
@@ -42,6 +43,9 @@ func (h *swctlAdapterHost) Upload(local, remote string) error {
 func (h *swctlAdapterHost) Run(ctx context.Context, command string) (string, string, int, error) {
 	h.commands = append(h.commands, command)
 	if strings.Contains(command, "kv_smoke.py") && strings.Contains(command, "--config") {
+		if _, err := os.Stat(h.traffic + ".window"); h.traffic != "" && err == nil {
+			os.WriteFile(h.traffic, []byte("traffic"), 0600)
+		}
 		if h.wrong {
 			return `{"status":"PASS","ack":16,"exact":15,"wrong":1}`, "", 0, nil
 		}
@@ -133,12 +137,12 @@ func swctlAdapterFixture(t *testing.T, mode string) ([]byte, CloudConfig, *swctl
 	if e = os.WriteFile(cluster, []byte(profile), 0600); e != nil {
 		t.Fatal(e)
 	}
-	program := "#!/usr/bin/python3\nimport json,sys,pathlib,hashlib\nMODE=" + fmt.Sprintf("%q", mode) + "\nCALLS=pathlib.Path(" + fmt.Sprintf("%q", calls) + ")\nORIGINAL=pathlib.Path(" + fmt.Sprintf("%q", cluster) + ")\n" + swctlCLIStandin
+	program := "#!/usr/bin/python3\nimport json,sys,pathlib,hashlib,time\nMODE=" + fmt.Sprintf("%q", mode) + "\nCALLS=pathlib.Path(" + fmt.Sprintf("%q", calls) + ")\nORIGINAL=pathlib.Path(" + fmt.Sprintf("%q", cluster) + ")\n" + swctlCLIStandin
 	if e = os.WriteFile(binary, []byte(program), 0700); e != nil {
 		t.Fatal(e)
 	}
 	digest := sha256.Sum256([]byte(program))
-	host := &swctlAdapterHost{uploads: map[string][]byte{}, wrong: mode == "wrong-bytes", dirty: mode == "dirty"}
+	host := &swctlAdapterHost{traffic: filepath.Join(root, "traffic"), uploads: map[string][]byte{}, wrong: mode == "wrong-bytes", dirty: mode == "dirty"}
 	c := CloudConfig{SWCtl: &SWCtlConfig{Binary: CloudFile{Path: binary, SHA256: fmt.Sprintf("%x", digest)}, Cluster: cluster, ArtifactsDir: root}, Output: t.TempDir(), Files: map[string]CloudFile{}, SSHKey: identity, swctlNodes: func(inventory.Host) swctlSmokeNode { return host }}
 	if mode == "binary-tamper" {
 		c.SWCtl.Binary.SHA256 = strings.Repeat("0", 64)
@@ -154,18 +158,18 @@ func TestSWCtlSmokeActualCallerPreservesOracleAndAlwaysClassifiesTeardown(t *tes
 		pass  bool
 		calls []string
 	}{
-		{"success-rc", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"success", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"changed-source", true, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"wrong-bytes", false, []string{"plan install", "install", "doctor", "uninstall"}},
+		{"success-rc", true, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"success", true, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"changed-source", true, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"wrong-bytes", false, []string{"plan install", "install", "doctor", "doctor", "uninstall"}},
 		{"doctor-bad", false, []string{"plan install", "install", "doctor", "uninstall"}},
 		{"doctor-off", false, []string{"plan install", "install", "doctor", "uninstall"}},
 		{"doctor-missing", false, []string{"plan install", "install", "doctor", "uninstall"}},
-		{"probe-wrong", false, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"probe-missing", false, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"uninstall-partial", false, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"uninstall-unknown", false, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
-		{"dirty", false, []string{"plan install", "install", "doctor", "probe", "uninstall"}},
+		{"probe-wrong", false, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"probe-missing", false, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"uninstall-partial", false, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"uninstall-unknown", false, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
+		{"dirty", false, []string{"plan install", "install", "doctor", "doctor", "probe", "uninstall"}},
 		{"install-refused", false, []string{"plan install", "install"}},
 		{"install-unknown", false, []string{"plan install", "install"}},
 		{"foreign-owner", false, []string{"plan install"}},
@@ -199,7 +203,8 @@ func TestSWCtlSmokeActualCallerPreservesOracleAndAlwaysClassifiesTeardown(t *tes
 					t.Fatal("mutable source redirected a CLI command")
 				}
 			}
-			if !reflect.DeepEqual(actions, tc.calls) && !(len(actions) == 0 && len(tc.calls) == 0) {
+			cancelledBeforeDoctorStart := tc.mode == "wrong-bytes" && reflect.DeepEqual(actions, []string{"plan install", "install", "doctor", "uninstall"})
+			if !cancelledBeforeDoctorStart && !reflect.DeepEqual(actions, tc.calls) && !(len(actions) == 0 && len(tc.calls) == 0) {
 				t.Fatalf("calls %v want %v; error %v", actions, tc.calls, e)
 			}
 			ran := false
@@ -232,7 +237,7 @@ func TestSWCtlSmokeActualCallerPreservesOracleAndAlwaysClassifiesTeardown(t *tes
 				if _, e := os.Stat(rows); e != nil {
 					t.Fatal(e)
 				}
-				doctor, _ := os.ReadFile(filepath.Join(c.Output, "swctl-doctor.json"))
+				doctor, _ := os.ReadFile(filepath.Join(c.Output, "swctl-doctor-before.json"))
 				if !strings.Contains(string(doctor), "NATIVE_STATS_ABSENT") || !strings.Contains(string(doctor), "NOT_PROVEN") {
 					t.Fatal("expected uncertainty erased")
 				}
@@ -252,10 +257,18 @@ r={'schema':'swctl.result/v1','command':action,'cluster':'fixture-cluster','stat
 if action=='install' and MODE.startswith('install-'):
  r['status']='REFUSED' if MODE=='install-refused' else 'UNKNOWN';r['partial']=MODE=='install-unknown';exit=65 if MODE=='install-refused' else 2
 if action=='doctor':
+ second=sum(json.loads(x)['Action']=='doctor' for x in CALLS.read_text().splitlines())==2
+ if second:
+  time.sleep(.3)
+  (CALLS.parent/'traffic.window').write_text('observing')
+  if MODE=='window-hang':time.sleep(10)
+  end=time.monotonic()+2
+  while not (CALLS.parent/'traffic').exists() and time.monotonic()<end:time.sleep(.01)
  rows=[]
  for name in ['rdma.device','rdma.port_state','rdma.gid','push.listener','dc.ready','dc.route','kv.budget_refusals','rotation.headroom','rotation.activity','native.stats','lmcache.shape','version.pins']:
   status='PASS';code='OK'
-  if name in ['dc.route','kv.budget_refusals']:status='NOT_PROVEN';code='KV_COUNTER_NO_TRAFFIC'
+  if name in ['dc.route','kv.budget_refusals']:
+   status='PASS' if second and MODE!='counter-quiet' and not (MODE=='budget-quiet' and name=='kv.budget_refusals') and not (MODE=='route-quiet' and name=='dc.route') and (CALLS.parent/'traffic').exists() else 'NOT_PROVEN';code='OK' if status=='PASS' else 'KV_COUNTER_NO_TRAFFIC'
   if name in ['rotation.headroom','rotation.activity']:status='NOT_APPLICABLE';code='MODE_OFF'
   if name=='native.stats':status='UNKNOWN';code='NATIVE_STATS_ABSENT'
   if MODE=='success-rc' and name=='dc.route':status='NOT_APPLICABLE';code='MODE_OFF'
@@ -334,5 +347,58 @@ func TestSWCtlAdapterFixturePassesProductStaticPlan(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSWCtlSmokeRequiresTrafficWindowCounters(t *testing.T) {
+	for _, mode := range []string{"success", "success-rc", "counter-quiet", "budget-quiet", "route-quiet"} {
+		t.Run(mode, func(t *testing.T) {
+			raw, c, _, calls := swctlAdapterFixture(t, mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := RunCloudHTTP(ctx, raw, c)
+			if (err == nil) != (mode == "success" || mode == "success-rc") {
+				t.Fatalf("mode=%s err=%v", mode, err)
+			}
+			b, _ := os.ReadFile(calls)
+			if strings.Count(string(b), `"Action": "doctor"`) != 2 {
+				t.Fatalf("second traffic-window doctor absent: %s", b)
+			}
+			if !strings.Contains(string(b), `"Action": "uninstall"`) {
+				t.Fatal("teardown did not run")
+			}
+		})
+	}
+}
+
+func TestSWCtlSmokeWindowCancellationJoinsBeforeTeardown(t *testing.T) {
+	raw, c, _, calls := swctlAdapterFixture(t, "window-hang")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(filepath.Join(filepath.Dir(calls), "traffic.window")); err == nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	_, err := RunCloudHTTP(ctx, raw, c)
+	<-joined
+	if err == nil {
+		t.Fatal("cancelled window passed")
+	}
+	b, _ := os.ReadFile(calls)
+	if strings.Count(string(b), `"Action": "doctor"`) != 2 || !strings.Contains(string(b), `"Action": "uninstall"`) {
+		t.Fatalf("observer/teardown not joined: %s", b)
 	}
 }

@@ -382,14 +382,19 @@ and oracle. Its fixed client tuple requires explicit `num_workers: 4`, `pipes:
 adapter because the unchanged smoke has no credential channel; `swctl` itself
 supports their installation. Secret values are resolved only by `swctl`.
 
-The adapter calls plan/install, records doctor's complete per-host rows, runs
-the unchanged smoke, requires the extra native probe's `PROBE_EXACT`, then
-uninstalls and checks for owned units/listeners. The intentional
-`native.stats/UNKNOWN/NATIVE_STATS_ABSENT` and quiet-window NOT_PROVEN rows remain
-visible in `swctl-doctor.json`; they are not relabelled as PASS. Other unexpected
-doctor rows fail the run. Oracle or probe failure still runs teardown. A refused
-or unconfirmed install never triggers deletion of a predecessor: retain its
-journal for exact CLI reconciliation.
+The adapter calls plan/install and keeps a pre-smoke doctor (quiet counters may
+be NOT_PROVEN). It then runs a second doctor concurrently with a bounded stream
+of the unchanged 16-key, 1 MiB smoke invocations, each judged by the existing
+oracle and saved separately. It stops on any failed invocation, never retries
+it, joins doctor before teardown, and requires kv.budget_refusals PASS plus
+dc.route PASS on DC plans. The stream ends when doctor completes or at 4 minutes;
+a quiet or incomplete counter window fails this qualification. This avoids
+assuming that a fixed controller delay lands inside doctor's target window.
+The native probe follows. Uninstall and independent postflight still run on any
+later failure. The pre-smoke rows are in swctl-doctor-before.json; the traffic
+window is swctl-doctor.json. Contracted native.stats UNKNOWN and other allowed
+uncertainties remain explicit; they are never relabelled PASS. A refused or
+partial install is retained for exact CLI reconciliation, not uninstalled.
 
 Outputs include the original `cloud-kv.jsonl`, `swctl-*.json`, the private frozen
 `swctl-cluster.yaml` and `swctl-state/`, plus helper and postflight receipts.

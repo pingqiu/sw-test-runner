@@ -435,13 +435,37 @@ func runSWCtlSmoke(ctx context.Context, d inventory.Document, c CloudConfig) (ro
 	if e != nil || exit != 0 && exit != 2 && exit != 3 || doctor.Cluster != profile.Name || !allowedSmokeDoctor(doctor, d, profile) {
 		return "", errors.Join(e, errors.New("unexpected swctl doctor row"))
 	}
+	if e = os.Rename(filepath.Join(c.Output, "swctl-doctor.json"), filepath.Join(c.Output, "swctl-doctor-before.json")); e != nil {
+		return "", e
+	}
 	command := "LD_LIBRARY_PATH=" + q(release+"/venv/lib/swctl-native") + " " + q(release+"/venv/bin/python")
 	for _, arg := range args {
 		command += " " + q(arg)
 	}
-	stdout, e := cloudStep(ctx, n, c.Output, "swctl-kv-smoke.json", "kv-smoke", 120, command)
 	rows = filepath.Join(c.Output, "cloud-kv.jsonl")
-	failure = errors.Join(e, os.WriteFile(rows, []byte(stdout), 0600), qualifyCloudSmoke(stdout, ""))
+	failure = swctlSmokeWindow(ctx, func(window context.Context) error {
+		r, exit, err := s.call(window, c, "doctor")
+		if err != nil || exit != 0 && exit != 2 && exit != 3 || r.Cluster != profile.Name || !allowedSmokeDoctor(r, d, profile) {
+			return errors.Join(err, errors.New("unexpected traffic-window doctor row"))
+		}
+		for _, item := range r.Items {
+			if (item.ID == "kv.budget_refusals" || item.ID == "dc.route" && profile.KV.LMCache.DC.Enabled) && item.Status != "NOT_APPLICABLE" && item.Status != "PASS" {
+				return errors.New("smoke traffic counters did not PASS")
+			}
+		}
+		return nil
+	}, func(window context.Context, round int) error {
+		stdout, err := cloudStep(window, n, c.Output, fmt.Sprintf("swctl-kv-smoke-%03d.json", round), "kv-smoke", 120, command)
+		if err = errors.Join(err, qualifyCloudSmoke(stdout, "")); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(rows, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		_, err = f.WriteString(strings.TrimSpace(stdout) + "\n")
+		return errors.Join(err, f.Close())
+	})
 	if failure != nil {
 		return rows, failure
 	}
@@ -510,4 +534,27 @@ func swctlInt(value *int, fallback int) int {
 		return fallback
 	}
 	return *value
+}
+
+// Keep the unchanged 16-key smoke active throughout the observer's own window.
+// Each invocation is independently judged and retained; no failed round retries.
+func swctlSmokeWindow(ctx context.Context, doctor func(context.Context) error, smoke func(context.Context, int) error) error {
+	window, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- doctor(window) }()
+	for round := 1; ; round++ {
+		if err := smoke(window, round); err != nil {
+			cancel()
+			return errors.Join(err, <-done) // join the observer before uninstall
+		}
+		select {
+		case err := <-done:
+			return err
+		case <-window.Done():
+			cancel()
+			return errors.Join(window.Err(), <-done)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
