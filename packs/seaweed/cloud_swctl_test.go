@@ -29,6 +29,7 @@ type swctlAdapterHost struct {
 	wrong, dirty bool
 	connections  int
 	traffic      string
+	nativeSite   string
 }
 
 func (h *swctlAdapterHost) ConnectContext(context.Context) error { h.connections++; return nil }
@@ -42,6 +43,10 @@ func (h *swctlAdapterHost) Upload(local, remote string) error {
 }
 func (h *swctlAdapterHost) Run(ctx context.Context, command string) (string, string, int, error) {
 	h.commands = append(h.commands, command)
+	if strings.Contains(command, "sysconfig.get_path") {
+		raw, _ := json.Marshal(map[string]string{"site": h.nativeSite, "native": h.nativeSite + "/seaweedkv_native/_native.so"})
+		return string(raw), "", 0, nil
+	}
 	if strings.Contains(command, "kv_smoke.py") && strings.Contains(command, "--config") {
 		if _, err := os.Stat(h.traffic + ".window"); h.traffic != "" && err == nil {
 			os.WriteFile(h.traffic, []byte("traffic"), 0600)
@@ -142,7 +147,7 @@ func swctlAdapterFixture(t *testing.T, mode string) ([]byte, CloudConfig, *swctl
 		t.Fatal(e)
 	}
 	digest := sha256.Sum256([]byte(program))
-	host := &swctlAdapterHost{traffic: filepath.Join(root, "traffic"), uploads: map[string][]byte{}, wrong: mode == "wrong-bytes", dirty: mode == "dirty"}
+	host := &swctlAdapterHost{nativeSite: "/opt/swctl/fixture-cluster/releases/" + d.ArtifactManifestSHA256 + "/venv/lib/python3.12/site-packages", traffic: filepath.Join(root, "traffic"), uploads: map[string][]byte{}, wrong: mode == "wrong-bytes", dirty: mode == "dirty"}
 	c := CloudConfig{SWCtl: &SWCtlConfig{Binary: CloudFile{Path: binary, SHA256: fmt.Sprintf("%x", digest)}, Cluster: cluster, ArtifactsDir: root}, Output: t.TempDir(), Files: map[string]CloudFile{}, SSHKey: identity, swctlNodes: func(inventory.Host) swctlSmokeNode { return host }}
 	if mode == "binary-tamper" {
 		c.SWCtl.Binary.SHA256 = strings.Repeat("0", 64)

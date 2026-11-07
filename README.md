@@ -390,6 +390,12 @@ it, joins doctor before teardown, and requires kv.budget_refusals PASS plus
 dc.route PASS on DC plans. The stream ends when doctor completes or at 4 minutes;
 a quiet or incomplete counter window fails this qualification. This avoids
 assuming that a fixed controller delay lands inside doctor's target window.
+Before the traffic window, an isolated readback resolves the regular native
+package and extension only inside the overlay's site-packages. Both that lookup
+and each smoke use `env -i` with explicit PATH/HOME/library path and the overlay
+`python -I -B`; inherited PYTHONPATH/PYTHONHOME are absent. The worker's
+native_dir is this checked site-packages path. Missing or escaping modules
+refuse with teardown, and swctl-python.json retains the readback.
 The native probe follows. Uninstall and independent postflight still run on any
 later failure. The pre-smoke rows are in swctl-doctor-before.json; the traffic
 window is swctl-doctor.json. Contracted native.stats UNKNOWN and other allowed

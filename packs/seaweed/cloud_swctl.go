@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -438,8 +439,18 @@ func runSWCtlSmoke(ctx context.Context, d inventory.Document, c CloudConfig) (ro
 	if e = os.Rename(filepath.Join(c.Output, "swctl-doctor.json"), filepath.Join(c.Output, "swctl-doctor-before.json")); e != nil {
 		return "", e
 	}
-	command := "LD_LIBRARY_PATH=" + q(release+"/venv/lib/swctl-native") + " " + q(release+"/venv/bin/python")
-	for _, arg := range args {
+	python := "env -i PATH=/usr/bin:/bin HOME=" + q(client.RunRoot) + " LD_LIBRARY_PATH=" + q(release+"/venv/lib/swctl-native") + " " + q(release+"/venv/bin/python") + " -I -B"
+	layout, err := cloudStep(ctx, n, c.Output, "swctl-python.json", "checked-overlay-python", 20, python+" -c "+q(swctlPythonLayout)+" "+q(release+"/venv"))
+	var native struct{ Site, Native string }
+	if err != nil || json.Unmarshal([]byte(layout), &native) != nil || !strings.HasPrefix(native.Site, release+"/venv/") || path.Clean(native.Site) != native.Site || !strings.HasSuffix(native.Site, "/site-packages") || !strings.HasPrefix(native.Native, native.Site+"/seaweedkv_native/") || !strings.HasSuffix(native.Native, ".so") {
+		return "", errors.Join(err, errors.New("native module is not in checked overlay site-packages"))
+	}
+	args, e = SmokeArgs(&view, client.ID, SmokeSettings{NativeDir: native.Site, HelperDir: helpers, Keys: 16, Length: 1 << 20})
+	if e != nil {
+		return "", e
+	}
+	command := python
+	for _, arg := range args[1:] { // the isolated prefix already supplies -I
 		command += " " + q(arg)
 	}
 	rows = filepath.Join(c.Output, "cloud-kv.jsonl")
@@ -558,3 +569,19 @@ func swctlSmokeWindow(ctx context.Context, doctor func(context.Context) error, s
 		}
 	}
 }
+
+// Locate only the checked overlay's regular package; never import a foreign
+// parent package while discovering its native extension.
+const swctlPythonLayout = `import sys,sysconfig,pathlib,json
+from importlib.machinery import PathFinder
+root=pathlib.Path(sys.argv[1])
+site=pathlib.Path(sysconfig.get_path('platlib')).resolve()
+assert root==root.resolve() and pathlib.Path(sys.prefix).resolve()==root and site.is_relative_to(root) and site.name=='site-packages'
+package=PathFinder.find_spec('seaweedkv_native',[str(site)])
+assert package and package.origin and pathlib.Path(package.origin).resolve().parent==site/'seaweedkv_native'
+spec=PathFinder.find_spec('seaweedkv_native._native',[str(site/'seaweedkv_native')])
+assert spec and spec.origin
+native=pathlib.Path(spec.origin).resolve()
+assert native.is_file() and native.is_relative_to(site/'seaweedkv_native') and native.suffix=='.so'
+print(json.dumps(dict(site=str(site),native=str(native))))
+`
