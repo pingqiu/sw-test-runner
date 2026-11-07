@@ -20,6 +20,8 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
+	SWCtl             *SWCtlConfig `json:"swctl,omitempty"`
+	swctlNodes        func(inventory.Host) swctlSmokeNode
 	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
 	MasterWrites      bool                 `json:"master_writes,omitempty"`
 	ECStage1          bool                 `json:"ec_stage1,omitempty"`
@@ -97,6 +99,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if c.SWCtl != nil {
+		return runSWCtlSmoke(ctx, *d, c)
 	}
 	if c.ECReconstruction && (!c.ECStage1 || c.ECUnderQuorum) {
 		return "", errors.New("EC reconstruction needs stage1 without under-quorum")
@@ -378,19 +383,8 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if e != nil {
 		return output, e
 	}
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	var summary struct {
-		Status            string
-		Ack, Exact, Wrong int
-		S3Ack             int `json:"s3_ack"`
-		S3Exact           int `json:"s3_exact"`
-	}
-	want := 16
-	if phase == "load" {
-		want = 512
-	}
-	if len(lines) == 0 || json.Unmarshal([]byte(lines[len(lines)-1]), &summary) != nil || summary.Status != "PASS" || summary.Ack != want || summary.Exact != want || summary.Wrong != 0 || phase == "load" && (summary.S3Ack != 32 || summary.S3Exact != 32) {
-		return output, errors.New("missing or failed KV smoke")
+	if e = qualifyCloudSmoke(stdout, phase); e != nil {
+		return output, e
 	}
 	return output, nil
 }
@@ -496,7 +490,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 }
 
 // cloudUpload copies one local file to the host and journals it as dir/file.
-func cloudUpload(n *infra.Node, dir, file, name, local, remote string) error {
+func cloudUpload(n interface{ Upload(string, string) error }, dir, file, name, local, remote string) error {
 	command := "upload " + local + " -> " + remote
 	e := n.Upload(local, remote)
 	rc := 0
@@ -515,7 +509,9 @@ func cloudNode(h inventory.Host, key, pin string) *infra.Node {
 }
 
 // cloudStep runs one bounded remote command and journals it as dir/file.
-func cloudStep(ctx context.Context, n *infra.Node, dir, file, name string, seconds int, cmd string) (string, error) {
+func cloudStep(ctx context.Context, n interface {
+	Run(context.Context, string) (string, string, int, error)
+}, dir, file, name string, seconds int, cmd string) (string, error) {
 	command := fmt.Sprintf("timeout -k 5 %d sh -ec ", seconds) + cloudQuote(cmd)
 	out, stderr, rc, e := n.Run(ctx, command)
 	w := writeCloudStep(dir, file, name, command, out, stderr, rc, e)
@@ -593,4 +589,23 @@ func (c CloudConfig) artifactNames() []string {
 		return []string{"weed"}
 	}
 	return []string{"weed", "weed-volume", "native.tar"}
+}
+
+// Shared terminal oracle for the unchanged smoke worker on both deploy paths.
+func qualifyCloudSmoke(stdout, phase string) error {
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	var summary struct {
+		Status            string
+		Ack, Exact, Wrong int
+		S3Ack             int `json:"s3_ack"`
+		S3Exact           int `json:"s3_exact"`
+	}
+	want := 16
+	if phase == "load" {
+		want = 512
+	}
+	if len(lines) == 0 || json.Unmarshal([]byte(lines[len(lines)-1]), &summary) != nil || summary.Status != "PASS" || summary.Ack != want || summary.Exact != want || summary.Wrong != 0 || phase == "load" && (summary.S3Ack != 32 || summary.S3Exact != 32) {
+		return errors.New("missing or failed KV smoke")
+	}
+	return nil
 }

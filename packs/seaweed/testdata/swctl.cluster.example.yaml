@@ -1,0 +1,104 @@
+# Offline fixture from mono M0/M2 contract 5590395b; no host installation.
+apiVersion: seaweedfs.io/cluster/v1
+profile: kv
+name: fixture-cluster
+release:
+  manifest_ref: controller-file:/fixture/manifest.json
+  manifest_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+ssh:
+  user: testdev
+  identity_ref: controller-file:/fixture/key-not-read
+hosts:
+- name: fixture
+  address: 127.0.0.1
+  host_key_sha256: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  roles:
+  - master
+  - filer
+  - volume
+  - lmcache
+  rdma:
+    device: mlx5_0
+    netdev: eth0
+    gid_index: 3
+    data_address: 10.0.2.1
+  data_paths:
+  - /fixture/data
+kv:
+  master:
+    port: 9333
+    grpc_port: 19333
+    mdir: /fixture/master
+    peers: none
+    volume_size_limit_mb: null
+    default_replication: '000'
+    metrics_port: 9327
+  filer:
+    port: 8888
+    grpc_port: 18888
+    default_replica_placement: '000'
+    metrics_port: 9326
+  volume:
+    port: 8080
+    grpc_port: 18080
+    min_free_space_percent: 1
+    metrics_port: 9325
+    nofile_limit: 2048
+    rdma:
+      enabled: true
+      port: 18516
+      ip: null
+      kv_transport: both
+      rc_setup: cm
+      rc_tcp_port: null
+      connection_budget: auto
+      push:
+        port: 18519
+        control_port: 18517
+        rc_tcp_port: null
+      dc:
+        device: mlx5_0
+        port: 1
+        gid_index: 3
+        push_control_port: 18520
+  rotation:
+    enabled: false
+    collections:
+    - lmcache
+    high_watermark: 0.9
+    low_watermark: 0.8
+    max_volumes_per_cycle: 1
+  security:
+    write_jwt_signing_key_ref: null
+    read_jwt_signing_key_ref: null
+    read_jwt_expires_after_seconds: 60
+    filer_jwt_signing_key_ref: null
+    filer_read_jwt_signing_key_ref: null
+    grpc_tls:
+      ca_ref: null
+      cert_ref: null
+      key_ref: null
+  lmcache:
+    base_python: /opt/vllm/bin/python
+    mode: mp
+    servers_per_node: 1
+    cuda_visible_devices: all
+    isolated_ipc: false
+    shm_name: kvlab
+    l1_use_lazy: false
+    l2_prefetch_max_in_flight: 32
+    adapter_params:
+      backing: loader-rdma
+      filer_grpc: 10.0.2.1:18888
+      num_workers: 4
+      push_read: true
+      pipes: 8
+      push_source_range_mr: true
+      rc_setup: cm
+    client_dc:
+      enabled: true
+      control_addr: 10.0.2.1:18520
+      device: mlx5_0
+      port: 1
+      gid_index: 3
+service_user: testdev
