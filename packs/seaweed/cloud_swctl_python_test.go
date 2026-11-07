@@ -50,7 +50,8 @@ func (h *swctlPythonHost) Run(ctx context.Context, command string) (string, stri
 		}
 	}
 	if h.poison {
-		q.Env = append(q.Env, "PYTHONPATH="+h.foreign, "PYTHONHOME="+h.foreign+"/not-a-python-home")
+		q.Env = append(q.Env, "PYTHONPATH="+h.foreign, "PYTHONHOME="+h.foreign+"/not-a-python-home",
+			"NUMBA_CACHE_DIR="+h.foreign+"/numba", "XDG_CACHE_HOME="+h.foreign+"/xdg", "HOME="+h.foreign)
 	}
 	var out, stderr strings.Builder
 	q.Stdout = &out
@@ -95,9 +96,12 @@ func TestSWCtlSmokeUsesIsolatedOverlayPython(t *testing.T) {
 from . import _native
 def launch():
  frame=sys._getframe(1)
- record=dict(origin=_native.__file__,isolated=sys.flags.isolated,bytecode=sys.dont_write_bytecode,pythonpath=os.environ.get('PYTHONPATH'),pythonhome=os.environ.get('PYTHONHOME'),native_dir=frame.f_locals['c']['native_dir'])
+ record=dict(origin=_native.__file__,isolated=sys.flags.isolated,bytecode=sys.dont_write_bytecode,pythonpath=os.environ.get('PYTHONPATH'),pythonhome=os.environ.get('PYTHONHOME'),native_dir=frame.f_locals['c']['native_dir'],numba_cache=os.environ.get('NUMBA_CACHE_DIR'),xdg_cache=os.environ.get('XDG_CACHE_HOME'),home=os.environ.get('HOME'))
  pathlib.Path(%q).write_text(json.dumps(record))
  assert record['isolated']==1 and record['bytecode'] and record['pythonpath'] is None and record['pythonhome'] is None
+ assert record['numba_cache']=='/var/cache/swctl/fixture-cluster', record
+ assert record['xdg_cache']==record['numba_cache'], record
+ assert record['home']=='/nonexistent/swctl-inspect', record
  assert record['native_dir']==str(pathlib.Path(__file__).parent.parent)
  print(json.dumps(dict(status='PASS',ack=16,exact=16,wrong=0)))
  raise SystemExit(0)

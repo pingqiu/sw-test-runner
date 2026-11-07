@@ -439,7 +439,7 @@ func runSWCtlSmoke(ctx context.Context, d inventory.Document, c CloudConfig) (ro
 	if e = os.Rename(filepath.Join(c.Output, "swctl-doctor.json"), filepath.Join(c.Output, "swctl-doctor-before.json")); e != nil {
 		return "", e
 	}
-	python := "env -i PATH=/usr/bin:/bin HOME=" + q(client.RunRoot) + " LD_LIBRARY_PATH=" + q(release+"/venv/lib/swctl-native") + " " + q(release+"/venv/bin/python") + " -I -B"
+	python := "env -i PATH=/usr/bin:/bin HOME=/nonexistent/swctl-inspect NUMBA_CACHE_DIR=" + q("/var/cache/swctl/"+profile.Name) + " XDG_CACHE_HOME=" + q("/var/cache/swctl/"+profile.Name) + " LD_LIBRARY_PATH=" + q(release+"/venv/lib/swctl-native") + " " + q(release+"/venv/bin/python") + " -I -B"
 	layout, err := cloudStep(ctx, n, c.Output, "swctl-python.json", "checked-overlay-python", 20, python+" -c "+q(swctlPythonLayout)+" "+q(release+"/venv"))
 	var native struct{ Site, Native string }
 	if err != nil || json.Unmarshal([]byte(layout), &native) != nil || !strings.HasPrefix(native.Site, release+"/venv/") || path.Clean(native.Site) != native.Site || !strings.HasSuffix(native.Site, "/site-packages") || !strings.HasPrefix(native.Native, native.Site+"/seaweedkv_native/") || !strings.HasSuffix(native.Native, ".so") {
