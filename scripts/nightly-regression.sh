@@ -59,8 +59,8 @@ printf '%s\n' "$docker_root" > "$out/docker-root"
 [[ $docker_root == /* ]] || exit 78
 timeout -k5 30 df -P -- /data/nvme "$docker_root" > "$out/disk-preflight.txt" 2>> "$out/disk-preflight.stderr" || exit 78
 awk 'NR>1 {n++; if ($5 !~ /^[0-9]+%$/ || $5+0>85) bad=1} END {exit !(n==2 && !bad)}' "$out/disk-preflight.txt" || exit 78
+timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2> "$out/image-inspect.stderr" || exit 78
 rm "$out/CLASSIFICATION"; stage=build
-timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id"
 for source in product runner; do mkdir "$work/$source"; done
 timeout -k5 90 tar -xzf "$root/inbox/mono.tar.gz" --strip-components=1 -C "$work/product"
 timeout -k5 90 tar -xf "$root/inbox/runner.tar" -C "$work/runner"

@@ -84,6 +84,9 @@ elif tool=='docker':
  if args[0]=='info':
   if os.environ.get('MODE')=='info-fails':print('Docker root unavailable',file=sys.stderr);sys.exit(23)
   print('/fixture-docker-root')
+ elif args[:2]==['image','inspect']:
+  if os.environ.get('MODE')=='image-missing':print('No such image: qualified-local-fixture',file=sys.stderr);sys.exit(1)
+  print('sha256:qualified-local-fixture')
  elif args[0]=='run':names.append(args[args.index('--name')+1])
  elif args[0]=='rm':
   if os.environ.get('MODE')=='rm-fails':sys.exit(23)
@@ -158,6 +161,18 @@ class NightlyCommand(unittest.TestCase):
         self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
         self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
         self.assertIn('Docker root unavailable', (out / 'disk-preflight.stderr').read_text())
+
+    def test_missing_qualified_image_is_environment_and_never_builds(self):
+        result = self.run_night('image-missing')
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'EXIT').read_text().strip(), '78')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        self.assertIn('No such image', (out / 'image-inspect.stderr').read_text())
+        calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
+        self.assertFalse(any(c[0] in ('make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
+        self.assertFalse((self.root / 'work').exists())
 
     def test_failed_disk_measurement_is_an_environment_refusal(self):
         result = self.run_night('df-fails')
