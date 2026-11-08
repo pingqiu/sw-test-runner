@@ -352,3 +352,66 @@ kills the victim without racing it with CONT. Wrong bytes, missing proof and unc
 postflight fail; missing freeze exposure is NOT_COVERED. Real RDMA runs require a lab token/window.
 
 HTTP process chaos on one existing container host or two physical hosts uses the same direct entry; see [cluster process cases](docs/cluster-process-direct.md) for `cluster_chaos_cases` and the observed two-copy gate.
+
+
+### KV smoke through the product CLI (M2)
+
+The direct entry can use the mono `swctl` CLI for KV smoke deployment and
+teardown. Keep the usual direct SSH settings and inventory, and select:
+
+```json
+{"files":{},"swctl":{"binary":{"path":"/controller/bin/swctl","sha256":"<sha256>"},"cluster":"/controller/cluster.yaml","artifacts_dir":"/controller/release"}}
+```
+
+Run the same `bin/seaweed-cloud direct --inventory INV.json --config CFG.json
+--out NEW_DIR`. This selector accepts an onprem RC/DC inventory matching the
+cluster's manifest digest, hosts, roles, data endpoints and pinned SSH identities
+(standard port 22). It freezes the cluster file before any apply. Other direct
+selectors and the default HTTP smoke keep their existing deployment path.
+
+The cluster must declare absolute `kv.lmcache.base_python` on its LMCache host,
+pointing to an existing dependency-bearing environment qualified by `swctl`.
+The CLI installs the pinned LMCache/native wheels offline into an overlay; it
+never installs dependencies into that base. The adapter freezes this field with
+the rest of the cluster file and delegates strict validation to the real CLI.
+A missing/unqualified base refuses before apply with `TARGET_BASE_ENV_MISSING`.
+
+The bounded smoke retains its original 16 keys, 1 MiB payloads, native worker
+and oracle. Its fixed client tuple requires explicit `num_workers: 4`, `pipes:
+8`, and `push_source_range_mr: true`. Filer JWT and gRPC TLS refs are refused by this
+adapter because the unchanged smoke has no credential channel; `swctl` itself
+supports their installation. Secret values are resolved only by `swctl`.
+
+The adapter calls plan/install and keeps a pre-smoke doctor (quiet counters may
+be NOT_PROVEN). It then runs a second doctor concurrently with a bounded stream
+of the unchanged 16-key, 1 MiB smoke invocations, each judged by the existing
+oracle and saved separately. It stops on any failed invocation, never retries
+it, joins doctor before teardown, and requires kv.budget_refusals PASS plus
+dc.route PASS on DC plans. The stream ends when doctor completes or at 4 minutes;
+a quiet or incomplete counter window fails this qualification. This avoids
+assuming that a fixed controller delay lands inside doctor's target window.
+Before the traffic window, an isolated readback resolves the regular native
+package and extension only inside the overlay's site-packages. Both that lookup
+and each smoke use `env -i` with explicit PATH/HOME/library path and the overlay
+`python -I -B`; inherited PYTHONPATH/PYTHONHOME are absent. The worker's
+native_dir is this checked site-packages path. Missing or escaping modules
+refuse with teardown, and swctl-python.json retains the readback.
+Only install/uninstall/probe receive `--state-dir`; doctor retains its read-only CLI arguments. The native probe follows. Uninstall and independent postflight still run on any
+later failure. The pre-smoke rows are in swctl-doctor-before.json; the traffic
+window is swctl-doctor.json. Contracted native.stats UNKNOWN and other allowed
+uncertainties remain explicit; they are never relabelled PASS. A refused or
+partial install is retained for exact CLI reconciliation, not uninstalled.
+
+For a scoped CPU-only qualification, `swctl.absent_gpu_hosts` may explicitly
+list the single client host ID whose NVIDIA hardware is known absent, for
+example `"absent_gpu_hosts":["m01"]`. Unknown/non-client IDs and duplicates
+refuse before install. Only that host's `lmcache.shape` row with exactly
+`UNKNOWN/GPU_OBSERVATION_UNKNOWN` is admitted; other UNKNOWNs and shape FAILs
+remain refused. Both saved doctor envelopes keep the original UNKNOWN: this
+never qualifies GPU visibility or a fully healthy KV profile. Without the
+explicit declaration, GPU expectations are unchanged.
+
+Outputs include the original `cloud-kv.jsonl`, `swctl-*.json`, the private frozen
+`swctl-cluster.yaml` and `swctl-state/`, plus helper and postflight receipts.
+An unconfirmed uninstall or dirty postflight fails the whole direct run. Data
+paths remain governed by the CLI's stopped-snapshot preservation contract.

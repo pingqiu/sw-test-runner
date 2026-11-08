@@ -1,0 +1,202 @@
+{
+  "source": {
+    "run": "m2r9-20261108-01",
+    "doctor_sha256": "6b62cab95e605c75dc6f0545491a5b8426875d8c5849faf67a7415e9030fc341",
+    "projection": "only envelope verdict and item id/host/status/code; inventory host id/roles"
+  },
+  "doctor": {
+    "schema": "swctl.result/v1",
+    "command": "doctor",
+    "cluster": "m2a-final20261107-01",
+    "status": "UNKNOWN",
+    "partial": false,
+    "items": [
+      {
+        "id": "rdma.device",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rdma.port_state",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rdma.gid",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "cfg.nonpublic",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "cfg.nonpublic",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "cfg.nonpublic",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "push.listener",
+        "host": "m01",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "dc.ready",
+        "host": "m01",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "dc.route",
+        "host": "m01",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "kv.budget_refusals",
+        "host": "m01",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "rotation.headroom",
+        "host": "m01",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "rotation.activity",
+        "host": "m01",
+        "status": "NOT_PROVEN",
+        "code": "ROTATION_NOT_OBSERVED"
+      },
+      {
+        "id": "native.stats",
+        "host": "m01",
+        "status": "UNKNOWN",
+        "code": "NATIVE_STATS_ABSENT"
+      },
+      {
+        "id": "lmcache.shape",
+        "host": "m01",
+        "status": "UNKNOWN",
+        "code": "GPU_OBSERVATION_UNKNOWN"
+      },
+      {
+        "id": "version.pins",
+        "host": "m01",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rdma.device",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rdma.port_state",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rdma.gid",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "cfg.nonpublic",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "push.listener",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "dc.ready",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "dc.route",
+        "host": "m02",
+        "status": "NOT_PROVEN",
+        "code": "KV_COUNTER_NO_TRAFFIC"
+      },
+      {
+        "id": "kv.budget_refusals",
+        "host": "m02",
+        "status": "NOT_PROVEN",
+        "code": "KV_COUNTER_NO_TRAFFIC"
+      },
+      {
+        "id": "rotation.headroom",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      },
+      {
+        "id": "rotation.activity",
+        "host": "m02",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "native.stats",
+        "host": "m02",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "lmcache.shape",
+        "host": "m02",
+        "status": "NOT_APPLICABLE",
+        "code": "MODE_OFF"
+      },
+      {
+        "id": "version.pins",
+        "host": "m02",
+        "status": "PASS",
+        "code": "OK"
+      }
+    ]
+  },
+  "inventory": {
+    "hosts": [
+      {
+        "id": "m01",
+        "roles": [
+          "master",
+          "filer",
+          "client"
+        ]
+      },
+      {
+        "id": "m02",
+        "roles": [
+          "volume"
+        ]
+      }
+    ]
+  }
+}
