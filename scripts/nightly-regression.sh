@@ -54,11 +54,16 @@ finish() {
 trap finish EXIT; trap 'exit 143' TERM INT
 stage=ENVIRONMENT; echo ENVIRONMENT > "$out/CLASSIFICATION"
 sha256sum "$root/inbox/mono.tar.gz" "$root/inbox/runner.tar" "$root/inbox/native.tar" > "$out/sources.sha256" 2> "$out/input-preflight.stderr" || exit 78
+disk_max_pct=${NIGHTLY_DISK_MAX_PCT-85}
+if [[ ! $disk_max_pct =~ ^([1-9][0-9]?|100)$ ]]; then
+  echo 'NIGHTLY_DISK_MAX_PCT must be an integer from 1 to 100' > "$out/disk-preflight.stderr"; exit 78
+fi
+printf '%s\n' "$disk_max_pct" > "$out/disk-max-pct"
 docker_root=$(timeout -k5 30 docker info --format '{{.DockerRootDir}}' 2>"$out/disk-preflight.stderr") || exit 78
 printf '%s\n' "$docker_root" > "$out/docker-root"
 [[ $docker_root == /* ]] || exit 78
 timeout -k5 30 df -P -- /data/nvme "$docker_root" > "$out/disk-preflight.txt" 2>> "$out/disk-preflight.stderr" || exit 78
-awk 'NR>1 {n++; if ($5 !~ /^[0-9]+%$/ || $5+0>85) bad=1} END {exit !(n==2 && !bad)}' "$out/disk-preflight.txt" || exit 78
+awk -v limit="$disk_max_pct" 'NR>1 {n++; if ($5 !~ /^[0-9]+%$/ || $5+0>limit) bad=1} END {exit !(n==2 && !bad)}' "$out/disk-preflight.txt" || exit 78
 timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2> "$out/image-inspect.stderr" || exit 78
 if [[ ! $image =~ ^sha256:[0-9a-f]{64}$ ]] || ! awk -v expected="$image" 'NR==1 && $0==expected {match_count++} END {exit !(NR==1 && match_count==1)}' "$out/image-id"; then
   echo 'Expected exactly one image ID matching the frozen full sha256 digest' >> "$out/image-inspect.stderr"
