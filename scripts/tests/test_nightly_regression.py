@@ -86,7 +86,11 @@ elif tool=='docker':
   print('/fixture-docker-root')
  elif args[:2]==['image','inspect']:
   if os.environ.get('MODE')=='image-missing':print('No such image: qualified-local-fixture',file=sys.stderr);sys.exit(1)
-  print('sha256:qualified-local-fixture')
+  mode=os.environ.get('MODE')
+  image='sha256:'+'b'*64
+  if mode=='image-wrong-id':image='sha256:'+'c'*64
+  if mode!='image-empty':print(image)
+  if mode=='image-multiple':print(image)
  elif args[0]=='run':names.append(args[args.index('--name')+1])
  elif args[0]=='rm':
   if os.environ.get('MODE')=='rm-fails':sys.exit(23)
@@ -124,7 +128,7 @@ class NightlyCommand(unittest.TestCase):
         inbox.mkdir()
         (inbox / 'input.json').write_text(json.dumps(dict(
             mono='a' * 40, night=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'),
-            image='qualified-local-fixture')))
+            image='sha256:' + 'b' * 64)))
         (inbox / 'native.tar').write_bytes(b'bridge fixture')
         for name in ('mono.tar.gz', 'runner.tar'):
             (inbox / name).write_bytes(b'fixture archive')
@@ -173,6 +177,41 @@ class NightlyCommand(unittest.TestCase):
         calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
         self.assertFalse(any(c[0] in ('make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
         self.assertFalse((self.root / 'work').exists())
+
+    def assert_environment_admission(self, result, diagnostic):
+        self.assertEqual(result.returncode, 78, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
+        self.assertEqual((out / 'EXIT').read_text().strip(), '78')
+        self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
+        self.assertTrue((out / diagnostic).read_text().strip())
+        calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
+        self.assertFalse(any(c[0] in ('tar', 'make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
+        self.assertFalse((self.root / 'work').exists())
+
+    def test_missing_runner_archive_is_environment(self):
+        (self.root / 'inbox/runner.tar').unlink()
+        self.assert_environment_admission(self.run_night(), 'input-preflight.stderr')
+
+    def test_missing_native_archive_is_environment(self):
+        (self.root / 'inbox/native.tar').unlink()
+        self.assert_environment_admission(self.run_night(), 'input-preflight.stderr')
+
+    def test_wrong_image_id_is_environment(self):
+        self.assert_environment_admission(self.run_night('image-wrong-id'), 'image-inspect.stderr')
+
+    def test_empty_image_id_is_environment(self):
+        self.assert_environment_admission(self.run_night('image-empty'), 'image-inspect.stderr')
+
+    def test_duplicate_image_ids_are_environment(self):
+        self.assert_environment_admission(self.run_night('image-multiple'), 'image-inspect.stderr')
+
+    def test_image_alias_is_not_a_frozen_digest(self):
+        path = self.root / 'inbox/input.json'
+        doc = json.loads(path.read_text())
+        doc['image'] = 'qualified:latest'
+        path.write_text(json.dumps(doc))
+        self.assert_environment_admission(self.run_night(), 'image-inspect.stderr')
 
     def test_failed_disk_measurement_is_an_environment_refusal(self):
         result = self.run_night('df-fails')
