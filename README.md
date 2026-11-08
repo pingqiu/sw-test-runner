@@ -402,6 +402,15 @@ window is swctl-doctor.json. Contracted native.stats UNKNOWN and other allowed
 uncertainties remain explicit; they are never relabelled PASS. A refused or
 partial install is retained for exact CLI reconciliation, not uninstalled.
 
+For a scoped CPU-only qualification, `swctl.absent_gpu_hosts` may explicitly
+list the single client host ID whose NVIDIA hardware is known absent, for
+example `"absent_gpu_hosts":["m01"]`. Unknown/non-client IDs and duplicates
+refuse before install. Only that host's `lmcache.shape` row with exactly
+`UNKNOWN/GPU_OBSERVATION_UNKNOWN` is admitted; other UNKNOWNs and shape FAILs
+remain refused. Both saved doctor envelopes keep the original UNKNOWN: this
+never qualifies GPU visibility or a fully healthy KV profile. Without the
+explicit declaration, GPU expectations are unchanged.
+
 Outputs include the original `cloud-kv.jsonl`, `swctl-*.json`, the private frozen
 `swctl-cluster.yaml` and `swctl-state/`, plus helper and postflight receipts.
 An unconfirmed uninstall or dirty postflight fails the whole direct run. Data

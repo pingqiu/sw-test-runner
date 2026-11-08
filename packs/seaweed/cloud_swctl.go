@@ -22,9 +22,10 @@ import (
 // SWCtlConfig selects only the existing KV smoke; it adds no workload or oracle.
 // Paths are controller-local. Secrets are resolved solely by the pinned CLI.
 type SWCtlConfig struct {
-	Binary       CloudFile `json:"binary"`
-	Cluster      string    `json:"cluster"`
-	ArtifactsDir string    `json:"artifacts_dir"`
+	Binary         CloudFile `json:"binary"`
+	Cluster        string    `json:"cluster"`
+	ArtifactsDir   string    `json:"artifacts_dir"`
+	AbsentGPUHosts []string  `json:"absent_gpu_hosts,omitempty"`
 }
 type swctlReply struct {
 	Schema, Command, Cluster, Status string
@@ -255,9 +256,16 @@ func bindSWCtl(d inventory.Document, c CloudConfig) (swctlCluster, inventory.Hos
 	if client.ID == "" {
 		return refuse()
 	}
+	seen := map[string]bool{}
+	for _, host := range c.SWCtl.AbsentGPUHosts {
+		if host != client.ID || seen[host] {
+			return refuse()
+		}
+		seen[host] = true
+	}
 	return profile, client, nil
 }
-func allowedSmokeDoctor(r swctlReply, d inventory.Document, p swctlCluster) bool {
+func allowedSmokeDoctor(r swctlReply, d inventory.Document, p swctlCluster, absentGPUHosts ...string) bool {
 	if len(r.Items) == 0 || r.Partial || (r.Status != "PASS" && r.Status != "UNKNOWN" && r.Status != "NOT_PROVEN" && r.Status != "WARN") {
 		return false
 	}
@@ -313,6 +321,9 @@ func allowedSmokeDoctor(r swctlReply, d inventory.Document, p swctlCluster) bool
 		}
 		if i.Status == "PASS" {
 			continue
+		}
+		if i.ID == "lmcache.shape" && i.Status == "UNKNOWN" && i.Code == "GPU_OBSERVATION_UNKNOWN" && contains(absentGPUHosts, i.Host) {
+			continue // Retain UNKNOWN: this declaration never proves GPU qualification.
 		}
 		if i.ID == "native.stats" && i.Status == "UNKNOWN" && i.Code == "NATIVE_STATS_ABSENT" {
 			continue
@@ -433,7 +444,7 @@ func runSWCtlSmoke(ctx context.Context, d inventory.Document, c CloudConfig) (ro
 		}
 	}
 	doctor, exit, e := s.call(ctx, c, "doctor")
-	if e != nil || exit != 0 && exit != 2 && exit != 3 || doctor.Cluster != profile.Name || !allowedSmokeDoctor(doctor, d, profile) {
+	if e != nil || exit != 0 && exit != 2 && exit != 3 || doctor.Cluster != profile.Name || !allowedSmokeDoctor(doctor, d, profile, s.AbsentGPUHosts...) {
 		return "", errors.Join(e, errors.New("unexpected swctl doctor row"))
 	}
 	if e = os.Rename(filepath.Join(c.Output, "swctl-doctor.json"), filepath.Join(c.Output, "swctl-doctor-before.json")); e != nil {
@@ -456,7 +467,7 @@ func runSWCtlSmoke(ctx context.Context, d inventory.Document, c CloudConfig) (ro
 	rows = filepath.Join(c.Output, "cloud-kv.jsonl")
 	failure = swctlSmokeWindow(ctx, func(window context.Context) error {
 		r, exit, err := s.call(window, c, "doctor")
-		if err != nil || exit != 0 && exit != 2 && exit != 3 || r.Cluster != profile.Name || !allowedSmokeDoctor(r, d, profile) {
+		if err != nil || exit != 0 && exit != 2 && exit != 3 || r.Cluster != profile.Name || !allowedSmokeDoctor(r, d, profile, s.AbsentGPUHosts...) {
 			return errors.Join(err, errors.New("unexpected traffic-window doctor row"))
 		}
 		for _, item := range r.Items {
@@ -500,7 +511,7 @@ func swctlPostflight(ctx context.Context, d inventory.Document, c CloudConfig, c
 			ports = append(ports, fmt.Sprint(s.Port))
 		}
 		if len(ports) > 0 {
-			command += "printf '%s\\n' \"$sockets\" | grep -E ':(" + strings.Join(ports, "|") + ")[[:space:]]'; rc=$?; test \"$rc\" = 1 || exit 1; "
+			command += "rc=0; printf '%s\\n' \"$sockets\" | grep -E ':(" + strings.Join(ports, "|") + ")[[:space:]]' || rc=$?; test \"$rc\" = 1 || exit 1; "
 		}
 		command += "echo 'owned units=0 ports=0'"
 		_, e := cloudStep(ctx, n, c.Output, "swctl-postflight-"+h.ID+".json", "postflight-"+h.ID, 30, command)
