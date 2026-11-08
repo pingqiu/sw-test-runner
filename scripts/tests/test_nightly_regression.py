@@ -66,6 +66,7 @@ if tool=='df':
  for name in args[-2:]:
   full=(os.environ.get('MODE')=='disk-nvme-full' and name=='/data/nvme') or (os.environ.get('MODE')=='disk-docker-full' and name=='/fixture-docker-root')
   used=86 if full else (85 if os.environ.get('MODE')=='boundary-85' else 50)
+  used=os.environ.get('FAKE_NVME_PCT' if name=='/data/nvme' else 'FAKE_DOCKER_PCT',used)
   print(f'fixture 100 50 50 {used}% {name}')
 elif tool=='jq':print(json.loads(pathlib.Path(args[-1]).read_text())[args[-2][1:]])
 elif tool=='timeout':os.execv('/usr/bin/timeout',sys.argv)
@@ -133,6 +134,8 @@ class NightlyCommand(unittest.TestCase):
         for name in ('mono.tar.gz', 'runner.tar'):
             (inbox / name).write_bytes(b'fixture archive')
         self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'], FAKE_STATE=str(self.root))
+        for name in ('NIGHTLY_DISK_MAX_PCT', 'FAKE_NVME_PCT', 'FAKE_DOCKER_PCT'):
+            self.env.pop(name, None)
 
     def run_night(self, mode=''):
         return subprocess.run(['bash', str(SCRIPT.with_suffix('.sh')), str(self.root)],
@@ -165,6 +168,34 @@ class NightlyCommand(unittest.TestCase):
         self.assertEqual((out / 'CLASSIFICATION').read_text().strip(), 'ENVIRONMENT')
         self.assertEqual((out / 'TABLE.md').read_text().count('| NOT_RUN |'), 11)
         self.assertIn('Docker root unavailable', (out / 'disk-preflight.stderr').read_text())
+
+    def test_disk_override_accepts_both_disks_at_90(self):
+        self.env.update(NIGHTLY_DISK_MAX_PCT='90', FAKE_NVME_PCT='90', FAKE_DOCKER_PCT='90')
+        result = self.run_night()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        out = self.root / ('results/' + 'a' * 40)
+        self.assertEqual((out / 'TABLE.md').read_text().count('| PASS |'), 11)
+        self.assertEqual((out / 'disk-max-pct').read_text().strip(), '90')
+
+    def test_disk_override_still_refuses_data_disk_above_90(self):
+        self.env.update(NIGHTLY_DISK_MAX_PCT='90', FAKE_NVME_PCT='91')
+        self.assert_environment_admission(self.run_night(), 'disk-preflight.txt')
+
+    def test_disk_override_still_refuses_docker_disk_above_90(self):
+        self.env.update(NIGHTLY_DISK_MAX_PCT='90', FAKE_DOCKER_PCT='91')
+        self.assert_environment_admission(self.run_night(), 'disk-preflight.txt')
+
+    def test_disk_override_rejects_non_integer(self):
+        self.env['NIGHTLY_DISK_MAX_PCT'] = 'not-a-number'
+        self.assert_environment_admission(self.run_night(), 'disk-preflight.stderr')
+
+    def test_disk_override_rejects_above_100(self):
+        self.env['NIGHTLY_DISK_MAX_PCT'] = '101'
+        self.assert_environment_admission(self.run_night(), 'disk-preflight.stderr')
+
+    def test_disk_override_rejects_empty(self):
+        self.env['NIGHTLY_DISK_MAX_PCT'] = ''
+        self.assert_environment_admission(self.run_night(), 'disk-preflight.stderr')
 
     def test_missing_qualified_image_is_environment_and_never_builds(self):
         result = self.run_night('image-missing')
