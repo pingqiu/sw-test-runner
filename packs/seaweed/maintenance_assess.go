@@ -42,6 +42,7 @@ type maintenanceData struct {
 }
 type maintenanceEvidence struct {
 	Task                                          string
+	RequiredFaults                                int
 	Expected                                      maintenanceSubject
 	Job, Attempt, Owner, Boot                     string
 	Flights                                       []maintenanceFlight
@@ -66,7 +67,7 @@ func sameMaintenanceSubject(a, b maintenanceSubject) bool {
 }
 
 func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
-	v := maintenanceVerdict{Data: "UNKNOWN", Task: "UNKNOWN", Coverage: "NOT_COVERED", TotalFaults: len(e.Faults), Refusal: e.Refusal}
+	v := maintenanceVerdict{Data: "UNKNOWN", Task: "UNKNOWN", Coverage: "NOT_COVERED", TotalFaults: e.RequiredFaults, Refusal: e.Refusal}
 	if len(e.ExpectedData) == 0 {
 		return v
 	}
@@ -172,7 +173,7 @@ func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
 			}
 		}
 	}
-	if v.CoveredFaults > 0 {
+	if v.TotalFaults > 0 && len(e.Faults) == v.TotalFaults && v.CoveredFaults == v.TotalFaults {
 		if !refused {
 			v.Task = "RECOVERED"
 		}

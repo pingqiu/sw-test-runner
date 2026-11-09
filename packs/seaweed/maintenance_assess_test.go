@@ -9,7 +9,30 @@ import (
 func maintenanceExample() maintenanceEvidence {
 	s := maintenanceSubject{Collection: "run-owned", VID: "7", EncodeNS: "123", Generation: 2, Shards: []int{0, 1, 2}}
 	d := maintenanceData{Key: "key", ExpectedSHA256: strings.Repeat("a", 64), ActualSHA256: strings.Repeat("a", 64), ExpectedLength: 3, ActualLength: 3, Observed: true, Status: 200}
-	return maintenanceEvidence{Task: "ec_repair", Expected: s, Job: "job", Attempt: "attempt1", Owner: "meta/pid/start", Boot: "boot", Terminal: "succeeded", EffectsKnown: true, PostOwners: true, GenerationConverged: true, Data: []maintenanceData{d}, ExpectedData: []maintenanceData{d}, Flights: []maintenanceFlight{{Subject: s, Job: "job", Attempt: "attempt1", Owner: "meta/pid/start", Boot: "boot", Operation: "copy/source-shard-0", State: "in_flight", Bytes: 1024, Begin: maintenanceBound{10, 11}, End: maintenanceBound{40, 41}}}, Faults: []maintenanceFault{{Subject: s, Owner: "meta/pid/start", Boot: "boot", Before: maintenanceBound{20, 21}, Gone: maintenanceBound{30, 31}, Missing: []int{0, 1}, Confirmed: true}}}
+	return maintenanceEvidence{RequiredFaults: 1, Task: "ec_repair", Expected: s, Job: "job", Attempt: "attempt1", Owner: "meta/pid/start", Boot: "boot", Terminal: "succeeded", EffectsKnown: true, PostOwners: true, GenerationConverged: true, Data: []maintenanceData{d}, ExpectedData: []maintenanceData{d}, Flights: []maintenanceFlight{{Subject: s, Job: "job", Attempt: "attempt1", Owner: "meta/pid/start", Boot: "boot", Operation: "copy/source-shard-0", State: "in_flight", Bytes: 1024, Begin: maintenanceBound{10, 11}, End: maintenanceBound{40, 41}}}, Faults: []maintenanceFault{{Subject: s, Owner: "meta/pid/start", Boot: "boot", Before: maintenanceBound{20, 21}, Gone: maintenanceBound{30, 31}, Missing: []int{0, 1}, Confirmed: true}}}
+}
+
+func TestMaintenanceEveryScheduledFaultMustBeCovered(t *testing.T) {
+	for _, covered := range []int{0, 1, 2} {
+		e := maintenanceExample()
+		e.RequiredFaults = 2
+		e.Faults = append(e.Faults, e.Faults[0])
+		for i := covered; i < len(e.Faults); i++ {
+			e.Faults[i].Confirmed = false
+		}
+		v := assessMaintenance(e)
+		if v.CoveredFaults != covered || v.TotalFaults != 2 || (v.Coverage == "COVERED") != (covered == 2) || (v.Task == "RECOVERED") != (covered == 2) {
+			t.Fatalf("%d of 2 required faults: %+v", covered, v)
+		}
+	}
+	for _, observed := range []int{0, 1} {
+		e := maintenanceExample()
+		e.RequiredFaults = 2
+		e.Faults = e.Faults[:observed]
+		if v := assessMaintenance(e); v.Coverage == "COVERED" || v.Task == "RECOVERED" {
+			t.Fatalf("missing required fault receipt: %+v", v)
+		}
+	}
 }
 
 func TestMaintenanceCoverageRequiresOwnActualWorkAndConservativeFaultBounds(t *testing.T) {

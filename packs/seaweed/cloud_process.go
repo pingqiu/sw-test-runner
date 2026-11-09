@@ -188,7 +188,7 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 				}
 			}
 			var outcome *MaintenanceOutcomeError
-			noCandidate := errors.As(failure, &outcome) && outcome.Status == "NOT_COVERED" && !maintenance.retain
+			noCandidate := errors.As(failure, &outcome) && outcome.Status == "NOT_COVERED" && outcome.Data == "PASS" && !maintenance.retain
 			if noCandidate && cleanupErr == nil {
 				maintenanceRow["status"] = "NOT_COVERED"
 				maintenanceRow["reason"] = "NO_EC_CANDIDATES"
@@ -257,6 +257,11 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	r.seedCheck = func(ctx context.Context, seeds map[string]string) error { return processCopies(ctx, r, hosts, seeds) }
 	if maintenance != nil {
 		if e = maintenance.setup(phaseCtx, phase); e != nil {
+			var outcome *MaintenanceOutcomeError
+			if errors.As(e, &outcome) && outcome.Data != "" {
+				maintenanceRow["data"] = outcome.Data
+				maintenanceRow["status"] = outcome.Status
+			}
 			return result, e
 		}
 		setupCancel()

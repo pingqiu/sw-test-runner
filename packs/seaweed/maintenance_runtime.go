@@ -392,7 +392,7 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 			return err
 		}
 		if detected.Count == 0 && detected.Status == "NO_EC_CANDIDATES" {
-			return &MaintenanceOutcomeError{Status: "NOT_COVERED", Cause: errors.New("NO_EC_CANDIDATES: real detector found zero candidates")}
+			return m.noCandidates(ctx)
 		}
 		if detected.Count != 1 || detected.Status != "CANDIDATE_BOUND" {
 			return errors.New("EC candidate admission unreadable")
@@ -419,6 +419,28 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 		return err
 	}
 	return m.r.save("maintenance-manifest.json", m.manifest)
+}
+
+func (m *maintenanceRuntime) noCandidates(ctx context.Context) error {
+	// Detection is read-only, but the fixture already contains ACKed writes and
+	// deletes. No work coverage does not waive the independent data oracle.
+	m.retain = true
+	readCtx, cancel, err := m.phase(ctx, 100*time.Second)
+	if err != nil {
+		return &MaintenanceOutcomeError{Status: "UNKNOWN", Data: "UNKNOWN", Cause: err}
+	}
+	defer cancel()
+	e, readErr := m.readData(readCtx)
+	v := assessMaintenance(e)
+	saveErr := errors.Join(m.r.save("maintenance-no-candidates-evidence.json", e), m.r.save("maintenance-no-candidates-verdict.json", v))
+	status := "UNKNOWN"
+	if v.Data == "FAIL" {
+		status = "FAIL"
+	} else if v.Data == "PASS" && readErr == nil && saveErr == nil {
+		status = "NOT_COVERED"
+		m.retain = false
+	}
+	return &MaintenanceOutcomeError{Status: status, Data: v.Data, Cause: errors.Join(errors.New("NO_EC_CANDIDATES: real detector found zero candidates"), readErr, saveErr)}
 }
 
 func (m *maintenanceRuntime) startPlugins(ctx context.Context) error {

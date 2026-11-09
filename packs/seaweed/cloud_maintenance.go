@@ -21,6 +21,7 @@ func (e *MaintenanceEnvironmentError) Error() string { return "ENVIRONMENT/NOT_R
 
 type MaintenanceOutcomeError struct {
 	Status string
+	Data   string
 	Cause  error
 }
 

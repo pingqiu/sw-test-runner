@@ -27,6 +27,10 @@ actual license id, validity, capacity and expiry in maintenance-master-license.j
 it never injects license_valid or reads the signing key. Actual invalid licenses
 remain ENVIRONMENT/NOT_RUN only after verified cleanup. A zero-candidate
 detector response is preserved as NO_EC_CANDIDATES / NOT_COVERED, never PASS.
+Before that outcome can permit fixture removal, a bounded independent readback
+must prove every ACKed live/deleted object. Loss, wrong bytes or resurrection
+is FAIL; unreadable/incomplete data or exhausted admission retains the fixture
+and backstops as UNKNOWN. No-candidate readback earns no task/fault coverage.
 C3/C6 remain NOT_RUN; C5 stays deferred.
 
 EC adds fourteen run-owned SSD volume processes (seven per physical host),
@@ -38,11 +42,12 @@ The actual erasure_coding worker serves repair and vacuum; both automatic
 schedulers are disabled before seeding and exactly one bound proposal is
 dispatched. Filer membership must be observed before config persistence.
 
-Fixture-only configuration: the disposable EC master's -deletionRetention=-1s
-disables the otherwise one-hour trial retention floor, so fresh acknowledged
-tombstones can be vacuumed inside the existing timebox. This is recorded in
-the command evidence; it changes neither licenses nor fault timing. Live and
-deleted bytes are checked after encode and maintenance.
+Non-default fixture configuration: the disposable EC master uses supported
+-deletionRetention=-1s. It disables the trial retention floor but does not
+guarantee vacuum candidates: the recorded real vacuum detection was skipped
+by its heartbeat condition, not the one-hour floor, and stays NOT_COVERED.
+Command evidence labels these runs non-default; licenses and fault timing are
+unchanged. Live and deleted bytes are checked even when detection finds no work.
 
 Observation choice: reuse the product's read-only GetMasterConfiguration,
 VolumeList and VolumeEcShardsInfo RPCs (field numbers pinned to mono 49daaba1),
@@ -57,6 +62,9 @@ EC work coverage additionally joins the owned worker PID/start/boot, actual
 job/request/attempt and VID/collection to one scratch shard file/inode whose
 bytes increase across the existing fault bracket. Switching files or workers,
 queued/no-op jobs, stale generations and foreign requests cannot earn coverage.
+Every required scheduled fault must be covered: C1 requires one, C2 six and C4
+two. Partial coverage or an omitted fault receipt stays NOT_COVERED; one of two
+cannot make a cell PASS. Data FAIL and unknown effects keep their precedence.
 Vacuum also binds its staged VIF's encode identity; repair binds the proposal's
 generation. Short jobs can run successfully and still be NOT_COVERED.
 

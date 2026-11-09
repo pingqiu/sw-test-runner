@@ -378,7 +378,8 @@ func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 	defer func() { chaos2Settle, chaos2Down, chaosBase = oldSettle, oldDown, oldBase }()
 	for _, tc := range []struct{ task, scenario, variant, status string }{
 		{"volume.balance", "C1-single-kill", "", "PASS"},
-		{"volume.balance", "C2-rolling", "", "PASS"},
+		// The modeled copy touches vol1/vol3, not all six rolling victims.
+		{"volume.balance", "C2-rolling", "", "NOT_COVERED"},
 		{"volume.fix.replication", "C1-single-kill", "", "PASS"},
 		{"volume.fix.replication", "C4-meta-restart", "", "PASS"},
 		{"volume.balance", "C1-single-kill", "queued", "NOT_COVERED"},
@@ -438,6 +439,9 @@ func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 			json.Unmarshal(raw, &row)
 			if row["status"] != tc.status {
 				t.Fatalf("wanted %s got %s; caller=%v", tc.status, raw, err)
+			}
+			if tc.scenario == "C2-rolling" && (row["total_faults"] != float64(6) || row["coverage"] != "NOT_COVERED") {
+				t.Fatalf("partial rolling coverage became a pass: %s", raw)
 			}
 			if f.arms != 2 || f.cleanupCalls != 2 {
 				t.Fatalf("lifecycle calls arm=%d cleanup=%d", f.arms, f.cleanupCalls)

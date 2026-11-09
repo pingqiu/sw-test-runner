@@ -147,12 +147,20 @@ func maintenanceReplicaPost(before, after map[string]maintenanceScope, task stri
 	return
 }
 
-func (m *maintenanceRuntime) collect(ctx context.Context, checkLock bool) (maintenanceVerdict, error) {
+func (m *maintenanceRuntime) readData(ctx context.Context) (maintenanceEvidence, error) {
 	e := maintenanceEvidence{Task: m.c.MaintenanceTask, Expected: m.subject}
 	for _, o := range m.manifest.Objects {
 		e.ExpectedData = append(e.ExpectedData, maintenanceData{Key: o.Key, ExpectedSHA256: o.SHA, ExpectedLength: o.Length, Deleted: o.Deleted})
 	}
 	readErr := m.leaf(ctx, "meta", "readback", 90, nil, &e.Data)
+	return e, readErr
+}
+
+func (m *maintenanceRuntime) collect(ctx context.Context, checkLock bool) (maintenanceVerdict, error) {
+	e, readErr := m.readData(ctx)
+	if len(m.c.ClusterChaosCases) == 1 {
+		e.RequiredFaults = map[string]int{"C1-single-kill": 1, "C2-rolling": 6, "C4-meta-restart": 2}[m.c.ClusterChaosCases[0]]
+	}
 	var waitErr error
 	if m.done != nil {
 		select {
