@@ -440,6 +440,12 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		}
 		defer n.Close()
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
+		if isMountCase(c.ReadCase) && len(h.Services) == 0 {
+			// The mount worker runs as a step, never a unit, so a client host has
+			// no run unit and journalctl -u refuses a glob that matches none.
+			// The worker's logs are in its run root.
+			command = ":"
+		}
 		if c.ECStage1 || c.MasterWrites {
 			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
 		}
