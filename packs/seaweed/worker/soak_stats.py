@@ -62,6 +62,113 @@ def proc_memory(status='/proc/self/status'):
     return out
 
 
+# Stage 3 host-side views of one process (the volume), each None when it cannot be read. The sampler in
+# soak_fault.py joins them on pid/starttime; the assessor classifies them. No view is ever guessed as 0.
+
+def fd_view(pid):
+    """(open fd count, sizes of the regular *.dat files it holds open), or None."""
+    base = Path('/proc/%d/fd' % pid)
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return None
+    dats = []
+    for name in names:
+        try:
+            target = os.readlink(base / name)
+            if target.endswith('.dat'):
+                dats.append(os.stat(base / name).st_size)
+        except OSError:
+            continue  # a descriptor closed between listing and reading
+    return len(names), sorted(dats)
+
+
+def limits(pid):
+    """{'memlock': [soft, hard], 'nofile': [soft, hard]} from /proc/pid/limits; unlimited is -1. None if unread."""
+    want = {'Max locked memory': 'memlock', 'Max open files': 'nofile'}
+    try:
+        lines = Path('/proc/%d/limits' % pid).read_text().splitlines()
+    except OSError:
+        return None
+    out = {}
+    for line in lines:
+        for label, key in want.items():
+            if line.startswith(label):
+                soft, hard = line[len(label):].split()[:2]
+                out[key] = [-1 if v == 'unlimited' else int(v) for v in (soft, hard)]
+    return out if len(out) == 2 else None
+
+
+def rdma_rows(kind, run):
+    """`rdma -j resource show <qp|mr>` as a list of row dicts, or None when the tool fails or the shape differs."""
+    try:
+        done = run(['rdma', '-j', 'resource', 'show', kind], capture_output=True, text=True, timeout=10)
+        rows = json.loads(done.stdout) if done.returncode == 0 else None
+    except Exception:  # missing tool, timeout, bad JSON: the view is unread
+        return None
+    if isinstance(rows, dict):  # some iproute2 versions wrap the table
+        rows = rows.get(kind)
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return None
+    return rows
+
+
+def rdma_view(pid, run=None):
+    """QPs and MRs owned by pid (rows carrying that pid): {'qp': n, 'mr': n, 'mr_lens': [...]}, or None."""
+    import subprocess
+    run = run or subprocess.run
+    qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
+    if qp is None or mr is None:
+        return None
+    mine = lambda rows: [r for r in rows if r.get('pid') == pid]
+    lens = [r.get('mrlen') for r in mine(mr)]
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in lens):
+        return None
+    return dict(qp=len(mine(qp)), mr=len(lens), mr_lens=sorted(lens))
+
+
+def scrape(url, series, timeout=3):
+    """The configured Prometheus series: {key: summed value}. A series is a bare metric name (every label set
+    summed) or one exact `name{labels}` token. A key whose series is absent is absent, never 0. None if unread."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            text = response.read(4 << 20).decode()
+    except Exception:
+        return None
+    out = {}
+    for line in text.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        token, _, rest = line.partition(' ')
+        name = token.split('{', 1)[0]
+        try:
+            value = float(rest.split()[0])
+        except (IndexError, ValueError):
+            continue
+        for key, want in series.items():
+            if token == want or ('{' not in want and name == want):
+                out[key] = out.get(key, 0.0) + value
+    return out
+
+
+def port_view(sys_root, device, port):
+    """(state text, link_downed counter) of one RDMA port, or None."""
+    base = Path(sys_root) / 'class' / 'infiniband' / device / 'ports' / str(port)
+    try:
+        return (base / 'state').read_text().strip(), int((base / 'counters' / 'link_downed').read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def statfs_free(mount):
+    try:
+        s = os.statvfs(mount)
+    except OSError:
+        return None
+    return s.f_bavail * s.f_frsize
+
+
 def native_stats(conn, root, stop, horizon_s, wait_s=60):
     """Write one stats row per TICK_S from the load start until horizon_s
     (duration + quiescence). Returns early when stop is set. Never unbounded:

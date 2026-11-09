@@ -12,7 +12,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
 from soak_native_worker import k8_refusal_misses, payload
-from soak_oracle import Oracle
+from soak_oracle import OP_LIMIT_S, Oracle, PutFaultWindow
 from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
 
@@ -554,6 +554,391 @@ def assess(c):
                 misses_undecidable=undecidable)
 
 
+# ---- Stage 3: one RDMA/resource fault row (R0, F1-F7). PASS needs every criterion PASS; a missing witness is
+# NOT_COVERED and never PASS; any FAIL fails the row. Each criterion recomputes from the run's own evidence.
+
+ROW_CRITERIA = ('bytes', 'write_contract', 'audit', 'failure_mode', 'recovery', 'resources', 'causal')  # Go's rowCriteria
+ROW_KINDS = {'control': 'R0', 'volume_kill_io': 'F1', 'client_kill_put': 'F2', 'link_flap': 'F3', 'conn_kill': 'F4',
+             'mr_pressure': 'F5', 'disk_full': 'F6', 'fd_exhaust': 'F7'}
+RECOVERY_S = {'volume_kill_io': 60, 'client_kill_put': 60}  # frozen by the plan; every other row 30 s
+SET_EXTRA_S = 9  # a PUT's terminal includes the ACK metadata read (8 s urlopen bound) after its native completion
+RESOURCES = ('fds', 'qp', 'mr', 'vm_pin_kB')
+PAGE = 4096
+
+
+def rank(outcomes):
+    """FAIL over NOT_COVERED over PASS."""
+    return 'FAIL' if 'FAIL' in outcomes else 'NOT_COVERED' if 'NOT_COVERED' in outcomes else 'PASS'
+
+
+def series(samples, key, ident, lo=-math.inf, hi=math.inf):
+    """(mono, value) of one metric over the samples of one volume identity, inside [lo, hi] (M02 clock)."""
+    return [(s['mono'], s['metrics'][key]) for s in samples if s.get('identity') == ident and lo <= s['mono'] <= hi
+            and isinstance(s.get('metrics'), dict) and key in s['metrics']]
+
+
+def counter_rose(samples, key, ident, start, end, after=None):
+    """True when the counter's value at some sample inside (start, end] exceeds its last value at or before start;
+    None when the metric was not observed on both sides (NOT_COVERED)."""
+    before = series(samples, key, ident, hi=start)
+    inside = series(samples, key, ident, lo=after if after is not None else start, hi=end)
+    inside = [(t, v) for t, v in inside if t > start]
+    if not before or not inside:
+        return None
+    return max(v for _, v in inside) > before[-1][1]
+
+
+def assess_row(c):
+    root, row = Path(c['root']), c['fault_row']
+    kind, episode = row['kind'], row['episode']
+    if kind not in ROW_KINDS or row['recovery_s'] != RECOVERY_S.get(kind, 30):
+        raise ValueError('fault row kind unknown or its frozen recovery bound moved')
+    if boot_id() != c['boot_id']:
+        raise ValueError('assessor is not on the admitted M01 boot')
+    crit, claims = {}, {}
+
+    def mark(name, outcome, reason=''):
+        crit[name] = dict(outcome=outcome, reason=reason[:400])
+    begin = typed(read_bound(root / WITNESS, dict(boot_id=c['boot_id'])) or {}, mono=float)['mono']
+    acks = [typed(a, key=str, writer=int, seed=str, submitted=float, completed=float, sequence=int, length=int, digest=str, fids=list)
+            for a in lines(root, 'ack-journal.jsonl')]
+    events = [typed(e) for e in lines(root, 'op-events.jsonl', op_event_bounds(c.get('pattern'), c['duration_s']))]
+    ops = [typed(e, op=str, action=str, key=str, worker=int, dispatched=float, submitted=float, completed=float, ok=bool)
+           for e in events if 'action' in e]
+    marks = [typed(e, event=str) for e in events if 'action' not in e]
+    if any(m['event'] not in ('client_kill', 'body_end', 'quiescent', 'fault_window', 'audit_done') for m in marks):
+        raise ValueError('unknown op-event kind')
+    ledger = [typed(r, op=str, key=str, state=str, seed=str, length=int, digest=str, sequence=int, worker=int,
+                    dispatched=float, submitted=float, completed=float, worker_identity=dict) for r in lines(root, 'write-ledger.jsonl')]
+    audits = [typed(r, key=str, reads=list) for r in lines(root, 'audit.jsonl')]
+    faults = [typed(f, episode=str, role=str, dispatch_mono=float, ready_mono=float, receipt=dict) for f in obj(root, 'faults.json')]
+    samples = [typed(s, mono=float, epoch=float, phase=str) for s in lines(root, 'resource-samples.jsonl')]
+    workers = obj(root, 'workers.json')
+    polls = [typed(p, req=float, done=float, ok=bool) for p in lines(root, 'topology-polls.jsonl')]
+    good = [typed(p, writables=list, present=list) for p in polls if p['ok']]
+    m02 = typed(obj(root, 'm02-collect.json'), status=str, collection=str, rotated=list, dat_vids=list)
+    if m02['status'] != 'SOAK_COLLECTED' or m02['collection'] != c['collection']:
+        raise ValueError('M02 collect missing or foreign')
+    if len(faults) != 1 or faults[0]['episode'] != episode:
+        raise ValueError('faults.json is not exactly this row')
+    f = faults[0]
+    kills = [k for k in marks if k['event'] == 'client_kill']
+    try:
+        lo, hi = clock_bracket(c, obj(root, 'soak-clock-s1.json'), obj(root, 'soak-clock-s2.json'))
+    except (ValueError, OSError):
+        lo = hi = None  # no M01-M02 join: every witness that needs one is NOT_COVERED
+    injection = {r.get('action'): r for r in f.get('injection') or [] if isinstance(r, dict)}
+
+    # 1. Bytes: every ACK re-derived from its seed; every hit the latest ACK when it completed (oracle replay).
+    wrong, oracle = [], Oracle()
+    gets = [e for e in ops if e['action'] == 'get']
+    for k, _, r in sorted([('ack', a['completed'], a) for a in acks] + [('get', e['completed'], e) for e in gets], key=lambda x: x[1]):
+        if k == 'ack':
+            v = oracle.begin_write(r['key'], payload(r['seed'], r['length']))
+            v = oracle.acknowledge(r['key'], v.sequence, r['length'], r['fids'])
+            if v.digest != r['digest']:
+                wrong.append('ack ' + r['key'][-8:])
+        elif get_case(r) == 'hit' and not (r['key'] in oracle.latest and oracle.latest[r['key']].matches(r['length'], r['sha256'])):
+            wrong.append('get ' + r['op'])
+    wrong += ['ledger ' + r['op'] for r in ledger if r['digest'] != hashlib_sha(payload(r['seed'], r['length']))]
+    mark('bytes', 'FAIL' if wrong else 'PASS', '%d wrong %s' % (len(wrong), wrong[:5]))
+
+    # 2. Write contract: one terminal state per PUT, ACKED exactly the journal, UNKNOWN never retried or ACKed,
+    # and every UNKNOWN attributed through the named PUT window (F1, F2 only).
+    bad, by_op = [], {}
+    for r in ledger:
+        if r['state'] not in ('ACKED', 'REFUSED', 'UNKNOWN') or r['op'] in by_op:
+            bad.append('state ' + r['op'])
+        by_op[r['op']] = r
+    set_ops = {e['op'] for e in ops if e['action'] == 'set'}
+    kill_ops = {str((k.get('witness') or {}).get('operation_id')) for k in kills if k.get('kind') == 'client_kill_put'}
+    if set(by_op) != set_ops | kill_ops:
+        bad.append('ledger is not exactly the PUTs')
+    if sorted((r['key'], r['sequence']) for r in ledger if r['state'] == 'ACKED') != sorted((a['key'], a['sequence']) for a in acks):
+        bad.append('ACKED is not the ACK journal')
+    window, victim = None, receipt_identities(f)[0]
+    if kind == 'volume_kill_io' and victim and isinstance((f['receipt'].get('Kill') or {}).get('PreKillMono'), (int, float)):
+        # The row's layout has exactly one volume process (Go refuses any other), so every PUT targets it.
+        window = PutFaultWindow(f['receipt']['Kill']['PreKillMono'], f['ready_mono'], victim)
+    elif kind == 'client_kill_put' and len(kills) == 1:
+        v = kills[0].get('victim') or {}
+        window = PutFaultWindow(kills[0]['killed'], kills[0]['finished'], (v.get('pid'), v.get('starttime')))
+    unknown = [r for r in ledger if r['state'] == 'UNKNOWN']
+    for r in unknown:
+        target = victim if kind == 'volume_kill_io' else (r['worker_identity'].get('pid'), r['worker_identity'].get('starttime'))
+        ok = window is not None and r.get('attributed') == episode and window.attributes(target, r['submitted'], r['completed'])
+        if kind == 'client_kill_put':
+            ok = ok and r['op'] in kill_ops
+        later = [x['op'] for x in ledger if x['key'] == r['key'] and x['dispatched'] > r['dispatched']] + \
+            [e['op'] for e in ops if e['action'] == 'set' and e['key'] == r['key'] and e['dispatched'] > r['dispatched']]
+        if later:
+            bad.append('UNKNOWN %s retried by %s' % (r['op'], later[:3]))
+        if any(a['key'] == r['key'] and a['sequence'] == r['sequence'] for a in acks):
+            bad.append('UNKNOWN %s turned into an ACK' % r['op'])
+        if not ok:
+            bad.append('UNKNOWN %s outside the attributed window' % r['op'])
+    attributed = sum(1 for r in unknown if r.get('attributed') == episode)
+    mark('write_contract', 'FAIL' if bad else 'PASS', '%d PUTs, %d attributed UNKNOWN; %s' % (len(ledger), attributed, bad[:5]))
+
+    # 3. Audit: a fresh client read every ledger key after the heal; each key returned what its ledger state allows.
+    retired = set()
+    final = set(good[-1]['present']) if good else None
+    rot = Oracle()
+    for vid in {typed(x, vid=int)['vid'] for x in m02['rotated']}:
+        if final is not None and vid not in final and vid not in m02['dat_vids']:
+            rot.retirement(vid, True, True, True)  # the oracle's existing rule: master success, topology and .dat absent
+    retired = rot.retired
+    fids = {(a['key'], a['sequence']): a['fids'] for a in acks}
+    keys = {}
+    for r in sorted(ledger, key=lambda r: r['sequence']):
+        if r['state'] == 'REFUSED':
+            continue  # a definite refusal before any mutation: not a ledger key of its own
+        k = keys.setdefault(r['key'], dict(survivor=None, unknown=[]))
+        if r['state'] == 'ACKED':
+            k['survivor'] = r
+        elif r['state'] == 'UNKNOWN':
+            k['unknown'].append(r)
+    done = [m for m in marks if m['event'] == 'audit_done']
+    fresh = done and done[-1].get('client') not in [dict(pid=w.get('pid'), starttime=w.get('starttime')) for w in workers.values()] + \
+        [k.get('replacement') and dict(pid=k['replacement'].get('pid'), starttime=k['replacement'].get('starttime')) for k in kills]
+    audited = {a['key']: a['reads'] for a in audits}
+    failed = []
+    for key, k in keys.items():
+        reads = audited.get(key)
+        if not reads:
+            continue
+        last = typed(reads[-1], case=str)
+        allowed = ([k['survivor']] if k['survivor'] else []) + k['unknown']
+        exact = last['case'] == 'hit' and any(last.get('sha256') == v['digest'] and last.get('length') == v['length'] for v in allowed)
+        vids = {str(x).split(',')[0] for x in fids.get((key, k['survivor']['sequence']), [])} if k['survivor'] else set()
+        miss_ok = last['case'] == 'miss' and (not k['survivor'] and k['unknown'] or (vids and vids <= {str(v) for v in retired}))
+        earlier_ok = all(x.get('case') == 'hit' and (x.get('sha256') == last.get('sha256') or x.get('length') != last.get('length'))
+                         for x in reads[:-1])
+        if not ((exact or miss_ok) and earlier_ok):
+            failed.append(key[-12:])
+    covered = bool(done) and done[-1].get('complete') is True and set(audited) == set(keys) and bool(fresh)
+    mark('audit', 'FAIL' if failed else 'PASS' if covered else 'NOT_COVERED',
+         '%d ledger keys, %d audited, fresh %s, failed %s' % (len(keys), len(audited), bool(fresh), failed[:5]))
+
+    # 4. Failure mode: every op terminal within the op limit, every op settled exactly once, and no crash of a
+    # process the row did not target (M01 workers; every watched M02 unit; the volume, F1 aside).
+    late = [e['op'] for e in ops if e['completed'] - e['submitted'] > OP_LIMIT_S + (SET_EXTRA_S if e['action'] == 'set' else 1)]
+    quiet = [q for q in marks if q['event'] == 'quiescent']
+    settled = sorted([e['op'] for e in ops] + sorted(kill_ops))
+    terminal = len(quiet) == 1 and events[-1] is quiet[0] and settled == sorted(str(i) for i in range(1, quiet[0]['dispatched'] + 1))
+    crash = []
+    if kills and kind != 'client_kill_put' or len(kills) > 1:
+        crash.append('client killed outside F2')
+    idents = [s.get('identity') for s in samples]
+    distinct = [(x['pid'], x['starttime']) for i, x in enumerate(idents) if x and x not in idents[:i]]
+    if kind == 'volume_kill_io' and receipt_identities(f)[0]:
+        if distinct != list(receipt_identities(f)):
+            crash.append('volume identities %s are not the receipt victim then replacement' % distinct)
+    elif None in idents or len(distinct) != 1:
+        crash.append('volume identities %d (or a gap), want exactly 1' % len(distinct))
+    for label in {k for s in samples for k in (s.get('watch') or {})}:
+        if len({json.dumps(s['watch'].get(label), sort_keys=True) for s in samples}) != 1:
+            crash.append('watched %s changed' % label)
+    outcome = 'FAIL' if late or not terminal or crash else 'NOT_COVERED' if not samples else 'PASS'
+    mark('failure_mode', outcome, 'late %s, terminal %s, %s' % (late[:5], terminal, crash[:4]))
+
+    # 5. Recovery: an RDMA GET submitted after the heal and served within the frozen bound.
+    heal = kills[0]['finished'] if kind == 'client_kill_put' and kills else f['ready_mono']
+    rdma = {str(i) for i, w in workers.items() if isinstance(w, dict) and w.get('transport') in ('dc', 'rc')}
+    after = [e for e in gets if str(e['worker']) in rdma and heal <= e['submitted'] <= heal + row['recovery_s']]
+    served = [e for e in after if get_case(e) == 'hit' and e['completed'] <= heal + row['recovery_s']]
+    mark('recovery', 'PASS' if served else 'FAIL' if after else 'NOT_COVERED',
+         '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
+
+    # 6. Resources: the pin bound at every sample, no whole .dat pin, and each view's quiescence class.
+    pinned = [s['metrics']['pinned'] for s in samples if isinstance(s.get('metrics'), dict) and 'pinned' in s['metrics']]
+    over = [p for p in pinned if p > row['pin_bound_bytes']]
+    whole = [s['seq'] for s in samples if (s.get('rdma') or {}).get('mr_lens') and any(
+        d > 0 and -(-d // PAGE) * PAGE in s['rdma']['mr_lens'] for d in s.get('dat_sizes') or [])]
+    classes = resource_classes(samples, row)
+    outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned else 'PASS'] + \
+        ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
+    mark('resources', rank(outcomes), 'pin max %s bound %d, whole .dat %s, classes %s' % (
+        max(pinned, default=None), row['pin_bound_bytes'], whole[:3], classes))
+
+    # 7. Causal witness: the row's host event and its effect, joined on PID/starttime and window. R0 runs every
+    # host-event check and must find none.
+    events_ = host_events(kind, row, f, samples, injection, kills, ledger, lo, hi)
+    if kind == 'control':
+        found = [k for k, v in events_.items() if v]
+        mark('causal', 'FAIL' if found else 'PASS', 'R0 host events found: %s' % found)
+    else:
+        outcome, why = effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, events_)
+        mark('causal', outcome, why)
+    if kind == 'conn_kill':
+        claims['qp'] = 'NOT_COVERED'  # TCP scope only: no QP-state claim without a real RDMA effect
+    status = rank([v['outcome'] for v in crit.values()])
+    return dict(status=status, row=ROW_KINDS[kind], criteria=crit, claims=claims, unknown_attributed=attributed,
+                resources='ACCOUNTED', resource_classes=classes)
+
+
+def receipt_identities(f):
+    """(victim, replacement) as (pid, starttime) from the restart receipt; None for an absent one."""
+    r = f['receipt']
+    one = lambda i: (i['PID'], i['StartTime']) if isinstance(i, dict) and i.get('PID') and i.get('StartTime') else None
+    return one((r.get('Kill') or {}).get('Identity')), one(r.get('Replacement'))
+
+
+def hashlib_sha(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def resource_classes(samples, row):
+    """Each view's quiescence class: released, retained (the product's own custody, within budget, not growing),
+    leak, or NOT_COVERED (unread, or the pre-load and final samples are not the same pid/starttime)."""
+    pre = [s for s in samples if s['phase'] == 'pre_load']
+    quiet = [s for s in samples if s['phase'] == 'quiescence']
+    out = {}
+    for view in RESOURCES:
+        value = (lambda s: (s.get('rdma') or {}).get(view)) if view in ('qp', 'mr') else (lambda s: s.get(view))
+        if not pre or not quiet or pre[-1].get('identity') is None or pre[-1].get('identity') != quiet[-1].get('identity') \
+                or value(pre[-1]) is None or value(quiet[-1]) is None:
+            out[view] = 'NOT_COVERED'
+            continue
+        excess = value(quiet[-1]) - value(pre[-1])
+        if excess <= 0:
+            out[view] = 'released'
+            continue
+        m = [s.get('metrics') or {} for s in quiet[-3:]]
+        held_bytes = [x.get('retained_bytes') for x in m]
+        held_sources = [x.get('retained_sources') for x in m]
+        steady = len(m) == 3 and None not in held_bytes + held_sources and held_bytes == sorted(held_bytes, reverse=True) \
+            and held_sources == sorted(held_sources, reverse=True)
+        cover = {'vm_pin_kB': held_bytes[-1] / 1024 if steady else 0, 'mr': held_sources[-1] if steady else 0,
+                 'fds': held_sources[-1] if steady else 0, 'qp': 0}[view]  # a QP is never custody
+        within = steady and 0 < held_bytes[-1] <= row['retained_budget_bytes'] and excess <= cover
+        out[view] = 'retained' if within else 'leak'
+    return out
+
+
+def m02_window(t1, t2, lo, hi):
+    """The M02 wall-clock interval certainly containing M01 mono [t1, t2], or None without a clock join."""
+    return None if lo is None else (t1 + lo, t2 + hi)
+
+
+def by_epoch(samples, span):
+    return [s for s in samples if span and span[0] <= s['epoch'] <= span[1]]
+
+
+def host_events(kind, row, f, samples, injection, kills, ledger, lo, hi):
+    """Every row's host event, each True only when observed; R0 must show none. M02 events come from the
+    sampler (and the injector's own before/after), never from the controller's intent."""
+    apply_, restore = injection.get('apply') or {}, injection.get('restore') or {}
+    before, after = apply_.get('before') or {}, apply_.get('after') or {}
+    idents = [s.get('identity') for s in samples if s.get('identity')]
+    lim = [s.get('limits') for s in samples if s.get('limits')]
+    port = [s.get('port') for s in samples if s.get('port')]
+    downed = [p[1] for p in port]
+    conns_before, conns_after = before.get('conns'), after.get('conns')
+    return dict(
+        kill=len({(i['pid'], i['starttime']) for i in idents}) > 1,
+        client_kill=bool(kills),
+        port_down=any('ACTIVE' not in p[0] for p in port) and bool(downed) and max(downed) > min(downed),
+        conns_gone=bool(conns_before) and conns_after is not None and not set(conns_before) & set(conns_after),
+        memlock_lowered=len({json.dumps(x.get('memlock')) for x in lim}) > 1,
+        nofile_lowered=len({json.dumps(x.get('nofile')) for x in lim}) > 1,
+        disk_low=any(s.get('free') is not None and s['free'] < row.get('free_below_bytes', 0) for s in samples),
+        fds_at_limit=any(s.get('fds') is not None and (s.get('limits') or {}).get('nofile', [-1])[0] not in (-1, None)
+                         and s['fds'] >= s['limits']['nofile'][0] for s in samples))
+
+
+def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, ev):
+    """(outcome, reason) of the row's causal witness: PASS only with its host event AND its effect in the window;
+    a missing one is NOT_COVERED."""
+    apply_, restore = injection.get('apply') or {}, injection.get('restore') or {}
+    start = (apply_.get('before') or {}).get('mono')
+    end = (restore.get('after') or {}).get('mono')
+    span = (start, end + row['recovery_s']) if start is not None and end is not None else None  # M02 mono
+    ident = (apply_.get('identity') or {}) if apply_ else None
+    ident = ident and dict(pid=ident.get('pid'), starttime=ident.get('starttime'))
+    m01 = (f['dispatch_mono'], f['ready_mono'] + row['recovery_s'])
+    nc = lambda why: ('NOT_COVERED', why)
+    if kind == 'volume_kill_io':
+        kw = f['receipt'].get('Kill') or {}
+        pre, post = kw.get('PreKillMono'), kw.get('PostKillMono')
+        if not ev['kill'] or not isinstance(pre, (int, float)) or not isinstance(post, (int, float)) or not pre < post:
+            return nc('no witnessed victim kill with its pre/post-kill clock')
+        arms = {a: sorted(e['op'] for e in ops if e['action'] == a and e['submitted'] <= pre and e['completed'] >= post)
+                for a in ('set', 'get')}
+        missing = [a for a, v in arms.items() if not v]
+        return (nc('arm(s) %s with no op pending at the kill' % missing) if missing else
+                ('PASS', 'pending at the kill: PUT %s, GET %s' % (arms['set'][:3], arms['get'][:3])))
+    if kind == 'client_kill_put':
+        k = kills[0] if len(kills) == 1 else {}
+        op = str((k.get('witness') or {}).get('operation_id'))
+        r = next((x for x in ledger if x['op'] == op), None)
+        if not (k.get('kind') == 'client_kill_put' and r and r['state'] == 'UNKNOWN' and k.get('victim') != k.get('replacement')):
+            return nc('no worker killed with a PUT pending')
+        span = m02_window(k['killed'], k['finished'] + row['recovery_s'], lo, hi)
+        vol = next((s['identity'] for s in by_epoch(samples, span) if s.get('identity')), None)
+        before = [s for s in samples if span and s['epoch'] < span[0] and s.get('identity') == vol]
+        rose = counter_rose(samples, 'released', vol, before[-1]['mono'], max((s['mono'] for s in by_epoch(samples, span)), default=-1)) \
+            if before else None
+        return nc('release count not observed across the kill') if rose is None else \
+            ('PASS', 'PUT %s UNKNOWN, release count rose' % op) if rose else ('NOT_COVERED', 'release count did not move')
+    if span is None or not ident or not ident.get('pid'):
+        return nc('no injector witness')
+    if kind == 'link_flap':
+        b, a = (apply_.get('before') or {}).get('port'), (apply_.get('after') or {}).get('port')
+        if not (ev['port_down'] and b and a and 'ACTIVE' not in a[0]):
+            return nc('port never DOWN with a link_downed delta')
+        rdma = {i for i, w in workers.items() if isinstance(w, dict) and w.get('transport') in ('dc', 'rc')}
+        hit = [e['op'] for e in ops if str(e['worker']) in rdma and m01[0] <= e['completed'] <= m01[1]
+               and (e.get('fault_error') or e.get('state') in ('REFUSED', 'UNKNOWN'))]
+        fb = fallback_rose(root, workers, row, m01)
+        return ('PASS', 'RDMA ops ended in clean error %s / fallback %s' % (hit[:3], fb)) if hit or fb else \
+            nc('no RDMA op ended in fallback or a clean error in the window')
+    if kind == 'conn_kill':
+        gone = ev['conns_gone']
+        new = set((restore.get('after') or {}).get('conns') or []) - set((apply_.get('before') or {}).get('conns') or [])
+        if not (gone and new):
+            return nc('setup connections not shown gone and replaced')
+        rose = counter_rose(samples, 'released', ident, start, span[1])
+        return nc('release count not observed') if rose is None else ('PASS', 'release count rose (TCP scope)') if rose \
+            else nc('release count did not move')
+    if kind == 'mr_pressure':
+        changed = ((apply_.get('after') or {}).get('limits') or {}).get('memlock', [None])[0] == (apply_.get('plan') or {}).get('memlock')
+        if not (ev['memlock_lowered'] and changed):
+            return nc('memlock not lowered in /proc/pid/limits')
+        t = (apply_.get('after') or {}).get('mono')
+        tried = [counter_rose(samples, k, ident, t, span[1]) for k in ('registration_refused', 'registration_fallback')]
+        return ('PASS', 'a registration after the change was refused or fell back') if True in tried else \
+            nc('no new registration attempted after the change')
+    if kind == 'disk_full':
+        if not (ev['disk_low'] and ((apply_.get('after') or {}).get('free') or math.inf) < row['free_below_bytes']):
+            return nc('statfs never below the threshold on the row mount')
+        hit = [r['op'] for r in ledger if r['state'] in ('REFUSED', 'UNKNOWN') and m01[0] <= r['completed'] <= m01[1]]
+        return ('PASS', 'PUTs ended %s' % hit[:3]) if hit else nc('no PUT ended REFUSED or UNKNOWN in the window')
+    if kind == 'fd_exhaust':
+        if not (ev['nofile_lowered'] and ev['fds_at_limit']):
+            return nc('nofile not lowered, or fd count never at it')
+        rose = counter_rose(samples, 'accept_errors', ident, (apply_.get('after') or {}).get('mono', start), span[1])
+        return ('PASS', 'accept/open errors rose on that pid') if rose else nc('no failed accept or open observed')
+    return nc('unknown row')
+
+
+def fallback_rose(root, workers, row, window):
+    """A client fallback counter (the profile's names) rose across the window on an RDMA worker's own series."""
+    names = row.get('client_fallback_counters') or []
+    for w in workers.values():
+        if not isinstance(w, dict) or w.get('transport') not in ('dc', 'rc'):
+            continue
+        rows = [r for r in (read_evidence(root / stats_name(w), FILE, LINE, ROWS) or []) if r.get('status') == 'OBSERVED']
+        pre = [r for r in rows if r['mono'] <= window[0]]
+        post = [r for r in rows if r['mono'] >= window[1]]
+        for n in names:
+            get = lambda r: (r.get('stats') or {}).get('loader', {}).get(n)
+            if pre and post and isinstance(get(pre[-1]), int) and isinstance(get(post[0]), int) and get(post[0]) > get(pre[-1]):
+                return True
+    return False
+
+
 # Emitted with every verdict, PASS or FAIL: what an excused miss does and doesn't mean.
 QUALIFICATION = dict(
     method='qualified observed ordering under the stated limit (decision 3 revision); not a retirement or durability '
@@ -576,9 +961,12 @@ def main():
     try:
         if config.get('schema') != SCHEMA:
             raise ValueError('assessor config schema differs')
-        row = assess(config)
+        row = assess_row(config) if config.get('fault_row') else assess(config)
     except Exception as error:  # any unreadable or malformed evidence fails closed
         row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
+        if config.get('fault_row'):
+            row.update(resources='ACCOUNTED')
+            del row['misses_qualification']
     row['binding'] = binding(config)
     print(json.dumps(row, sort_keys=True), flush=True)
 

@@ -75,6 +75,9 @@ func BuildProfile(input ProfileInput) (ProfileBundle, error) {
 		if input.Soak != nil && h.ID == "m01" {
 			helpers = append(helpers, "soak_load.py", "soak_stats.py", "soak_assess.py")
 		}
+		if input.Soak != nil && input.Soak.rowMode() && h.ID == "m02" { // stage 3: the injector and its sampler
+			helpers = append(helpers, "soak_fault.py", "soak_stats.py")
+		}
 		for _, name := range helpers {
 			body, err := workerFiles.ReadFile("worker/" + name)
 			if err != nil {
@@ -188,7 +191,18 @@ func addSoak(out *ProfileBundle, d *inventory.Document, files map[string]map[str
 		}
 		x.FaultReady = append(x.FaultReady, step)
 	}
+	if x.rowMode() { // stage 3: the row's injector, sampler and phase markers, all on M02
+		for _, action := range soakFaultActions {
+			args, e = SoakFaultArgs(d, p.Smoke, x, action)
+			if _, err = pin("fault-"+action+"-m02", "m02", args, e); err != nil {
+				return err
+			}
+		}
+	}
 	for _, f := range x.Faults {
+		if !f.restarts() {
+			continue // F2-F7 and R0 restart nothing
+		}
 		victim := ""
 		for _, s := range p.Deploy {
 			if s.Host == "m02" && s.Role == f.Role {

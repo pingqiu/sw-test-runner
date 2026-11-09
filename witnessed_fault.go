@@ -5,8 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 )
+
+// witnessedKinds are the TierChaos kinds a witnessed plan or a cleanup grant may name: the original three,
+// and the stage-3 rows that leave state to restore (RDMA link flap, memlock and nofile pressure; a full disk
+// stays fill_disk). A connection kill leaves nothing to restore, so it has no grant.
+var witnessedKinds = []string{"partition", "netem", "fill_disk", "link_flap", "mr_pressure", "fd_exhaust"}
 
 // FaultObservation is the complete touched configuration, not a command rc.
 // The provider reads live state and refuses missing/ambiguous enumeration.
@@ -50,7 +56,7 @@ func (s *RunScope) FaultReceipts() map[string]FaultReceipt {
 // jobs; read-only providers and COMPLETE resource-state parsers belong to the
 // pack. They are trusted code, not evidence synthesized by this substrate.
 func (s *RunScope) ApplyWitnessedFault(actionCtx context.Context, key string, p WitnessedFault) error {
-	if key != p.Key() || (p.Kind != "partition" && p.Kind != "netem" && p.Kind != "fill_disk") || p.Node == "" || p.Resource == "" || p.Observe == nil || len(p.Before) == 0 || len(p.During) == 0 || maps.Equal(p.Before, p.During) || p.Apply.Node != p.Node || p.Restore.Node != p.Node {
+	if key != p.Key() || !slices.Contains(witnessedKinds, p.Kind) || p.Node == "" || p.Resource == "" || p.Observe == nil || len(p.Before) == 0 || len(p.During) == 0 || maps.Equal(p.Before, p.During) || p.Apply.Node != p.Node || p.Restore.Node != p.Node {
 		return errors.New("incomplete witnessed TierChaos plan")
 	}
 	p.Before, p.During = maps.Clone(p.Before), maps.Clone(p.During)

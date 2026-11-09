@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"path"
+	"slices"
 	"strings"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -28,8 +29,15 @@ var soakCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "termi
 var kvLoadCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "terminal", "fault_errors", "misses", "write_once",
 	"body", "client_kill", "load_as_declared", "routes"}
 
+// rowCriteria is a stage-3 row's set (soak_assess.ROW_CRITERIA): the plan's five acceptance items, with the
+// write contract and its mandatory audit apart from bytes.
+var rowCriteria = []string{"bytes", "write_contract", "audit", "failure_mode", "recovery", "resources", "causal"}
+
 // criteria is the mandatory set the plan's assessor must return.
 func (x *SoakPlan) criteria() []string {
+	if x.rowMode() {
+		return rowCriteria
+	}
 	if x != nil && x.Pattern != nil {
 		return kvLoadCriteria
 	}
@@ -80,6 +88,12 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if x.Pattern != nil {
 		config["pattern"], config["faults"] = x.Pattern, x.Faults // kv_load: judged by its own rows; absent for the soak
 	}
+	if x.rowMode() { // stage 3: the row's frozen values; absent otherwise
+		f, r := x.Faults[0], x.Row
+		config["fault_row"] = map[string]any{"kind": f.kind(), "episode": f.Episode, "recovery_s": r.RecoveryS,
+			"pin_bound_bytes": r.PinBound.bytes(), "retained_budget_bytes": r.RetainedBudgetBytes, "free_below_bytes": r.FreeBelowBytes,
+			"client_fallback_counters": append([]string{}, r.ClientFallbackCounters...)}
+	}
 	if x.rc() {
 		config["read_transport"] = "rc" // the RC soak's routes and client kill; absent is DC
 	}
@@ -110,6 +124,12 @@ type SoakVerdict struct {
 	} `json:"misses_qualification"`
 	// Rule A (Ping, 2026-11-04): misses inside the clock bracket around B, reported per op; they do not fail the row.
 	MissesUndecidable []MissUndecidable `json:"misses_undecidable,omitempty"`
+	// Stage 3 rows only: the row id, scoped claims (F4's QP claim), the attributed UNKNOWN count and each
+	// resource view's quiescence class.
+	Row               string            `json:"row,omitempty"`
+	Claims            map[string]string `json:"claims,omitempty"`
+	UnknownAttributed *int              `json:"unknown_attributed,omitempty"`
+	ResourceClasses   map[string]string `json:"resource_classes,omitempty"`
 }
 
 // MissUndecidable is one rule-A miss: exactly these four members, each required and typed.
@@ -126,7 +146,8 @@ var verdictFields = []string{"status", "criteria", "k7", "resources", "binding",
 	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono", // the clock row is decoded by encoding/json too
 	"misses_qualification", "method", "limit",
 	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s",
-	"file", "bytes", "sha256"} // the M02 evidence reference row (#1002)
+	"file", "bytes", "sha256", // the M02 evidence reference row (#1002)
+	"row", "claims", "unknown_attributed", "resource_classes"} // stage 3 rows
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -185,7 +206,14 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	}
 	dec := json.NewDecoder(bytes.NewReader(out))
 	dec.DisallowUnknownFields()
-	if err = dec.Decode(&v); err != nil || (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" {
+	row := slices.Equal(criteria, rowCriteria)
+	if err = dec.Decode(&v); err != nil {
+		return v, errors.New("soak verdict malformed")
+	}
+	if row {
+		return v, decodeRowVerdict(v, want, criteria)
+	}
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -215,4 +243,38 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 		return v, errors.New("soak verdict PASS without every mandatory criterion")
 	}
 	return v, nil
+}
+
+// decodeRowVerdict integrates a stage-3 row verdict: PASS, FAIL or NOT_COVERED, each criterion one of those,
+// and the row's status exactly the worst of them (FAIL over NOT_COVERED over PASS), so a missing witness can
+// never be read as PASS. A PASS also carries every criterion, the attributed UNKNOWN count and the classes.
+func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error {
+	outcomes := []string{"PASS", "FAIL", "NOT_COVERED"}
+	if !slices.Contains(outcomes, v.Status) || v.Resources != "ACCOUNTED" || v.MissesQualification.Method != "" || len(v.MissesUndecidable) != 0 {
+		return errors.New("soak row verdict malformed")
+	}
+	if v.Binding != want {
+		return fmt.Errorf("soak verdict is bound to %+v, not this run", v.Binding)
+	}
+	worst := "PASS"
+	for name, c := range v.Criteria {
+		if !contains(criteria, name) || !slices.Contains(outcomes, c.Outcome) {
+			return fmt.Errorf("soak row criterion %q unknown or malformed", name)
+		}
+		if c.Outcome == "FAIL" || c.Outcome == "NOT_COVERED" && worst == "PASS" {
+			worst = c.Outcome
+		}
+	}
+	if v.Error != "" && v.Status != "FAIL" || v.Error == "" && v.Status != worst {
+		return errors.New("soak row verdict status is not the worst of its criteria")
+	}
+	for k, c := range v.Claims {
+		if k != "qp" || c != "NOT_COVERED" {
+			return errors.New("soak row verdict claim unknown")
+		}
+	}
+	if v.Status == "PASS" && (len(v.Criteria) != len(criteria) || v.UnknownAttributed == nil || len(v.ResourceClasses) == 0 || v.Row == "") {
+		return errors.New("soak row verdict PASS without every criterion, its UNKNOWN count and resource classes")
+	}
+	return nil
 }

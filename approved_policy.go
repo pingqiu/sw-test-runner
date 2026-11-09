@@ -120,7 +120,7 @@ func validateApprovedPolicy(p ApprovedRunPolicy, b RunBinding, grants []CleanupG
 	}
 	for _, g := range grants {
 		key := g.Node + "/" + g.Resource
-		if seen[key] || g.Resource == "" || strings.ContainsRune(g.Resource, 0) || (g.Kind != "partition" && g.Kind != "netem" && g.Kind != "fill_disk") || g.Apply.Node != g.Node || g.Restore.Node != g.Node || len(g.Before) == 0 || len(g.Before) != len(g.During) || maps.Equal(g.Before, g.During) || !g.Deadline.After(time.Now()) || g.Deadline.After(b.HardDeadline) {
+		if seen[key] || g.Resource == "" || strings.ContainsRune(g.Resource, 0) || !slices.Contains(witnessedKinds, g.Kind) || g.Apply.Node != g.Node || g.Restore.Node != g.Node || len(g.Before) == 0 || len(g.Before) != len(g.During) || maps.Equal(g.Before, g.During) || !g.Deadline.After(time.Now()) || g.Deadline.After(b.HardDeadline) {
 			return errors.New("incomplete exact cleanup grant")
 		}
 		seen[key] = true

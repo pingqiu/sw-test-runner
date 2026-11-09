@@ -73,6 +73,9 @@ type KillWitness struct {
 	// Controller-local CLOCK_MONOTONIC seconds; zero when absent. Compare only
 	// within the qualified controller boot/clock domain, not the victim clock.
 	PreKillMono float64
+	// PostKillMono is the same clock read after the kill was confirmed (the victim's starttime gone); zero
+	// when absent. Only the stage-3 F1 row records it: an op pending at both instants was pending across the kill.
+	PostKillMono float64 `json:",omitempty"`
 }
 
 // Enroll is inert and retains possible issuers before dispatch. Authorize must

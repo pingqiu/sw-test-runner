@@ -1,0 +1,531 @@
+"""Stage 3 fault-row verdict, through the real caller (`python -I soak_assess.py --config ...`), on labelled
+SYNTHETIC evidence: one consistent row per kind, then the plan's negative controls, each a plausible fake
+PASS that lies about exactly one thing."""
+import copy
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import soak_assess
+from soak_native_worker import payload
+from soak_stats import boot_id
+from test_soak_assess import M02_BOOT, sample
+
+HERE = Path(__file__).resolve().parent
+M02 = 4000.0  # M02 CLOCK_MONOTONIC = M01 mono + 4000 in the fixture (a different clock, joined only by witnesses)
+WID = {i: dict(pid=10 + i, starttime=1) for i in range(4)}
+VOL, REPL = dict(pid=500, starttime=9), dict(pid=501, starttime=20)
+BOUND = 8 << 20
+
+
+def digest(seed, length=64):
+    return hashlib.sha256(payload(seed, length)).hexdigest()
+
+
+class Row:
+    """Builds one row's evidence: ops at M01 mono, samples at M02 mono, all mutually consistent."""
+
+    def __init__(self, kind):
+        self.kind, self.n, self.seq = kind, 0, 0
+        self.acks, self.events, self.ledger, self.audit, self.marks = [], [], [], {}, []
+        self.fault = dict(episode='E1', role='volume', kind=kind, dispatch_mono=1100.0, ready_mono=1130.0, receipt={}, injection=[])
+        self.recovery = 60 if kind in ('volume_kill_io', 'client_kill_put') else 30
+
+    def op(self):
+        self.n += 1
+        return str(self.n)
+
+    def put(self, key, t, state='ACKED', worker=1, done=None, attributed=None, error=None, event=True, op=None):
+        op, seed = op or self.op(), 'seed-%s-%s' % (key, t)
+        self.seq += 1
+        done = t + 0.05 if done is None else done
+        row = dict(op=op, key=key, state=state, seed=seed, length=64, digest=digest(seed), sequence=self.seq, worker=worker,
+                   dispatched=t - 0.01, submitted=t, completed=done, error=error, attributed=attributed, worker_identity=WID[worker])
+        self.ledger.append(row)
+        if event:
+            self.events.append(dict(op=op, worker=worker, action='set', key=key, dispatched=t - 0.01, submitted=t, completed=done,
+                                    ok=state == 'ACKED', error=error, state=state))
+        if state == 'ACKED':
+            self.acks.append(dict(key=key, writer=worker, seed=seed, submitted=t, completed=done, sequence=self.seq, length=64,
+                                  digest=row['digest'], fids=['3,ab']))
+        return row
+
+    def latest(self, key):
+        return [a for a in self.acks if a['key'] == key][-1]
+
+    def get(self, key, t, worker=0, done=None, fault=False):
+        a = self.latest(key)
+        e = dict(op=self.op(), worker=worker, action='get', key=key, dispatched=t - 0.01, submitted=t,
+                 completed=t + 0.01 if done is None else done, sequence=a['sequence'])
+        if fault:
+            e.update(ok=False, fault_error=True, episode='E1', error='operation timed out')
+        else:
+            e.update(ok=True, length=64, sha256=a['digest'])
+        self.events.append(e)
+        return e
+
+
+def samples(kind, mutate=None):
+    """The volume sampler: pre_load 950-1000, load to 1366, quiescence to 1486 (M01 mono; written at M02 mono)."""
+    out, released = [], 0
+    for seq, t in enumerate(range(950, 1490, 5)):
+        phase = 'pre_load' if t < 1000 else 'load' if t < 1366 else 'quiescence'
+        busy = phase == 'load'
+        ident = REPL if kind == 'volume_kill_io' and t > 1100 else VOL
+        if kind in ('client_kill_put', 'conn_kill') and t >= 1105:
+            released = 1
+        s = dict(seq=seq, mono=t + M02, epoch=t + 1793610000.0, phase=phase, identity=dict(ident),
+                 watch=dict(master=dict(pid=600, starttime=3)), fds=50 if busy else 40, dat_sizes=[33554432],
+                 limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), rdma=dict(qp=6 if busy else 4, mr=3, mr_lens=[1 << 20] * 3),
+                 vm_pin_kB=4096 if busy else 1024, port=['4: ACTIVE', 0], free=1 << 30,
+                 metrics=dict(pinned=float(1 << 20), retained_bytes=0.0, retained_sources=0.0, released=float(released),
+                              registration_refused=float(t >= 1110 and kind == 'mr_pressure'),
+                              registration_fallback=0.0, accept_errors=float(t >= 1110 and kind == 'fd_exhaust')))
+        if 1100 < t <= 1130:
+            if kind == 'link_flap':
+                s['port'] = ['1: DOWN', 1]
+            if kind == 'mr_pressure':
+                s['limits']['memlock'] = [1 << 20, -1]
+            if kind == 'fd_exhaust':
+                s['limits']['nofile'], s['fds'] = [60, 1024], 60
+            if kind == 'disk_full':
+                s['free'] = 1000
+        if kind == 'link_flap' and t > 1130:
+            s['port'] = ['4: ACTIVE', 1]
+        if mutate:
+            mutate(s, t)
+        out.append(s)
+    return out
+
+
+def injection(kind):
+    if kind in ('volume_kill_io', 'client_kill_put'):
+        return []
+    snap = lambda mono, **kw: dict(dict(mono=mono + M02, identity=VOL, limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), fds=40), **kw)
+    before, after, plan, end = snap(1100.0), snap(1100.5), {}, snap(1130.0)
+    if kind == 'link_flap':
+        before['port'], after['port'] = ['4: ACTIVE', 0], ['1: DOWN', 1]
+    if kind in ('conn_kill', 'control'):
+        before['conns'], after['conns'] = ['198.51.100.2:18888>198.51.100.1:5000'], ([] if kind == 'conn_kill' else ['198.51.100.2:18888>198.51.100.1:5000'])
+        end['conns'] = ['198.51.100.2:18888>198.51.100.1:5001'] if kind == 'conn_kill' else before['conns']
+    if kind == 'mr_pressure':
+        plan, after['limits'] = dict(memlock=1 << 20), dict(memlock=[1 << 20, -1], nofile=[1024, 1024])
+    if kind == 'fd_exhaust':
+        plan, after['limits'] = dict(nofile=60), dict(memlock=[-1, -1], nofile=[60, 1024])
+    if kind == 'disk_full':
+        before['free'], after['free'], plan = 1 << 30, 1000, dict(ballast_bytes=(1 << 30) - 1000)
+    return [dict(action='apply', kind=kind, identity=VOL, before=before, after=after, plan=plan),
+            dict(action='restore', kind=kind, identity=VOL, after=end, restored=True)]
+
+
+def row_evidence(kind):
+    r = Row(kind)
+    for k in ('k1', 'k2', 'q'):
+        r.put(k, 1010.0 + len(r.acks))
+    for t in range(1020, 1090, 10):
+        r.get('k1', float(t))
+    r.fault['injection'] = injection(kind)
+    if kind == 'volume_kill_io':
+        r.fault.update(ready_mono=1110.0, receipt=dict(State='REPLACED', Kill=dict(Identity=dict(PID=500, StartTime=9), PreKillMono=1100.0,
+                                                                                   PostKillMono=1100.3, Signal='SIGKILL'),
+                                                       Replacement=dict(PID=501, StartTime=20)))
+        r.put('q', 1099.9, state='UNKNOWN', done=1105.0, attributed='E1', error='connection reset')
+        r.get('k1', 1099.95, done=1104.0, fault=True)
+    if kind == 'client_kill_put':
+        r.fault.update(role='client', ready_mono=1100.0)
+        op = r.op()
+        r.put('f2', 1099.5, state='UNKNOWN', done=1101.0, attributed='E1', error='client killed with the PUT pending', event=False, op=op)
+        r.marks.append(dict(event='client_kill', kind='client_kill_put', worker=1, started=1099.0, killed=1100.0, finished=1101.0,
+                            witness=dict(event='submitted', operation_id=op, action='set', pid=11, monotonic=1099.5),
+                            victim=dict(WID[1]), replacement=dict(pid=77, starttime=2)))
+    if kind == 'link_flap':
+        r.get('k2', 1104.0, done=1105.0, fault=True)
+    if kind == 'disk_full':
+        r.put('k9', 1105.0, state='REFUSED', error='No space left on device')
+    heal = 1101.0 if kind == 'client_kill_put' else r.fault['ready_mono']
+    r.get('k2', heal + 2)
+    for t in range(1150, 1300, 25):
+        r.get('k1', float(t))
+    r.put('k2', 1300.0)
+    r.get('k2', 1310.0)
+    # The audit: every ledger key (ACKED or UNKNOWN), each answering its survivor or what its state allows.
+    for key in sorted({x['key'] for x in r.ledger if x['state'] != 'REFUSED'}):
+        acked = [x for x in r.ledger if x['key'] == key and x['state'] == 'ACKED']
+        r.audit[key] = [dict(case='hit', sha256=acked[-1]['digest'], length=64)] if acked else [dict(case='miss')]
+    return r
+
+
+def files(r, kind):
+    boot = boot_id()
+    marks = r.marks + [dict(event='fault_window', phase='armed', episode='E1', mono=1100.0),
+                       dict(event='fault_window', phase='closed', episode='E1', mono=1131.0),
+                       dict(event='body_end', mono=1300.0),
+                       dict(event='audit_done', mono=1365.0, keys=len(r.audit), complete=True, client=dict(pid=900, starttime=50)),
+                       dict(event='quiescent', mono=1366.0, dispatched=r.n)]
+    return {
+        'soak-load-start.json': dict(boot_id=boot, mono=1000.0),
+        'faults.json': [r.fault],
+        'workers.json': {str(i): dict(WID[i], transport='http' if i == 3 else 'dc') for i in range(4)},
+        'm02-collect.json': dict(status='SOAK_COLLECTED', collection='lmcache', dat_vids=[], rotated=[], events=[]),
+        'soak-clock-s1.json': sample(980, 990.2, 980.1, 10), 'soak-clock-s2.json': sample(1500, 1500.2, 1500.1, 0),
+        'ack-journal.jsonl': r.acks, 'write-ledger.jsonl': r.ledger,
+        'op-events.jsonl': sorted(r.events, key=lambda e: e['completed']) + marks,
+        'audit.jsonl': [dict(key=k, reads=v) for k, v in sorted(r.audit.items())],
+        'topology-polls.jsonl': [dict(req=float(t), done=t + 0.05, ok=True, writables=[3], present=[1, 2, 3]) for t in range(1000, 1370, 10)],
+        'resource-samples.jsonl': samples(kind),
+    }
+
+
+def config(root, kind):
+    return dict(schema=soak_assess.SCHEMA, root=str(root), run_id='run-1', boot_id=boot_id(), m02_boot_id=M02_BOOT, duration_s=300,
+                quiescence_s=60, client_kill_at_s=0, collection='lmcache',
+                fault_row=dict(kind=kind, episode='E1', recovery_s=60 if kind in ('volume_kill_io', 'client_kill_put') else 30,
+                               pin_bound_bytes=BOUND, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
+                               client_fallback_counters=['rdma_fallbacks']))
+
+
+def write_row(root, kind, edit=None):
+    """The row's evidence files in root (edit mutates the dict of files first). The Go bridge test calls this."""
+    ev = files(row_evidence(kind), kind)
+    if edit:
+        edit(ev)
+    for name, body in ev.items():
+        text = ''.join(json.dumps(x) + '\n' for x in body) if name.endswith('.jsonl') else json.dumps(body)
+        (Path(root) / name).write_text(text)
+
+
+def no_registration(ev):
+    for s in ev['resource-samples.jsonl']:
+        s['metrics']['registration_refused'] = 0.0
+
+
+def verdict(test, kind, edit=None, fix=None):
+    """Write the row's evidence, run the real CLI, return its row."""
+    root = Path(tempfile.mkdtemp())
+    test.addCleanup(shutil.rmtree, root)
+    write_row(root, kind, edit)
+    c = config(root, kind)
+    if fix:
+        fix(c)
+    out = subprocess.run([sys.executable, '-I', str(HERE / 'soak_assess.py'), '--config', json.dumps(c)],
+                         capture_output=True, text=True, timeout=60)
+    test.assertEqual(out.returncode, 0, out.stderr)
+    return json.loads(out.stdout)
+
+
+KINDS = list(soak_assess.ROW_KINDS)
+
+
+class Positives(unittest.TestCase):
+    def test_each_row_witnessed_on_fixtures(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                v = verdict(self, kind)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual({k: x['outcome'] for k, x in v['criteria'].items() if x['outcome'] != 'PASS'},
+                                 {'resources': 'NOT_COVERED'} if kind == 'volume_kill_io' else {}, v['criteria'])
+                # F1: the replacement has no pre-load sample, so its resources cannot be PID-joined (plan rule).
+                self.assertEqual(v['status'], 'NOT_COVERED' if kind == 'volume_kill_io' else 'PASS')
+                self.assertEqual(v['row'], soak_assess.ROW_KINDS[kind])
+                self.assertEqual(sorted(v['criteria']), sorted(soak_assess.ROW_CRITERIA))
+
+    def test_f1_and_f2_report_their_attributed_unknown_count(self):
+        for kind in ('volume_kill_io', 'client_kill_put'):
+            with self.subTest(kind=kind):
+                self.assertEqual(verdict(self, kind)['unknown_attributed'], 1)
+
+    def test_f4_claims_nothing_about_qp(self):
+        self.assertEqual(verdict(self, 'conn_kill')['claims'], dict(qp='NOT_COVERED'))
+
+    def test_retained_within_budget_is_not_a_leak(self):
+        def held(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['vm_pin_kB'] += 1024
+                    s['metrics'].update(retained_bytes=float(2 << 20), retained_sources=1.0)
+        v = verdict(self, 'control', held)
+        self.assertEqual(v['resource_classes']['vm_pin_kB'], 'retained')
+        self.assertEqual(v['status'], 'PASS', v['criteria'])
+
+
+def outcome(v, name):
+    return v['criteria'][name]['outcome']
+
+
+class NotCovered(unittest.TestCase):
+    def test_each_injector_removed(self):
+        def no_injector(kind):
+            def edit(ev):
+                ev['faults.json'][0]['injection'] = []
+                ev['faults.json'][0]['receipt'] = {}
+                ev['resource-samples.jsonl'] = samples('control')
+                ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if e.get('event') != 'client_kill']
+                ev['write-ledger.jsonl'] = [x for x in ev['write-ledger.jsonl'] if x['state'] != 'UNKNOWN']
+                ev['audit.jsonl'] = [a for a in ev['audit.jsonl'] if any(x['key'] == a['key'] for x in ev['write-ledger.jsonl'])]
+                # with no kill, the PUT that was pending at it simply completes: nothing else changes
+                for e in ev['op-events.jsonl']:
+                    if e.get('state') == 'UNKNOWN':
+                        e.update(state='ACKED', ok=True)
+            return edit
+        for kind in KINDS[1:]:
+            with self.subTest(kind=kind):
+                ev_fix = no_injector(kind)
+                def edit(ev, ev_fix=ev_fix, kind=kind):
+                    ev_fix(ev)
+                    if kind == 'volume_kill_io':  # the completed PUT is in the ledger and the ACK journal as ACKED
+                        unknown = next(e for e in ev['op-events.jsonl'] if e.get('state') == 'ACKED' and e['completed'] == 1105.0)
+                        seed = 'seed-q-1099.9'
+                        ev['write-ledger.jsonl'].append(dict(op=unknown['op'], key='q', state='ACKED', seed=seed, length=64, digest=digest(seed),
+                                                            sequence=4, worker=1, dispatched=1099.89, submitted=1099.9, completed=1105.0,
+                                                            error=None, attributed=None, worker_identity=WID[1]))
+                        ev['ack-journal.jsonl'].append(dict(key='q', writer=1, seed=seed, submitted=1099.9, completed=1105.0, sequence=4,
+                                                           length=64, digest=digest(seed), fids=['3,ab']))
+                        for a in ev['audit.jsonl']:
+                            if a['key'] == 'q':
+                                a['reads'] = [dict(case='hit', sha256=digest(seed), length=64)]
+                    if kind == 'disk_full':  # no full disk: the PUT is not refused
+                        ev['write-ledger.jsonl'] = [x for x in ev['write-ledger.jsonl'] if x['state'] != 'REFUSED']
+                        ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if e.get('state') != 'REFUSED']
+                        renumber(ev)
+                    if kind == 'client_kill_put':
+                        renumber(ev)
+                v = verdict(self, kind, edit)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria'])
+                self.assertEqual(v['status'], 'NOT_COVERED', v['criteria'])
+
+    def test_f5_without_a_new_registration(self):
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                s['metrics']['registration_refused'] = 0.0
+        v = verdict(self, 'mr_pressure', edit)
+        self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED')
+        self.assertIn('no new registration', v['criteria']['causal']['reason'])
+        self.assertEqual(v['status'], 'NOT_COVERED')
+
+    def test_f1_op_that_ended_before_the_kill(self):
+        def edit(ev):  # the PUT arm's op completed at 1100.1, before the kill was done (1100.3)
+            for e in ev['op-events.jsonl'] + ev['write-ledger.jsonl']:
+                if e.get('state') == 'UNKNOWN':
+                    e['completed'] = 1100.1
+        v = verdict(self, 'volume_kill_io', edit)
+        self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED')
+        self.assertIn("['set']", v['criteria']['causal']['reason'])
+
+    def test_audit_missing_a_ledger_key(self):
+        v = verdict(self, 'control', lambda ev: ev['audit.jsonl'].pop(0))
+        self.assertEqual(outcome(v, 'audit'), 'NOT_COVERED')
+        self.assertEqual(v['status'], 'NOT_COVERED')
+
+    def test_audit_incomplete_or_not_fresh(self):
+        for change in (dict(complete=False), dict(client=dict(WID[2]))):
+            with self.subTest(change=change):
+                def edit(ev, change=change):
+                    next(m for m in ev['op-events.jsonl'] if m.get('event') == 'audit_done').update(change)
+                self.assertEqual(outcome(verdict(self, 'control', edit), 'audit'), 'NOT_COVERED')
+
+    def test_no_rdma_read_after_the_heal(self):
+        def edit(ev):
+            ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if not (e.get('action') == 'get' and 1130 <= e['submitted'] <= 1160)]
+            renumber(ev)
+        self.assertEqual(outcome(verdict(self, 'link_flap', edit), 'recovery'), 'NOT_COVERED')
+
+
+def renumber(ev):
+    """Op ids stay 1..N after a fixture drops ops (the terminal check counts them)."""
+    ops = [e for e in ev['op-events.jsonl'] if 'action' in e]
+    kill = {str(m['witness']['operation_id']) for m in ev['op-events.jsonl'] if m.get('event') == 'client_kill'}
+    keep = sorted({e['op'] for e in ops} | kill, key=int)
+    new = {old: str(i + 1) for i, old in enumerate(keep)}
+    for e in ops + ev['write-ledger.jsonl']:
+        e['op'] = new[e['op']]
+    for m in ev['op-events.jsonl']:
+        if m.get('event') == 'client_kill':
+            m['witness']['operation_id'] = new[str(m['witness']['operation_id'])]
+        if m.get('event') == 'quiescent':
+            m['dispatched'] = len(keep)
+
+
+class Fail(unittest.TestCase):
+    def check(self, kind, edit, criterion):
+        v = verdict(self, kind, edit)
+        self.assertNotIn('error', v, v.get('error'))
+        self.assertEqual(outcome(v, criterion), 'FAIL', v['criteria'][criterion])
+        self.assertEqual(v['status'], 'FAIL')
+        return v
+
+    def test_one_corrupted_object(self):
+        def edit(ev):
+            g = next(e for e in ev['op-events.jsonl'] if e.get('action') == 'get' and e.get('ok'))
+            g['sha256'] = '0' * 64
+        self.check('control', edit, 'bytes')
+
+    def test_partial_put_read_back_as_other_bytes(self):
+        def edit(ev):  # the quarantined key returns neither its survivor nor the UNKNOWN generation's exact bytes
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'q')['reads'] = [dict(case='hit', sha256='1' * 64, length=64)]
+        self.check('volume_kill_io', edit, 'audit')
+
+    def test_partial_put_exact_unknown_bytes_is_allowed(self):
+        def edit(ev):
+            u = next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'q')['reads'] = [dict(case='hit', sha256=u['digest'], length=64)]
+        self.assertEqual(outcome(verdict(self, 'volume_kill_io', edit), 'audit'), 'PASS')
+
+    def test_unknown_retried(self):
+        def edit(ev):
+            n = max(int(e['op']) for e in ev['op-events.jsonl'] if 'op' in e) + 1
+            seed = 'retry'
+            ev['op-events.jsonl'].insert(0, dict(op=str(n), worker=1, action='set', key='q', dispatched=1200.0, submitted=1200.01,
+                                                 completed=1200.05, ok=True, error=None, state='ACKED'))
+            ev['write-ledger.jsonl'].append(dict(op=str(n), key='q', state='ACKED', seed=seed, length=64, digest=digest(seed), sequence=99,
+                                                 worker=1, dispatched=1200.0, submitted=1200.01, completed=1200.05, error=None,
+                                                 attributed=None, worker_identity=WID[1]))
+            ev['ack-journal.jsonl'].append(dict(key='q', writer=1, seed=seed, submitted=1200.01, completed=1200.05, sequence=99, length=64,
+                                                digest=digest(seed), fids=['3,ab']))
+            next(m for m in ev['op-events.jsonl'] if m.get('event') == 'quiescent')['dispatched'] = n
+        v = self.check('volume_kill_io', edit, 'write_contract')
+        self.assertIn('retried', v['criteria']['write_contract']['reason'])
+
+    def test_unknown_cleared_to_an_ack(self):
+        def edit(ev):
+            u = next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')
+            ev['ack-journal.jsonl'].append(dict(key=u['key'], writer=1, seed=u['seed'], submitted=u['submitted'], completed=u['completed'],
+                                                sequence=u['sequence'], length=64, digest=u['digest'], fids=['3,ab']))
+        v = self.check('volume_kill_io', edit, 'write_contract')
+        self.assertIn('turned into an ACK', v['criteria']['write_contract']['reason'])
+
+    def test_ack_superseded_without_a_later_ack(self):
+        def edit(ev):  # k2's audit returns its older generation, not its survivor
+            first = next(x for x in ev['write-ledger.jsonl'] if x['key'] == 'k2' and x['state'] == 'ACKED')
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'k2')['reads'] = [dict(case='hit', sha256=first['digest'], length=64)]
+        self.check('control', edit, 'audit')
+
+    def test_ack_lost_without_retirement(self):
+        def edit(ev):
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'k1')['reads'] = [dict(case='miss')]
+        self.check('control', edit, 'audit')
+
+    def test_quarantined_key_lost_its_prior_ack_unread_by_the_load(self):
+        def edit(ev):  # the load never read q after the fault; only the audit can catch the lost survivor
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'q')['reads'] = [dict(case='miss')]
+        self.check('volume_kill_io', edit, 'audit')
+
+    def test_no_prior_ack_returning_other_bytes(self):
+        def edit(ev):
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'f2')['reads'] = [dict(case='hit', sha256='2' * 64, length=64)]
+        self.check('client_kill_put', edit, 'audit')
+
+    def test_no_prior_ack_exact_unknown_bytes_is_allowed(self):
+        def edit(ev):
+            u = next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')
+            next(a for a in ev['audit.jsonl'] if a['key'] == 'f2')['reads'] = [dict(case='hit', sha256=u['digest'], length=64)]
+        self.assertEqual(outcome(verdict(self, 'client_kill_put', edit), 'audit'), 'PASS')
+
+    def test_unknown_outside_the_attributed_window_treated_as_continuing(self):
+        def edit(ev):
+            for e in ev['op-events.jsonl'] + ev['write-ledger.jsonl']:
+                if e.get('state') == 'UNKNOWN':
+                    e.update(submitted=1200.0, dispatched=1199.99, completed=1200.5)
+        v = self.check('volume_kill_io', edit, 'write_contract')
+        self.assertIn('outside the attributed window', v['criteria']['write_contract']['reason'])
+
+    def test_unknown_in_a_row_without_attribution(self):
+        def edit(ev):
+            ev['write-ledger.jsonl'].append(dict(op='999', key='z', state='UNKNOWN', seed='z', length=64, digest=digest('z'), sequence=50,
+                                                 worker=1, dispatched=1105.0, submitted=1105.0, completed=1106.0, error='reset',
+                                                 attributed='E1', worker_identity=WID[1]))
+        self.check('link_flap', edit, 'write_contract')
+
+    def test_f2_unknown_of_another_worker(self):
+        def edit(ev):
+            next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')['worker_identity'] = WID[2]
+        self.check('client_kill_put', edit, 'write_contract')
+
+    def test_one_leaked_fd(self):
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['fds'] += 1
+        v = self.check('control', edit, 'resources')
+        self.assertEqual(v['resource_classes']['fds'], 'leak')
+
+    def test_leaked_qp_row_even_with_custody_reported(self):
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['rdma']['qp'] += 1
+                    s['metrics'].update(retained_bytes=float(1 << 20), retained_sources=1.0)
+        v = self.check('control', edit, 'resources')
+        self.assertEqual(v['resource_classes']['qp'], 'leak')
+
+    def test_retained_over_budget_or_growing_is_a_leak(self):
+        for held in ([8 << 20] * 3, [1 << 20, 2 << 20, 3 << 20]):
+            with self.subTest(held=held):
+                def edit(ev, held=held):
+                    quiet = [s for s in ev['resource-samples.jsonl'] if s['phase'] == 'quiescence']
+                    for s in quiet:
+                        s['vm_pin_kB'] += 1024
+                        s['metrics'].update(retained_bytes=float(held[0]), retained_sources=1.0)
+                    for s, b in zip(quiet[-3:], held):
+                        s['metrics']['retained_bytes'] = float(b)
+                self.check('control', edit, 'resources')
+
+    def test_pin_over_the_bound_and_a_whole_dat_pin(self):
+        def over(ev):
+            ev['resource-samples.jsonl'][30]['metrics']['pinned'] = float(BOUND + 1)
+        def whole(ev):
+            ev['resource-samples.jsonl'][30]['rdma']['mr_lens'] = [33554432]
+        for edit in (over, whole):
+            with self.subTest(edit=edit.__name__):
+                self.check('control', edit, 'resources')
+
+    def test_untargeted_process_crash(self):
+        def edit(ev):
+            ev['resource-samples.jsonl'][40]['watch']['master'] = dict(pid=601, starttime=99)
+        self.check('link_flap', edit, 'failure_mode')
+
+    def test_op_past_the_limit(self):
+        def edit(ev):
+            g = next(e for e in ev['op-events.jsonl'] if e.get('action') == 'get')
+            g['completed'] = g['submitted'] + 31.5
+        self.check('control', edit, 'failure_mode')
+
+    def test_r0_reports_a_fault_when_one_happened(self):
+        for mutate in ('port', 'limits', 'identity'):
+            with self.subTest(mutate=mutate):
+                def edit(ev, mutate=mutate):
+                    s = ev['resource-samples.jsonl'][30]
+                    if mutate == 'port':
+                        s['port'] = ['1: DOWN', 1]
+                        for x in ev['resource-samples.jsonl'][31:]:
+                            x['port'] = ['4: ACTIVE', 1]
+                    elif mutate == 'limits':
+                        s['limits']['memlock'] = [1 << 20, -1]
+                    else:
+                        for x in ev['resource-samples.jsonl'][30:]:
+                            x['identity'] = dict(REPL)
+                v = verdict(self, 'control', edit)
+                self.assertEqual(outcome(v, 'causal'), 'FAIL', v['criteria']['causal'])
+
+    def test_failed_recovery(self):
+        def edit(ev):
+            for e in ev['op-events.jsonl']:
+                if e.get('action') == 'get' and 1130 <= e['submitted'] <= 1160:
+                    e.update(ok=False, fault_error=True, episode='E1', error='operation timed out')
+                    e.pop('sha256', None)
+                    e.pop('length', None)
+        self.check('link_flap', edit, 'recovery')
+
+    def test_a_moved_recovery_bound_is_refused(self):
+        v = verdict(self, 'link_flap', fix=lambda c: c['fault_row'].update(recovery_s=45))
+        self.assertEqual(v['status'], 'FAIL')
+        self.assertIn('recovery bound moved', v['error'])
+
+
+if __name__ == '__main__':
+    unittest.main()

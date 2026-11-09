@@ -87,6 +87,18 @@ type SoakAck struct {
 		Op        string  `json:"op"`
 		Submitted float64 `json:"submitted"`
 	} `json:"pending_gets"`
+	// Stage 3: an armed row window keeps the load running, so its ack names the pending PUTs too.
+	Armed       bool `json:"armed,omitempty"`
+	PendingSets []struct {
+		Op        string  `json:"op"`
+		Submitted float64 `json:"submitted"`
+	} `json:"pending_sets,omitempty"`
+}
+
+// soakInjector is the stage-3 injector side of an executor: one soak_fault.py action on M02 ("apply" or
+// "restore"), returning its witness row. Only the direct executor has one.
+type soakInjector interface {
+	Inject(ctx context.Context, action string) (json.RawMessage, error)
 }
 
 // pauseAndAck pauses the worker and validates its exact acknowledgement
@@ -110,8 +122,13 @@ func pauseAndAck(ctx context.Context, ops soakOps, clk *soakClock, f SoakFault) 
 		return a, errors.New("soak: fault-window ack later than AckWait; no Kill")
 	}
 	seen := map[string]bool{}
-	ok := a.PauseMono == pause && pause <= a.ObservedMono && a.ObservedMono <= a.AckMono && a.AckMono <= now && a.InflightSets == 0
-	for _, g := range a.PendingGETs {
+	// A restart window drains every PUT first; an armed row window names its pending PUTs instead.
+	sets := a.InflightSets == 0 && len(a.PendingSets) == 0
+	if f.armed() {
+		sets = a.InflightSets == len(a.PendingSets)
+	}
+	ok := a.PauseMono == pause && pause <= a.ObservedMono && a.ObservedMono <= a.AckMono && a.AckMono <= now && sets && a.Armed == f.armed()
+	for _, g := range append(a.PendingGETs, a.PendingSets...) {
 		ok = ok && g.Op != "" && !seen[g.Op] && g.Submitted > 0 && g.Submitted <= a.ObservedMono
 		seen[g.Op] = true
 	}
@@ -126,6 +143,8 @@ func pauseAndAck(ctx context.Context, ops soakOps, clk *soakClock, f SoakFault) 
 type FaultRecord struct {
 	Episode      string                      `json:"episode"`
 	Role         string                      `json:"role"`
+	Kind         string                      `json:"kind,omitempty"`      // stage 3 only; absent is a restart
+	Injection    []json.RawMessage           `json:"injection,omitempty"` // stage 3: the apply and restore witness rows
 	DueMono      float64                     `json:"due_mono"`
 	DispatchMono float64                     `json:"dispatch_mono"` // P: the fault start, right before the Kill
 	Ack          *SoakAck                    `json:"ack,omitempty"`
@@ -243,8 +262,8 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if err = x.checkScheduleWithin(horizon); err != nil { // before any arithmetic or effect
 		return nil, exit, err
 	}
-	trailing := trailingReserve(x.DurationS, declaresHorizon(ops)) // only for a checked, non-nil plan
-	duration := secs(x.DurationS)
+	trailing := trailingReserve(x.DurationS, declaresHorizon(ops)) + x.rowTail() // only for a checked, non-nil plan
+	duration := secs(x.DurationS) + x.rowAudit()                                 // a row's load ends after its audit
 	// R3: remaining WORK at load admission; cleanup lies after WorkDeadline. The load's end is not known
 	// until its start witness, up to WitnessWait away.
 	if ops.WorkDeadline().Sub(ops.Now()) < WitnessWait+duration+QuiescenceReserve+LoadExitGrace+trailing {
@@ -279,7 +298,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 	if err = latch.ended(); err != nil {
 		return nil, exit, err
 	}
-	endpoint := start + float64(x.DurationS) + QuiescenceReserve.Seconds() + LoadExitGrace.Seconds()
+	endpoint := start + float64(x.DurationS) + QuiescenceReserve.Seconds() + LoadExitGrace.Seconds() + x.rowAudit().Seconds()
 	for i, f := range x.Faults {
 		due := start + float64(f.AtS)
 		now, e := clk.now()
@@ -320,8 +339,19 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		}
 		// Two separate needs: this fault's spacing, and the whole load tail plus collection.
 		left := ops.WorkDeadline().Sub(ops.Now())
-		if left < FaultBudget+postSpan+trailing || left < tail+trailing {
+		budget := FaultBudget
+		if x.rowMode() {
+			budget = x.rowBudget(f)
+		}
+		if left < budget+postSpan+trailing || left < tail+trailing {
 			return records, exit, errors.New("soak: not enough work time left for this fault")
+		}
+		if f.kind() == KindClientKillPut { // F2: the load kills its own client at at_s; no window, no runner effect
+			records = append(records, FaultRecord{Episode: f.Episode, Role: f.Role, Kind: f.Kind, DueMono: due, DispatchMono: now, ReadyMono: now})
+			if err = waitOrComplete(ctx, ops, latch, x.rowBudget(f)+RecoveryMargin); err != nil {
+				return records, exit, err
+			}
+			continue
 		}
 		ack, err := pauseAndAck(ctx, ops, clk, f)
 		if err != nil { // no valid ack: no Kill
@@ -333,8 +363,12 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		if now, err = clk.now(); err != nil { // P: immediately before the Kill
 			return records, exit, err
 		}
-		rec := FaultRecord{Episode: f.Episode, Role: f.Role, DueMono: due, DispatchMono: now, Ack: &ack}
-		err = runFault(ctx, ops, p, in, f, victims[in.Restarts[f.Episode].Victim], &rec)
+		rec := FaultRecord{Episode: f.Episode, Role: f.Role, Kind: f.Kind, DueMono: due, DispatchMono: now, Ack: &ack}
+		if f.injected() {
+			err = runInjected(ctx, ops, clk, x, &rec)
+		} else {
+			err = runFault(ctx, ops, p, in, f, victims[in.Restarts[f.Episode].Victim], &rec)
+		}
 		records = append(records, rec)
 		if err != nil {
 			return records, exit, err
@@ -393,6 +427,50 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		return records, latch.exit, latch.err
 	}
 	return records, latch.exit, nil
+}
+
+// runInjected is one stage-3 injected fault: apply (which arms the host-side dead-man before any change),
+// hold, then restore. The restore always runs, under its own bound even after the run's context ended; a
+// restore that is not proven is CLEANUP_UNKNOWN and stops the stage. ReadyMono is the controller clock after
+// the restore returned: the heal the recovery bound counts from.
+func runInjected(ctx context.Context, ops soakOps, clk *soakClock, x *SoakPlan, rec *FaultRecord) (err error) {
+	defer func() {
+		if err != nil {
+			rec.Error = err.Error()
+		}
+	}()
+	inj, ok := ops.(soakInjector)
+	if !ok {
+		return errors.New("soak: this executor has no stage-3 injector")
+	}
+	actx, cancel := context.WithTimeout(ctx, InjectBound)
+	row, err := inj.Inject(actx, "apply")
+	cancel()
+	if len(row) > 0 {
+		rec.Injection = append(rec.Injection, row)
+	}
+	if err == nil {
+		select {
+		case <-ops.After(secs(x.Row.HoldS)):
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+	}
+	rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), InjectBound)
+	defer rcancel()
+	row, rerr := inj.Inject(rctx, "restore")
+	if len(row) > 0 {
+		rec.Injection = append(rec.Injection, row)
+	}
+	var restored struct {
+		Restored bool `json:"restored"`
+	}
+	if rerr != nil || json.Unmarshal(row, &restored) != nil || !restored.Restored {
+		rerr = errors.Join(rerr, errors.New("CLEANUP_UNKNOWN: stage-3 fault restore not proven; stop the stage"))
+	}
+	m, merr := clk.now()
+	rec.ReadyMono = m
+	return errors.Join(err, rerr, merr)
 }
 
 // runFault is one bounded restart plus the identity-checked READY probes.

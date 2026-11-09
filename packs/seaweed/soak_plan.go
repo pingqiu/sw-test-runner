@@ -43,6 +43,8 @@ type SoakPlan struct {
 	// stays HTTP): absent is "dc", today's soak byte for byte; "rc" reads over
 	// RC push (#999). kv_load keeps its pattern's own transport.
 	ReadTransport SoakTransport `json:"read_transport,omitempty"`
+	// Row is stage 3's one fault row (R0, F1-F7); absent keeps the soak and kv_load byte for byte.
+	Row *FaultRow `json:"fault_row,omitempty"`
 }
 
 // SoakTransport decodes only "dc" or "rc": null, "" and anything else refuse,
@@ -171,6 +173,231 @@ type SoakFault struct {
 	AtS     int    `json:"at_s"`
 	Role    string `json:"role"`
 	Episode string `json:"episode"`
+	// Kind is the stage-3 fault row's injector. Absent is "restart": today's generation restart, so every
+	// existing profile and its plan bytes are unchanged.
+	Kind string `json:"kind,omitempty"`
+}
+
+// Stage 3 fault kinds, one per row of the plan (R0, F1-F7).
+const (
+	KindRestart       = "restart"
+	KindControl       = "control"         // R0: no injector; the no-op witness records the window only
+	KindVolumeKillIO  = "volume_kill_io"  // F1: the existing volume kill, with a PUT and a GET window
+	KindClientKillPut = "client_kill_put" // F2: the load's client kill, during a PUT
+	KindLinkFlap      = "link_flap"       // F3
+	KindConnKill      = "conn_kill"       // F4
+	KindMRPressure    = "mr_pressure"     // F5
+	KindDiskFull      = "disk_full"       // F6
+	KindFDExhaust     = "fd_exhaust"      // F7
+)
+
+func (f SoakFault) kind() string {
+	if f.Kind == "" {
+		return KindRestart
+	}
+	return f.Kind
+}
+
+// restarts: the fault is the runner's generation restart (today's, or F1's).
+func (f SoakFault) restarts() bool { return f.kind() == KindRestart || f.kind() == KindVolumeKillIO }
+
+// injected: the fault is a soak_fault.py apply/restore pair on M02.
+func (f SoakFault) injected() bool {
+	return f.kind() != KindRestart && f.kind() != KindVolumeKillIO && f.kind() != KindClientKillPut
+}
+
+// armed: the load keeps running through the window instead of pausing (every stage-3 row with a window).
+func (f SoakFault) armed() bool { return f.kind() != KindRestart && f.kind() != KindClientKillPut }
+
+// FaultRow carries one stage-3 row's frozen settings (plan "Stage 3: RDMA and resource faults"). It is
+// present exactly when the soak's one fault has a non-restart kind, and runs only under seaweed-cloud direct.
+type FaultRow struct {
+	RecoveryS   int      `json:"recovery_s"`   // frozen per kind (rowRecovery): a changed bound is a new plan
+	HoldS       int      `json:"hold_s"`       // how long an injected state stays before its restore
+	AuditS      int      `json:"audit_s"`      // the fresh client's whole-ledger audit budget
+	QuiescenceS int      `json:"quiescence_s"` // the resource quiescence sampling after the load: 120
+	Refused     []string `json:"refused"`      // the packet's named REFUSED error classes (literal substrings)
+	// F3
+	Netdev     string `json:"netdev,omitempty"`
+	RDMADevice string `json:"rdma_device,omitempty"`
+	RDMAPort   int    `json:"rdma_port,omitempty"`
+	// F4
+	SetupPorts []int `json:"setup_ports,omitempty"`
+	// F5, F7
+	MemlockBytes int64 `json:"memlock_bytes,omitempty"`
+	NofileExtra  int   `json:"nofile_extra,omitempty"`
+	// F6
+	Mount           string `json:"mount,omitempty"`
+	FreeBelowBytes  int64  `json:"free_below_bytes,omitempty"`
+	MaxBallastBytes int64  `json:"max_ballast_bytes,omitempty"`
+	// The volume's metrics (lab answer "which metrics port") and the series each witness reads.
+	MetricsURL             string            `json:"metrics_url"`
+	Metrics                map[string]string `json:"metrics"`
+	ClientFallbackCounters []string          `json:"client_fallback_counters,omitempty"`
+	PinBound               PinBound          `json:"pin_bound"`
+	RetainedBudgetBytes    int64             `json:"retained_budget_bytes"`
+}
+
+// PinBound is the plan's formula, frozen in the packet: max inflight ranges across clients x largest range
+// + configured pool and cache charges.
+type PinBound struct {
+	MaxInflightRanges int64 `json:"max_inflight_ranges"`
+	LargestRangeBytes int64 `json:"largest_range_bytes"`
+	PoolBytes         int64 `json:"pool_bytes"`
+	CacheBytes        int64 `json:"cache_bytes"`
+}
+
+// bytes is the bound, or -1 when a term is out of range or the sum overflows.
+func (b PinBound) bytes() int64 {
+	const limit = 1 << 50
+	if b.MaxInflightRanges < 1 || b.MaxInflightRanges > 1<<20 || b.LargestRangeBytes < 1 || b.LargestRangeBytes > 1<<30 ||
+		b.PoolBytes < 0 || b.PoolBytes > limit || b.CacheBytes < 0 || b.CacheBytes > limit {
+		return -1
+	}
+	return b.MaxInflightRanges*b.LargestRangeBytes + b.PoolBytes + b.CacheBytes
+}
+
+// Frozen row values from the plan: recovery 60 s for F1-F2 and 30 s for F3-F7 (R0 records a baseline under
+// the 30 s value), the 30 s flap and 60 s limit holds, and the 120 s quiescence.
+var (
+	rowRecovery = map[string]int{KindControl: 30, KindVolumeKillIO: 60, KindClientKillPut: 60, KindLinkFlap: 30,
+		KindConnKill: 30, KindMRPressure: 30, KindDiskFull: 30, KindFDExhaust: 30}
+	rowHold       = map[string]int{KindLinkFlap: 30, KindMRPressure: 60, KindFDExhaust: 60}
+	rowMetricKeys = []string{"released", "registration_refused", "registration_fallback", "accept_errors", "pinned", "retained_bytes", "retained_sources"}
+	rowNetdev     = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
+	rowMetricName = regexp.MustCompile(`^[A-Za-z_:][A-Za-z0-9_:]*(\{[A-Za-z0-9_]+="[^"\s]*"(,[A-Za-z0-9_]+="[^"\s]*")*\})?$`)
+	rowMetricsURL = regexp.MustCompile(`^http://[A-Za-z0-9.\[\]:-]+:[0-9]{1,5}/[A-Za-z0-9/_.-]*$`)
+	rowAbsPath    = regexp.MustCompile(`^/[A-Za-z0-9/_.-]+$`)
+)
+
+const (
+	rowQuiescenceS = 120              // "sample for up to 120 s"
+	InjectBound    = 60 * time.Second // each soak_fault.py apply or restore step
+)
+
+// rowMode reports a stage-3 fault row plan.
+func (x *SoakPlan) rowMode() bool {
+	if x == nil {
+		return false
+	}
+	for _, f := range x.Faults {
+		if f.kind() != KindRestart {
+			return true
+		}
+	}
+	return x.Row != nil
+}
+
+// rowBudget is one row fault's controller time: an injected state's hold plus its two bounded steps, F1's
+// existing restart budget, or F2's in-worker kill (at most 60 s to find a pending PUT).
+func (x *SoakPlan) rowBudget(f SoakFault) time.Duration {
+	switch {
+	case f.restarts():
+		return FaultBudget
+	case f.injected():
+		return AckWait + secs(x.Row.HoldS) + 2*InjectBound
+	}
+	return 60 * time.Second
+}
+
+// rowTail is what a row needs after its load: the resource quiescence sampling and its fetch.
+func (x *SoakPlan) rowTail() time.Duration {
+	if !x.rowMode() || x.Row == nil {
+		return 0
+	}
+	return secs(x.Row.QuiescenceS) + 60*time.Second
+}
+
+// rowAudit is the load's extra time for its fresh audit; zero outside a row.
+func (x *SoakPlan) rowAudit() time.Duration {
+	if !x.rowMode() || x.Row == nil {
+		return 0
+	}
+	return secs(x.Row.AuditS)
+}
+
+// checkRow admits one stage-3 row: one fault of a known kind, the row's frozen values, and the settings its
+// injector and witness need. Each row is at most 10 minutes from load start to the end of its resource
+// quiescence; deploy and cleanup are outside that span.
+func (x *SoakPlan) checkRow() error {
+	r := x.Row
+	if r == nil || len(x.Faults) != 1 {
+		return errors.New("stage-3 fault row needs fault_row and exactly one fault")
+	}
+	f := x.Faults[0]
+	k := f.kind()
+	want, known := rowRecovery[k]
+	if !known || !soakName.MatchString(f.Episode) {
+		return errors.New("stage-3 fault kind unknown or episode malformed")
+	}
+	if role := map[bool]string{true: "client", false: "volume"}[k == KindClientKillPut]; f.Role != role {
+		return fmt.Errorf("stage-3 %s fault role must be %s", k, role)
+	}
+	if r.RecoveryS != want || r.QuiescenceS != rowQuiescenceS || x.ClientKillAtS != 0 {
+		return errors.New("stage-3 recovery and quiescence bounds are frozen by the plan, and a row runs no soak client kill")
+	}
+	if h, fixed := rowHold[k]; fixed && r.HoldS != h || !fixed && f.injected() && (r.HoldS < 1 || r.HoldS > 60) || !f.injected() && r.HoldS != 0 {
+		return errors.New("stage-3 hold out of range for its kind")
+	}
+	if r.AuditS < 1 || r.AuditS > 120 || len(r.Refused) > 16 || x.Pattern != nil && x.Pattern.Keys > 4096 {
+		return errors.New("stage-3 audit budget, refused classes or ledger size out of range")
+	}
+	for _, s := range r.Refused {
+		if s == "" || len(s) > 200 || strings.ContainsAny(s, "\x00\n") {
+			return errors.New("stage-3 refused class malformed")
+		}
+	}
+	if !rowMetricsURL.MatchString(r.MetricsURL) || len(r.ClientFallbackCounters) > 8 {
+		return errors.New("stage-3 metrics url or fallback counters malformed")
+	}
+	for key, name := range r.Metrics {
+		if !slices.Contains(rowMetricKeys, key) || !rowMetricName.MatchString(name) {
+			return fmt.Errorf("stage-3 metric %q unknown or malformed", key)
+		}
+	}
+	for _, n := range r.ClientFallbackCounters {
+		if !soakName.MatchString(n) {
+			return errors.New("stage-3 fallback counter malformed")
+		}
+	}
+	if r.PinBound.bytes() < 0 || r.RetainedBudgetBytes < 0 || r.RetainedBudgetBytes > 1<<40 {
+		return errors.New("stage-3 pin bound or retained budget out of range")
+	}
+	switch k {
+	case KindLinkFlap:
+		if !rowNetdev.MatchString(r.Netdev) || !rowNetdev.MatchString(r.RDMADevice) || r.RDMAPort < 1 || r.RDMAPort > 8 {
+			return errors.New("stage-3 F3 needs the data netdev, its RDMA device and port")
+		}
+	case KindConnKill:
+		if len(r.SetupPorts) == 0 || len(r.SetupPorts) > 8 {
+			return errors.New("stage-3 F4 needs the volume's RDMA setup ports")
+		}
+		for _, p := range r.SetupPorts {
+			if p < 1 || p > 65535 || p == 22 {
+				return errors.New("stage-3 F4 setup port out of range")
+			}
+		}
+	case KindMRPressure:
+		if r.MemlockBytes < 1 {
+			return errors.New("stage-3 F5 needs a memlock target")
+		}
+	case KindFDExhaust:
+		if r.NofileExtra < 1 || r.NofileExtra > 64 {
+			return errors.New("stage-3 F7 nofile margin must be small (1..64)")
+		}
+	case KindDiskFull:
+		if !rowAbsPath.MatchString(r.Mount) || strings.Contains(r.Mount, "..") || r.FreeBelowBytes < 1 || r.MaxBallastBytes < 1 {
+			return errors.New("stage-3 F6 needs its loop mount, threshold and ballast bound")
+		}
+	}
+	// One fault, then its recovery, then the load's own quiescence, all inside the load.
+	if f.AtS < 60 || secs(f.AtS)+x.rowBudget(f)+secs(r.RecoveryS)+QuiescenceReserve > secs(x.DurationS) {
+		return errors.New("stage-3 fault leaves no recovery and quiescence before load end")
+	}
+	if secs(x.DurationS)+QuiescenceReserve+secs(r.AuditS)+secs(r.QuiescenceS) > 10*time.Minute {
+		return errors.New("stage-3 row longer than 10 minutes from load start to resource quiescence")
+	}
+	return nil
 }
 
 // Rotation mirrors lab_profile.py master_toml(): the product's own rules plus caps.
@@ -220,7 +447,7 @@ func directSoakBudget(x *SoakPlan, now, work, timeout time.Time) error {
 	if err := x.checkScheduleWithin(DirectSoakHorizon); err != nil {
 		return err
 	}
-	need := DeployReserve + WitnessWait + secs(x.DurationS) + QuiescenceReserve + LoadExitGrace + trailingReserve(x.DurationS, true)
+	need := DeployReserve + WitnessWait + secs(x.DurationS) + x.rowAudit() + QuiescenceReserve + LoadExitGrace + trailingReserve(x.DurationS, true) + x.rowTail()
 	if work.Sub(now) < need {
 		return fmt.Errorf("soak needs %s of work time; the inventory's work deadline leaves %s", need, work.Sub(now).Round(time.Second))
 	}
@@ -326,9 +553,15 @@ func (x *SoakPlan) checkScheduleWithin(horizon time.Duration) error {
 		if err := x.Pattern.check(x.DurationS); err != nil {
 			return err
 		}
-		if float64(x.ClientKillAtS) < x.Pattern.writeSeconds() { // the kill's GET would come before the barrier
+		if !x.rowMode() && float64(x.ClientKillAtS) < x.Pattern.writeSeconds() { // the kill's GET would come before the barrier
 			return errors.New("kv_load pattern client kill must come after write_once")
 		}
+	}
+	if x.rowMode() { // stage 3: one row, its own frozen schedule; no soak client kill
+		if x.Pattern != nil && len(x.Faults) == 1 && float64(x.Faults[0].AtS) < x.Pattern.writeSeconds() {
+			return errors.New("kv_load pattern fault row must come after write_once")
+		}
+		return x.checkRow()
 	}
 	if len(x.Faults) == 0 || len(x.Faults) > 2 {
 		return errors.New("soak needs one or two faults")
@@ -370,6 +603,9 @@ func bindSoak(p Plan, d *inventory.Document, in tr.PackInputs, used map[string]b
 	x := p.Soak
 	if p.Restart != nil {
 		return errors.New("soak and restart are exclusive")
+	}
+	if x.rowMode() { // the approved path has no stage-3 injector, sampler or audit
+		return errors.New("stage-3 fault rows run only under seaweed-cloud direct")
 	}
 	if p.Profile != "m01-m02-v1" || d.Transport != "dc" || len(p.Workload) != 1 || p.Workload[0].Host != "m01" {
 		return errors.New("soak needs the exact local M01 DC profile with one M01 load")

@@ -25,7 +25,9 @@ def child(pipe, cfg):
         time.sleep(cfg.get('fake_delay_' + cmd['action'], 0.01))  # long GETs: always some pending at a pause
         row = dict(operation_id=cmd['operation_id'], action=cmd['action'], key=cmd['key'], submitted=submitted,
                    completed=time.monotonic(), ok=True, error=None, results=None)
-        if cmd['action'] == 'set':
+        if cmd['action'] == 'set' and (root / 'fake-fail-set').exists():  # stage 3: a failed PUT; the file holds its error
+            row.update(ok=False, error=(root / 'fake-fail-set').read_text() or 'connection reset', results=[False])
+        elif cmd['action'] == 'set':
             row['fids'] = ['3,0a1b2c']
         elif (root / 'fake-refused').exists():  # a K8 budget-refusal miss: the worker's counter delta names it
             row.update(results=[False], error='', cause='budget_refusal')

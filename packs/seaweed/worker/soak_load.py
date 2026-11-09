@@ -33,6 +33,8 @@ MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)'
                   r'|(?<!DC )(?<!batch )push-read response status 1 pipe=\d+ request_id=\d+ fid=\S+ offset=\d+ length=\d+ slot=\d+')
 TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
 EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'completions.jsonl')
+ROW_EVIDENCE = ('write-ledger.jsonl', 'audit.jsonl')  # stage 3 fault rows only
+AUDIT_OP_S = 35  # one audit GET: the 30 s op limit plus margin; past it the audit stops incomplete
 
 
 def volume_ids(topology):
@@ -245,10 +247,13 @@ def run(config):
     push_pipes(config.get('pattern'))
     route = read_route(config)
     root = Path(config['root'])
-    files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE}
+    row_cfg = config.get('fault_row')  # stage 3: absent keeps the soak and kv_load byte for byte
+    files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE + (ROW_EVIDENCE if row_cfg else ())}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
     oracle, rng, seq = Oracle(), random.Random(20261027), [0]
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
+    if row_cfg:
+        counts['unknown_attributed'] = 0  # always present in a row's summary, zero included
     pat = config.get('pattern')  # kv_load's client pattern; absent, the soak's own mix
     clients, gap = (pat['clients'], 1 / pat['rate_per_client']) if pat else (4, .125)
     transport = (lambda i: pat['transport']) if pat else (lambda i: 'http' if i == 3 else route)
@@ -257,6 +262,9 @@ def run(config):
     stop = threading.Event()
     window = dict(episode=None, acked=False, done=set(), allowed={})  # addendum r4
     bind = dict(run_id=config['smoke']['run_id'], boot_id=boot_id())
+    # Stage 3: an armed window keeps the load running through the fault; every op dispatched or pending while
+    # it is armed may end in a credited error, and in F1 an UNKNOWN PUT among them quarantines its key.
+    armed_ops, ledger = set(), {}  # ledger: key -> survivor (highest ACK), UNKNOWN generations, quarantined
 
     def fault_window():
         """Pause: stop all dispatch, drain SETs (a GET error now is fatal: no
@@ -274,9 +282,26 @@ def run(config):
                 observed = time.monotonic()  # captured once; a pause from the future is refused
                 if pm > observed:
                     raise ValueError('fault pause dated after its observation')
-                window.update(episode=ep, acked=False, pause=row, observed=observed)
+                window.update(episode=ep, acked=False, pause=row, observed=observed, armed=bool(row_cfg))
                 window['done'].add(ep)
-                return
+                if not row_cfg:
+                    return
+                break
+        if window['episode'] is not None and window.get('armed') and not window['acked']:
+            # A row window acknowledges at once, with its pending PUTs and GETs, and never drains or pauses.
+            sets = [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values() if c['action'] == 'set']
+            gets = [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values() if c['action'] == 'get']
+            armed_ops.update(c['operation_id'] for c in commands.values())
+            p = window['pause']
+            window['ack_mono'] = time.monotonic()
+            publish(root / ('fault-ack-%s.json' % window['episode']),
+                    dict(bind, role=p['role'], episode=window['episode'], pause_mono=p['pause_mono'],
+                         observed_mono=window['observed'], ack_mono=window['ack_mono'], inflight_sets=len(sets),
+                         pending_gets=gets, pending_sets=sets, armed=True))
+            window['acked'] = True
+            log('op-events.jsonl', dict(event='fault_window', phase='armed', episode=window['episode'], mono=window['ack_mono']))
+        elif window['episode'] is None:
+            return
         elif not window['acked']:
             if any(c['action'] == 'set' for c in commands.values()):
                 return  # still draining SETs
@@ -296,7 +321,9 @@ def run(config):
                 end = close.get('end_mono')
                 if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end < window['ack_mono']:
                     raise ValueError('fault close malformed or before the ack')
-                window['episode'] = None
+                if window.get('armed'):
+                    log('op-events.jsonl', dict(event='fault_window', phase='closed', episode=ep, mono=time.monotonic()))
+                window.update(episode=None, armed=False)
     log = lambda name, row: files[name].write(json.dumps(row) + '\n')
 
     def start_worker(i):
@@ -320,7 +347,50 @@ def run(config):
             oracle.begin_read(key)
         busy[key] = busy.get(key, 0) + 1  # in-flight ops per key: kv_load reads of one key may overlap
         commands[i], available[i] = cmd, time.monotonic() + gap
+        if window.get('armed'):
+            armed_ops.add(cmd['operation_id'])
         workers[i]['pipe'].send(cmd)
+
+    def ledger_row(i, cmd, state, digest, submitted, completed, error=None, attributed=None, ident=None):
+        """Stage 3 write contract: one terminal row per PUT (ACKED, REFUSED or UNKNOWN), frozen as it happens."""
+        cand = dict(op=cmd['operation_id'], seed=cmd['seed'], length=cmd['length'], digest=digest, sequence=cmd['sequence'])
+        ident = ident or workers[i]['identity']
+        log('write-ledger.jsonl', dict(cand, key=cmd['key'], state=state, worker=i, dispatched=cmd['dispatched'],
+                                       submitted=submitted, completed=completed, error=error, attributed=attributed,
+                                       worker_identity=dict(pid=ident['pid'], starttime=ident['starttime'])))
+        entry = ledger.setdefault(cmd['key'], dict(survivor=None, unknown=[], quarantined=False)) if state != 'REFUSED' else None
+        if state == 'ACKED':
+            entry['survivor'] = cand
+        elif state == 'UNKNOWN':
+            entry['unknown'].append(cand)
+
+    def quarantine(i, cmd, submitted, completed, error, ident=None):
+        """An attributed UNKNOWN (F1, F2): the key leaves the load for good, pinned busy so nothing selects it."""
+        key = cmd['key']
+        digest = oracle.pending[key].digest
+        oracle.quarantine_write(key)
+        busy[key] = busy.get(key, 0) + 1
+        ledger_row(i, cmd, 'UNKNOWN', digest, submitted, completed, error, row_cfg['episode'], ident)
+        ledger[key]['quarantined'] = True
+        counts['unknown_attributed'] += 1
+
+    def put_failed(i, cmd, row, event):
+        """REFUSED for a named definite error; in F1 an UNKNOWN among the armed ops quarantines; any other
+        UNKNOWN stops the run as today."""
+        error, key = str(row.get('error')), cmd['key']
+        if any(s in error for s in row_cfg['refused']):
+            digest = oracle.pending[key].digest
+            oracle.refuse_write(key)
+            ledger_row(i, cmd, 'REFUSED', digest, row['submitted'], row['completed'], error)
+            event['state'] = 'REFUSED'
+        elif row_cfg['kind'] == 'volume_kill_io' and cmd['operation_id'] in armed_ops:
+            quarantine(i, cmd, row['submitted'], row['completed'], error)
+            event['state'] = 'UNKNOWN'
+        else:
+            ledger_row(i, cmd, 'UNKNOWN', oracle.pending[key].digest, row['submitted'], row['completed'], error)
+            log('op-events.jsonl', dict(event, state='UNKNOWN'))
+            oracle.abandon_write(key)  # raises UNKNOWN_WRITE: the run stops
+        log('op-events.jsonl', event)
 
     def release(key):
         busy[key] -= 1
@@ -338,10 +408,15 @@ def run(config):
                      completed=row['completed'], ok=row['ok'], error=row.get('error'))
         if cmd['action'] == 'set':
             if not row['ok'] or row['results'] not in (None, [True]):
+                if row_cfg:
+                    return put_failed(i, cmd, row, event)
                 raise OracleError('failed SET ' + str(row.get('error')))  # any failed SET is fatal (r9)
             v = oracle.acknowledge(key, cmd['sequence'], cmd['length'], row['fids'])
             seeds[key] = cmd['seed']
             log('ack-journal.jsonl', dict(key=key, writer=i, seed=cmd['seed'], submitted=row['submitted'], completed=row['completed'], **vars(v)))
+            if row_cfg:
+                ledger_row(i, cmd, 'ACKED', v.digest, row['submitted'], row['completed'])
+                event['state'] = 'ACKED'
             writers[i] += 1
             key_writers.setdefault(key, set()).add(i)
             counts['acks'] += 1
@@ -349,7 +424,10 @@ def run(config):
         else:
             v = oracle.end_read(key)
             event.update(sequence=v.sequence, length=row.get('length'), sha256=row.get('sha256'))
-            case = classify_get(row, cmd['operation_id'] in window['allowed'])
+            credited = cmd['operation_id'] in window['allowed'] or cmd['operation_id'] in armed_ops
+            case = classify_get(row, credited)
+            if case == 'unexpected' and row_cfg and credited and any(s in str(row.get('error')) for s in row_cfg['refused']):
+                case = 'fault'  # a named definite refusal inside the armed window
             if case == 'hit':
                 if not v.matches(row['length'], row['sha256']):
                     counts['wrong_bytes'] += 1
@@ -361,7 +439,7 @@ def run(config):
                     event['cause'] = 'budget_refusal'
                 counts['misses'] += 1
             elif case == 'fault':  # acked + r9 kind
-                event.update(fault_error=True, episode=window['allowed'][cmd['operation_id']])  # credited only by 3b, within [P, P+60]
+                event.update(fault_error=True, episode=window['allowed'].get(cmd['operation_id']) or row_cfg['episode'])  # credited only by 3b, within [P, P+60]
             else:
                 raise OracleError('unexpected GET error ' + str(row.get('error')))
         log('op-events.jsonl', event)
@@ -374,6 +452,13 @@ def run(config):
             elif row['event'] == 'complete':
                 complete(i, row['row'])
                 submissions.pop(i, None)
+            elif row['event'] == 'error' and row_cfg and i in commands and row.get('operation_id') == commands[i]['operation_id']:
+                # Stage 3: an op that raised in its worker (a completion deadline, a lost connection) still ends in
+                # exactly one terminal state, judged like a failed completion; outside a row it stays fatal.
+                sub = submissions.pop(i, None)
+                complete(i, dict(operation_id=row['operation_id'], action=row.get('action'), ok=False, results=None,
+                                 error=str(row.get('error')), completed=time.monotonic(),
+                                 submitted=sub['monotonic'] if sub else commands[i]['dispatched']))
             elif row['event'] != 'stats':
                 counts['worker_errors'] += 1
                 raise RuntimeError('worker error ' + repr(row)[:300])
@@ -403,6 +488,77 @@ def run(config):
             time.sleep(.001)
         raise TimeoutError('no submitted GET to kill within 60 s')
 
+    def client_kill_put(started):
+        """F2 (extends client_kill): kill an RDMA worker only while its PUT is submitted and pending. That PUT is
+        UNKNOWN, attributed to the killed worker's pid/starttime, and its key is quarantined."""
+        n = 0
+        while time.monotonic() - started < 60:
+            for i in (i for i in range(clients) if transport(i) in ('dc', 'rc')):
+                pump(i)
+                if i in commands and commands[i]['action'] == 'set' and i in submissions:
+                    witness, cmd = submissions.pop(i), commands.pop(i)
+                    release(cmd['key'])
+                    victim = dict(workers[i]['identity'])
+                    killed = time.monotonic()
+                    workers[i]['process'].kill()
+                    workers[i]['process'].join(5)
+                    if workers[i]['process'].is_alive():
+                        raise RuntimeError('owned client survived kill')
+                    finished = time.monotonic()
+                    quarantine(i, cmd, witness['monotonic'], finished, 'client killed with the PUT pending', victim)
+                    start_worker(i)
+                    return dict(kind='client_kill_put', worker=i, started=started, killed=killed, finished=finished,
+                                witness=witness, victim=dict(pid=victim['pid'], starttime=victim['starttime']),
+                                replacement=workers[i]['identity'])
+                if i not in commands:
+                    n += 1
+                    key = config['key_prefix'] + hashlib.sha256(('f2-key-%d' % n).encode()).hexdigest()
+                    send(i, 'set', key, pat['object_bytes'] if pat else 1 << 20, seed='f2-generation-%d' % n)
+            time.sleep(.001)
+        raise TimeoutError('no submitted PUT to kill within 60 s')
+
+    def audit_get(w, op, key, cand):
+        """One GET of `cand` (its seed and length) by the fresh audit client; the assessor judges the bytes."""
+        cmd = dict(action='get', key=key, seed=cand['seed'], length=cand['length'], operation_id=op, dispatched=time.monotonic())
+        w['pipe'].send(cmd)
+        end = time.monotonic() + AUDIT_OP_S
+        while time.monotonic() < end:
+            if not w['pipe'].poll(max(0, end - time.monotonic())):
+                break
+            msg = w['pipe'].recv()
+            if msg['event'] == 'complete':
+                r = msg['row']
+                return dict(op=op, seed=cand['seed'], length=r.get('length'), ok=r['ok'], results=r.get('results'),
+                            sha256=r.get('sha256'), error=r.get('error'), untouched=r.get('untouched'),
+                            case=classify_get(r, False), submitted=r['submitted'], completed=r['completed'])
+            if msg['event'] == 'error':
+                return dict(op=op, seed=cand['seed'], ok=False, error=str(msg.get('error')), case='unexpected')
+        return None  # no answer within the op limit: the audit stops here, incomplete
+
+    def audit():
+        """Mandatory fresh audit (stage 3): after the load drained, a NEW client process reads every ledger key:
+        its survivor, then, for a quarantined key, each UNKNOWN generation, stopping at the first exact match or
+        miss. It records; the assessor decides. Past audit_s it stops and the row is NOT_COVERED."""
+        deadline, n, complete_ = time.monotonic() + row_cfg['audit_s'], 0, True
+        start_worker('audit')
+        w = workers['audit']
+        for key in sorted(ledger):
+            entry, reads = ledger[key], []
+            for cand in ([entry['survivor']] if entry['survivor'] else []) + (entry['unknown'] if entry['quarantined'] else []):
+                n += 1
+                r = audit_get(w, 'audit-%d' % n, key, cand) if time.monotonic() < deadline else None
+                if r is None:
+                    complete_ = False
+                    break
+                reads.append(r)
+                if r['case'] == 'miss' or (r['case'] == 'hit' and r['sha256'] == cand['digest'] and r['length'] == cand['length']):
+                    break
+            if not complete_:
+                break
+            log('audit.jsonl', dict(key=key, reads=reads))
+        log('op-events.jsonl', dict(event='audit_done', mono=time.monotonic(), keys=len(ledger), complete=complete_,
+                                    client=dict(pid=w['identity']['pid'], starttime=w['identity']['starttime'])))
+
     poller = threading.Thread(target=poll_topology, args=(config, stop, files['topology-polls.jsonl']), daemon=True)
     try:
         for i in range(clients):
@@ -419,10 +575,15 @@ def run(config):
                     raise RuntimeError('worker exited unexpectedly')
                 pump(i)
             fault_window()
-            if window['episode'] is not None:
+            if window['episode'] is not None and not window.get('armed'):
                 time.sleep(.002)
                 continue  # paused: no new dispatch of any kind until the exact close
-            if not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
+            if row_cfg and row_cfg['kind'] == 'client_kill_put' and not kills and now - begin >= row_cfg['at_s']:
+                if pattern and pattern.phase == 0:
+                    raise OracleError('kv_load client kill due before write_once ended')
+                kills.append(client_kill_put(now))
+                log('op-events.jsonl', dict(event='client_kill', **kills[-1]))
+            if not row_cfg and not kills and now - begin >= config['client_kill_at_s'] and not any(c['action'] == 'set' for c in commands.values()):
                 if pattern and pattern.phase == 0:  # the kill's own GET would precede the write barrier
                     raise OracleError('kv_load client kill due before write_once ended')
                 kills.append(client_kill(now))
@@ -464,6 +625,8 @@ def run(config):
             time.sleep(.02)
         if commands or oracle.pending or oracle.reading:
             raise OracleError('unfinished operations after quiescence')
+        if row_cfg:
+            audit()
         log('op-events.jsonl', dict(event='quiescent', mono=time.monotonic(), dispatched=seq[0]))  # the terminal row
         return dict(status='LOAD_DONE', counts=counts, writers=writers, kills=kills, body_start=begin, body_end=body_end,
                     shared_keys_all_four=sum(len(w) == 4 for w in key_writers.values()),
@@ -489,7 +652,8 @@ def main():
     summary = run(config)
     root = Path(config['root'])
     summary['evidence'] = {n: dict(sha256=hashlib.sha256((root / n).read_bytes()).hexdigest(), bytes=(root / n).stat().st_size)
-                           for n in EVIDENCE + tuple(sorted(p.name for p in root.glob('native-stats-*.jsonl')))}
+                           for n in EVIDENCE + (ROW_EVIDENCE if config.get('fault_row') else ())
+                           + tuple(sorted(p.name for p in root.glob('native-stats-*.jsonl')))}
     print(json.dumps(summary, sort_keys=True), flush=True)
 
 
