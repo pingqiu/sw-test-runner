@@ -17,6 +17,9 @@ import (
 
 // Reuse the profile's jobs and direct executor, without an approved-run adapter.
 func (s *directSoak) readJobs() error {
+	if s.c.ReadCase == MountSoakCase {
+		return s.mountJobs()
+	}
 	role := strings.Split(s.c.ReadCase, "-")[0]
 	victim := ""
 	for _, step := range s.b.Plan.Deploy {
@@ -174,6 +177,9 @@ func (s *directSoak) readFreeze(ctx context.Context, victim string) (w freezeWin
 }
 
 func (s *directSoak) readCase(ctx context.Context) (string, error) {
+	if s.c.ReadCase == MountSoakCase {
+		return s.mountCase(ctx)
+	}
 	var c SmokeConfig
 	if err := json.Unmarshal([]byte(s.b.Jobs["read-load"].Argv[3]), &c); err != nil {
 		return "", err
