@@ -64,8 +64,16 @@ func TestMaintenanceMasterReadOnlyRPC(t *testing.T) {
 	defer cancel()
 	response = maintenancePBTestBytes(11, license)
 	l, e := maintenanceReadLicense(ctx, listener.Addr().String())
-	if e != nil || !l.Valid || l.ID != "DEFAULT-ENT-25TB" || l.Expiry != "2026-12-09" || l.CapacityTB != 25 {
+	if e != nil || !l.Valid || l.UUID != "DEFAULT-ENT-25TB" || l.ID != "" || l.Expiry != "2026-12-09" || l.CapacityTB != 25 {
 		t.Fatalf("license %+v %v", l, e)
+	}
+	// Real default-trial GetMasterConfiguration leaves license_uuid empty;
+	// its license ID is a different field, printed by the owned master.
+	trial := append(maintenancePBTestNumber(1, 1), maintenancePBTestBytes(4, []byte("2026-12-09"))...)
+	trial = append(trial, maintenancePBTestNumber(5, 25)...)
+	response = maintenancePBTestBytes(11, trial)
+	if got, err := maintenanceReadLicense(ctx, listener.Addr().String()); err != nil || !got.Valid {
+		t.Fatalf("valid trial with empty UUID refused: %+v %v", got, err)
 	}
 	response = maintenancePBTestBytes(1, top)
 	rows, e := maintenanceReadShards(ctx, listener.Addr().String(), "own", "47")
@@ -96,6 +104,20 @@ func TestMaintenanceMasterReadOnlyRPC(t *testing.T) {
 	} {
 		if e = maintenanceCheckHolder(ctx, listener.Addr().String(), bad); e == nil {
 			t.Fatalf("foreign serving identity accepted: %+v", bad)
+		}
+	}
+}
+
+func TestMaintenanceLicenseIDMustComeFromOwnedMasterLog(t *testing.T) {
+	good := "OWNER 12 100\nI1109 02:47:10 license_validation.go:30    License ID: DEFAULT-ENT-25TB\nI1109 02:47:10 license_validation.go:33    Expires: 2026-12-09\n"
+	for _, raw := range []string{good, "", good + good, "license_valid=true capacity=25", "I1109 license_validation.go:30 License ID: DEFAULT-ENT-25TB\nI1109 license_validation.go:33 Expires: 2026-12-08\n"} {
+		l := maintenanceLicense{Valid: true, Expiry: "2026-12-09", CapacityTB: 25}
+		err := maintenanceJoinLicenseID(&l, raw)
+		if (err == nil) != (raw == good) {
+			t.Fatalf("log accepted=%t %q", err == nil, raw)
+		}
+		if err == nil && (l.ID != "DEFAULT-ENT-25TB" || l.UUID != "" || l.IDSource != "owned-master-startup-journal") {
+			t.Fatalf("ID/UUID conflated: %+v", l)
 		}
 	}
 }

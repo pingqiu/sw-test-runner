@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -28,6 +29,9 @@ type maintenanceMasterShard struct {
 type maintenanceLicense struct {
 	Valid      bool   `json:"valid"`
 	ID         string `json:"id"`
+	UUID       string `json:"uuid"`
+	IDSource   string `json:"id_source"`
+	Owner      string `json:"owner"`
 	Expiry     string `json:"expiry"`
 	CapacityTB uint64 `json:"capacity_tb"`
 }
@@ -214,17 +218,35 @@ func maintenanceReadLicense(ctx context.Context, address string) (maintenanceLic
 	id, e1 := maintenancePBBytes(f, 6)
 	expiry, e2 := maintenancePBBytes(f, 4)
 	capacity, e3 := maintenancePBNumber(f, 5)
-	l.ID, l.Expiry, l.CapacityTB = string(id), string(expiry), capacity
+	l.UUID, l.Expiry, l.CapacityTB = string(id), string(expiry), capacity
 	if e = errors.Join(e1, e2, e3); e != nil {
 		return l, e
 	}
-	if l.ID == "" || l.CapacityTB == 0 {
-		return l, errors.New("master license identity/capacity absent")
+	if l.CapacityTB == 0 {
+		return l, errors.New("master license capacity absent")
 	}
 	if _, e = time.Parse("2006-01-02", l.Expiry); e != nil {
 		return l, errors.New("master license expiry unreadable")
 	}
 	return l, nil
+}
+
+// LicenseInfo carries license_uuid, not the startup license's ID. In
+// particular DEFAULT-ENT-25TB has an empty UUID. Never invent that ID from
+// capacity/customer-name heuristics: join the owned master's actual log.
+func maintenanceJoinLicenseID(l *maintenanceLicense, raw string) error {
+	if len(raw) > 16384 {
+		return errors.New("owned master license log cap")
+	}
+	owners := regexp.MustCompile(`(?m)^OWNER ([1-9][0-9]*) ([1-9][0-9]*)$`).FindAllStringSubmatch(raw, -1)
+	ids := regexp.MustCompile(`(?m)^.*license_validation\.go:[0-9]+\s+License ID:\s+([^\s]{1,200})\s*$`).FindAllStringSubmatch(raw, -1)
+	dates := regexp.MustCompile(`(?m)^.*license_validation\.go:[0-9]+\s+Expires:\s+([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$`).FindAllStringSubmatch(raw, -1)
+	if len(owners) != 1 || len(ids) != 1 || len(dates) != 1 || dates[0][1] != l.Expiry {
+		return errors.New("owned master license ID/expiry log is unreadable or ambiguous")
+	}
+	l.ID, l.IDSource = ids[0][1], "owned-master-startup-journal"
+	l.Owner = owners[0][1] + "/" + owners[0][2]
+	return nil
 }
 func maintenanceReadShards(ctx context.Context, address, collection, vid string) ([]maintenanceMasterShard, error) {
 	v, e := strconv.ParseUint(vid, 10, 32)

@@ -448,13 +448,24 @@ func (m *maintenanceRuntime) startPlugins(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = m.r.save("maintenance-master-license.json", l); err != nil {
+	if !l.Valid {
+		if err = m.r.save("maintenance-master-license.json", l); err != nil {
+			return err
+		}
+		return &MaintenanceEnvironmentError{Reason: "master reports an invalid license; expiry=" + l.Expiry + " uuid=" + l.UUID}
+	}
+	masterUnit := strings.TrimSuffix(m.r.gens.unit(m.r.docs["meta"], "meta", "master"), ".service") + ".service"
+	cmd = mainPID(masterUnit) + `test "$(sudo -n readlink /proc/$pid/exe)" = ` + q(h.RunRoot+"/weed") + `; sockets=$(sudo -n ss -Hltnp); printf '%s\n' "$sockets" | awk -v p=` + strconv.Itoa(servicePort(h, "master_grpc")) + ` -v pid="$pid" '$4 ~ (":" p "$") && index($0,"pid=" pid ","){found=1} END{exit !found}'; sudo -n journalctl -b --no-pager -o cat -n16 ` + q("_SYSTEMD_UNIT="+masterUnit) + ` "_PID=$pid" --grep='License ID:|Expires:'; test "$(` + chaosStat + `)" = "$start"`
+	cmd = strings.Replace(cmd, "sudo -n journalctl", `printf 'OWNER %s %s\n' "$pid" "$start"; sudo -n journalctl`, 1)
+	cmd += `; test "$(sudo -n systemctl show -p MainPID --value ` + q(masterUnit) + `)" = "$pid"`
+	log, err := m.r.step(ctx, "meta", "maintenance-master-license-id", 30, cmd)
+	if err != nil {
 		return err
 	}
-	if !l.Valid {
-		return &MaintenanceEnvironmentError{Reason: "master license is not valid: " + l.ID}
+	if err = maintenanceJoinLicenseID(&l, log); err != nil {
+		return err
 	}
-	return nil
+	return m.r.save("maintenance-master-license.json", l)
 }
 
 func (m *maintenanceRuntime) scopes(ctx context.Context, hashed bool) (map[string]maintenanceScope, error) {
