@@ -55,6 +55,20 @@ def errname(e):
     return E.errorcode.get(e.errno, str(e.errno)) if isinstance(e, OSError) and e.errno else type(e).__name__
 
 
+class TermHold:
+    """SIGTERM waits while a child is spawned and recorded, then is honoured. A flag, not a signal mask: exec keeps a mask."""
+    held = pending = False
+
+    def __enter__(self):
+        TermHold.held = True
+
+    def __exit__(self, *exc):
+        TermHold.held = False
+        if TermHold.pending:
+            TermHold.pending = False
+            raise SystemExit(143)
+
+
 class Run:
     def __init__(self, c):
         self.c, self.root, self.lock, self.op = c, Path(c['root']), threading.Lock(), 0
@@ -87,9 +101,10 @@ class Run:
                 '-volumeServerAccess=direct', '-dirAutoCreate']
         if writeback:
             argv.append('-writebackCache')
-        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=open(self.root / ('mount-%s.log' % name), 'ab'),
-                             stderr=subprocess.STDOUT, start_new_session=True)
-        self.spawned[name] = dict(dir=d, proc=p)  # owned from here, not from readiness: a slow start must not escape teardown
+        with TermHold():
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=open(self.root / ('mount-%s.log' % name), 'ab'),
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+            self.spawned[name] = dict(dir=d, proc=p)  # owned from here, not from readiness: a slow start must not escape teardown
         for _ in range(300):
             if os.path.ismount(d):
                 self.mounts[name] = dict(dir=d, proc=p, argv=argv)
@@ -655,6 +670,9 @@ def teardown(run, root):
 
 
 def stop_on_term(signum, frame):
+    if TermHold.held:
+        TermHold.pending = True
+        return
     raise SystemExit(143)
 
 

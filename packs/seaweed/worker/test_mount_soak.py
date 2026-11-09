@@ -1,6 +1,6 @@
 """Caller controls for the mount soak load: teardown owns the rule and the mounts on every path, and absence is only
 ever proven by a successful check. No FUSE, iptables or network: the effects are recorded by fakes."""
-import json, tempfile, threading, unittest
+import inspect, json, os, signal, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -175,6 +175,77 @@ class PendingStart(Base):
         self.assertEqual(child.signals, ['term', 'kill'])
         self.assertIn('m0', self.run_.spawned)
         self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+
+class StopAroundSpawn(unittest.TestCase):
+    """A real SIGTERM through the real handler at a real source line, with a real child that only sleeps."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.root = Path(d.name)
+        weed = self.root / 'weed'
+        weed.write_text('#!/bin/sh\nexec sleep 120\n')
+        weed.chmod(0o755)
+        with mock.patch.object(M.subprocess, 'Popen'):
+            self.run_ = M.Run(dict(config(self.root), weed=str(weed)))
+        self.addCleanup(self.run_.journal.close)
+        self.run_.fault_cmd = FakeFaults()
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.signal(signal.SIGTERM, M.stop_on_term))
+        self.children = []
+        real = M.subprocess.Popen
+
+        def recording(*a, **k):
+            self.children.append(real(*a, **k))
+            return self.children[-1]
+        patch = mock.patch.object(M.subprocess, 'Popen', recording)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.kill_children)
+
+    def kill_children(self):
+        for c in self.children:
+            if c.poll() is None:
+                c.kill()
+                c.wait()
+
+    def term_at(self, source):
+        """Mount with a SIGTERM delivered just before the line of Run.mount holding source runs; teardown as main() would."""
+        code = M.Run.mount.__code__
+        target = code.co_firstlineno + next(i for i, ln in enumerate(inspect.getsource(M.Run.mount).splitlines()) if source in ln)
+        sent = []
+
+        def trace(frame, event, arg):
+            if frame.f_code is not code:
+                return None
+            if event == 'line' and frame.f_lineno == target and not sent:
+                sent.append(1)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return trace
+        sys.settrace(trace)
+        try:
+            with self.assertRaises(SystemExit) as stopped:
+                self.run_.mount('m0')
+        finally:
+            sys.settrace(None)
+        self.assertEqual(sent, [1])
+        self.assertEqual(stopped.exception.code, 143)
+        self.assertIn('m0', self.run_.spawned)  # owned when the stop lands
+        M.teardown(self.run_, self.root)
+        self.assertEqual(len(self.children), 1)
+        self.assertEqual(self.children[0].poll(), -signal.SIGTERM)
+        self.assertEqual(self.run_.spawned, {})
+        self.assertEqual(json.loads((self.root / 'mount-cleanup.json').read_text()), 'PROVEN')
+
+    def test_a_stop_between_spawn_and_registration_cannot_lose_the_child(self):
+        self.term_at('self.spawned[name] = dict(dir=d, proc=p)')
+
+    def test_a_stop_after_registration_is_honoured_at_once(self):
+        self.term_at('for _ in range(300):')
+
+    def test_a_held_stop_is_not_left_pending(self):
+        self.term_at('self.spawned[name] = dict(dir=d, proc=p)')
+        self.assertFalse(M.TermHold.held or M.TermHold.pending)
 
 
 class RuleGone(Base):
