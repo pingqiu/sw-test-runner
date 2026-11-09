@@ -75,7 +75,7 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 				return 77
 			}
 		}
-		if strings.Contains(inner, "systemd-run") && strings.Contains(inner, "volume-g2") {
+		if strings.Contains(inner, "systemd-run") && strings.Contains(inner, "volume-g2") && !strings.Contains(inner, "--on-active=") {
 			f.restartOnce.Do(func() { close(f.restartSeen) })
 		}
 	}
