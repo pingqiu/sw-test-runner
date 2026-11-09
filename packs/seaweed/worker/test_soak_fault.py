@@ -26,7 +26,10 @@ read = lambda n: (S / n).read_text() if (S / n).exists() else ''
 port = S / 'sys/class/infiniband/mlx5_0/ports/1'
 if tool == 'systemctl':
     if a[:2] == ['show', '-p']: print(read('mainpid').strip() or '0')
-    elif a[0] == 'is-active': print('inactive'); sys.exit(3)
+    elif a[0] == 'stop' and (S / 'stop-fails').exists(): sys.exit(1)
+    elif a[0] == 'is-active':
+        if (S / 'stop-fails').exists(): print('active'); sys.exit(0)
+        print('inactive'); sys.exit(3)
 elif tool == 'ip':
     if a[:2] == ['-o', 'addr']: print(read('addr'), end='')
     elif a[:2] == ['route', 'show']: print(read('default'), end='')
@@ -121,6 +124,14 @@ class LinkFlap(Host):
         self.assertIn(['systemctl', 'stop', 'sw-fault-run-1-E1.timer'], self.calls('systemctl'))
         self.assertTrue(self.cli(c, 'restore')['restored'])  # idempotent
 
+    def test_a_dead_man_that_cannot_be_cancelled_is_not_a_proven_restore(self):
+        self.dummy()
+        c = self.config('link_flap')
+        self.cli(c, 'apply')
+        (self.state / 'stop-fails').touch()  # the timer stays armed: a later firing could flap the link again
+        row = self.cli(c, 'restore', expect=4)
+        self.assertEqual((row['restored'], row['proof']['deadman_timer']), (False, 'active'))
+
     def test_preflight_refuses_and_changes_nothing(self):
         self.dummy()
         cases = {
@@ -166,6 +177,16 @@ class Limits(Host):
         self.assertEqual(self.limits(p.pid)['nofile'][0], row['before']['fds'] + 4)
         self.assertTrue(self.cli(c, 'restore')['restored'])
         self.assertEqual(self.limits(p.pid)['nofile'], before)
+
+    def test_a_restore_command_that_did_nothing_is_not_proven(self):
+        p = self.dummy()
+        c = self.config('fd_exhaust')
+        self.cli(c, 'apply')
+        (self.bin / 'prlimit').write_text('#!/bin/sh\nexit 0\n')  # reports success, changes nothing
+        (self.bin / 'prlimit').chmod(0o755)
+        row = self.cli(c, 'restore', expect=4)
+        self.assertFalse(row['restored'])
+        self.assertNotEqual(self.limits(p.pid)['nofile'][0], row['after']['limits']['nofile'][1] + 1)
 
     def test_restore_on_a_changed_target_is_not_proven(self):
         p = self.dummy()

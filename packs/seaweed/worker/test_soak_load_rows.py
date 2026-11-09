@@ -60,8 +60,22 @@ class Rows(unittest.TestCase):
         done = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('event') == 'audit_done']
         workers = json.loads((self.root / 'workers.json').read_text())
         self.assertTrue(done[0]['complete'] and done[0]['client']['pid'] not in [w['pid'] for w in workers.values()])
-        marks = [e['phase'] for e in jsonl(self.root / 'op-events.jsonl') if e.get('event') == 'fault_window']
-        self.assertEqual(marks, ['armed', 'closed'])
+        events = jsonl(self.root / 'op-events.jsonl')
+        marks = [e for e in events if e.get('event') == 'fault_window']
+        self.assertEqual([m['phase'] for m in marks], ['armed', 'closed'])
+        # armed, not paused: the load kept dispatching between the ack and the close
+        inside = [e for e in events if 'action' in e and marks[0]['mono'] < e['dispatched'] < marks[1]['mono']]
+        self.assertGreater(len(inside), 2, 'no dispatch while armed')
+
+    def test_f1_quarantined_keys_are_never_selected_again(self):
+        # a long window over the soak's 32 hot slots: without the busy pin a quarantined key is re-drawn and the
+        # oracle stops the run (UNKNOWN_WRITE retry); with it the load runs to the end
+        self.row('volume_kill_io')
+        self.config.update(duration_s=8, pacing_s=0.05)
+        self.config['native']['fake_delay_set'] = 0.05
+        self.armed_controller(0.5, 5.0)
+        self.assertEqual(soak_load.run(self.config)['status'], 'LOAD_DONE')
+        self.assertGreater(len([r for r in jsonl(self.root / 'write-ledger.jsonl') if r['state'] == 'UNKNOWN']), 5)
 
     def test_an_unknown_outside_the_window_stops_the_run_as_today(self):
         self.row('volume_kill_io')
@@ -99,7 +113,10 @@ class Rows(unittest.TestCase):
         self.assertEqual((u[0]['op'], u[0]['attributed'], u[0]['worker_identity']),
                          (k['witness']['operation_id'], 'E1', k['victim']))
         self.assertNotEqual(k['victim']['pid'], k['replacement']['pid'])
-        self.assertIn(u[0]['key'], {a['key'] for a in jsonl(self.root / 'audit.jsonl')})
+        # its key had no prior ACK: the audit must read it at the UNKNOWN generation's own seed and length
+        audit = {a['key']: a['reads'] for a in jsonl(self.root / 'audit.jsonl')}
+        self.assertIn(u[0]['key'], audit)
+        self.assertEqual([r['seed'] for r in audit[u[0]['key']]], [u[0]['seed']])
         self.assertEqual(summary['counts']['unknown_attributed'], 1)
 
     def test_rows_never_run_the_soak_client_kill(self):

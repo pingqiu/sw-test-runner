@@ -299,6 +299,49 @@ class NotCovered(unittest.TestCase):
                 self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria'])
                 self.assertEqual(v['status'], 'NOT_COVERED', v['criteria'])
 
+    def test_injector_witness_present_but_host_event_or_effect_missing(self):
+        """The injector's own rows stay; only the sampled host event, or only the effect, is taken away."""
+        def samples_of(mutate):
+            def edit(ev):
+                for s in ev['resource-samples.jsonl']:
+                    mutate(s)
+            return edit
+        def drop_ops(pred):
+            def edit(ev):
+                ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if not pred(e)]
+                ev['write-ledger.jsonl'] = [x for x in ev['write-ledger.jsonl'] if not pred(x)]
+                renumber(ev)
+            return edit
+        def f1_no_kill(ev):
+            for s in ev['resource-samples.jsonl']:
+                s['identity'] = dict(VOL)
+        def f2_not_unknown(ev):
+            next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')['state'] = 'REFUSED'
+        def f4_no_new(ev):
+            ev['faults.json'][0]['injection'][1]['after']['conns'] = []
+        def f5_unchanged(s):
+            s['limits']['memlock'] = [-1, -1]
+        cases = [
+            ('F1 host event', 'volume_kill_io', f1_no_kill),
+            ('F2 effect: not UNKNOWN', 'client_kill_put', f2_not_unknown),
+            ('F2 effect: no release', 'client_kill_put', samples_of(lambda s: s['metrics'].update(released=0.0))),
+            ('F3 host event', 'link_flap', samples_of(lambda s: s.update(port=['4: ACTIVE', 0]))),
+            ('F3 effect', 'link_flap', drop_ops(lambda e: e.get('fault_error'))),
+            ('F4 no new connection', 'conn_kill', f4_no_new),
+            ('F4 effect: no release', 'conn_kill', samples_of(lambda s: s['metrics'].update(released=0.0))),
+            ('F5 host event', 'mr_pressure', samples_of(f5_unchanged)),
+            ('F6 host event', 'disk_full', samples_of(lambda s: s.update(free=1 << 30))),
+            ('F6 effect', 'disk_full', drop_ops(lambda e: e.get('state') == 'REFUSED')),
+            ('F7 host event: fds never at the limit', 'fd_exhaust', samples_of(lambda s: s.update(fds=min(s['fds'], 50)))),
+            ('F7 effect', 'fd_exhaust', samples_of(lambda s: s['metrics'].update(accept_errors=0.0))),
+        ]
+        for name, kind, edit in cases:
+            with self.subTest(name=name):
+                v = verdict(self, kind, edit)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
+                self.assertNotEqual(v['status'], 'PASS')
+
     def test_f5_without_a_new_registration(self):
         def edit(ev):
             for s in ev['resource-samples.jsonl']:
@@ -364,6 +407,22 @@ class Fail(unittest.TestCase):
             g = next(e for e in ev['op-events.jsonl'] if e.get('action') == 'get' and e.get('ok'))
             g['sha256'] = '0' * 64
         self.check('control', edit, 'bytes')
+
+    def test_an_ack_whose_digest_is_not_its_seeds_bytes(self):
+        def edit(ev):
+            ev['ack-journal.jsonl'][0]['digest'] = '3' * 64
+        self.check('control', edit, 'bytes')
+
+    def test_f2_second_unknown_of_the_killed_worker_is_not_the_killed_op(self):
+        def edit(ev):  # same worker identity, inside the kill window, but not the op pending at the kill
+            seed = 'other'
+            ev['write-ledger.jsonl'].append(dict(op='999', key='z', state='UNKNOWN', seed=seed, length=64, digest=digest(seed), sequence=60,
+                                                 worker=1, dispatched=1100.4, submitted=1100.5, completed=1100.9, error='reset',
+                                                 attributed='E1', worker_identity=WID[1]))
+            ev['op-events.jsonl'].insert(0, dict(op='999', worker=1, action='set', key='z', dispatched=1100.4, submitted=1100.5,
+                                                 completed=1100.9, ok=False, error='reset', state='UNKNOWN'))
+        v = self.check('client_kill_put', edit, 'write_contract')
+        self.assertIn('UNKNOWN 999 outside the attributed window', v['criteria']['write_contract']['reason'])
 
     def test_partial_put_read_back_as_other_bytes(self):
         def edit(ev):  # the quarantined key returns neither its survivor nor the UNKNOWN generation's exact bytes
@@ -433,6 +492,27 @@ class Fail(unittest.TestCase):
                     e.update(submitted=1200.0, dispatched=1199.99, completed=1200.5)
         v = self.check('volume_kill_io', edit, 'write_contract')
         self.assertIn('outside the attributed window', v['criteria']['write_contract']['reason'])
+
+    def test_unknown_that_ended_before_the_kill_began(self):
+        def edit(ev):
+            for e in ev['op-events.jsonl'] + ev['write-ledger.jsonl']:
+                if e.get('state') == 'UNKNOWN':
+                    e.update(submitted=1099.5, dispatched=1099.49, completed=1099.95)  # pre-kill clock is 1100.0
+        self.check('volume_kill_io', edit, 'write_contract')
+
+    def test_volume_gap_or_change_in_a_row_that_kills_nothing(self):
+        for change in ('gap', 'restart'):
+            with self.subTest(change=change):
+                def edit(ev, change=change):
+                    ev['resource-samples.jsonl'][40]['identity'] = None if change == 'gap' else dict(REPL)
+                self.check('link_flap', edit, 'failure_mode')
+
+    def test_f1_replacement_is_not_the_receipt(self):
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['identity'] == REPL:
+                    s['identity'] = dict(pid=502, starttime=21)
+        self.check('volume_kill_io', edit, 'failure_mode')
 
     def test_unknown_in_a_row_without_attribution(self):
         def edit(ev):
