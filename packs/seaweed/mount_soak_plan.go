@@ -114,6 +114,21 @@ func MountSoakArgs(d *inventory.Document, s SmokeSettings, name string) ([]strin
 	return []string{"-I", path.Join(s.HelperDir, "mount_soak.py"), "--config", string(raw)}, nil
 }
 
+// checkMountHelpers proves the profile pins M01's two mount helpers to the
+// sources compiled into this binary, as BuildProfile does for the soak helpers.
+func checkMountHelpers(files map[string]string, s SmokeSettings) error {
+	for _, name := range mountSoakHelpers {
+		body, err := workerFiles.ReadFile("worker/" + name)
+		if err != nil {
+			return err
+		}
+		if files[path.Join(s.HelperDir, name)] != hash(body) {
+			return errors.New("mount soak: profile pin differs from the compiled helper: " + name)
+		}
+	}
+	return nil
+}
+
 // MountAssessArgs is the exact assessor argv.
 func MountAssessArgs(d *inventory.Document, s SmokeSettings) []string {
 	return []string{"-I", path.Join(s.HelperDir, "mount_assess.py"), "--root", runRoot(d, "m01")}

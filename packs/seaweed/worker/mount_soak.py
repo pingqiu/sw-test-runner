@@ -59,7 +59,7 @@ class Run:
     def __init__(self, c):
         self.c, self.root, self.lock, self.op = c, Path(c['root']), threading.Lock(), 0
         self.journal = open(self.root / 'mount-journal.jsonl', 'a', buffering=1)
-        self.mounts, self.procs = {}, []
+        self.mounts, self.procs, self.spawned = {}, [], {}  # spawned: every mount process from Popen until reaped
         self.cohorts, self.faults, self.w1_state, self.w2_current = {}, {}, {}, {}
         self.w1_left = c['write_budget_bytes']
         self.w1_rate = c['write_budget_bytes'] / max(1, sum(c['phases_s']))  # bytes per second over all load phases
@@ -89,6 +89,7 @@ class Run:
             argv.append('-writebackCache')
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=open(self.root / ('mount-%s.log' % name), 'ab'),
                              stderr=subprocess.STDOUT, start_new_session=True)
+        self.spawned[name] = dict(dir=d, proc=p)  # owned from here, not from readiness: a slow start must not escape teardown
         for _ in range(300):
             if os.path.ismount(d):
                 self.mounts[name] = dict(dir=d, proc=p, argv=argv)
@@ -103,10 +104,23 @@ class Run:
         m = self.mounts.pop(name)
         self.procs = [(n, p) for n, p in self.procs if n != name]
         subprocess.run(['fusermount', '-u', str(m['dir'])], check=False, timeout=120)
-        try:
-            m['proc'].wait(30)
-        except subprocess.TimeoutExpired:
-            m['proc'].kill()
+        self.reap(name)
+
+    def reap(self, name):
+        """Stop one spawned mount process and forget it only once its exit is observed. -> True when it is gone."""
+        s = self.spawned.get(name)
+        if s is None:
+            return True
+        p = s['proc']
+        for stop in (lambda: None, p.terminate, p.kill):
+            stop()
+            try:
+                p.wait(10)
+                del self.spawned[name]
+                return True
+            except subprocess.TimeoutExpired:
+                pass
+        return False
 
     def path(self, mount, rel):
         return self.mounts[mount]['dir'] / rel
@@ -626,12 +640,17 @@ def teardown(run, root):
             run.unmount(m)
         except Exception:  # keep going: the check below decides
             pass
+    reaped = True
+    for name, s in list(run.spawned.items()):  # includes mounts still starting
+        reaped = run.reap(name) and reaped
+        if os.path.ismount(s['dir']):
+            subprocess.run(['fusermount', '-uz', str(s['dir'])], check=False, timeout=60)
     rc, listing = run.fault_cmd(['iptables', '-S', 'OUTPUT'])
     try:
         mounts = [ln for ln in Path('/proc/mounts').read_text().splitlines() if str(root) in ln]
     except OSError:
         mounts = None
-    proven = rc == 0 and 'swmountsoak' not in listing and mounts == []
+    proven = reaped and rc == 0 and 'swmountsoak' not in listing and mounts == []
     (root / 'mount-cleanup.json').write_text(json.dumps('PROVEN' if proven else 'UNKNOWN'))
 
 

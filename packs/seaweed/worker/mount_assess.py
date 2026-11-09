@@ -43,7 +43,22 @@ class Occurrence:
     a read judged inside its window stays judged."""
 
     def __init__(self, gen, ack_end, epoch):
-        self.gen, self.ack_end, self.next_start, self.epoch = gen, ack_end, float('inf'), epoch
+        self.gen, self.epoch, self.windows = gen, epoch, [[ack_end, float('inf')]]
+
+    def is_open(self):
+        return self.windows[-1][1] == float('inf')
+
+    def covers(self, r):
+        return any(a <= r['start'] and r['end'] <= b for a, b in self.windows)
+
+
+def definitely_left_the_name_alone(r):
+    """True when a mutation certainly did not change this name. Its own in-flight interval stays unjudged."""
+    if r['kind'] in ('delete', 'rename'):
+        return r['rc'] != 0 and r.get('errno') in DEFINITE_FAILURES
+    if r['kind'] == 'replace':  # written to a temporary name; only the rename touches this one
+        return not r['full'] or r.get('fsync') != 0 or (r.get('rename', 0) != 0 and r.get('errno') in DEFINITE_FAILURES)
+    return False
 
 
 def ledger(events):
@@ -57,8 +72,12 @@ def ledger(events):
         return o
     for r in sorted((e for e in events if e['t'] == 'mut'), key=lambda e: e['start']):
         kind, path = r['kind'], r['path']
-        for o in history.get(path, ()):
-            o.next_start = min(o.next_start, r['start'])
+        was_open = [o for o in history.get(path, ()) if o.is_open()]
+        for o in was_open:
+            o.windows[-1][1] = r['start']
+        if definitely_left_the_name_alone(r):  # the bytes are unchanged: judged again once the failed op is over
+            for o in was_open:
+                o.windows.append([r['end'], float('inf')])
         if kind in ('create', 'replace'):
             g = Gen(r)
             o = place(path, g, r['end'])
@@ -102,7 +121,7 @@ def judge_w1(events, fail):
                 fail('no_silent_corruption', 'final %s matches no generation' % path)
     for r in (e for e in events if e['t'] == 'read'):
         occs = history.get(r['path'], [])
-        current = [o for o in occs if o.gen.acked and o.ack_end <= r['start'] and r['end'] <= o.next_start]
+        current = [o for o in occs if o.gen.acked and o.covers(r)]
         if not current:
             continue  # outside every immutable window: not judged
         o = current[-1]

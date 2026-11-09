@@ -76,6 +76,29 @@ func TestMountSoakRefusesAnInventoryOutsideTheFrozenPath(t *testing.T) {
 	}
 }
 
+func TestMountHelpersMustMatchTheCompiledSources(t *testing.T) {
+	s := SmokeSettings{HelperDir: "/rel/worker"}
+	files := map[string]string{}
+	for _, name := range mountSoakHelpers {
+		body, err := workerFiles.ReadFile("worker/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files["/rel/worker/"+name] = hash(body)
+	}
+	if err := checkMountHelpers(files, s); err != nil {
+		t.Fatal(err)
+	}
+	files["/rel/worker/mount_assess.py"] = "not the compiled bytes"
+	if err := checkMountHelpers(files, s); err == nil {
+		t.Fatal("a stale pin was accepted")
+	}
+	delete(files, "/rel/worker/mount_assess.py")
+	if err := checkMountHelpers(files, s); err == nil {
+		t.Fatal("a missing pin was accepted")
+	}
+}
+
 func TestMountVerdictDecodeRefusesForeignOutput(t *testing.T) {
 	if _, err := decodeMountVerdict([]byte(`{"schema":"seaweed-mount-verdict/1","status":"PASS","cleanup":"PROVEN"}`)); err != nil {
 		t.Fatal(err)

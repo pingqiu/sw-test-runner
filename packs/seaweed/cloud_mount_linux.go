@@ -16,7 +16,7 @@ import (
 // on M01 are the embedded sources.
 func (s *directSoak) mountJobs() error {
 	smoke := s.b.Plan.Smoke
-	if err := checkPinned(tr.PackInputs{Files: s.in.Files}, "m01", smoke, mountSoakHelpers, false); err != nil {
+	if err := checkMountHelpers(s.in.Files["m01"], smoke); err != nil {
 		return err
 	}
 	args, err := MountSoakArgs(s.d, smoke, s.c.ReadCase)

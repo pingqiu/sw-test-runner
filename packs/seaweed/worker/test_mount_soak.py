@@ -127,6 +127,56 @@ class Teardown(Base):
         self.assertEqual(self.run_.fault_cmd(['iptables', '-S'])[0], -1)
 
 
+class StartingMount:
+    """A mount process that never becomes ready; it dies on terminate unless stubborn."""
+
+    def __init__(self, stubborn=False):
+        self.alive, self.stubborn, self.signals = True, stubborn, []
+
+    def poll(self):
+        return None if self.alive else -15
+
+    def wait(self, timeout=None):
+        if self.alive:
+            raise M.subprocess.TimeoutExpired('mount', timeout)
+        return -15
+
+    def terminate(self):
+        self.signals.append('term')
+        self.alive = self.stubborn
+
+    def kill(self):
+        self.signals.append('kill')
+        self.alive = self.stubborn
+
+
+class PendingStart(Base):
+    def start_and_fail(self, child):
+        self.run_.fault_cmd = FakeFaults()
+        real_read = Path.read_text
+        with mock.patch.object(M.subprocess, 'Popen', return_value=child), mock.patch.object(M.os.path, 'ismount', return_value=False), \
+                mock.patch.object(M.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'did not start'):
+                self.run_.mount('m0')
+            self.assertIn('m0', self.run_.spawned)  # owned before it is ready
+            with mock.patch.object(M.Path, 'read_text', lambda p, *a, **k: '' if str(p) == '/proc/mounts' else real_read(p, *a, **k)):
+                M.teardown(self.run_, self.root)
+
+    def test_a_mount_still_starting_is_stopped_before_cleanup_is_proven(self):
+        child = StartingMount()
+        self.start_and_fail(child)
+        self.assertFalse(child.alive)
+        self.assertEqual(self.run_.spawned, {})
+        self.assertEqual(self.cleanup_state(), 'PROVEN')
+
+    def test_a_mount_that_will_not_die_leaves_cleanup_unknown(self):
+        child = StartingMount(stubborn=True)
+        self.start_and_fail(child)
+        self.assertEqual(child.signals, ['term', 'kill'])
+        self.assertIn('m0', self.run_.spawned)
+        self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+
 class RuleGone(Base):
     def test_only_the_no_such_rule_answer_proves_absence(self):
         self.assertEqual(M.IPTABLES_NO_SUCH_RULE, 1)

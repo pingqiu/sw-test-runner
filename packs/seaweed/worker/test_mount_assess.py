@@ -294,6 +294,41 @@ class Oracle(unittest.TestCase):
         j.final('b/x', 's3', 100)
         self.passes(j)
 
+    def failed_then_read(self, kind, sha, **kw):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        if kind == 'replace':
+            j.mut('replace', 'b/x', 'g3', 's3', 100, start=210.0, fsync=5)
+        else:
+            j.mut(kind, 'b/x', 'g2', 's2', 100, start=210.0, rc=-1, errno='EACCES', **kw)
+        j.add(t='read', path='b/x', rc=0, sha=sha, size=100, start=220.0, end=220.1)
+        j.final('b/x', 's2', 100)
+        return j
+
+    def test_a_corrupt_read_after_a_definitely_failed_mutation_fails(self):
+        for kind, kw in (('delete', {}), ('rename', dict(to='b/y')), ('replace', {})):
+            self.fails(self.failed_then_read(kind, '0' * 64, **kw), 'no_silent_corruption')
+
+    def test_an_exact_read_after_a_definitely_failed_mutation_passes(self):
+        for kind, kw in (('delete', {}), ('rename', dict(to='b/y')), ('replace', {})):
+            self.passes(self.failed_then_read(kind, sha('s2', 100), **kw))
+
+    def test_a_read_inside_the_failed_operation_is_not_judged(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('delete', 'b/x', '', '', 0, start=210.0, rc=-1, errno='EACCES')  # in flight 210.0 to 210.1
+        j.add(t='read', path='b/x', rc=0, sha='0' * 64, size=100, start=210.02, end=210.05)
+        j.final('b/x', 's2', 100)
+        self.passes(j)
+
+    def test_an_uncertain_mutation_does_not_reopen_the_window(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('delete', 'b/x', '', '', 0, start=210.0, rc=-1, errno='ETIMEDOUT')
+        j.add(t='read', path='b/x', rc=0, sha='0' * 64, size=100, start=220.0, end=220.1)
+        j.final('b/x', 's2', 100)
+        self.passes(j)
+
     def test_a_definitely_failed_delete_keeps_the_ack(self):
         j = J()
         j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
