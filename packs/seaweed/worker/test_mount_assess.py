@@ -24,6 +24,13 @@ class J:
         self.barrier('w0', 1000)
         self.mut('create', 'a/keep', 'g1', 'seed1', 4096, mount='m2')
         self.final('a/keep', 'seed1', 4096)
+        for i, name in enumerate('ABC'):  # coverage: W1 keeps writing through every load phase
+            base = 7000.0 + i * 100
+            self.add(t='phase', name=name, start=base, end=base + 50)
+            for n in range(3):
+                path, gen = 'p%s/f%d' % (name, n), 'p%s%d' % (name, n)
+                self.mut('create', path, gen, gen, 64, start=base + n + 1)
+                self.final(path, gen, 64)
 
     def add(self, **r):
         self.op += 1
@@ -236,6 +243,14 @@ class Oracle(unittest.TestCase):
         j.add(t='read', path='z', rc=-1, errno='EIO', sha='', size=0, start=300.0, end=301.0)
         self.fails(j, 'mounts_alive')
 
+    def test_a_long_phase_row_is_not_an_operation(self):  # found in rehearsal
+        j = J()
+        next(e for e in j.ev if e['t'] == 'phase').update(end=7900.0)
+        for e in j.ev:
+            if e['t'] == 'phase':
+                e.pop('op', None)
+        self.passes(j)
+
     def test_long_op_outside_a_window_fails(self):
         j = J()
         j.add(t='read', path='z', rc=0, sha='', size=0, start=300.0, end=361.0)
@@ -252,6 +267,71 @@ class Oracle(unittest.TestCase):
         j.faults['E180'].update(apply=5400.0, heal=5580.0)
         j.add(t='w3', mount='sync', path='s/q', full=False, fsync=5, close=5, sha='', size=0, errno='EIO', start=5100.0, end=5579.0)
         self.passes(j)
+
+    # --- Codex01 review of #128
+    def test_a_later_delete_does_not_erase_an_earlier_corrupt_read(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.add(t='read', path='b/x', rc=0, sha='0' * 64, size=100, start=210.0, end=210.1)
+        j.mut('delete', 'b/x', '', '', 0, start=220.0)
+        self.fails(j, 'no_silent_corruption')
+
+    def test_a_later_rename_does_not_erase_an_earlier_corrupt_read(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.add(t='read', path='b/x', rc=0, sha='0' * 64, size=100, start=210.0, end=210.1)
+        j.mut('rename', 'b/x', 'g2', 's2', 100, to='b/y', start=220.0)
+        j.final('b/y', 's2', 100)
+        self.fails(j, 'no_silent_corruption')
+
+    def test_a_stale_enoent_on_a_name_recreated_after_a_rename_passes(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('rename', 'b/x', 'g2', 's2', 100, to='b/y', start=210.0)
+        j.mut('create', 'b/x', 'g3', 's3', 100, start=220.0)  # the old name's history ended with the rename
+        j.add(t='read', path='b/x', rc=-1, errno='ENOENT', sha='', size=0, start=230.0, end=230.1)
+        j.final('b/y', 's2', 100)
+        j.final('b/x', 's3', 100)
+        self.passes(j)
+
+    def test_a_definitely_failed_delete_keeps_the_ack(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('delete', 'b/x', '', '', 0, start=220.0, rc=-1, errno='EACCES')
+        self.fails(j, 'no_lost_ack')
+
+    def test_a_definitely_failed_rename_keeps_the_ack_at_its_name(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('rename', 'b/x', 'g2', 's2', 100, to='b/y', start=220.0, rc=-1, errno='EACCES')
+        j.final('b/y', 's2', 100)
+        v = j.verdict()
+        self.assertIn('no_lost_ack', self.failing(v))
+
+    def test_an_uncertain_delete_with_the_file_gone_is_invalid_not_pass(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('delete', 'b/x', '', '', 0, start=220.0, rc=-1, errno='ETIMEDOUT')  # unknown outcome
+        v = self.invalid(j)
+        self.assertEqual(self.failing(v), [])
+
+    def test_a_definitely_failed_delete_with_the_file_present_passes(self):
+        j = J()
+        j.mut('create', 'b/x', 'g2', 's2', 100, start=200.0)
+        j.mut('delete', 'b/x', '', '', 0, start=220.0, rc=-1, errno='EACCES')
+        j.final('b/x', 's2', 100)
+        self.passes(j)
+
+    def test_a_phase_without_w1_writes_is_invalid(self):
+        j = J()
+        j.drop(lambda e: e['t'] == 'mut' and e['path'].startswith('pB/'))
+        j.drop(lambda e: e['t'] == 'final' and e['path'].startswith('pB/'))
+        self.invalid(j)
+
+    def test_missing_phase_rows_are_invalid(self):
+        j = J()
+        j.drop(lambda e: e['t'] == 'phase')
+        self.invalid(j)
 
     # --- Gates: never a product verdict
     def invalid(self, j, **over):

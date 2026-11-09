@@ -14,6 +14,7 @@ CHUNK, RECORD = 1 << 18, 256
 # file grows the filer's metadata log quadratically and fills a small cluster. Rotate and pace to keep W2 honest.
 W2_RECORDS_PER_FILE, W2_APPEND_PAUSE_S, W2_ATTR_PAUSE_S = 64, 0.2, 0.1
 W3_FILES, W3_SYNC_FILES, W3_SIZE = 24, 4, 1 << 20
+W1_BURST_BYTES = 1 << 25  # the largest write has to fit in the bucket
 SIZES, SIZE_WEIGHTS = (4096, 1 << 16, 1 << 20, 1 << 24), (50, 30, 19, 1)
 
 
@@ -39,6 +40,9 @@ for line in sys.stdin:
 '''
 
 
+IPTABLES_NO_SUCH_RULE = 1  # other codes are errors, which prove nothing about the rule
+
+
 def join_all(threads, seconds):
     """One shared deadline: stuck writers must not cost seconds each. A thread still stuck leaves its op unsettled,
     which the assessor reports as INVALID."""
@@ -58,6 +62,8 @@ class Run:
         self.mounts, self.procs = {}, []
         self.cohorts, self.faults, self.w1_state, self.w2_current = {}, {}, {}, {}
         self.w1_left = c['write_budget_bytes']
+        self.w1_rate = c['write_budget_bytes'] / max(1, sum(c['phases_s']))  # bytes per second over all load phases
+        self.w1_tokens, self.w1_at = 0.0, time.monotonic()
         self.helper = subprocess.Popen([sys.executable, '-I', '-c', FAULT_HELPER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
     def begin(self):
@@ -158,13 +164,13 @@ class Run:
             n = state['n']
             action, rel = rng.random(), None
             size = rng.choices(SIZES, SIZE_WEIGHTS)[0]
-            if (action < 0.5 or not live) and self.spend(size):
+            if (action < 0.5 or not live) and self.spend(size, stop):
                 rel = '%s/f%d' % (m, n)
                 if self.w1_write(m, rel, 'create', '%s-%d' % (m, n), size):
                     live.append(rel)  # only acknowledged files may be renamed, replaced or deleted later
                 else:
                     rel = None
-            elif action < 0.7 and live and self.spend(size):
+            elif action < 0.7 and live and self.spend(size, stop):
                 rel = rng.choice(live)
                 self.w1_replace(m, rel, '%s-%d' % (m, n), size)
             elif not live or action < 0.7:
@@ -200,12 +206,27 @@ class Run:
                     self.done(op, s, t='read', path=rel, rc=rc, sha=sha, size=size, errno=err, mount=m)
             shared['w1'] = shared.get('w1', [])[-200:] + ([rel] if rel and rel in live else [])
 
-    def spend(self, size):
+    def start_phase_budget(self, secs):
+        """Each load phase gets its own share, so no phase can spend another's, and nothing accrues across a partition."""
         with self.lock:
-            if self.w1_left < size:
-                return False
-            self.w1_left -= size
-            return True
+            self.w1_left = int(self.c['write_budget_bytes'] * secs / max(1, sum(self.c['phases_s'])))
+            self.w1_tokens, self.w1_at = 0.0, time.monotonic()
+
+    def spend(self, size, stop):
+        """Wait for this write's share of the paced budget; False once the budget is gone or the phase ends."""
+        while not stop.is_set():
+            with self.lock:
+                now = time.monotonic()
+                self.w1_tokens = min(self.w1_tokens + (now - self.w1_at) * self.w1_rate, W1_BURST_BYTES)
+                self.w1_at = now
+                if self.w1_left < size:
+                    return False
+                if self.w1_tokens >= size:
+                    self.w1_tokens -= size
+                    self.w1_left -= size
+                    return True
+            time.sleep(0.05)
+        return False
 
     def w1_write(self, m, rel, kind, seed, size):
         op, s = self.begin()
@@ -324,11 +345,12 @@ class Run:
                 self.done(op, s, t='wread', file=file, seqs=[], valid=True, mode=None, errno=errname(e), mount=m)
             time.sleep(0.5)
 
-    def load_phase(self, secs, names, seqs):
+    def load_phase(self, name, secs, names, seqs):
         """Run W1 and W2 for secs; returns when every thread has exited."""
+        self.start_phase_budget(secs)
         stop, shared, ts = threading.Event(), {}, []
         for i, m in enumerate(names):
-            ts.append(threading.Thread(target=self.w1, args=(m, random.Random('%s-%s' % (m, secs)), stop, shared), daemon=True))
+            ts.append(threading.Thread(target=self.w1, args=(m, random.Random('%s-%s' % (m, name)), stop, shared), daemon=True))
         for i in range(0, len(names) - 1, 2):
             a, b, f = names[i], names[i + 1], 'file%d' % (i // 2)
             ts.append(threading.Thread(target=self.w2_append, args=(a, f, seqs, stop), daemon=True))
@@ -336,12 +358,13 @@ class Run:
             ts.append(threading.Thread(target=self.w2_read, args=(b, f, stop), daemon=True))
         for t in ts:
             t.start()
-        end = time.monotonic() + secs
+        began, end = time.monotonic(), time.monotonic() + secs
         while time.monotonic() < end:
             self.check_mounts()
             time.sleep(1)
         stop.set()
         join_all(ts, 300)
+        self.log(t='phase', name=name, start=began, end=time.monotonic())
 
     # --- W3 and its witnesses
     def filer_meta(self, path):
@@ -355,9 +378,13 @@ class Run:
             return {'unknown': 'unreachable'}
 
     def fault_cmd(self, argv):
-        self.helper.stdin.write(json.dumps(self.c['iptables'] + argv) + '\n')
-        self.helper.stdin.flush()
-        return json.loads(self.helper.stdout.readline())
+        """-> [rc, stdout]. Never raises: a broken channel is rc -1, which proves nothing."""
+        try:
+            self.helper.stdin.write(json.dumps(self.c['iptables'] + argv) + '\n')
+            self.helper.stdin.flush()
+            return json.loads(self.helper.stdout.readline())
+        except (OSError, ValueError) as e:
+            return [-1, str(e)]
 
     def rule(self, action):
         c = self.c
@@ -369,6 +396,19 @@ class Run:
         return int(lines[0].split()[0]) if lines else None
 
     def episode(self, ep, secs):
+        """The partition is owned here: every way out, including an exception, removes the rule."""
+        try:
+            self.run_episode(ep, secs)
+        finally:
+            self.heal_rule()
+
+    def heal_rule(self):
+        """Remove every copy of the rule; stops at the first answer other than success."""
+        for _ in range(8):
+            if self.rule('-D') != 0:
+                break
+
+    def run_episode(self, ep, secs):
         c, wb, sync = self.c, 'wb', 'sync'
         rec = dict(argv_direct=all('-volumeServerAccess=direct' in self.mounts[m]['argv'] for m in (wb, sync)))
         if self.rule('-I') != 0:
@@ -430,7 +470,7 @@ class Run:
         self.rule('-D')
         rec['heal'] = heal_t = time.monotonic()
         trace('healed')
-        rec['rule_gone'] = self.rule('-C') != 0
+        rec['rule_gone'] = self.rule('-C') == IPTABLES_NO_SUCH_RULE
         join_all(sync_ts + wb_ts, 180)
         self.faults[ep] = rec
         (self.root / 'mount-faults.json').write_text(json.dumps(self.faults, sort_keys=True))
@@ -540,12 +580,8 @@ def fuse_ok():
     return os.path.exists('/dev/fuse') and 'user_allow_other' in Path('/etc/fuse.conf').read_text()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True)
-    c = json.loads(parser.parse_args().config)
-    root = Path(c['root'])
-    run, names = Run(c), ['m%d' % i for i in range(c['mounts'])]
+def drive(run, c, root):
+    names = ['m%d' % i for i in range(c['mounts'])]
     env = dict(fuse_ok=fuse_ok(), mounts=names, mounts_started=False)
     try:
         if not env['fuse_ok']:
@@ -570,22 +606,54 @@ def main():
         (root / 'mount-env.json').write_text(json.dumps(env, sort_keys=True))
     seqs = {}
     a, b, last = c['phases_s']
-    run.load_phase(a, names, seqs)
-    run.episode('E%d' % c['episodes_s'][0], c['episodes_s'][0])
-    run.load_phase(b, names, seqs)
-    run.episode('E%d' % c['episodes_s'][1], c['episodes_s'][1])
-    run.load_phase(max(0, last - c['dual_append_s']), names, seqs)
+    e1, e2 = c['episodes_s']
+    run.load_phase('A', a, names, seqs)
+    run.episode('E1-%ds' % e1, e1)
+    run.load_phase('B', b, names, seqs)
+    run.episode('E2-%ds' % e2, e2)
+    run.load_phase('C', last, names, seqs)
     run.dual_append(names[0], names[1], c['dual_append_s'])
     run.finish(names, seqs)
-    for m in list(run.mounts):
-        run.unmount(m)
-    left = run.fault_cmd(['iptables', '-S', 'OUTPUT'])[1]
-    mnts = [ln for ln in Path('/proc/mounts').read_text().splitlines() if str(root) in ln]
-    (root / 'mount-cleanup.json').write_text(json.dumps('PROVEN' if 'swmountsoak' not in left and not mnts else 'UNKNOWN'))
     run.log(t='end', dispatched=run.op)
     print(json.dumps(dict(status='LOAD_DONE', ops=run.op)))
-    run.journal.flush()
-    os._exit(0)
+
+
+def teardown(run, root):
+    """On every path out: remove the rule, unmount everything, then prove absence. Anything unchecked stays UNKNOWN."""
+    run.heal_rule()
+    for m in list(run.mounts):
+        try:
+            run.unmount(m)
+        except Exception:  # keep going: the check below decides
+            pass
+    rc, listing = run.fault_cmd(['iptables', '-S', 'OUTPUT'])
+    try:
+        mounts = [ln for ln in Path('/proc/mounts').read_text().splitlines() if str(root) in ln]
+    except OSError:
+        mounts = None
+    proven = rc == 0 and 'swmountsoak' not in listing and mounts == []
+    (root / 'mount-cleanup.json').write_text(json.dumps('PROVEN' if proven else 'UNKNOWN'))
+
+
+def stop_on_term(signum, frame):
+    raise SystemExit(143)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True)
+    c = json.loads(parser.parse_args().config)
+    root = Path(c['root'])
+    run = Run(c)
+    signal.signal(signal.SIGTERM, stop_on_term)
+    code = 1
+    try:
+        drive(run, c, root)
+        code = 0
+    finally:
+        teardown(run, root)
+        run.journal.flush()
+    os._exit(code)
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ import (
 
 // Reuse the profile's jobs and direct executor, without an approved-run adapter.
 func (s *directSoak) readJobs() error {
-	if s.c.ReadCase == MountSoakCase {
+	if isMountCase(s.c.ReadCase) {
 		return s.mountJobs()
 	}
 	role := strings.Split(s.c.ReadCase, "-")[0]
@@ -177,7 +177,7 @@ func (s *directSoak) readFreeze(ctx context.Context, victim string) (w freezeWin
 }
 
 func (s *directSoak) readCase(ctx context.Context) (string, error) {
-	if s.c.ReadCase == MountSoakCase {
+	if isMountCase(s.c.ReadCase) {
 		return s.mountCase(ctx)
 	}
 	var c SmokeConfig

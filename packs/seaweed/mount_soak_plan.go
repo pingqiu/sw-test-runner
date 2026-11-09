@@ -15,6 +15,29 @@ import (
 // M01, the assessor, then collect and cleanup.
 const MountSoakCase = "mount-soak"
 
+// MountSoakSmokeCase is the first lab step: the same direct wiring on a short
+// schedule. It answers only whether the wiring works, so its verdict's status
+// is not judged; a published verdict and proven cleanup are the whole result.
+const MountSoakSmokeCase = "mount-soak-smoke"
+
+func isMountCase(name string) bool { return name == MountSoakCase || name == MountSoakSmokeCase }
+
+// mountSchedule is one frozen run shape.
+type mountSchedule struct {
+	PhasesS, EpisodesS []int
+	DualS              int
+	Budget             int64
+	WorkerS            int // bound on the whole worker step
+}
+
+// schedules: the soak is plan r4's; the smoke is bounded to 15 minutes of worker time.
+func scheduleFor(name string) mountSchedule {
+	if name == MountSoakSmokeCase {
+		return mountSchedule{PhasesS: []int{60, 40, 40}, EpisodesS: []int{45, 60}, DualS: 10, Budget: 20 << 20, WorkerS: 900}
+	}
+	return mountSchedule{PhasesS: mountSoakPhasesS, EpisodesS: mountSoakEpisodesS, DualS: mountSoakDualAppendS, Budget: mountSoakWriteBudget, WorkerS: mountSoakWorkerBudget}
+}
+
 // mountSoakHelpers must be byte-identical to the embedded sources on M01.
 var mountSoakHelpers = []string{"mount_soak.py", "mount_assess.py"}
 
@@ -32,7 +55,7 @@ const (
 	mountSoakWorkerBudget = 3600 // seconds for the whole worker step
 	// mountSoakWriteBudget bounds W1 well inside the profile's 24 x 32 MiB of
 	// volumes: space is only reclaimed by vacuum, and ENOSPC would prove nothing.
-	mountSoakWriteBudget = 150 << 20
+	mountSoakWriteBudget  = 150 << 20
 	mountSoakAssessBudget = 600
 )
 
@@ -55,7 +78,8 @@ type mountSoakConfig struct {
 // MountSoakArgs produces the exact worker argv for M01. The partition targets
 // exactly M02's volume HTTP port, the only path a direct upload can take: the
 // inventory must have one volume server, so reassignment has nowhere to go.
-func MountSoakArgs(d *inventory.Document, s SmokeSettings) ([]string, error) {
+func MountSoakArgs(d *inventory.Document, s SmokeSettings, name string) ([]string, error) {
+	sched := scheduleFor(name)
 	var filer, volume *inventory.Host
 	for i := range d.Hosts {
 		h := &d.Hosts[i]
@@ -82,8 +106,8 @@ func MountSoakArgs(d *inventory.Document, s SmokeSettings) ([]string, error) {
 		return nil, err
 	}
 	raw, err := json.Marshal(mountSoakConfig{Root: runRoot(d, "m01"), Weed: path.Join(path.Dir(s.HelperDir), "bin", "weed"), Filer: filerHTTP,
-		FilerPath: "/testops/" + d.RunID + "/mountsoak", VolumeHost: host, VolumePort: port, PhasesS: mountSoakPhasesS, EpisodesS: mountSoakEpisodesS,
-		Iptables: []string{"sudo", "-n"}, Mounts: mountSoakMounts, DualS: mountSoakDualAppendS, Budget: mountSoakWriteBudget})
+		FilerPath: "/testops/" + d.RunID + "/mountsoak", VolumeHost: host, VolumePort: port, PhasesS: sched.PhasesS, EpisodesS: sched.EpisodesS,
+		Iptables: []string{"sudo", "-n"}, Mounts: mountSoakMounts, DualS: sched.DualS, Budget: sched.Budget})
 	if err != nil {
 		return nil, err
 	}

@@ -12,6 +12,9 @@ PRODUCT = ('no_lost_ack', 'no_lost_update', 'no_silent_corruption', 'writeback_o
 OP_LIMIT_S, HEAL_GRACE_S, ERR_GRACE_S, RECOVER_S = 60, 120, 60, 120
 FLOORS = dict(overlapping_chmods=1000, cohort_per_episode=20)
 ERROR_ERRNOS = ('EIO', 'ESTALE')
+# The operation certainly did not happen; anything else leaves its outcome unknown.
+DEFINITE_FAILURES = ('EACCES', 'EPERM', 'ENOTEMPTY', 'EINVAL', 'EROFS')
+PHASE_W1_FLOOR = 3
 
 
 def payload(seed, n):
@@ -28,73 +31,88 @@ def is_prefix(seed, length, size, sha):
 
 class Gen:
     def __init__(self, r):
-        self.id, self.path, self.sha, self.size, self.seed = r['gen'], r['path'], r['sha'], r['size'], r['seed']
+        self.id, self.sha, self.size, self.seed = r['gen'], r['sha'], r['size'], r['seed']
         self.acked = bool(r['full']) and r.get('fsync') == 0 and r.get('rename', 0) == 0
-        self.ack_end, self.next_start = r['end'], float('inf')
 
     def matches(self, sha, size):
         return (sha, size) == (self.sha, self.size) or (not self.acked and is_prefix(self.seed, self.size, size, sha))
 
 
+class Occurrence:
+    """A generation at one name for one interval. A later rename or delete closes the interval but never erases it, so
+    a read judged inside its window stays judged."""
+
+    def __init__(self, gen, ack_end, epoch):
+        self.gen, self.ack_end, self.next_start, self.epoch = gen, ack_end, float('inf'), epoch
+
+
 def ledger(events):
-    """W1 replay -> (survivors: path -> Gen, history: path -> [Gen], alt: gen id -> other allowed paths, maybe_gone)."""
-    survivors, history, alt, maybe_gone = {}, {}, {}, set()
+    """W1 replay -> survivors (path -> occurrence), history (path -> [occurrence]), epochs, alt, uncertain.
+    A definite failure keeps the ack's obligation; only an unknown outcome is uncertain, which is INVALID, never PASS."""
+    survivors, history, epoch, alt, uncertain = {}, {}, {}, {}, set()
+
+    def place(path, gen, end):
+        o = Occurrence(gen, end, epoch.get(path, 0))
+        history.setdefault(path, []).append(o)
+        return o
     for r in sorted((e for e in events if e['t'] == 'mut'), key=lambda e: e['start']):
         kind, path = r['kind'], r['path']
-        if path in survivors:
-            survivors[path].next_start = min(survivors[path].next_start, r['start'])
+        for o in history.get(path, ()):
+            o.next_start = min(o.next_start, r['start'])
         if kind in ('create', 'replace'):
             g = Gen(r)
-            history.setdefault(path, []).append(g)
+            o = place(path, g, r['end'])
             if g.acked:
-                survivors[path] = g
+                survivors[path] = o
         elif kind == 'rename':
-            g = survivors.get(path)
-            if g and r['rc'] == 0:
+            o = survivors.get(path)
+            if o and r['rc'] == 0:
                 del survivors[path]
-                g.path, g.next_start = r['to'], float('inf')
-                g.ack_end = r['end']
-                survivors[r['to']] = g
-                history.setdefault(r['to'], []).append(g)
-                history[path] = []  # the old name is legitimately gone
-            elif g:
-                alt.setdefault(g.id, set()).add(r['to'])  # the outcome of a failed rename is unknown; either name
+                epoch[path] = epoch.get(path, 0) + 1
+                survivors[r['to']] = place(r['to'], o.gen, r['end'])
+            elif o and r.get('errno') not in DEFINITE_FAILURES:
+                alt.setdefault(o.gen.id, set()).add(r['to'])
+                uncertain.add(o.gen.id)
         elif kind == 'delete':
-            g = survivors.get(path)
+            o = survivors.get(path)
             if r['rc'] == 0:
                 survivors.pop(path, None)
-                history[path] = []  # a later ENOENT is legitimate again
-            elif g:
-                maybe_gone.add(g.id)
-    return survivors, history, alt, maybe_gone
+                epoch[path] = epoch.get(path, 0) + 1
+            elif o and r.get('errno') not in DEFINITE_FAILURES:
+                uncertain.add(o.gen.id)
+    return survivors, history, epoch, alt, uncertain
 
 
 def judge_w1(events, fail):
-    survivors, history, alt, maybe_gone = ledger(events)
-    finals = {r['path']: r for r in events if r['t'] == 'final'}
-    for path, g in survivors.items():
-        here = [finals.get(p) for p in [path, *alt.get(g.id, ())]]
-        if any(f and f['rc'] == 0 and (f['sha'], f['size']) == (g.sha, g.size) for f in here):
+    """-> ids of acked generations whose absence is explained only by a mutation of unknown outcome."""
+    survivors, history, epoch, alt, uncertain = ledger(events)
+    finals, unresolved = {r['path']: r for r in events if r['t'] == 'final'}, []
+    for path, o in survivors.items():
+        here = [finals.get(p) for p in [path, *alt.get(o.gen.id, ())]]
+        if any(f and f['rc'] == 0 and (f['sha'], f['size']) == (o.gen.sha, o.gen.size) for f in here):
             continue
-        if g.id not in maybe_gone or any(f and f['rc'] == 0 for f in here):
-            fail('no_lost_ack', 'survivor %s %s absent or not exact' % (path, g.id))
+        if o.gen.id in uncertain and not any(f and f['rc'] == 0 for f in here):
+            unresolved.append(o.gen.id)
+        else:
+            fail('no_lost_ack', 'survivor %s %s absent or not exact' % (path, o.gen.id))
     for path, f in finals.items():
-        if f['rc'] == 0 and path not in survivors and not any(g.matches(f['sha'], f['size']) for g in history.get(path, ())):
-            if not any(path in paths for paths in alt.values()):
+        if f['rc'] == 0 and path not in survivors:
+            live = [o for o in history.get(path, ()) if o.epoch == epoch.get(path, 0)]
+            if not any(o.gen.matches(f['sha'], f['size']) for o in live) and not any(path in paths for paths in alt.values()):
                 fail('no_silent_corruption', 'final %s matches no generation' % path)
     for r in (e for e in events if e['t'] == 'read'):
-        gens = history.get(r['path'], [])
-        current = [g for g in gens if g.acked and g.ack_end <= r['start'] and r['end'] <= g.next_start]
+        occs = history.get(r['path'], [])
+        current = [o for o in occs if o.gen.acked and o.ack_end <= r['start'] and r['end'] <= o.next_start]
         if not current:
             continue  # outside every immutable window: not judged
-        g = current[-1]
-        earlier = gens[:gens.index(g)]
+        o = current[-1]
+        earlier = [x for x in occs[:occs.index(o)] if x.epoch == o.epoch]
         if r['rc'] == 0:
-            if not any(x.matches(r['sha'], r['size']) for x in [g, *earlier]):
+            if not any(x.gen.matches(r['sha'], r['size']) for x in [o, *earlier]):
                 fail('no_silent_corruption', 'read %s matches no allowed generation' % r['op'])
-        elif r.get('errno') != 'ENOENT' or earlier:
-            if r.get('errno') == 'ENOENT':
-                fail('no_silent_corruption', 'read %s ENOENT with an earlier generation' % r['op'])
+        elif r.get('errno') == 'ENOENT' and earlier:
+            fail('no_silent_corruption', 'read %s ENOENT with an earlier generation' % r['op'])
+    return unresolved
 
 
 def is_valid_prefix(seqs):
@@ -145,7 +163,7 @@ def judge_liveness(events, windows, fail):
     for r in events:
         if r['t'] == 'mount_exit' and r['after_start']:
             fail('mounts_alive', 'mount %s exited' % r['mount'])
-        if 'start' in r and 'end' in r:
+        if 'op' in r and 'start' in r and 'end' in r:  # operations only: a phase row spans minutes by design
             if r.get('errno') in ERROR_ERRNOS and not inside(r['end'], ERR_GRACE_S):
                 fail('mounts_alive', 'op %s %s outside a fault window' % (r.get('op'), r['errno']))
             dur = r['end'] - r['start']
@@ -165,13 +183,15 @@ def overlapping_chmods(events):
                for r in events if r['t'] == 'attr')
 
 
-def gates(d, events):
+def gates(d, events, unresolved=()):
     """-> (status or None, reasons). Nothing here is a product verdict."""
     if not d['env'].get('fuse_ok') or not d['env'].get('mounts_started'):
         return 'ENVIRONMENT', ['FUSE or mount start failed before the first op']
     why = []
     if not d['journal_complete']:
         why.append('journal missing, unparseable or unsettled')
+    if unresolved:
+        why.append('acked generations absent after a mutation of unknown outcome: %s' % sorted(unresolved)[:5])
     for ep, f in d['faults'].items():
         missing = [k for k in ('rule_confirmed', 'counter_rose', 'filer_ok', 'rule_gone', 'argv_direct') if not f.get(k)]
         if missing:
@@ -194,6 +214,14 @@ def gates(d, events):
     wrote = {r['mount'] for r in events if r['t'] in ('mut', 'app')}
     if not set(d['env'].get('mounts', ())) <= wrote:
         why.append('coverage: not every mount wrote')
+    phases = [r for r in events if r['t'] == 'phase']
+    if len(phases) != 3:
+        why.append('coverage: %d load phases journaled, want 3' % len(phases))
+    for p in phases:
+        n = sum(1 for r in events if r['t'] == 'mut' and r['kind'] in ('create', 'replace') and r['full'] and r.get('fsync') == 0
+                and p['start'] <= r['end'] <= p['end'])
+        if n < PHASE_W1_FLOOR:
+            why.append('coverage: phase %s has %d acked W1 writes' % (p['name'], n))
     finals = {r['file'] for r in events if r['t'] == 'barrier'}
     if {r['file'] for r in events if r['t'] == 'app'} - finals:
         why.append('a W2 file has no final barrier')
@@ -206,11 +234,11 @@ def assess(d):
     def fail(row, reason):
         rows[row]['outcome'] = 'FAIL'
         rows[row]['reason'] = (rows[row]['reason'] + [reason])[:10]
-    judge_w1(events, fail)
+    unresolved = judge_w1(events, fail)
     judge_w2(events, fail)
     judge_w3(events, d['cohorts'], fail)
     judge_liveness(events, [(f['apply'], f['heal']) for f in d['faults'].values() if 'apply' in f and 'heal' in f], fail)
-    gate, why = gates(d, events)
+    gate, why = gates(d, events, unresolved)
     failed = [k for k in PRODUCT if rows[k]['outcome'] == 'FAIL']
     if gate == 'ENVIRONMENT':
         status = gate
@@ -254,4 +282,4 @@ if __name__ == '__main__':
     parser.add_argument('--root', required=True)
     verdict = assess(load(parser.parse_args().root))
     print(json.dumps(verdict, sort_keys=True))
-    sys.exit(0 if verdict['status'] == 'PASS' else 1)
+    # A verdict was produced: FAIL is a result for the caller to publish, not an assessor error.

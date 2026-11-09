@@ -19,7 +19,7 @@ func mountSoakInventory() *inventory.Document {
 }
 
 func TestMountSoakArgsComeOnlyFromTheInventory(t *testing.T) {
-	args, err := MountSoakArgs(mountSoakInventory(), SmokeSettings{HelperDir: "/rel/worker"})
+	args, err := MountSoakArgs(mountSoakInventory(), SmokeSettings{HelperDir: "/rel/worker"}, MountSoakCase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +38,27 @@ func TestMountSoakArgsComeOnlyFromTheInventory(t *testing.T) {
 	}
 }
 
+func TestMountSoakSmokeIsTheShortBoundedSchedule(t *testing.T) {
+	args, err := MountSoakArgs(mountSoakInventory(), SmokeSettings{HelperDir: "/rel/worker"}, MountSoakSmokeCase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c mountSoakConfig
+	if err = json.Unmarshal([]byte(args[3]), &c); err != nil {
+		t.Fatal(err)
+	}
+	total := c.DualS
+	for _, v := range append(append([]int{}, c.PhasesS...), c.EpisodesS...) {
+		total += v
+	}
+	if total != 255 || scheduleFor(MountSoakSmokeCase).WorkerS != 900 || c.Budget != 20<<20 {
+		t.Fatalf("smoke schedule %+v (total %d s)", c, total)
+	}
+	if !isMountCase(MountSoakSmokeCase) || !isMountCase(MountSoakCase) || isMountCase("volume-restart") {
+		t.Fatal("mount case routing")
+	}
+}
+
 func TestMountSoakRefusesAnInventoryOutsideTheFrozenPath(t *testing.T) {
 	cases := map[string]func(*inventory.Document){
 		"two volume servers": func(d *inventory.Document) { d.Hosts[0].Roles = append(d.Hosts[0].Roles, "volume") },
@@ -49,7 +70,7 @@ func TestMountSoakRefusesAnInventoryOutsideTheFrozenPath(t *testing.T) {
 	for name, mutate := range cases {
 		d := mountSoakInventory()
 		mutate(d)
-		if _, err := MountSoakArgs(d, SmokeSettings{HelperDir: "/rel/worker"}); err == nil {
+		if _, err := MountSoakArgs(d, SmokeSettings{HelperDir: "/rel/worker"}, MountSoakCase); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

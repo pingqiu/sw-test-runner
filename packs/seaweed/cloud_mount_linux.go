@@ -19,7 +19,7 @@ func (s *directSoak) mountJobs() error {
 	if err := checkPinned(tr.PackInputs{Files: s.in.Files}, "m01", smoke, mountSoakHelpers, false); err != nil {
 		return err
 	}
-	args, err := MountSoakArgs(s.d, smoke)
+	args, err := MountSoakArgs(s.d, smoke, s.c.ReadCase)
 	if err != nil {
 		return err
 	}
@@ -32,22 +32,33 @@ func (s *directSoak) mountJobs() error {
 // mountCase runs the load, then the assessor even when the load failed: a
 // missing or partial journal is the assessor's INVALID, not a product verdict.
 func (s *directSoak) mountCase(ctx context.Context) (string, error) {
-	_, loadErr := s.step(ctx, "mount-soak", mountSoakWorkerBudget)
-	e, err := s.step(ctx, "mount-assess", mountSoakAssessBudget)
-	if err != nil {
-		return "", errors.Join(loadErr, err)
-	}
+	return runMountCase(ctx, s.step, s.c.Output, s.c.ReadCase)
+}
+
+// runMountCase publishes whatever verdict the assessor completed; a non-PASS
+// verdict is a result for the caller, not a reason to lose the file.
+func runMountCase(ctx context.Context, step func(context.Context, string, int) (tr.ExitInfo, error), output, name string) (string, error) {
+	_, loadErr := step(ctx, "mount-soak", scheduleFor(name).WorkerS)
+	e, stepErr := step(ctx, "mount-assess", mountSoakAssessBudget)
 	raw, _, err := e.Output.Decode()
 	if err != nil {
-		return "", errors.Join(loadErr, err)
+		return "", errors.Join(loadErr, stepErr, err)
 	}
 	v, err := decodeMountVerdict(raw)
 	if err != nil {
-		return "", errors.Join(loadErr, err)
+		return "", errors.Join(loadErr, stepErr, err)
 	}
-	rows := filepath.Join(s.c.Output, "mount-verdict.json")
+	loadErr = errors.Join(loadErr, stepErr)
+	rows := filepath.Join(output, "mount-verdict.json")
 	if err = os.WriteFile(rows, raw, 0600); err != nil {
 		return "", errors.Join(loadErr, err)
+	}
+	if name == MountSoakSmokeCase {
+		// The smoke answers only whether the wiring ran and cleaned up.
+		if v.Cleanup != "PROVEN" {
+			return rows, errors.Join(loadErr, fmt.Errorf("mount soak smoke: cleanup %s (status %s)", v.Cleanup, v.Status))
+		}
+		return rows, loadErr
 	}
 	if v.Status != "PASS" {
 		return rows, errors.Join(loadErr, fmt.Errorf("mount soak verdict %s (cleanup %s)", v.Status, v.Cleanup))
