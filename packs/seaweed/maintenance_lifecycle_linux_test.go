@@ -31,6 +31,9 @@ func TestMaintenanceLifecycleRealDirectoriesAndRefusalBeforeDeletion(t *testing.
 const maintenanceLifecycleControls = `
 import importlib.util,sys,pathlib,tempfile,os,json
 spec=importlib.util.spec_from_file_location('life',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+# Production cleanup runs via sudo. Non-root CI models the privileged /proc
+# observation, while the local root run exercises that observation for real.
+if os.getuid()!=0:m.process_absent=lambda roots:None
 for case in ('clean','symlink','hardlink','replacement','open-race','evidence-symlink','lost-receipt','foreign-unit','foreign-owner','unknown-root','nonexclusive-receipt'):
     with tempfile.TemporaryDirectory() as parent:
         parent=pathlib.Path(parent);canary=parent/'adjacent-canary';canary.write_bytes(b'KEEP')
@@ -51,7 +54,7 @@ for case in ('clean','symlink','hardlink','replacement','open-race','evidence-sy
             raise AssertionError('unexpected platform command '+repr(argv))
         m.command=command
         root=pathlib.Path(roots[1]['path']);data=root/'volume/data.dat'
-        original_open=m.os.open
+        original_open=m.os.open;original_stat=m.os.stat
         if case=='open-race':
             def raced_open(path,flags,*args,**kwargs):
                 if str(path)==str(root) and not (parent/'replaced-root').exists():
@@ -72,8 +75,14 @@ for case in ('clean','symlink','hardlink','replacement','open-race','evidence-sy
         if case=='lost-receipt':records=[]
         if case=='foreign-unit':states[units[1]['unit']]['WorkingDirectory']='/unrelated/foreign'
         if case=='foreign-owner':
-            if os.getuid()!=0:raise AssertionError('this control requires the ordinary WSL root test process')
-            os.chown(data,65534,65534)
+            if os.getuid()==0:os.chown(data,65534,65534)
+            else:
+                def foreign_stat(path,*args,**kwargs):
+                    s=original_stat(path,*args,**kwargs)
+                    if str(path)=='data.dat':
+                        fields=list(s);fields[4]=65534;return os.stat_result(fields)
+                    return s
+                m.os.stat=foreign_stat
         if case=='unknown-root':records=records[:1]
         if case=='nonexclusive-receipt':os.link(root/'.maintenance-owner.json',parent/'receipt-link')
         c=dict(units=units,ports=[],roots=roots,receipts=records,remove=True)
@@ -89,5 +98,6 @@ for case in ('clean','symlink','hardlink','replacement','open-race','evidence-sy
         assert canary.read_bytes()==b'KEEP','adjacent data touched'
         if case=='foreign-unit':assert not any(x[:2]==['systemctl','stop'] for x in calls),'foreign unit was stopped'
         m.os.open=original_open
+        m.os.stat=original_stat
 print('real directory cleanup: 1 positive + 10 fail-closed controls PASS')
 `
