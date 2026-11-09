@@ -157,7 +157,7 @@ func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
 				affected := false
 				for _, a := range w.Subject.Shards {
 					for _, b := range f.Subject.Shards {
-						if a == b && missing[b] {
+						if a == b {
 							affected = true
 						}
 					}

@@ -113,6 +113,9 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	workCancel := func() {}
 	if c.MaintenanceTask != "" {
 		maintenance = newMaintenanceRuntime(ctx, d, c)
+		if e = maintenance.extend(&view, docs, physical); e != nil {
+			return "", e
+		}
 		ctx, workCancel = context.WithDeadline(ctx, maintenance.budget.work)
 		defer workCancel()
 		phaseCtx, setupCancel, e = maintenance.phase(ctx, 240*time.Second)
@@ -146,7 +149,11 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		_, e := runCloudNode(phaseCtx, rd, h, hc, label)
 		return e
 	}
-	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: pins}, append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...))
+	ids := []string{}
+	for _, h := range view.Hosts {
+		ids = append(ids, h.ID)
+	}
+	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: pins}, ids)
 	if e != nil {
 		return "", e
 	}
@@ -170,7 +177,24 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 				}
 			}
 			failure = errors.Join(failure, cleanupErr)
-			if failure != nil && maintenanceRow["data"] != "FAIL" {
+			var environment *MaintenanceEnvironmentError
+			if errors.As(failure, &environment) {
+				if cleanupErr == nil {
+					maintenanceRow["classification"] = "ENVIRONMENT"
+					maintenanceRow["status"] = "NOT_RUN"
+					maintenanceRow["reason"] = environment.Reason
+				} else {
+					failure = fmt.Errorf("unresolved cleanup after environment refusal: %v", failure)
+				}
+			}
+			var outcome *MaintenanceOutcomeError
+			noCandidate := errors.As(failure, &outcome) && outcome.Status == "NOT_COVERED" && !maintenance.retain
+			if noCandidate && cleanupErr == nil {
+				maintenanceRow["status"] = "NOT_COVERED"
+				maintenanceRow["reason"] = "NO_EC_CANDIDATES"
+				maintenanceRow["candidate_count"] = 0
+			}
+			if failure != nil && maintenanceRow["data"] != "FAIL" && !noCandidate && !(environment != nil && cleanupErr == nil) {
 				maintenanceRow["status"] = "UNKNOWN"
 			}
 			failure = errors.Join(failure, os.WriteFile(result, processJSON(maintenanceRow), 0600))

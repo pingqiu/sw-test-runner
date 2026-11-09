@@ -107,9 +107,6 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		if e := maintenanceAdmission(ctx, *d, c); e != nil {
 			return "", e
 		}
-		if strings.HasPrefix(c.MaintenanceTask, "ec_") {
-			return maintenanceLicenseNotRun(c)
-		}
 	}
 	if c.SWCtl != nil {
 		return runSWCtlSmoke(ctx, *d, c)
@@ -366,6 +363,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	master := endpoint(meta, "master_http")
 	commands := cloudServices(h, meta, root, phase != "", c.Replication)
+	if strings.HasPrefix(c.MaintenanceTask, "ec_") {
+		commands["master"] += " -deletionRetention=-1s"
+	}
 	if c.MaintenanceTask != "" && strings.HasPrefix(h.ID, "ec") {
 		commands["volume"] += " --disk=ssd"
 	}

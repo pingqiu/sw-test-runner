@@ -91,7 +91,16 @@ type maintenanceSample struct {
 	Result   *maintenanceTaskResult `json:"result"`
 	Events   []maintenanceProgress  `json:"events,omitempty"`
 	Job      json.RawMessage        `json:"job,omitempty"`
-	Scratch  []struct {
+	EC       *struct {
+		Subject maintenanceSubject `json:"subject"`
+		Worker  struct {
+			PID   int    `json:"pid"`
+			Start string `json:"start"`
+			Boot  string `json:"boot"`
+		} `json:"worker"`
+		Request string `json:"request"`
+	} `json:"ec,omitempty"`
+	Scratch []struct {
 		Path string `json:"path"`
 		Size int64  `json:"size"`
 	} `json:"scratch,omitempty"`
@@ -147,6 +156,7 @@ type maintenanceRuntime struct {
 	observerNode     *infra.Node
 	observerSequence int
 	retain           bool
+	ecVictim         string
 }
 
 func newMaintenanceRuntime(ctx context.Context, d inventory.Document, c CloudConfig) *maintenanceRuntime {
@@ -192,7 +202,7 @@ func (m *maintenanceRuntime) extend(view *inventory.Document, docs map[string]in
 	}
 	for i := range view.Hosts {
 		if view.Hosts[i].ID == "meta" {
-			p := servicePort(view.Hosts[i], "master_http") + 30000
+			p := servicePort(view.Hosts[i], "master_http") + 12000
 			for j, name := range []string{"maintenance_admin_http", "maintenance_worker_metrics", "maintenance_worker_debug"} {
 				view.Hosts[i].Services = append(view.Hosts[i].Services, inventory.Service{Name: name, Port: p + j})
 			}
@@ -219,6 +229,14 @@ func (m *maintenanceRuntime) bind(r *chaosRun, hosts map[string]inventory.Host) 
 	if m.ec() {
 		m.base["seed_node"] = endpoint(hosts["ec0"], "volume_http")
 		m.base["admin"] = "http://127.0.0.1:" + strconv.Itoa(servicePort(h, "maintenance_admin_http"))
+		m.base["worker_id"] = m.d.RunID + "-maintenance-worker"
+		m.base["worker_unit"] = "sw-cloud-" + r.docs["meta"].RunID + "-maintenance-worker.service"
+		m.base["filer"] = endpoint(h, "filer_http")
+		endpoints := []string{}
+		for i := 0; i < 14; i++ {
+			endpoints = append(endpoints, endpoint(hosts["ec"+strconv.Itoa(i)], "volume_http"))
+		}
+		m.base["ec_endpoints"] = endpoints
 	}
 	m.base["weed_sha256"] = m.c.Files["weed"].SHA256
 	helper, _ := workerFiles.ReadFile("worker/maintenance.py")
@@ -275,17 +293,6 @@ func (m *maintenanceRuntime) checkManifest(man maintenanceManifest) error {
 	return nil
 }
 func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inventory.Host) error) error {
-	if m.ec() {
-		for i := 0; i < 14; i++ {
-			h := m.hosts["ec"+strconv.Itoa(i)]
-			if err := phase("prepare", h); err != nil {
-				return err
-			}
-			if err := phase("deploy", h); err != nil {
-				return err
-			}
-		}
-	}
 	if err := m.leaf(ctx, "meta", "init", 10, nil, &struct {
 		Initialized bool `json:"initialized"`
 	}{}); err != nil {
@@ -321,6 +328,7 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 		}
 	}
 	if m.ec() {
+		m.retain = true // an incomplete encode may have unresolved switch state
 		if err := m.leaf(ctx, "meta", "encode", 90, nil, &m.manifest); err != nil {
 			return err
 		}
@@ -334,6 +342,9 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 		}
 		shards := map[int]string{}
 		for id, s := range m.initial {
+			if s.Pending != 0 || s.Ordinary || len(s.Shards) > 0 && !s.Mounted {
+				return errors.New("initial EC owner/protocol state is unresolved")
+			}
 			if len(s.Shards) > 0 {
 				if m.subject.EncodeNS == "" {
 					m.subject.EncodeNS = s.EncodeNS
@@ -353,6 +364,16 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 		if len(shards) != 14 || m.subject.EncodeNS == "" {
 			return errors.New("maintenance fixture missing frozen 14-shard generation")
 		}
+		m.retain = false
+		m.ecVictim = shards[0]
+		for n := 0; n < 14; n++ {
+			m.subject.Shards = append(m.subject.Shards, n)
+		}
+		if err = m.leaf(ctx, "meta", "freeze", 10, map[string]any{"subject": m.subject}, &struct {
+			Frozen bool `json:"frozen"`
+		}{}); err != nil {
+			return err
+		}
 		if m.c.MaintenanceTask == "ec_repair" {
 			id := shards[13]
 			if err = m.removeFixture(ctx, id, []int{13}); err != nil {
@@ -360,8 +381,21 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 			}
 			m.missing = []int{13}
 		}
-		if err = m.leaf(ctx, "meta", "detect", 30, nil, &map[string]any{}); err != nil {
+		var detected struct {
+			Count  int    `json:"count"`
+			Status string `json:"status"`
+		}
+		if err = m.leaf(ctx, "meta", "detect", 30, nil, &detected); err != nil {
 			return err
+		}
+		if err = m.r.save("maintenance-detection.json", detected); err != nil {
+			return err
+		}
+		if detected.Count == 0 && detected.Status == "NO_EC_CANDIDATES" {
+			return &MaintenanceOutcomeError{Status: "NOT_COVERED", Cause: errors.New("NO_EC_CANDIDATES: real detector found zero candidates")}
+		}
+		if detected.Count != 1 || detected.Status != "CANDIDATE_BOUND" {
+			return errors.New("EC candidate admission unreadable")
 		}
 	} else if m.c.MaintenanceTask == "volume.fix.replication" {
 		owners, err := m.replicaOwners(ctx)
@@ -395,8 +429,8 @@ func (m *maintenanceRuntime) startPlugins(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	admin := q(h.RunRoot+"/weed") + " admin -master=" + q(endpoint(h, "master_http")) + " -port=" + strconv.Itoa(servicePort(h, "maintenance_admin_http")) + " -dataDir=" + q(root+"/admin")
-	worker := q(h.RunRoot+"/weed") + " worker -admin=" + q("127.0.0.1:"+strconv.Itoa(servicePort(h, "maintenance_admin_http"))) + " -id=" + q(m.d.RunID+"-maintenance-worker") + " -jobType=" + q(m.c.MaintenanceTask) + " -workingDir=" + q(root+"/worker") + " -maxExecute=1 -maxDetect=1 -metricsPort=" + strconv.Itoa(servicePort(h, "maintenance_worker_metrics")) + " -debug.port=" + strconv.Itoa(servicePort(h, "maintenance_worker_debug"))
+	admin := q(h.RunRoot+"/weed") + " admin -ip=127.0.0.1 -master=" + q(endpoint(h, "master_http")) + " -port=" + strconv.Itoa(servicePort(h, "maintenance_admin_http")) + " -port.grpc=" + strconv.Itoa(servicePort(h, "maintenance_admin_grpc")) + " -port.legacy=0 -iceberg.port=0 -lance.port=0 -dataDir=" + q(root+"/admin")
+	worker := q(h.RunRoot+"/weed") + " worker -admin=" + q("127.0.0.1:"+strconv.Itoa(servicePort(h, "maintenance_admin_http"))) + " -id=" + q(m.d.RunID+"-maintenance-worker") + " -jobType=erasure_coding -workingDir=" + q(root+"/worker") + " -maxExecute=1 -maxDetect=1 -metricsPort=" + strconv.Itoa(servicePort(h, "maintenance_worker_metrics")) + " -debug.port=" + strconv.Itoa(servicePort(h, "maintenance_worker_debug"))
 	for _, x := range []struct{ name, cmd string }{{"maintenance-admin", admin}, {"maintenance-worker", worker}} {
 		cmd := cloudStart(m.r.docs["meta"], h.RunRoot, x.name, "--property=User="+q(h.Management.User)+" --property=UMask=0077 "+x.cmd)
 		if _, err = m.r.step(ctx, "meta", x.name, 30, cmd); err != nil {
@@ -407,7 +441,20 @@ func (m *maintenanceRuntime) startPlugins(ctx context.Context) error {
 	unit := "sw-cloud-" + m.r.docs["meta"].RunID + "-maintenance-admin"
 	cmd := mainPID(unit) + `test "$(sudo -n readlink /proc/$pid/exe)" = ` + q(h.RunRoot+"/weed") + `; args=$(sudo -n cat /proc/$pid/cmdline | tr '\000' '\n'); printf '%s\n' "$args" | grep -Fx -- ` + q("-dataDir="+root+"/admin") + ` >/dev/null; sockets=$(sudo -n ss -Hltnp); printf '%s\n' "$sockets" | awk -v p=` + strconv.Itoa(servicePort(h, "maintenance_admin_http")) + ` -v pid="$pid" '$4 ~ (":" p "$") && index($0,"pid=" pid ","){found=1} END{exit !found}'; test "$(` + chaosStat + `)" = "$start"`
 	_, err = m.r.step(ctx, "meta", "maintenance-admin-owner", 30, cmd)
-	return err
+	if err != nil {
+		return err
+	}
+	l, err := maintenanceReadLicense(ctx, endpoint(h, "master_grpc"))
+	if err != nil {
+		return err
+	}
+	if err = m.r.save("maintenance-master-license.json", l); err != nil {
+		return err
+	}
+	if !l.Valid {
+		return &MaintenanceEnvironmentError{Reason: "master license is not valid: " + l.ID}
+	}
+	return nil
 }
 
 func (m *maintenanceRuntime) scopes(ctx context.Context, hashed bool) (map[string]maintenanceScope, error) {
@@ -439,6 +486,45 @@ func (m *maintenanceRuntime) scopes(ctx context.Context, hashed bool) (map[strin
 		}(id)
 	}
 	wg.Wait()
+	if failure == nil && m.ec() {
+		rows, err := maintenanceReadShards(ctx, endpoint(m.hosts["meta"], "master_grpc"), m.manifest.Collection, m.manifest.VID)
+		if err != nil {
+			return out, err
+		}
+		if err = m.r.save(fmt.Sprintf("maintenance-ec-heartbeat-%d.json", time.Now().UnixNano()), rows); err != nil {
+			return out, err
+		}
+		seen := map[string]bool{}
+		for _, row := range rows {
+			id := ""
+			for candidate, h := range m.hosts {
+				if strings.HasPrefix(candidate, "ec") && endpoint(h, "volume_http") == row.Endpoint {
+					id = candidate
+					break
+				}
+			}
+			if id == "" || seen[id] {
+				return out, errors.New("EC heartbeat has foreign/duplicate holder")
+			}
+			seen[id] = true
+			s := out[id]
+			s.Mounted = true
+			bits := uint64(0)
+			for _, n := range s.Shards {
+				bits |= 1 << n
+			}
+			if bits != row.Bits || uint64(s.Generation) != row.Generation || s.EncodeNS != row.EncodeNS || row.Pending || row.Protocol < 1 {
+				s.Pending++
+			}
+			out[id] = s
+		}
+		for id, s := range out {
+			if len(s.Shards) > 0 && !seen[id] {
+				s.Pending++
+				out[id] = s
+			}
+		}
+	}
 	return out, failure
 }
 func (m *maintenanceRuntime) scope(ctx context.Context, id string, hashed bool) (maintenanceScope, error) {
@@ -451,12 +537,21 @@ func (m *maintenanceRuntime) scope(ctx context.Context, id string, hashed bool) 
 	if err != nil {
 		return s, err
 	}
+	if m.ec() && len(s.Shards) > 0 {
+		if err = maintenanceCheckHolder(ctx, endpoint(m.hosts[id], "volume_grpc"), s); err != nil {
+			return s, err
+		}
+		s.Mounted = true
+	}
 	last, body, err := processOwnerReceipt(ctx, m.r, m.hosts, id)
 	if err != nil {
 		return s, err
 	}
 	if first != last || s.VID != m.manifest.VID || s.Collection != m.manifest.Collection {
 		return s, errors.New("maintenance owner/generation observation changed")
+	}
+	if m.ec() {
+		return s, nil
 	}
 	var status struct {
 		Volumes []struct {
@@ -622,7 +717,12 @@ func (m *maintenanceRuntime) beforeFault(ctx context.Context, id, role string) (
 	m.mu.Lock()
 	s := m.latest
 	m.mu.Unlock()
-	return &maintenanceFaultSample{Victim: id, Role: role, Subject: m.subject, Before: s, BeforePrecedesDispatch: true, TargetEndpoint: endpoint(m.hosts[id], role+"_http"), TargetUnit: m.r.gens.unit(m.r.docs[id], id, role)}, nil
+	f := &maintenanceFaultSample{Victim: id, Role: role, Subject: m.subject, Missing: append([]int(nil), m.missing...), Before: s, BeforePrecedesDispatch: true, TargetEndpoint: endpoint(m.hosts[id], role+"_http"), TargetUnit: m.r.gens.unit(m.r.docs[id], id, role)}
+	if m.ec() && role == "volume" {
+		f.Subject.Shards = append([]int(nil), m.initial[id].Shards...)
+		f.Missing = append(f.Missing, f.Subject.Shards...)
+	}
+	return f, nil
 }
 func (m *maintenanceRuntime) afterFault(ctx context.Context, f *maintenanceFaultSample, confirmed bool) error {
 	if f == nil {

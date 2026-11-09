@@ -18,13 +18,47 @@ key and host-key configuration. Add to the normal config:
 |---|---|---|
 | volume.balance | C1-single-kill, C2-rolling | Replicated integration |
 | volume.fix.replication | C1-single-kill, C4-meta-restart | Replicated integration |
-| ec_repair, ec_vacuum | C1-single-kill, C4-meta-restart | ENVIRONMENT / NOT_RUN |
+| ec_repair, ec_vacuum | C1-single-kill, C4-meta-restart | Real plugin detection/execution |
 
-EC emits EC_WORKER_LICENSE_UNAVAILABLE and exits 78 before artifact checks
-or SSH. No approved license reference/binding exists under the 2026-11-09
-ruling. Dormant EC prototypes are neither enabled nor qualified. Never inject
-license_valid; no PASS or product finding is earned. C3/C6 remain NOT_RUN;
-C5 stays deferred.
+The 09:21Z license correction supersedes the earlier static EC refusal.
+With no license input the real enterprise master supplies its default 25 TB,
+one-month trial. The runner reads GetMasterConfiguration and records its
+actual license id, validity, capacity and expiry in maintenance-master-license.json;
+it never injects license_valid or reads the signing key. Actual invalid licenses
+remain ENVIRONMENT/NOT_RUN only after verified cleanup. A zero-candidate
+detector response is preserved as NO_EC_CANDIDATES / NOT_COVERED, never PASS.
+C3/C6 remain NOT_RUN; C5 stays deferred.
+
+EC adds fourteen run-owned SSD volume processes (seven per physical host),
+one shard per process, alongside the existing replicated mixed-load cluster.
+The existing C1 schedule targets the frozen holder of data shard 0; repair's
+setup quarantines shard 13, so the planned loss is two distinct shards at most.
+C4 keeps its existing master/filer schedule. No host-failure tolerance is claimed.
+The actual erasure_coding worker serves repair and vacuum; both automatic
+schedulers are disabled before seeding and exactly one bound proposal is
+dispatched. Filer membership must be observed before config persistence.
+
+Fixture-only configuration: the disposable EC master's -deletionRetention=-1s
+disables the otherwise one-hour trial retention floor, so fresh acknowledged
+tombstones can be vacuumed inside the existing timebox. This is recorded in
+the command evidence; it changes neither licenses nor fault timing. Live and
+deleted bytes are checked after encode and maintenance.
+
+Observation choice: reuse the product's read-only GetMasterConfiguration,
+VolumeList and VolumeEcShardsInfo RPCs (field numbers pinned to mono 49daaba1),
+rather than change product code or infer serving state from HTTP/text output.
+HTTP /status and volume.list omit serving EC generation. The cost is the
+gRPC dependency and a bounded, maintenance-specific protobuf reader. Holder
+RPCs sit inside stable process-owner observations and must agree with the
+master heartbeat and local active-generation files. Missing, mixed or pending
+state stays UNKNOWN. No transport lifecycle mechanism is introduced.
+
+EC work coverage additionally joins the owned worker PID/start/boot, actual
+job/request/attempt and VID/collection to one scratch shard file/inode whose
+bytes increase across the existing fault bracket. Switching files or workers,
+queued/no-op jobs, stale generations and foreign requests cannot earn coverage.
+Vacuum also binds its staged VIF's encode identity; repair binds the proposal's
+generation. Short jobs can run successfully and still be NOT_COVERED.
 
 ## Runtime and evidence
 

@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -16,6 +17,103 @@ func maintenanceSampleFixture(t *testing.T, at float64) maintenanceSample {
 	s.After = at + 1
 	s.Progress.Bytes = int64(at * 100)
 	return s
+}
+
+func TestMaintenanceECPostRequiresAllServingShardsAndOneGeneration(t *testing.T) {
+	makeScopes := func(gen uint32, encode string) map[string]maintenanceScope {
+		s := map[string]maintenanceScope{}
+		for i := 0; i < 14; i++ {
+			s[fmt.Sprintf("ec%d", i)] = maintenanceScope{maintenanceSubject: maintenanceSubject{VID: "7", Collection: "own", Generation: gen, EncodeNS: encode, Shards: []int{i}}, Mounted: true}
+		}
+		return s
+	}
+	for _, task := range []string{"ec_repair", "ec_vacuum"} {
+		for _, bad := range []string{"none", "stale", "unmounted", "pending", "missing", "duplicate", "partial", "mixed encode"} {
+			t.Run(task+"/"+bad, func(t *testing.T) {
+				before := makeScopes(2, "123")
+				after := makeScopes(2, "123")
+				if task == "ec_vacuum" {
+					after = makeScopes(3, "124")
+				}
+				s := after["ec0"]
+				switch bad {
+				case "stale":
+					if task == "ec_vacuum" {
+						after = makeScopes(2, "123")
+					} else {
+						s.Generation = 1
+						after["ec0"] = s
+					}
+				case "unmounted":
+					s.Mounted = false
+					after["ec0"] = s
+				case "pending":
+					s.Pending = 1
+					after["ec0"] = s
+				case "missing":
+					delete(after, "ec0")
+				case "duplicate":
+					s.Shards = []int{1}
+					after["ec0"] = s
+				case "partial":
+					s.Ordinary = true
+					after["ec0"] = s
+				case "mixed encode":
+					s.EncodeNS = "other"
+					after["ec0"] = s
+				}
+				known, owners, converged, pending := maintenanceECPost(before, after, task)
+				pass := known && owners && converged && pending == 0
+				if pass != (bad == "none") {
+					t.Fatalf("%s accepted=%t known=%t owners=%t converged=%t pending=%d", bad, pass, known, owners, converged, pending)
+				}
+			})
+		}
+	}
+}
+
+func TestMaintenanceECFlightJoinsWorkerRequestGenerationAndShard(t *testing.T) {
+	for _, bad := range []string{"none", "worker restart", "foreign request", "stale encode", "stale generation", "no bytes", "pre GONE", "queued", "foreign VID"} {
+		t.Run(bad, func(t *testing.T) {
+			a, b := maintenanceSampleFixture(t, 20), maintenanceSampleFixture(t, 30)
+			for _, s := range []*maintenanceSample{&a, &b} {
+				s.Identity.Task = "ec_repair"
+				s.Progress.Source = "own"
+				s.Progress.Target = "7"
+				raw := []byte(`{"subject":{"collection":"own","vid":"7","generation":2,"encode_ns":"123","shards":[0]},"worker":{"pid":55,"start":"1000","boot":"boot"},"request":"request-1"}`)
+				if e := json.Unmarshal(raw, &s.EC); e != nil {
+					t.Fatal(e)
+				}
+			}
+			want := maintenanceSubject{VID: "7", Collection: "own", Generation: 2, EncodeNS: "123", Shards: []int{0}}
+			f := maintenanceFaultSample{Before: a, After: b, Subject: want, Confirmed: true, Role: "volume", Victim: "ec0", TargetUnit: "sw-cloud-run-ec0-volume", GoneWitness: "OLD 11 10 GONE", BeforePrecedesDispatch: true, AfterFollowsGone: true}
+			r := maintenanceTaskResult{Job: "job", Attempt: "1", Identity: *a.Identity, Started: 5, Ended: 50, Completion: json.RawMessage(`{"request_id":"request-1"}`)}
+			switch bad {
+			case "worker restart":
+				f.After.EC.Worker.Start = "1001"
+			case "foreign request":
+				f.After.EC.Request = "foreign"
+			case "stale encode":
+				f.Before.EC.Subject.EncodeNS = "122"
+				f.After.EC.Subject.EncodeNS = "122"
+			case "stale generation":
+				f.Before.EC.Subject.Generation = 1
+				f.After.EC.Subject.Generation = 1
+			case "no bytes":
+				f.After.Progress.Bytes = f.Before.Progress.Bytes
+			case "pre GONE":
+				f.AfterFollowsGone = false
+			case "queued":
+				f.After.Progress.State = "queued"
+			case "foreign VID":
+				f.After.Progress.VID = "8"
+			}
+			_, _, valid := maintenanceReplicaFlight("ec_repair", want, r, &f)
+			if valid != (bad == "none") {
+				t.Fatalf("%s valid=%t", bad, valid)
+			}
+		})
+	}
 }
 func TestMaintenanceSamplesJoinOnlyOneOwnedCopyAcrossGone(t *testing.T) {
 	for _, tc := range []struct {

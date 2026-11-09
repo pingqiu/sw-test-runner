@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"time"
 
@@ -34,19 +32,6 @@ func (e *MaintenanceOutcomeError) Error() string {
 	return fmt.Sprintf("maintenance %s: %s", e.Status, detail)
 }
 func (e *MaintenanceOutcomeError) Unwrap() error { return e.Cause }
-
-func maintenanceLicenseNotRun(c CloudConfig) (string, error) {
-	const reason = "EC_WORKER_LICENSE_UNAVAILABLE"
-	if err := os.MkdirAll(c.Output, 0700); err != nil {
-		return "", err
-	}
-	path := filepath.Join(c.Output, "maintenance-result.json")
-	row := map[string]any{"task": c.MaintenanceTask, "case": c.ClusterChaosCases[0], "classification": "ENVIRONMENT", "status": "NOT_RUN", "reason": reason, "data": "NOT_RUN", "task_recovery": "NOT_RUN", "coverage": "NOT_COVERED", "refusals": 0, "product_finding": false}
-	if err := os.WriteFile(path, processJSON(row), 0600); err != nil {
-		return "", err
-	}
-	return path, &MaintenanceEnvironmentError{Reason: reason}
-}
 
 func maintenanceAdmission(ctx context.Context, d inventory.Document, c CloudConfig) error {
 	allowed := map[string]map[string]bool{

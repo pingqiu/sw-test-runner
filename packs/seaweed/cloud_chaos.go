@@ -419,6 +419,9 @@ func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts ma
 	d = r.document(d, victim)
 	h, root := hosts[victim], hosts[victim].RunRoot
 	command := cloudServices(h, hosts["meta"], root, true, r.rep)[role]
+	if r.maintenance != nil && r.maintenance.ec() && role == "master" {
+		command += " -deletionRetention=-1s"
+	}
 	if r.maintenance != nil && role == "volume" && strings.HasPrefix(victim, "ec") {
 		command += " --disk=ssd"
 	}

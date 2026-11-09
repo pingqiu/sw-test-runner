@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestMaintenanceECWorkerLicenseIsEnvironmentNotProduct(t *testing.T) {
+func TestMaintenanceECUsesArtifactAdmissionInsteadOfStaticLicenseGate(t *testing.T) {
 	for _, task := range []string{"ec_repair", "ec_vacuum"} {
 		t.Run(task, func(t *testing.T) {
 			dir := t.TempDir()
@@ -33,17 +33,10 @@ func TestMaintenanceECWorkerLicenseIsEnvironmentNotProduct(t *testing.T) {
 			raw, _ = json.Marshal(map[string]any{"maintenance_task": task, "cluster_chaos_cases": []string{"C1-single-kill"}, "replication": "001"})
 			os.WriteFile(cfg, raw, 0600)
 			code, out := directCall(t, "--inventory", inv, "--config", cfg, "--out", filepath.Join(dir, "out"), "--timeout", "25m")
-			if code != 78 || out.Code != "ENVIRONMENT" {
-				t.Fatalf("EC license gate became a product verdict: exit=%d %+v", code, out)
-			}
-			raw, err = os.ReadFile(out.Rows)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var row map[string]any
-			json.Unmarshal(raw, &row)
-			if row["status"] != "NOT_RUN" || row["coverage"] != "NOT_COVERED" || row["reason"] != "EC_WORKER_LICENSE_UNAVAILABLE" || row["product_finding"] != false {
-				t.Fatalf("%s", raw)
+			// A no-artifact request must fail ordinary artifact admission. It
+			// cannot assert that a target's real default trial is unavailable.
+			if code == 0 || code == 78 || out.Code == "ENVIRONMENT" || out.Rows != "" {
+				t.Fatalf("EC bypassed artifact admission: exit=%d %+v", code, out)
 			}
 		})
 	}

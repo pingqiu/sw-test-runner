@@ -190,6 +190,8 @@ def preserve(c):
         if str(root) not in records:out[str(root)]=dict(unconfirmed_prepare=True);continue
         rootfd=prevalidate_root(records[str(root)],tree=False)
         names=['.maintenance-owner.json','maintenance/config.json','maintenance/manifest.json',
+               'maintenance/preflight.json','maintenance/detection.json','maintenance/proposal.json',
+               'maintenance/subject.json','maintenance/ec-progress.json',
                'maintenance/acks.jsonl','maintenance/result.json','maintenance/events.jsonl','maintenance/task.log','maintenance/lock-check.json']
         try:
             try:volume=os.open('volume',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)

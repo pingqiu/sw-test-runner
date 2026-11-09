@@ -47,6 +47,18 @@ with tempfile.TemporaryDirectory() as root:
     except FileExistsError:pass
     else:raise AssertionError('exclusive reply overwritten')
     assert m.strict(p.read_bytes())==dict(before=1)
+    target=pathlib.Path(root)/'zero';target.mkdir()
+    m.write(target/'manifest.json',dict(run_id='own',collection='maint-own',vid='7'),True)
+    # A real leaf operation with a zero-candidate product reply must retain
+    # that reply and return a distinct noncoverage result, never execute work.
+    original=m.api
+    m.api=lambda *args,**kw:dict(count=0,proposals=[],completed=dict(success=True),detector_worker_id='worker')
+    try:
+        result=m.detect(dict(run_id='own',collection='maint-own',task='ec_repair',admin='http://127.0.0.1:1',worker_id='worker'),target)
+        assert result==dict(count=0,status='NO_EC_CANDIDATES'),result
+        assert not (target/'proposal.json').exists()
+        assert m.strict((target/'detection.json').read_bytes())['count']==0
+    finally:m.api=original
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args):pass
     def do_GET(self):

@@ -41,7 +41,25 @@ func maintenanceReplicaFlight(task string, want maintenanceSubject, result maint
 	if p.Source == "" || p.Target == "" || p.Source != q.Source || p.Target != q.Target {
 		return maintenanceFlight{}, fault, false
 	}
-	if f.Role == "volume" {
+	isEC := strings.HasPrefix(task, "ec_")
+	if isEC {
+		if a.EC == nil || b.EC == nil || !reflect.DeepEqual(a.EC, b.EC) || !sameMaintenanceSubject(a.EC.Subject, want) || len(a.EC.Subject.Shards) != 1 || a.EC.Worker.PID <= 0 || a.EC.Worker.Start == "" || a.EC.Worker.Boot != a.Boot || p.Source != want.Collection || p.Target != want.VID {
+			return maintenanceFlight{}, fault, false
+		}
+		var completed map[string]json.RawMessage
+		if json.Unmarshal(result.Completion, &completed) != nil {
+			return maintenanceFlight{}, fault, false
+		}
+		if inner := completed["completion"]; len(inner) > 0 {
+			if json.Unmarshal(inner, &completed) != nil {
+				return maintenanceFlight{}, fault, false
+			}
+		}
+		var request string
+		if json.Unmarshal(completed["request_id"], &request) != nil || request == "" || request != a.EC.Request {
+			return maintenanceFlight{}, fault, false
+		}
+	} else if f.Role == "volume" {
 		if f.TargetEndpoint != p.Source && f.TargetEndpoint != p.Target {
 			return maintenanceFlight{}, fault, false
 		}
@@ -55,7 +73,48 @@ func maintenanceReplicaFlight(task string, want maintenanceSubject, result maint
 	fault.Before = maintenanceBound{a.Before, a.After}
 	fault.Gone = maintenanceBound{a.After, b.Before}
 	flight := maintenanceFlight{Subject: want, Job: result.Job, Attempt: result.Attempt, Owner: fault.Owner, Boot: a.Boot, Operation: p.Operation, Begin: maintenanceBound{p.Begin, p.Begin}, End: maintenanceBound{b.Before, b.After}, Bytes: p.Bytes, State: "in_flight"}
+	if isEC {
+		flight.Subject = a.EC.Subject
+	}
 	return flight, fault, true
+}
+
+func maintenanceECPost(before, after map[string]maintenanceScope, task string) (known, owners, converged bool, pending int) {
+	known = len(before) == 14 && len(after) == 14
+	shards := map[int]bool{}
+	var generation uint32
+	encode := ""
+	for id, s := range after {
+		pending += s.Pending
+		if s.Ordinary || len(s.Shards) > 0 && !s.Mounted {
+			known = false
+		}
+		if len(s.Shards) == 0 {
+			continue
+		}
+		if encode == "" {
+			generation, encode = s.Generation, s.EncodeNS
+		}
+		if encode == "" || s.EncodeNS != encode || s.Generation != generation {
+			known = false
+		}
+		old, ok := before[id]
+		if !ok {
+			known = false
+		}
+		if len(old.Shards) > 0 && (task == "ec_repair" && (s.Generation != old.Generation || s.EncodeNS != old.EncodeNS) || task == "ec_vacuum" && (s.Generation <= old.Generation || s.EncodeNS == old.EncodeNS)) {
+			known = false
+		}
+		for _, n := range s.Shards {
+			if n < 0 || n >= 14 || shards[n] {
+				known = false
+			}
+			shards[n] = true
+		}
+	}
+	owners = len(shards) == 14
+	converged = known && owners && pending == 0
+	return
 }
 
 func maintenanceReplicaPost(before, after map[string]maintenanceScope, task string) (known, owners, moved bool, pending int) {
@@ -117,7 +176,7 @@ func (m *maintenanceRuntime) collect(ctx context.Context, checkLock bool) (maint
 	}
 	after, postErr := m.scopes(ctx, true)
 	unchangedRefusal := e.Terminal == "refused" && reflect.DeepEqual(m.beforeTask, after)
-	if postErr == nil {
+	if postErr == nil && !m.ec() {
 		postErr = m.verifyCollection(ctx, after, unchangedRefusal)
 	}
 	var lockErr error
@@ -139,11 +198,16 @@ func (m *maintenanceRuntime) collect(ctx context.Context, checkLock bool) (maint
 	}
 	moved := true
 	if postErr == nil {
-		known, owners, changed, pending := maintenanceReplicaPost(m.beforeTask, after, m.c.MaintenanceTask)
-		moved = changed
-		e.EffectsKnown, e.PostOwners, e.GenerationConverged, e.Pending = known, owners, true, pending
-		if unchangedRefusal && known && pending == 0 {
-			e.PostOwners = true
+		if m.ec() {
+			known, owners, converged, pending := maintenanceECPost(m.initial, after, m.c.MaintenanceTask)
+			e.EffectsKnown, e.PostOwners, e.GenerationConverged, e.Pending = known, owners, converged, pending
+		} else {
+			known, owners, changed, pending := maintenanceReplicaPost(m.beforeTask, after, m.c.MaintenanceTask)
+			moved = changed
+			e.EffectsKnown, e.PostOwners, e.GenerationConverged, e.Pending = known, owners, true, pending
+			if unchangedRefusal && known && pending == 0 {
+				e.PostOwners = true
+			}
 		}
 	}
 	if lockErr != nil {

@@ -196,7 +196,9 @@ def readback(c, root):
 def lock_check(c,root):
     manifest=strict((root/'manifest.json').read_bytes())
     text=shell(c,'volume.list -volumeId='+manifest['vid']+' -collectionPattern='+c['collection']+' -v=5',seconds=15)
-    pattern=r'^\s+volume Id:'+re.escape(manifest['vid'])+r', [^\n]*Collection:'+re.escape(c['collection'])+r','
+    pattern=(r'^\s+ec volume id:'+re.escape(manifest['vid'])+r' collection:'+re.escape(c['collection'])+r'(?: |$)'
+             if c['task'].startswith('ec_') else
+             r'^\s+volume Id:'+re.escape(manifest['vid'])+r', [^\n]*Collection:'+re.escape(c['collection'])+r',')
     if not re.search(pattern,text,re.M):raise ValueError('lock/read/unlock did not expose the owned VID')
     write(root/'lock-check.json',dict(output=text,vid=manifest['vid'],collection=c['collection']),True)
     return dict(lock_usable=True,vid=manifest['vid'],collection=c['collection'],waited='waiting for lock held by ' in text)
@@ -207,8 +209,17 @@ def encode(c, root):
     shell(c, 'ec.encode -volumeIds=' + manifest['vid'] +
           ' -batchSize=0 -diskType=ssd -shardReplicaPlacement=001')
     if c['task'] == 'ec_vacuum':
+        # urllib intentionally does not replay DELETE across the master's 308.
+        # Resolve once, bind the endpoint to this run, and issue the one DELETE
+        # directly; this is fixture setup, never an automatic write retry.
+        # Collection-qualified /dir/lookup selects normal-volume layouts; the
+        # global VID lookup also resolves the newly encoded EC shard owners.
+        lookup=api('http://'+c['master']+'/dir/lookup?'+urlencode(dict(volumeId=manifest['vid'])))
+        locations=lookup.get('locations',[])
+        if not locations or any(x.get('url') not in c['ec_endpoints'] for x in locations):raise ValueError('foreign/missing EC DELETE owner')
+        target=locations[0]['url']
         for obj in manifest['objects'][::2]:
-            status, _ = request('http://' + c['master'] + '/' + obj['fid'], method='DELETE')
+            status, _ = request('http://' + target + '/' + obj['fid'], method='DELETE')
             if status not in (200, 202):
                 raise ValueError('fixture DELETE not acknowledged; no replay')
             obj['deleted'] = True
@@ -222,21 +233,28 @@ def plugin_preflight(c, root):
     deadline=time.monotonic()+20
     while True:
         types=api(c['admin']+'/api/plugin/job-types')
-        if any(x.get('job_type')==c['task'] for x in types):break
+        admin=api(c['admin']+'/api/admin')
+        filers=admin.get('filer_nodes',[])
+        listed=any(x.get('address')==c['filer'] or x.get('address','').startswith(c['filer']+'.') and x['address'][len(c['filer'])+1:].isdecimal() for x in filers)
+        if all(any(x.get('job_type')==job for x in types) for job in ('ec_repair','ec_vacuum')) and listed:break
         if time.monotonic()>=deadline:raise TimeoutError('maintenance worker registration20s')
         time.sleep(.1)
     config=dict(job_type=c['task'],admin_runtime=dict(enabled=False,max_jobs_per_detection=1),
-                worker_config_values=dict(collection_filter=dict(string_value=c['collection']),
-                    min_interval_seconds=dict(int64_value='1'),ec_min_interval_seconds=dict(int64_value='1'),
+                admin_config_values=dict(collection_filter=dict(string_value=c['collection'])),
+                worker_config_values=dict(min_interval_seconds=dict(int64_value='1'),ec_min_interval_seconds=dict(int64_value='1'),
                     ec_deleted_ratio_threshold=dict(double_value=.01)))
-    api(c['admin']+'/api/plugin/job-types/'+c['task']+'/config',config,'PUT')
+    # This fresh worker advertises both EC handlers. Disable both schedulers
+    # before creating a candidate, so no background job can race our one job.
+    for job in ('ec_repair','ec_vacuum'):
+        api(c['admin']+'/api/plugin/job-types/'+job+'/config',dict(config,job_type=job),'PUT')
     # Never manufacture license_valid in cluster_context: the admin builds it.
     status,raw=request(c['admin']+'/api/plugin/job-types/'+c['task']+'/detect',
                        dict(max_results=1,timeout_seconds=15),'POST',timeout=20)
     report=strict(raw)
     write(root/'preflight.json',dict(status=status,report=report),True)
-    if status!=200 or report.get('error'):raise ValueError('maintenance product detection preflight refused: '+str(report.get('error','status%d'%status))[:500])
-    if report.get('count')!=0:raise ValueError('unexpected pre-existing EC maintenance candidate')
+    if status!=200 or report.get('error') or report.get('skipped_reason'):raise ValueError('maintenance product detection preflight refused: '+str(report.get('error') or report.get('skipped_reason') or 'status%d'%status)[:500])
+    if type(report.get('count')) is not int or report['count']!=0:raise ValueError('unexpected pre-existing EC maintenance candidate')
+    if report.get('detector_worker_id')!=c['worker_id']:raise ValueError('foreign detector worker')
     return dict(capability=c['task'],detection_status=status,count=0)
 
 
@@ -244,12 +262,77 @@ def detect(c, root):
     manifest=strict((root/'manifest.json').read_bytes())
     report=api(c['admin']+'/api/plugin/job-types/'+c['task']+'/detect',dict(max_results=1,timeout_seconds=15),'POST',timeout=20)
     proposals=report.get('proposals',[])
+    write(root/'detection.json',report,True)
+    if type(report.get('count')) is not int or report.get('error') or report.get('skipped_reason') or report.get('detector_worker_id')!=c['worker_id']:
+        raise ValueError('detection result/worker unreadable')
+    if report['count']==0 and not proposals:
+        return dict(count=0,status='NO_EC_CANDIDATES')
     if report.get('count')!=1 or len(proposals)!=1:raise ValueError('fixture has no unique actual maintenance proposal')
     p=proposals[0];params=p.get('parameters',{})
     if str(params.get('volume_id',{}).get('int64_value',''))!=manifest['vid'] or params.get('collection',{}).get('string_value')!=c['collection']:
         raise ValueError('foreign maintenance proposal')
     write(root/'proposal.json',p,True)
-    return p
+    return dict(count=1,status='CANDIDATE_BOUND')
+
+
+def freeze(c,root):
+    manifest=strict((root/'manifest.json').read_bytes())
+    subject=c['subject']
+    if subject['vid']!=manifest['vid'] or subject['collection']!=manifest['collection'] or not subject['encode_ns'] or subject['shards']!=list(range(14)):
+        raise ValueError('foreign frozen EC subject')
+    write(root/'subject.json',subject,True)
+    return dict(frozen=True)
+
+
+def ec_progress(c,root,detail):
+    """One real worker + its current job + one growing, generation-bound shard.
+
+    Missing/short-lived metadata is NOT_COVERED, never a fabricated progress row.
+    Only the current file/inode can bridge two samples; a new file resets begin.
+    """
+    j=detail.get('job',{}) if isinstance(detail,dict) else {}
+    params=j.get('parameters',{})
+    if (j.get('job_id')!=c['run_id']+'-maintenance' or j.get('job_type')!=c['task'] or
+        j.get('worker_id')!=c['worker_id'] or j.get('attempt')!=1 or j.get('state')!='job_state_running' or
+        not j.get('request_id') or str(params.get('volume_id'))!=c['subject']['vid'] or params.get('collection')!=c['collection']):return None,None
+    owner=subprocess.run(['systemctl','show','-p','MainPID','--value',c['worker_unit']],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=2)
+    pid=owner.stdout.decode().strip()
+    if owner.returncode or not pid.isdecimal() or int(pid)==0:return None,None
+    worker=proc_identity(int(pid))
+    args=(pathlib.Path('/proc')/pid/'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+    required=[c['weed'].encode(),b'worker',('-workingDir='+str(root/'worker')).encode(),('-id='+c['worker_id']).encode(),b'-jobType=erasure_coding',b'-maxExecute=1']
+    if args[:2]!=required[:2] or any(args.count(x)!=1 for x in required[2:]) or executable_identity('/proc/'+pid+'/exe')!=executable_identity(c['weed']):raise ValueError('foreign EC worker identity')
+    subject=c['subject'];vid=subject['vid'];gen=subject['generation']
+    suffix='' if gen==0 else '.v%d'%gen
+    scratch=root/'worker/task_scratch'
+    candidates=[]
+    for p in scratch.rglob('*') if scratch.exists() else []:
+        if p.is_symlink() or p.stat().st_uid!=os.getuid():raise ValueError('foreign worker scratch')
+        if not p.is_file():continue
+        rel=p.relative_to(scratch)
+        if c['task']=='ec_repair':
+            match=re.fullmatch(r'ec-repair-'+vid+r'-[A-Za-z0-9]+/'+vid+r'\.ec([0-9]{2})'+re.escape(suffix),str(rel))
+            if str(params.get('generation'))!=str(gen):return None,None
+        else:
+            match=re.fullmatch(r'vol_'+vid+r'_[0-9]+/'+re.escape(c['collection'])+'_'+vid+r'\.ec([0-9]{2})',str(rel))
+            vif=p.parent/(c['collection']+'_'+vid+'.vif')
+            if not vif.exists() or vif.is_symlink():continue
+            if vif.stat().st_size>LIMIT:raise ValueError('worker VIF metadata cap')
+            info=strict(vif.read_bytes());cfg=info.get('ecShardConfig',{})
+            if str(cfg.get('encodeTsNs',''))!=subject['encode_ns'] or info.get('ecVacuumVersion',0)!=gen:continue
+        if not match or int(match[1])>=14:continue
+        st=p.stat()
+        if st.st_nlink!=1 or st.st_size<1:continue
+        candidates.append((st.st_mtime_ns,str(rel),st.st_ino,st.st_size,int(match[1])))
+    if not candidates:return None,None
+    _,name,inode,size,shard=max(candidates)
+    operation=name+'/'+str(inode)+'/'+str(worker['pid'])+'/'+worker['start']
+    previous=strict((root/'ec-progress.json').read_bytes()) if (root/'ec-progress.json').exists() else {}
+    begin=previous['begin'] if previous.get('operation')==operation and size>=previous['bytes'] else time.monotonic()
+    progress=dict(state='in_flight',vid=vid,operation=operation,bytes=size,begin=begin,source=c['collection'],target=vid)
+    write(root/'ec-progress.json',progress)
+    affected=dict(subject,shards=[shard])
+    return progress,dict(subject=affected,worker=worker,request=j['request_id'])
 
 
 def scope(c, parent):
@@ -265,7 +348,7 @@ def scope(c, parent):
     for member in folder.glob(c['collection']+'_*'):
         if member.is_symlink() or not member.is_file() or member.stat().st_nlink!=1:
             raise ValueError('unresolved collection member')
-        allowed=re.fullmatch(re.escape(c['collection'])+r'_[1-9][0-9]*\.(?:dat|idx|vif(?:\.v[1-9][0-9]*)?|ec[0-9]{2}(?:\.v[1-9][0-9]*)?|ecx(?:\.v[1-9][0-9]*)?|ecj(?:\.v[1-9][0-9]*)?|active|last_committed)',member.name)
+        allowed=re.fullmatch(re.escape(c['collection'])+r'_[1-9][0-9]*\.(?:dat|idx|vif(?:\.v[1-9][0-9]*)?|ec[0-9]{2}(?:\.v[1-9][0-9]*)?|(?:ecx|ecj|ecsum|idt)(?:\.v[1-9][0-9]*)?|active|last_committed)',member.name)
         if not allowed:pending+=1
         data_file=re.fullmatch(re.escape(c['collection'])+r'_([1-9][0-9]*)\.dat',member.name)
         if data_file:data_vids.append(data_file[1])
@@ -445,7 +528,11 @@ def task(c, root):
             transcript.write_bytes(raw)
             done = strict(raw)
             completion = done.get('completion', done)
-            result.update(terminal='succeeded' if status == 200 and completion.get('success') is True else 'failed', completion=done)
+            result['completion']=done
+            if completion.get('job_id')!=job or completion.get('job_type')!=c['task'] or not completion.get('request_id') or type(completion.get('success')) is not bool:
+                raise ValueError('EC completion identity/result absent')
+            result.update(exit=0 if status==200 and completion['success'] else 1,
+                          terminal='succeeded' if status==200 and completion['success'] else 'failed')
     except Exception as error:
         result['diagnostic'] = type(error).__name__ + ': ' + str(error)[:1000]
     result.update(ended=time.monotonic(), started=start, identity=identity)
@@ -484,11 +571,8 @@ def sample(c, root):
         status, body = request(c['admin'] + '/api/plugin/jobs/' + job + '/detail',timeout=5)
         report['job'] = strict(body) if status==200 else None
         if status not in (200,404):raise ValueError('job detail unreadable status%d'%status)
-        report['scratch'] = []
-        scratch = root / 'worker/task_scratch'
-        for p in scratch.rglob('*') if scratch.exists() else []:
-            if p.is_symlink(): raise ValueError('symlink in task scratch')
-            if p.is_file(): report['scratch'].append(dict(path=str(p.relative_to(scratch)), size=p.stat().st_size))
+        subject=strict((root/'subject.json').read_bytes())
+        report['progress'],report['ec']=ec_progress(dict(c,subject=subject),root,report['job'])
     else:
         report['events'] = [strict(x) for x in (root/'events.jsonl').read_bytes().splitlines()] if (root/'events.jsonl').exists() else []
         if alive and (root/'child.json').exists():
@@ -522,7 +606,7 @@ def main():
         raise ValueError('foreign maintenance directory')
     owned=strict((root/'config.json').read_bytes())
     if owned!=dict(run_id=c['run_id'],task=c['task'],config_sha256=c['config_sha256']):raise ValueError('foreign maintenance config')
-    action = {'seed': seed,'plugin_preflight':plugin_preflight,'detect':detect, 'encode':encode, 'task': task, 'sample': sample, 'readback': readback,'lock_check':lock_check}.get(c['stage'])
+    action = {'seed': seed,'freeze':freeze,'plugin_preflight':plugin_preflight,'detect':detect, 'encode':encode, 'task': task, 'sample': sample, 'readback': readback,'lock_check':lock_check}.get(c['stage'])
     if action is None: raise ValueError('unknown maintenance stage')
     print(json.dumps(action(c, root), allow_nan=False), flush=True)
 

@@ -326,6 +326,9 @@ func (f *chaos2Fault) each(ids []string, act func(id string) error) error {
 }
 
 func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
+	if m := f.r.maintenance; m != nil && m.ec() && m.injecting && id == "vol1" && role == "volume" {
+		id = m.ecVictim
+	}
 	var sampled *maintenanceFaultSample
 	var e error
 	if f.r.maintenance != nil {
@@ -346,6 +349,9 @@ func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
 }
 
 func (f *chaos2Fault) start(ctx context.Context, id, role string) error {
+	if m := f.r.maintenance; m != nil && m.ec() && m.injecting && id == "vol1" && role == "volume" {
+		id = m.ecVictim
+	}
 	identity, e := chaosStart(ctx, f.r, f.d, f.hosts, id, role, f.g.next(id, role), f.g.noted("kill-"+id+"-"+role))
 	f.g.note("start-"+id+"-"+role, identity)
 	if e == nil {
