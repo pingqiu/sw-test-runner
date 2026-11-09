@@ -20,6 +20,7 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
+	MaintenanceTask string `json:"maintenance_task,omitempty"`
 	SWCtl             *SWCtlConfig `json:"swctl,omitempty"`
 	swctlNodes        func(inventory.Host) swctlSmokeNode
 	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
@@ -99,6 +100,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if c.MaintenanceTask != "" {
+		if e := maintenanceAdmission(ctx, *d, c); e != nil { return "", e }
 	}
 	if c.SWCtl != nil {
 		return runSWCtlSmoke(ctx, *d, c)
