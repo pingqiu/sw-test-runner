@@ -86,6 +86,15 @@ func SoakFaultArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan, action s
 	if m02 == nil || m02.RunRoot == "" || !x.rowMode() || x.Row == nil || !slices.Contains(soakFaultActions, action) {
 		return nil, errors.New("soak fault job needs a stage-3 row and the M02 run root")
 	}
+	volumes := 0
+	for _, h := range d.Hosts {
+		if contains(h.Roles, "volume") {
+			volumes++
+		}
+	}
+	if volumes != 1 || !contains(m02.Roles, "volume") { // F1 attributes every PUT to the one volume it kills
+		return nil, errors.New("a stage-3 row needs exactly one volume, on M02")
+	}
 	unit := func(label string) string { return "sw-cloud-" + d.RunID + "-" + label }
 	f, r := x.Faults[0], x.Row
 	units, watch := []string{unit("deploy-m02-volume")}, map[string]string{}

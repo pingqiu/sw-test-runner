@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
 // rowPlan is one admissible stage-3 row of the given kind (plan "Stage 3: RDMA and resource faults").
@@ -100,6 +101,19 @@ func TestExistingSoakPlansCarryNoRowBytes(t *testing.T) {
 }
 
 func slicesEqual(a, b []string) bool { return strings.Join(a, ",") == strings.Join(b, ",") }
+
+func TestARowNeedsExactlyOneVolumeOnM02(t *testing.T) {
+	doc := func(m01Roles ...string) *inventory.Document {
+		return &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: "/r1", Roles: m01Roles},
+			{ID: "m02", RunRoot: "/r2", Roles: []string{"master", "volume"}}}}
+	}
+	if _, err := SoakFaultArgs(doc("client"), SmokeSettings{HelperDir: "/w"}, rowPlan(KindVolumeKillIO), "apply"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SoakFaultArgs(doc("client", "volume"), SmokeSettings{HelperDir: "/w"}, rowPlan(KindVolumeKillIO), "apply"); err == nil {
+		t.Fatal("F1 attributes PUTs to the one volume it kills: a second volume must refuse")
+	}
+}
 
 func TestTheApprovedPathRefusesRows(t *testing.T) {
 	p := Plan{Soak: rowPlan(KindLinkFlap)}
