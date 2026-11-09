@@ -18,6 +18,7 @@ import (
 // directConfig is the controller-local input for an existing ssh host: the
 // key that reaches it, its host-key pin, and the three pinned artifacts.
 type directConfig struct {
+	MaintenanceTask   string               `json:"maintenance_task,omitempty"`
 	SWCtl             *seaweed.SWCtlConfig `json:"swctl,omitempty"`
 	Replication       string               `json:"replication,omitempty"`
 	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
@@ -102,7 +103,7 @@ func runDirect(args []string, w io.Writer) int {
 	defer cancel()
 	ctx, stop := context.WithTimeout(ctx, *timeout)
 	defer stop()
-	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SWCtl: c.SWCtl, Replication: c.Replication, ClusterChaosCases: c.ClusterChaosCases, SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, ECUnderQuorum: c.ECUnderQuorum, ECReconstruction: c.ECReconstruction, ECVolumeImpl: c.ECVolumeImpl, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
+	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{MaintenanceTask: c.MaintenanceTask, SWCtl: c.SWCtl, Replication: c.Replication, ClusterChaosCases: c.ClusterChaosCases, SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, ECUnderQuorum: c.ECUnderQuorum, ECReconstruction: c.ECReconstruction, ECVolumeImpl: c.ECVolumeImpl, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()

@@ -268,7 +268,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		}
 		results[id] = map[string]int{"ops": len(out.Outcomes), "failed": failed}
 	}
-	back, e := r.each(ctx, "readback", 300, func(id string) string { return cmds[id]["readback"] })
+	readBound := 300
+	if r.maintenance != nil {
+		readBound = 120
+	}
+	back, e := r.each(ctx, "readback", readBound, func(id string) string { return cmds[id]["readback"] })
 	if e != nil {
 		return e
 	}
@@ -322,8 +326,19 @@ func (f *chaos2Fault) each(ids []string, act func(id string) error) error {
 }
 
 func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
+	var sampled *maintenanceFaultSample
+	var e error
+	if f.r.maintenance != nil {
+		sampled, e = f.r.maintenance.beforeFault(ctx, id, role)
+		if e != nil {
+			return e
+		}
+	}
 	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.r.document(f.d, id), id, role))
 	f.g.note("kill-"+id+"-"+role, old)
+	if f.r.maintenance != nil {
+		e = errors.Join(e, f.r.maintenance.afterFault(ctx, sampled, e == nil))
+	}
 	return e
 }
 

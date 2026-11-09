@@ -211,6 +211,11 @@ func processPins(d inventory.Document, c CloudConfig) map[string]string {
 // Join MainPID/starttime to executable, argv/root and owned TCP listeners;
 // recheck that unit generation after the status read.
 func processOwner(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, id string) (string, error) {
+	_, body, err := processOwnerReceipt(ctx, r, hosts, id)
+	return body, err
+}
+
+func processOwnerReceipt(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, id string) (string, string, error) {
 	h := hosts[id]
 	unit := r.gens.unit(r.docs[id], id, "volume")
 	cmd := mainPID(unit) + `test "$(sudo -n readlink /proc/$pid/exe)" = ` + cloudQuote(h.RunRoot+"/weed-volume") + `; test "$(sudo -n readlink /proc/$pid/cwd)" = ` + cloudQuote(h.RunRoot) + `; ` +
@@ -222,9 +227,9 @@ func processOwner(ctx context.Context, r *chaosRun, hosts map[string]inventory.H
 	f := strings.Fields(receipt)
 	var st struct{ DiskStatuses []struct{ Dir string } }
 	if e != nil || !ok || len(f) != 5 || f[0] != "OWNER" || f[3] != endpoint(h, "volume_http") || f[4] != h.RunRoot || json.Unmarshal([]byte(body), &st) != nil || len(st.DiskStatuses) != 1 || st.DiskStatuses[0].Dir != h.RunRoot+"/volume" {
-		return "", errors.Join(e, errors.New("volume role identity/endpoint/root not bound: "+id))
+		return "", "", errors.Join(e, errors.New("volume role identity/endpoint/root not bound: "+id))
 	}
-	return body, nil
+	return receipt, body, nil
 }
 
 // Join every actual ACK VID to two distinct observed volume-process owners
@@ -252,8 +257,11 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 			return errors.New("no writable owner on " + id)
 		}
 	}
-	for _, urls := range owners {
+	for vid, urls := range owners {
 		sort.Strings(urls)
+		if r.maintenance != nil && vid == r.maintenance.manifest.VID {
+			continue
+		} // Only the separately-oracled task fixture may be deliberately deficient.
 		if len(urls) != 2 || urls[0] == urls[1] {
 			return errors.New("observed volume copies differ from two")
 		}

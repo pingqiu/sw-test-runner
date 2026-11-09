@@ -64,6 +64,7 @@ func chaosContScript(pid, start string) string {
 }
 
 type chaosRun struct {
+	maintenance     *maintenanceRuntime
 	docs            map[string]inventory.Document
 	gens            *chaosGens
 	seedCheck       func(context.Context, map[string]string) error
@@ -84,6 +85,11 @@ func (r *chaosRun) document(d inventory.Document, id string) inventory.Document 
 }
 
 func (r *chaosRun) step(ctx context.Context, id, name string, seconds int, cmd string) (string, error) {
+	if r.maintenance != nil {
+		if d, ok := ctx.Deadline(); !ok || time.Until(d) < time.Duration(seconds+5)*time.Second {
+			return "", fmt.Errorf("maintenance step %s cannot fit maximum %ds", name, seconds)
+		}
+	}
 	r.mu.Lock()
 	r.seq++
 	file := fmt.Sprintf("cloud-step-%03d.json", r.seq)
@@ -406,6 +412,9 @@ func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts ma
 	d = r.document(d, victim)
 	h, root := hosts[victim], hosts[victim].RunRoot
 	command := cloudServices(h, hosts["meta"], root, true, r.rep)[role]
+	if r.maintenance != nil && role == "volume" && strings.HasPrefix(victim, "ec") {
+		command += " --disk=ssd"
+	}
 	if r.docs != nil && role == "filer" {
 		command += " -localSocket=" + cloudQuote(root+"/filer.sock")
 	}

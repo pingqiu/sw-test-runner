@@ -31,11 +31,14 @@ type maintenanceFault struct {
 	Confirmed    bool
 }
 type maintenanceData struct {
-	Key, ExpectedSHA256, ActualSHA256 string
-	ExpectedLength, ActualLength      int64
-	Deleted                           bool
-	Status                            int
-	Observed                          bool
+	Key            string `json:"key"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	ActualSHA256   string `json:"actual_sha256,omitempty"`
+	ExpectedLength int64  `json:"expected_length,omitempty"`
+	ActualLength   int64  `json:"actual_length,omitempty"`
+	Deleted        bool   `json:"deleted,omitempty"`
+	Status         int    `json:"status"`
+	Observed       bool   `json:"observed"`
 }
 type maintenanceEvidence struct {
 	Task                                          string
@@ -119,11 +122,11 @@ func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
 		return v
 	}
 	refusals := map[string]bool{"RPC_UNAVAILABLE": true, "GENERATION_SWITCH_IN_PROGRESS": true, "NO_TARGET_CAPACITY": true, "INSUFFICIENT_SHARDS": true, "MASTER_UNAVAILABLE": true}
-	if e.Terminal == "refused" && refusals[e.Refusal] {
+	refused := e.Terminal == "refused" && refusals[e.Refusal]
+	if refused {
 		v.Task = "CLEAN_REFUSAL"
-		return v
 	}
-	if e.Terminal != "succeeded" || e.Job == "" || e.Attempt == "" || e.Owner == "" || e.Boot == "" {
+	if (e.Terminal != "succeeded" && !refused) || e.Job == "" || e.Attempt == "" || e.Owner == "" || e.Boot == "" {
 		return v
 	}
 	if e.Task == "ec_repair" || e.Task == "ec_vacuum" {
@@ -170,9 +173,11 @@ func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
 		}
 	}
 	if v.CoveredFaults > 0 {
-		v.Task = "RECOVERED"
+		if !refused {
+			v.Task = "RECOVERED"
+		}
 		v.Coverage = "COVERED"
-	} else {
+	} else if !refused {
 		v.Task = "NOT_PROVEN"
 	}
 	return v

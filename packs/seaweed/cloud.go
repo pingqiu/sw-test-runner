@@ -20,7 +20,7 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
-	MaintenanceTask string `json:"maintenance_task,omitempty"`
+	MaintenanceTask   string       `json:"maintenance_task,omitempty"`
 	SWCtl             *SWCtlConfig `json:"swctl,omitempty"`
 	swctlNodes        func(inventory.Host) swctlSmokeNode
 	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
@@ -102,7 +102,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", e
 	}
 	if c.MaintenanceTask != "" {
-		if e := maintenanceAdmission(ctx, *d, c); e != nil { return "", e }
+		if e := maintenanceAdmission(ctx, *d, c); e != nil {
+			return "", e
+		}
 	}
 	if c.SWCtl != nil {
 		return runSWCtlSmoke(ctx, *d, c)
@@ -285,6 +287,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	defer os.RemoveAll(scratch)
 	helpers := cloudHelpers(phase, c.ChaosSet)
+	if c.MaintenanceTask != "" {
+		helpers = append(helpers, "maintenance.py")
+	}
 	if c.ECStage1 {
 		helpers = []string{"ec_service.py", "ec_setup.py", "ec_capture.py", "ec_chaos.py", "chaos_load.py"}
 	}
@@ -327,6 +332,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	master := endpoint(meta, "master_http")
 	commands := cloudServices(h, meta, root, phase != "", c.Replication)
+	if c.MaintenanceTask != "" && strings.HasPrefix(h.ID, "ec") {
+		commands["volume"] += " --disk=ssd"
+	}
 	if len(c.ClusterChaosCases) > 0 {
 		commands["filer"] += " -localSocket=" + q(root+"/filer.sock")
 	}
