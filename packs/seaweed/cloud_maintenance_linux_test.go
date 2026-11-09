@@ -54,3 +54,13 @@ func TestMaintenanceReserveAndPhaseMaxima(t *testing.T) {
 		t.Fatal("reserve changed")
 	}
 }
+
+func TestMaintenanceStepAdmitsKillGraceBeforeDispatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	r := &chaosRun{maintenance: &maintenanceRuntime{}}
+	// There is deliberately no node: a budget refusal must precede dispatch.
+	if _, err := r.step(ctx, "absent", "bounded-step", 2, ":"); err == nil || !strings.Contains(err.Error(), "cannot fit") {
+		t.Fatalf("timeout -k 5 grace was not admitted: %v", err)
+	}
+}
