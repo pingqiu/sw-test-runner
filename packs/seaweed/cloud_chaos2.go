@@ -337,6 +337,9 @@ func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
 	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.r.document(f.d, id), id, role))
 	f.g.note("kill-"+id+"-"+role, old)
 	if f.r.maintenance != nil {
+		if sampled != nil {
+			sampled.GoneWitness = old
+		}
 		e = errors.Join(e, f.r.maintenance.afterFault(ctx, sampled, e == nil))
 	}
 	return e

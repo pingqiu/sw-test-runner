@@ -107,11 +107,31 @@ func runDirect(args []string, w io.Writer) int {
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()
+		var environment *seaweed.MaintenanceEnvironmentError
+		if errors.As(err, &environment) {
+			out.Code = "ENVIRONMENT"
+		}
+		var outcome *seaweed.MaintenanceOutcomeError
+		if errors.As(err, &outcome) {
+			out.Code = outcome.Status
+		}
 	}
-	if e := writeResult(*outDir, out); e != nil && err == nil {
-		err = e
+	if e := writeResult(*outDir, out); e != nil {
+		err = errors.Join(err, e)
+		out.Code, out.Error = "FAIL", err.Error()
 	}
-	if e := json.NewEncoder(w).Encode(out); e != nil || err != nil {
+	if e := json.NewEncoder(w).Encode(out); e != nil {
+		return 1
+	}
+	if err != nil {
+		var environment *seaweed.MaintenanceEnvironmentError
+		if out.Code == "ENVIRONMENT" && errors.As(err, &environment) {
+			return 78
+		}
+		var outcome *seaweed.MaintenanceOutcomeError
+		if out.Code != "FAIL" && errors.As(err, &outcome) {
+			return 2
+		}
 		return 1
 	}
 	return 0

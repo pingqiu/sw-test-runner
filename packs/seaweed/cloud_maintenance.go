@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -12,12 +15,48 @@ import (
 const maintenanceWork = 1200 * time.Second
 const maintenanceReserve = 300 * time.Second
 
+// MaintenanceEnvironmentError is a non-product result; the direct CLI returns
+// 78 rather than presenting an unrun EC worker cell as a failed product test.
+type MaintenanceEnvironmentError struct{ Reason string }
+
+func (e *MaintenanceEnvironmentError) Error() string { return "ENVIRONMENT/NOT_RUN: " + e.Reason }
+
+type MaintenanceOutcomeError struct {
+	Status string
+	Cause  error
+}
+
+func (e *MaintenanceOutcomeError) Error() string {
+	detail := fmt.Sprint(e.Cause)
+	if len(detail) > 1400 {
+		detail = detail[:300] + " ... [full command/output in raw step evidence] ... " + detail[len(detail)-1000:]
+	}
+	return fmt.Sprintf("maintenance %s: %s", e.Status, detail)
+}
+func (e *MaintenanceOutcomeError) Unwrap() error { return e.Cause }
+
+func maintenanceLicenseNotRun(c CloudConfig) (string, error) {
+	const reason = "EC_WORKER_LICENSE_UNAVAILABLE"
+	if err := os.MkdirAll(c.Output, 0700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(c.Output, "maintenance-result.json")
+	row := map[string]any{"task": c.MaintenanceTask, "case": c.ClusterChaosCases[0], "classification": "ENVIRONMENT", "status": "NOT_RUN", "reason": reason, "data": "NOT_RUN", "task_recovery": "NOT_RUN", "coverage": "NOT_COVERED", "refusals": 0, "product_finding": false}
+	if err := os.WriteFile(path, processJSON(row), 0600); err != nil {
+		return "", err
+	}
+	return path, &MaintenanceEnvironmentError{Reason: reason}
+}
+
 func maintenanceAdmission(ctx context.Context, d inventory.Document, c CloudConfig) error {
 	allowed := map[string]map[string]bool{
 		"volume.balance":         {"C1-single-kill": true, "C2-rolling": true},
 		"volume.fix.replication": {"C1-single-kill": true, "C4-meta-restart": true},
 		"ec_repair":              {"C1-single-kill": true, "C4-meta-restart": true},
 		"ec_vacuum":              {"C1-single-kill": true, "C4-meta-restart": true},
+	}
+	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,54}$`).MatchString(d.RunID) {
+		return errors.New("maintenance run_id must fit its closed collection/unit namespace")
 	}
 	if len(c.ClusterChaosCases) != 1 || !allowed[c.MaintenanceTask][c.ClusterChaosCases[0]] || d.Target != "onprem" || len(d.Hosts) != 2 || c.Replication != "001" || c.Chaos || c.ChaosSet != "" || c.ECStage1 || c.KVSoak || c.KVLoad || c.MasterWrites || c.ReadCase != "" || c.SWCtl != nil || c.ECUnderQuorum || c.ECReconstruction || c.ECVolumeImpl != "" {
 		return errors.New("maintenance requires one approved task/fault pair, two onprem hosts, replication 001 and no other selector")
@@ -26,7 +65,7 @@ func maintenanceAdmission(ctx context.Context, d inventory.Document, c CloudConf
 	if !ok || time.Until(deadline) < maintenanceWork+maintenanceReserve-time.Second {
 		return errors.New("maintenance requires --timeout at least 25m including the 300s cleanup reserve")
 	}
-	return errors.New("maintenance runtime is not integrated yet")
+	return nil
 }
 
 // Each new step must fit its entire maximum before qualification ends. Cleanup

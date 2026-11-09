@@ -1,42 +1,79 @@
-# Maintenance × chaos: implementation checkpoint
+# Maintenance × existing process chaos
 
-This branch implements the controls for the accepted Stage 2 plan, SHA256
-`d9109f2e31eddf9a6862e0286c2fcd145d783c93a753c7f0915e088316fe19f0`.
-It is **not ready for execution or merge**. `maintenance_task` is forwarded by
-the direct CLI but admission deliberately refuses it before artifacts or SSH:
-`maintenance runtime is not integrated yet`.
+Opt-in extension of accepted Stage 2 plan d9109f2e. As-built references:
+runner base e7c54b024b48b4011441e917d4d6bf81935d1415, mono
+49daaba122ad6d49e3896e73092fcd628c81122b. Reuses the existing six-volume
+Rust / Go master and filer deployment, mixed workload and ACK oracle.
+No lab, hardware or production-readiness claim is made here.
 
-Implemented controls:
+Use the existing direct command with a pinned two-host onprem inventory,
+--timeout 25m, and the normal pinned weed, weed-volume, native.tar, SSH
+key and host-key configuration. Add to the normal config:
 
-- Only the eight approved task/fault pairs, two onprem hosts, replication 001,
-  a 1500-second bound and no competing selector are admitted to validation.
-- Coverage requires this task's actual VID/shard/generation, operation, bytes,
-  owner/boot and conservative fault/GONE brackets. Queued/no-op/foreign work
-  remains NOT_COVERED. No cross-host raw monotonic comparison.
-- A frozen expected-key/length/hash/delete oracle is independent of task exit
-  and refusal. Loss/wrong bytes/resurrection fails; unknown effects or pending
-  state cannot be called recovered. Refusals have their own count/verdict.
-- Embedded leaf controls execute real Python, including a trickling local HTTP
-  server. Every copy announcement starts a new operation, even for the same VID.
-  Strict JSON refuses duplicate/aliased decision keys and trailing replies.
-- Prototype code invokes the existing product shell/admin/worker paths; it does
-  not fabricate `license_valid`, substitute a fake task, or change fault timing.
+```json
+{"maintenance_task":"volume.balance","cluster_chaos_cases":["C1-single-kill"],"replication":"001"}
+```
 
-Remaining before enabling admission:
+| Task | Admitted existing cases | Execution scope |
+|---|---|---|
+| volume.balance | C1-single-kill, C2-rolling | Replicated integration |
+| volume.fix.replication | C1-single-kill, C4-meta-restart | Replicated integration |
+| ec_repair, ec_vacuum | C1-single-kill, C4-meta-restart | ENVIRONMENT / NOT_RUN |
 
-1. Finish the lifecycle integration, exact-run target backstops and independent
-   two-host cleanup within the 300-second reserve, including controller loss.
-2. Complete immutable multi-VID balance placement, EC serving-owner/generation
-   readback and task/fault evidence joins. A filesystem shard or queued job alone
-   is insufficient. Calibrate fixtures without changing the fault schedule.
-3. Complete the public-caller modeled-host rehearsal and local real-task cells;
-   do not describe the current leaf/control tests as that full rehearsal.
-4. Obtain the approved enterprise-license input/binding for the EC worker's real
-   detection/execute path. Existing cloud/inventory inputs have no such delivery
-   mechanism. Source observation: mono `49daaba1`,
-   `enterprise/weed/plugin/worker/enterprise.go:20` and
-   `enterprise/weed/admin/dash/plugin_api.go:895`.
+EC emits EC_WORKER_LICENSE_UNAVAILABLE and exits 78 before artifact checks
+or SSH. No approved license reference/binding exists under the 2026-11-09
+ruling. Dormant EC prototypes are neither enabled nor qualified. Never inject
+license_valid; no PASS or product finding is earned. C3/C6 remain NOT_RUN;
+C5 stays deferred.
 
-No lab token is active. M01/M02 have not been touched by this implementation.
-The accepted plan and its review remain the authority; this file records an
-incomplete implementation, not a replacement plan or a qualification result.
+## Runtime and evidence
+
+cloud_process.go binds the opt-in seam; maintenance_runtime.go and
+maintenance_collection.go freeze the ACKed fixture and all its VID owners.
+Balance uses an uneven run-owned collection with five replicated VIDs; only
+the ACKed VID earns overlap. Fix replication quarantines one proven copy,
+retaining the acknowledged source. Both invoke the real product shell, lock
+and exact collection filter. Balance uses the product copy-rate option.
+Fast/no-op tasks remain NOT_COVERED.
+
+maintenance_observe.go uses an independent pinned SSH connection. Fault hooks
+only snapshot/queue observations, adding no SSH wait to C1/C2/C4. Coverage
+requires a live owned shell child, matching executable/helper/config identity,
+actual VID and source/target route, and increasing byte progress on the same
+operation across dispatch/GONE. The post-GONE observation must START after
+GONE is received. Numeric bounds use the task host's clock and boot; victim
+monotonic timestamps are never compared with another host's clock.
+
+maintenance_collect.go checks exact bytes independently of task exit/refusal,
+whole-collection mounted owners/readonly state, pending files and master
+lookups. A settled task must leave a usable product lock: a fresh bounded
+lock / own-VID volume.list / unlock must succeed. A clean refusal has its own
+count and is never RECOVERED; early refusal is not work coverage. Unknown
+effects, lost replies, unconfirmed copies or lost cleanup proof stay UNKNOWN.
+Wrong bytes/lost ACKed data remain FAIL even if cleanup fails. The original
+mixed-load live/deleted oracle is unchanged.
+
+maintenance_lifecycle.go and embedded worker/maintenance_lifecycle.py arm
+both exact-run target backstops before setup, record root inode/owner receipts,
+preserve allowlisted diagnostics, stop exact owned units, and independently
+check PIDs, TCP/Unix listeners and paths. Root deletion is no-follow,
+receipt-bound and validates every root before deleting any. Unknown effects
+retain protocol state and both backstops; they cannot produce a clean release.
+
+Bounds: 1200 seconds work + 300 cleanup, at most 1500 total. Setup, concurrent
+task/case, and final reads have maxima 240 / 600 / 240 seconds. Each step must
+fit its full maximum before admission. Supplied inventory deadlines are
+clamped, never extended. The existing inventory cleanup-reserve schema stays
+unchanged; maintenance enforces its own 300-second reserve. No qualification
+retries.
+
+## Verification scope
+
+Public-caller rehearsal: real loopback SSH with modeled two-host service
+responses. Positives and negatives include queued/foreign/no-op work,
+pre-GONE RPCs, wrong bytes, pending effects, lock failure, lost prepare and
+failed cleanup proof. Local leaf controls execute real Python, a compiled
+subprocess, HTTP server and filesystem deletion/refusal. That subprocess is
+a protocol fixture, not a Seaweed product binary. These establish runner
+controls, not real maintenance-task/fault coverage. A separately reviewed,
+tokened product/lab run is still required. No M01/M02 access is authorized.

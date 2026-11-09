@@ -94,7 +94,11 @@ func (r *chaosRun) step(ctx context.Context, id, name string, seconds int, cmd s
 	r.seq++
 	file := fmt.Sprintf("cloud-step-%03d.json", r.seq)
 	r.mu.Unlock()
-	return cloudStep(ctx, r.nodes[id], r.dir, file, name, seconds, cmd)
+	out, err := cloudStep(ctx, r.nodes[id], r.dir, file, name, seconds, cmd)
+	if r.maintenance != nil && (name == "load" || name == "readback") {
+		r.maintenance.observeMixed(out)
+	}
+	return out, err
 }
 
 // each runs one step per client concurrently and returns every stdout.
@@ -177,6 +181,9 @@ func (r *chaosRun) startLoad(ctx context.Context, seconds int, cmd func(id strin
 	go func() {
 		defer close(loaded)
 		loads, loadErr = r.each(loadCtx, "load", seconds, cmd)
+		if loadErr != nil && r.maintenance != nil {
+			r.maintenance.loadFailed()
+		}
 	}()
 	return cancel, func() (map[string]string, error) {
 		<-loaded
@@ -414,6 +421,9 @@ func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts ma
 	command := cloudServices(h, hosts["meta"], root, true, r.rep)[role]
 	if r.maintenance != nil && role == "volume" && strings.HasPrefix(victim, "ec") {
 		command += " --disk=ssd"
+	}
+	if r.maintenance != nil {
+		command = "--property=TimeoutStopSec=5 --property=KillMode=control-group " + command
 	}
 	if r.docs != nil && role == "filer" {
 		command += " -localSocket=" + cloudQuote(root+"/filer.sock")

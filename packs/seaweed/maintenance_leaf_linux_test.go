@@ -35,7 +35,7 @@ s=dict(phase=None,operation=0)
 for line in ['copying volume 7 from source','replicating volume 7 001 from source','  moving hdd volume maint-2026_7 source => target','volume 8 processed 1.00 MiB','volume 7 processed NaN MiB','volume 7 processed 0 B']:
     assert m.transfer_progress(line,'7',s,10)['state']=='idle',line
 p=m.transfer_progress('source => target volume 7 processed 1.00 MiB','7',s,11)
-assert p==dict(state='in_flight',vid='7',operation='1',bytes=1048576,begin=11),p
+assert p==dict(state='in_flight',vid='7',operation='1',bytes=1048576,begin=11,source='source',target='target'),p
 p=m.transfer_progress('copying volume 7 from source','7',s,20)
 assert p['state']=='idle','same VID started a second copy but kept the old operation'
 p=m.transfer_progress('source => target volume 7 processed 2.00 MiB','7',s,30)

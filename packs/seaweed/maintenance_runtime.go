@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pingqiu/sw-test-runner/infra"
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
@@ -46,6 +48,8 @@ type maintenanceScope struct {
 	Ordinary bool                       `json:"ordinary"`
 	Mounted  bool                       `json:"mounted,omitempty"`
 	ReadOnly bool                       `json:"read_only,omitempty"`
+	Volumes  map[string]bool            `json:"volumes,omitempty"`
+	DataVIDs []string                   `json:"data_vids,omitempty"`
 }
 type maintenanceIdentity struct {
 	PID       int    `json:"pid"`
@@ -64,7 +68,7 @@ type maintenanceTaskResult struct {
 	Terminal     string              `json:"terminal"`
 	Refusal      string              `json:"refusal"`
 	EffectsKnown bool                `json:"effects_known"`
-	Exit         int                 `json:"exit,omitempty"`
+	Exit         *int                `json:"exit"`
 	Completion   json.RawMessage     `json:"completion,omitempty"`
 	Diagnostic   string              `json:"diagnostic,omitempty"`
 	Started      float64             `json:"started"`
@@ -97,35 +101,52 @@ type maintenanceSample struct {
 		Operation string  `json:"operation"`
 		Bytes     int64   `json:"bytes"`
 		Begin     float64 `json:"begin"`
+		Source    string  `json:"source"`
+		Target    string  `json:"target"`
 	} `json:"progress"`
 }
 type maintenanceFaultSample struct {
-	Victim, Role  string
-	Before, After maintenanceSample
-	Subject       maintenanceSubject
-	Missing       []int
-	Confirmed     bool
+	Victim, Role           string
+	Before, After          maintenanceSample
+	Subject                maintenanceSubject
+	Missing                []int
+	Confirmed              bool
+	TargetEndpoint         string
+	TargetUnit             string
+	GoneWitness            string
+	BeforePrecedesDispatch bool
+	AfterFollowsGone       bool
+	goneAt                 time.Time
 }
 type maintenanceRuntime struct {
-	d          inventory.Document
-	c          CloudConfig
-	r          *chaosRun
-	hosts      map[string]inventory.Host
-	budget     maintenanceBudget
-	base       map[string]any
-	manifest   maintenanceManifest
-	subject    maintenanceSubject
-	initial    map[string]maintenanceScope
-	missing    []int
-	mu         sync.Mutex
-	faults     []*maintenanceFaultSample
-	injecting  bool
-	done       chan struct{}
-	taskResult maintenanceTaskResult
-	taskErr    error
-	armed      []inventory.Host
-	started    time.Time
-	beforeTask map[string]maintenanceScope
+	d                inventory.Document
+	c                CloudConfig
+	r                *chaosRun
+	hosts            map[string]inventory.Host
+	budget           maintenanceBudget
+	base             map[string]any
+	manifest         maintenanceManifest
+	subject          maintenanceSubject
+	initial          map[string]maintenanceScope
+	missing          []int
+	mu               sync.Mutex
+	faults           []*maintenanceFaultSample
+	injecting        bool
+	done             chan struct{}
+	taskResult       maintenanceTaskResult
+	taskErr          error
+	armed            []inventory.Host
+	started          time.Time
+	beforeTask       map[string]maintenanceScope
+	receipts         map[string]maintenanceRootRecord
+	effects          bool
+	fixtureVIDs      map[string]bool
+	mixedWrong       bool
+	failureCancel    context.CancelFunc
+	latest           maintenanceSample
+	observerNode     *infra.Node
+	observerSequence int
+	retain           bool
 }
 
 func newMaintenanceRuntime(ctx context.Context, d inventory.Document, c CloudConfig) *maintenanceRuntime {
@@ -134,6 +155,9 @@ func newMaintenanceRuntime(ctx context.Context, d inventory.Document, c CloudCon
 	if hard, e := time.Parse(time.RFC3339Nano, d.Deadlines.Hard); e == nil && hard.Before(m.budget.hard) {
 		m.budget.hard = hard
 		m.budget.work = hard.Add(-maintenanceReserve)
+	}
+	if work, e := time.Parse(time.RFC3339Nano, d.Deadlines.Work); e == nil && work.Before(m.budget.work) {
+		m.budget.work = work
 	}
 	return m
 }
@@ -197,6 +221,9 @@ func (m *maintenanceRuntime) bind(r *chaosRun, hosts map[string]inventory.Host) 
 		m.base["admin"] = "http://127.0.0.1:" + strconv.Itoa(servicePort(h, "maintenance_admin_http"))
 	}
 	m.base["weed_sha256"] = m.c.Files["weed"].SHA256
+	helper, _ := workerFiles.ReadFile("worker/maintenance.py")
+	m.base["helper_sha256"] = hash(helper)
+	m.base["task_unit"] = "sw-cloud-" + r.docs["meta"].RunID + "-maintenance-task.service"
 	m.base["config_sha256"] = hash(processJSON(m.base))
 }
 func (m *maintenanceRuntime) command(id, stage string, extras map[string]any) string {
@@ -231,13 +258,19 @@ func (m *maintenanceRuntime) checkManifest(man maintenanceManifest) error {
 	if err != nil || vid == 0 || strconv.FormatUint(vid, 10) != man.VID {
 		return errors.New("maintenance VID invalid")
 	}
+	seenFID := map[string]bool{}
 	for i, o := range man.Objects {
 		key := fmt.Sprint("maintenance-", i)
 		block := sha256.Sum256([]byte(m.d.RunID + "/" + key))
-		payload := strings.Repeat(string(block[:]), (1<<20)/len(block))
-		if o.Key != key || o.Length != 1<<20 || o.SHA != hash([]byte(payload)) || !strings.HasPrefix(o.FID, man.VID+",") || o.Deleted && m.c.MaintenanceTask != "ec_vacuum" {
+		length := int64(1 << 20)
+		if m.c.MaintenanceTask == "volume.balance" {
+			length = 8 << 20
+		}
+		payload := strings.Repeat(string(block[:]), int(length)/len(block))
+		if seenFID[o.FID] || o.Key != key || o.Length != length || o.SHA != hash([]byte(payload)) || !regexp.MustCompile(`^`+man.VID+`,[0-9a-f]{9,24}$`).MatchString(o.FID) || o.Deleted && m.c.MaintenanceTask != "ec_vacuum" {
 			return errors.New("maintenance ACK manifest identity/bytes differ")
 		}
+		seenFID[o.FID] = true
 	}
 	return nil
 }
@@ -273,6 +306,20 @@ func (m *maintenanceRuntime) setup(ctx context.Context, phase func(string, inven
 		return err
 	}
 	m.subject = maintenanceSubject{Collection: m.manifest.Collection, VID: m.manifest.VID}
+	if !m.ec() {
+		var err error
+		m.initial, err = m.scopes(ctx, true)
+		if err != nil {
+			return err
+		}
+		m.fixtureVIDs, err = maintenanceFreezeCollection(m.initial, m.manifest.VID, m.c.MaintenanceTask)
+		if err != nil {
+			return err
+		}
+		if err = m.r.save("maintenance-fixture-volumes.json", m.fixtureVIDs); err != nil {
+			return err
+		}
+	}
 	if m.ec() {
 		if err := m.leaf(ctx, "meta", "encode", 90, nil, &m.manifest); err != nil {
 			return err
@@ -400,7 +447,7 @@ func (m *maintenanceRuntime) scope(ctx context.Context, id string, hashed bool) 
 	if err != nil {
 		return s, err
 	}
-	err = m.leaf(ctx, id, "scope", 30, map[string]any{"vid": m.manifest.VID, "hash_files": hashed}, &s)
+	err = m.leaf(ctx, id, "scope", 20, map[string]any{"vid": m.manifest.VID, "hash_files": hashed}, &s)
 	if err != nil {
 		return s, err
 	}
@@ -422,10 +469,38 @@ func (m *maintenanceRuntime) scope(ctx context.Context, id string, hashed bool) 
 		return s, err
 	}
 	s.Mounted, s.ReadOnly = false, false
+	s.Volumes = map[string]bool{}
 	for _, v := range status.Volumes {
+		if v.Collection == m.manifest.Collection {
+			vid := strconv.FormatUint(v.Id, 10)
+			if v.Id == 0 {
+				return s, errors.New("invalid collection inventory VID")
+			}
+			if _, exists := s.Volumes[vid]; exists {
+				return s, errors.New("duplicate collection inventory VID")
+			}
+			s.Volumes[vid] = v.ReadOnly
+		}
 		if strconv.FormatUint(v.Id, 10) == m.manifest.VID && v.Collection == m.manifest.Collection {
 			s.Mounted = true
 			s.ReadOnly = v.ReadOnly
+		}
+	}
+	if !m.ec() {
+		seen := map[string]bool{}
+		for _, vid := range s.DataVIDs {
+			if seen[vid] {
+				return s, errors.New("duplicate collection data VID")
+			}
+			seen[vid] = true
+			if _, ok := s.Volumes[vid]; !ok {
+				s.Pending++
+			}
+		}
+		for vid := range s.Volumes {
+			if !seen[vid] {
+				s.Pending++
+			}
 		}
 	}
 	return s, nil
@@ -482,17 +557,53 @@ func (m *maintenanceRuntime) startTask(ctx context.Context) error {
 		h := m.hosts["meta"]
 		cmd := cloudStart(m.r.docs["meta"], h.RunRoot, "maintenance-task", "--wait --pipe --collect --property=User="+cloudQuote(h.Management.User)+" --property=UMask=0077 --property=RuntimeMaxSec=580 --property=TimeoutStopSec=3 --property=KillMode=control-group "+m.command("meta", "task", nil))
 		out, err := m.r.step(ctx, "meta", "maintenance-task", 590, cmd)
+		var result maintenanceTaskResult
 		if err == nil {
-			err = maintenanceDecode([]byte(out), &m.taskResult)
+			err = maintenanceDecode([]byte(out), &result)
+			if err == nil {
+				err = m.validateTaskResult(result)
+			}
 		}
-		m.taskErr = err
+		m.mu.Lock()
+		m.taskResult, m.taskErr = result, err
+		m.mu.Unlock()
 	}()
 	return nil
 }
 
+func (m *maintenanceRuntime) validateTaskResult(result maintenanceTaskResult) error {
+	i := result.Identity
+	if result.Job != m.d.RunID+"-maintenance" || result.Attempt != "1" || i.PID <= 0 || i.Start == "" || i.Boot == "" || i.Task != m.c.MaintenanceTask || i.RunID != m.d.RunID || i.ConfigSHA != m.base["config_sha256"] || !validMaintenanceBound(maintenanceBound{result.Started, result.Ended}) {
+		return errors.New("maintenance terminal reply is not bound to this task/attempt")
+	}
+	if result.Terminal == "succeeded" && (result.Exit == nil || *result.Exit != 0 || result.Refusal != "") {
+		return errors.New("maintenance success has no explicit zero exit")
+	}
+	if result.Ended-result.Started > 600 {
+		return errors.New("maintenance task exceeded its own bounded lifetime")
+	}
+	if result.Terminal == "refused" && (result.Exit == nil || result.Refusal == "") {
+		return errors.New("maintenance refusal has no explicit process result")
+	}
+	return nil
+}
+
+func (m *maintenanceRuntime) taskSnapshot() (maintenanceTaskResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.taskResult, m.taskErr
+}
+
 func (m *maintenanceRuntime) sample(ctx context.Context) (maintenanceSample, error) {
 	var s maintenanceSample
-	err := m.leaf(ctx, "meta", "sample", 10, nil, &s)
+	if d, ok := ctx.Deadline(); !ok || time.Until(d) < 15*time.Second {
+		return s, errors.New("maintenance observer cannot fit maximum")
+	}
+	m.observerSequence++
+	out, err := cloudStep(ctx, m.observerNode, m.c.Output, fmt.Sprintf("maintenance-observe-%06d.json", m.observerSequence), "maintenance-observe", 10, m.command("meta", "sample", nil))
+	if err == nil {
+		err = maintenanceDecode([]byte(out), &s)
+	}
 	if err == nil && (!validMaintenanceBound(maintenanceBound{s.Before, s.After}) || s.Boot == "") {
 		err = errors.New("invalid maintenance-host clock bracket")
 	}
@@ -506,50 +617,23 @@ func (m *maintenanceRuntime) beforeFault(ctx context.Context, id, role string) (
 	if !m.injecting {
 		return nil, nil
 	}
-	subject := m.subject
-	missing := append([]int{}, m.missing...)
-	if role == "volume" {
-		scope, err := m.scope(ctx, id, false)
-		if err != nil {
-			return nil, err
-		}
-		subject = scope.maintenanceSubject
-		if m.ec() {
-			missing = append(missing, scope.Shards...)
-		} else if !scope.Ordinary {
-			subject.VID = ""
-		}
-	}
-	s, err := m.sample(ctx)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[int]bool{}
-	for _, shard := range missing {
-		if shard < 0 || shard >= 14 {
-			return nil, errors.New("maintenance unknown missing shard")
-		}
-		seen[shard] = true
-	}
-	if len(seen) > 4 {
-		return nil, errors.New("maintenance fault would exceed four distinct missing shards")
-	}
-	return &maintenanceFaultSample{Victim: id, Role: role, Subject: subject, Missing: missing, Before: s}, nil
+	// Pure snapshot: never add an SSH round trip to the existing fault schedule.
+	// A missing/old/idle observation earns no coverage; it never delays a fault.
+	m.mu.Lock()
+	s := m.latest
+	m.mu.Unlock()
+	return &maintenanceFaultSample{Victim: id, Role: role, Subject: m.subject, Before: s, BeforePrecedesDispatch: true, TargetEndpoint: endpoint(m.hosts[id], role+"_http"), TargetUnit: m.r.gens.unit(m.r.docs[id], id, role)}, nil
 }
 func (m *maintenanceRuntime) afterFault(ctx context.Context, f *maintenanceFaultSample, confirmed bool) error {
 	if f == nil {
 		return nil
 	}
-	s, err := m.sample(ctx)
-	if err != nil {
-		return err
-	}
-	f.After = s
 	f.Confirmed = confirmed
+	f.goneAt = time.Now()
 	m.mu.Lock()
 	m.faults = append(m.faults, f)
 	m.mu.Unlock()
-	return m.r.save("maintenance-faults.json", m.faults)
+	return nil // the independent observer takes the post-GONE sample
 }
 
 // Validate the original bytes before the case-insensitive struct decoder. Raw
@@ -564,7 +648,7 @@ func maintenanceDecode(raw []byte, dst any) error {
 	var validate func([]byte, reflect.Type) error
 	validate = func(b []byte, t reflect.Type) error {
 		if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
-			if t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Map || t == reflect.TypeOf(json.RawMessage{}) {
+			if t.Kind() == reflect.Pointer || t.Kind() == reflect.Interface || t == reflect.TypeOf(json.RawMessage{}) {
 				return nil
 			}
 			return errors.New("null maintenance scalar")
@@ -577,6 +661,7 @@ func maintenanceDecode(raw []byte, dst any) error {
 		}
 		if t.Kind() == reflect.Struct {
 			fields := map[string]reflect.Type{}
+			required := map[string]bool{}
 			var add func(reflect.Type)
 			add = func(s reflect.Type) {
 				for i := 0; i < s.NumField(); i++ {
@@ -596,6 +681,7 @@ func maintenanceDecode(raw []byte, dst any) error {
 						name = f.Name
 					}
 					fields[name] = f.Type
+					required[name] = !strings.Contains(","+f.Tag.Get("json")+",", ",omitempty,")
 				}
 			}
 			add(t)
@@ -605,6 +691,11 @@ func maintenanceDecode(raw []byte, dst any) error {
 			}
 			if values == nil {
 				return errors.New("null maintenance object")
+			}
+			for key, needed := range required {
+				if _, exists := values[key]; needed && !exists {
+					return fmt.Errorf("missing maintenance field %q", key)
+				}
 			}
 			for name, value := range values {
 				ft, ok := fields[name]

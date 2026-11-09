@@ -130,8 +130,8 @@ def shell(c, command, seconds=180):
     return text
 
 
-def payload(run, key):
-    return hashlib.sha256((run + '/' + key).encode()).digest() * (1024 * 1024 // 32)
+def payload(run, key, length=1024*1024):
+    return hashlib.sha256((run + '/' + key).encode()).digest() * (length // 32)
 
 
 def seed(c, root):
@@ -149,7 +149,7 @@ def seed(c, root):
     for index in range(16):
         key = 'maintenance-%d' % index
         fid = '%s,%x%s' % (vid, first + index, cookie)
-        body = payload(c['run_id'], key)
+        body = payload(c['run_id'], key,8*1024*1024 if c['task']=='volume.balance' else 1024*1024)
         boundary = 'swtestmaintenance'
         multipart = (('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="data"\r\n'
                       'Content-Type: application/octet-stream\r\n\r\n').encode() + body +
@@ -170,6 +170,14 @@ def seed(c, root):
             os.fsync(stream.fileno())
     manifest = dict(run_id=c['run_id'], task=c['task'], collection=collection, vid=vid, objects=rows)
     write(root / 'manifest.json', manifest, True)
+    if c['task']=='volume.balance':
+        # One VID replicated twice across six servers has no imbalance worth
+        # moving. Additional OWN empty VIDs make this a real balance fixture;
+        # only the ACKed VID can earn coverage in the observer.
+        grown=api('http://'+c['master']+'/vol/grow?'+urlencode(dict(collection=collection,replication='001',count=4,dataNode=c['seed_node'])))
+        if type(grown.get('count')) is not int or grown['count']<4:
+            raise ValueError('balance fixture growth incomplete; no replay')
+        write(root/'balance-growth.json',grown,True)
     return manifest
 
 
@@ -179,10 +187,19 @@ def readback(c, root):
         raise ValueError('foreign manifest')
     rows = []
     for obj in manifest['objects']:
-        status, data = request('http://' + c['master'] + '/' + obj['fid'], maximum=1024 * 1024)
+        status, data = request('http://' + c['master'] + '/' + obj['fid'], maximum=obj['expected_length'])
         rows.append(dict(key=obj['key'], actual_sha256=hashlib.sha256(data).hexdigest(),
                          actual_length=len(data), status=status, observed=True))
     return rows
+
+
+def lock_check(c,root):
+    manifest=strict((root/'manifest.json').read_bytes())
+    text=shell(c,'volume.list -volumeId='+manifest['vid']+' -collectionPattern='+c['collection']+' -v=5',seconds=15)
+    pattern=r'^\s+volume Id:'+re.escape(manifest['vid'])+r', [^\n]*Collection:'+re.escape(c['collection'])+r','
+    if not re.search(pattern,text,re.M):raise ValueError('lock/read/unlock did not expose the owned VID')
+    write(root/'lock-check.json',dict(output=text,vid=manifest['vid'],collection=c['collection']),True)
+    return dict(lock_usable=True,vid=manifest['vid'],collection=c['collection'],waited='waiting for lock held by ' in text)
 
 
 def encode(c, root):
@@ -242,6 +259,16 @@ def scope(c, parent):
     if folder.is_symlink() or folder.resolve() != folder:
         raise ValueError('foreign volume directory')
     prefix = c['collection'] + '_' + c['vid']
+    pending=0;data_vids=[]
+    # The task owns the whole run collection, including the empty imbalance
+    # VIDs. A partial copy on another own VID cannot hide behind the data VID.
+    for member in folder.glob(c['collection']+'_*'):
+        if member.is_symlink() or not member.is_file() or member.stat().st_nlink!=1:
+            raise ValueError('unresolved collection member')
+        allowed=re.fullmatch(re.escape(c['collection'])+r'_[1-9][0-9]*\.(?:dat|idx|vif(?:\.v[1-9][0-9]*)?|ec[0-9]{2}(?:\.v[1-9][0-9]*)?|ecx(?:\.v[1-9][0-9]*)?|ecj(?:\.v[1-9][0-9]*)?|active|last_committed)',member.name)
+        if not allowed:pending+=1
+        data_file=re.fullmatch(re.escape(c['collection'])+r'_([1-9][0-9]*)\.dat',member.name)
+        if data_file:data_vids.append(data_file[1])
     files = []
     raw = {}
     for p in sorted(folder.glob(prefix + '.*')):
@@ -268,8 +295,8 @@ def scope(c, parent):
         if match:shards.append(int(match[1]))
     if any(x>=14 for x in shards):raise ValueError('foreign shard index')
     return dict(collection=c['collection'],vid=c['vid'],generation=generation,encode_ns=encode_ns,
-                shards=shards,files=files,metadata=raw,pending=int(prefix+'.prepared' in raw),
-                ordinary=any(x['name']==prefix+'.dat' for x in files))
+                shards=shards,files=files,metadata=raw,pending=pending,
+                ordinary=any(x['name']==prefix+'.dat' for x in files),data_vids=data_vids)
 
 
 def quarantine(c, parent):
@@ -296,25 +323,37 @@ def proc_identity(pid):
     return dict(pid=pid, start=fields[19], boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())
 
 
+def executable_identity(path):
+    st=os.stat(path)
+    return dict(dev=st.st_dev,ino=st.st_ino,size=st.st_size,mtime_ns=st.st_mtime_ns,ctime_ns=st.st_ctime_ns)
+
+
 def transfer_progress(text, vid, state, at):
     # Every announced copy is a new operation, including another copy of the
     # SAME VID. Joining two copies across their idle gap would fake overlap.
     if re.search(r'\b(?:moving \S+ volume \S+|replicating volume [0-9]+|copying volume [0-9]+)\b', text) or re.search(r'\bmoved volume [0-9]+\b', text):
         state['phase'] = None
-    match = re.search(r'\bvolume ([0-9]+) processed ([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?i?B)(?: bytes)?(?:\s|$)', text)
-    if match and match[1] == vid:
-        unit = match[3]
+        state['route'] = None
+        route=re.search(r'^replicating volume ([0-9]+) [0-9]{3} from (\S+) to dataNode (\S+) \.\.\.$',text)
+        if route:state['route']=dict(vid=route[1],source=route[2],target=route[3])
+    match = re.search(r'^\s*(\S+) => (\S+) volume ([0-9]+) processed ([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?i?B)(?: bytes)?(?:\s|$)', text)
+    simple=re.search(r'^volume ([0-9]+) processed ([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?i?B) bytes$',text)
+    if not match and simple and state.get('route') and state['route']['vid']==simple[1]:
+        route=state['route'];match=(None,route['source'],route['target'],simple[1],simple[2],simple[3])
+    if match and match[3] == vid:
+        unit = match[5]
         power = 'KMGTPE'.index(unit[0])+1 if unit[0] != 'B' else 0
-        amount = float(match[2]) * ((1024 if 'i' in unit else 1000)**power)
+        amount = float(match[4]) * ((1024 if 'i' in unit else 1000)**power)
         if math.isfinite(amount) and amount >= 1:
+            if state['phase'] and (state['phase']['source']!=match[1] or state['phase']['target']!=match[2]):state['phase']=None
             if state['phase'] is None:
                 state['operation'] += 1
-                state['phase'] = dict(begin=at, bytes=int(amount))
+                state['phase'] = dict(begin=at, bytes=int(amount),source=match[1],target=match[2])
             state['phase']['bytes'] = max(state['phase']['bytes'], int(amount))
     phase = state['phase']
     return dict(state='in_flight' if phase else 'idle', vid=vid,
                 operation=str(state['operation']), bytes=phase['bytes'] if phase else 0,
-                begin=phase['begin'] if phase else 0)
+                begin=phase['begin'] if phase else 0,source=phase['source'] if phase else '',target=phase['target'] if phase else '')
 
 
 def task(c, root):
@@ -338,15 +377,31 @@ def task(c, root):
                    if c['task'] == 'volume.balance' else
                    'volume.fix.replication -apply -collectionPattern=' + c['collection'] + ' -maxParallelization=1 -maxParallelizationPerServer=1 -retry=0')
         argv = [c['weed'], 'shell', '-master=' + c['master']]
-    result = dict(job=job, attempt='1', terminal='unknown', refusal='', effects_known=False)
+    result = dict(job=job, attempt='1', terminal='unknown', refusal='', effects_known=False,exit=None)
     try:
         if argv:
+            if pathlib.Path(c['weed']).is_symlink() or hashlib.sha256(pathlib.Path(c['weed']).read_bytes()).hexdigest()!=c['weed_sha256']:
+                raise ValueError('maintenance executable does not match its pin')
             process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, start_new_session=True)
-            write(root/'child.json',proc_identity(process.pid),True)
             try:
-                process.stdin.write(('lock\n' + command + '\nunlock\n').encode())
-                process.stdin.close()
+                try:
+                    child=proc_identity(process.pid);child['executable']=executable_identity('/proc/%d/exe'%process.pid)
+                    if child['executable']!=executable_identity(c['weed']):raise ValueError('foreign executed maintenance binary')
+                    write(root/'child.json',child,True)
+                except (FileNotFoundError,ProcessLookupError):
+                    # A fast no-op/refusal can exit before /proc is observed.
+                    # Its exit remains observable; it earns NO in-flight proof.
+                    if process.poll() is None:raise
+                try:
+                    process.stdin.write(('lock\n' + command + '\nunlock\n').encode())
+                    process.stdin.close()
+                except BrokenPipeError:
+                    # Keep the explicit exit and stderr of an early refusal.
+                    # A process that closed stdin but will not exit is UNKNOWN.
+                    try:process.stdin.close()
+                    except BrokenPipeError:pass
+                    process.wait(timeout=2)
                 selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
                 retained = bytearray(); pending = bytearray(); progress_state=dict(phase=None,operation=0)
                 with events.open('xb', buffering=0) as out, transcript.open('xb', buffering=0) as log:
@@ -369,9 +424,14 @@ def task(c, root):
                                 if progress['state']=='in_flight':
                                     out.write(json.dumps(dict(event='actual_progress', at=at, vid=manifest['vid'], bytes=progress['bytes'])).encode()+b'\n')
                     rc = process.wait(timeout=max(.01, 570 - (time.monotonic()-start)))
-                    write(root/'progress.json',dict(state='idle',vid=manifest['vid'],operation=str(progress_state['operation']),bytes=0,begin=0))
+                    write(root/'progress.json',dict(state='idle',vid=manifest['vid'],operation=str(progress_state['operation']),bytes=0,begin=0,source='',target=''))
                 text = retained.decode('utf-8', 'replace')
-                result.update(exit=rc, terminal='succeeded' if rc == 0 and not re.search(r'(?im)^(?:error|failed)\b', text) else 'failed')
+                failure=re.search(r'(?im)^(?:error|failed)\b|^fixing under replicated volume [0-9]+:',text)
+                result.update(exit=rc, terminal='succeeded' if rc == 0 and not failure else 'failed')
+                if result['terminal']=='failed' and re.search(r'(?im)^(?:(?:error|failed)\b|fixing under replicated volume [0-9]+:)[^\n]*rpc error: code = Unavailable\b',text):
+                    result.update(terminal='refused',refusal='RPC_UNAVAILABLE')
+                if re.search(r'(?m)^no progress made on [1-9][0-9]* under replicated volumes, stopping;',text):
+                    result.update(terminal='refused',refusal='NO_PROGRESS')
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -402,6 +462,19 @@ def sample(c, root):
             alive = all(proc_identity(identity['pid'])[k] == identity[k] for k in ('pid', 'start', 'boot'))
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             pass
+    if alive:
+        owner=subprocess.run(['systemctl','show','-p','MainPID','--value',c['task_unit']],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=2)
+        value=owner.stdout.decode().strip()
+        if owner.returncode or not value.isdecimal():raise ValueError('task unit identity unreadable')
+        if int(value)==0:alive=False
+        elif int(value)!=identity['pid']:raise ValueError('foreign task MainPID')
+        if alive:
+            args=(pathlib.Path('/proc')/str(identity['pid'])/'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+            expected=dict(c,stage='task')
+            if len(args)!=4 or args[1]!=b'-I' or args[2]!=str(pathlib.Path(c['root'])/'worker/maintenance.py').encode() or strict(args[3])!=expected:
+                raise ValueError('task unit argv is foreign')
+            if hashlib.sha256(pathlib.Path(args[2].decode()).read_bytes()).hexdigest()!=c['helper_sha256']:
+                raise ValueError('task unit helper changed')
     report = dict(before=before, after=time.monotonic(), identity=identity, alive=alive,
                   boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                   result=strict((root/'result.json').read_bytes()) if (root/'result.json').exists() else None)
@@ -423,7 +496,7 @@ def sample(c, root):
             try:
                 observed=proc_identity(child['pid'])
                 args=(pathlib.Path('/proc')/str(child['pid'])/'cmdline').read_bytes().split(b'\0')
-                if observed==child and args[:3]==[c['weed'].encode(),b'shell',('-master='+c['master']).encode()] and hashlib.sha256(pathlib.Path(c['weed']).read_bytes()).hexdigest()==c['weed_sha256']:
+                if all(observed[k]==child[k] for k in ('pid','start','boot')) and args[:3]==[c['weed'].encode(),b'shell',('-master='+c['master']).encode()] and executable_identity('/proc/%d/exe'%child['pid'])==child['executable']==executable_identity(c['weed']):
                     report['progress']=strict((root/'progress.json').read_bytes()) if (root/'progress.json').exists() else None
             except (FileNotFoundError,ProcessLookupError,PermissionError):pass
     report['after'] = time.monotonic()
@@ -449,7 +522,7 @@ def main():
         raise ValueError('foreign maintenance directory')
     owned=strict((root/'config.json').read_bytes())
     if owned!=dict(run_id=c['run_id'],task=c['task'],config_sha256=c['config_sha256']):raise ValueError('foreign maintenance config')
-    action = {'seed': seed,'plugin_preflight':plugin_preflight,'detect':detect, 'encode':encode, 'task': task, 'sample': sample, 'readback': readback}.get(c['stage'])
+    action = {'seed': seed,'plugin_preflight':plugin_preflight,'detect':detect, 'encode':encode, 'task': task, 'sample': sample, 'readback': readback,'lock_check':lock_check}.get(c['stage'])
     if action is None: raise ValueError('unknown maintenance stage')
     print(json.dumps(action(c, root), allow_nan=False), flush=True)
 

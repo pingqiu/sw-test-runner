@@ -121,7 +121,7 @@ func assessMaintenance(e maintenanceEvidence) maintenanceVerdict {
 	if !e.EffectsKnown || !e.PostOwners || !e.GenerationConverged || e.Pending != 0 {
 		return v
 	}
-	refusals := map[string]bool{"RPC_UNAVAILABLE": true, "GENERATION_SWITCH_IN_PROGRESS": true, "NO_TARGET_CAPACITY": true, "INSUFFICIENT_SHARDS": true, "MASTER_UNAVAILABLE": true}
+	refusals := map[string]bool{"RPC_UNAVAILABLE": true, "GENERATION_SWITCH_IN_PROGRESS": true, "NO_TARGET_CAPACITY": true, "INSUFFICIENT_SHARDS": true, "MASTER_UNAVAILABLE": true, "NO_PROGRESS": true}
 	refused := e.Terminal == "refused" && refusals[e.Refusal]
 	if refused {
 		v.Task = "CLEAN_REFUSAL"
