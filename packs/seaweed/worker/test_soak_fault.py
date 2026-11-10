@@ -531,6 +531,58 @@ class Sampler(Host):
             (fake / '500/task' / str(tid) / 'status').write_text('Name:\tx\nTgid:\t%d\nPid:\t%d\n' % (tgid, tid))
         self.assertEqual(soak_fault.thread_group(500, proc=str(fake)), [500, 501])
 
+    def fake_proc(self, statuses):
+        """A fake /proc with pid 500's task dir: tid -> status text, None (listed, status gone: ENOENT) or 'DIR'."""
+        fake = self.tmp / ('proc%d' % len(list(self.tmp.glob('proc*'))))
+        for tid, text in statuses.items():
+            d = fake / '500/task' / str(tid)
+            d.mkdir(parents=True)
+            if text == 'DIR':
+                (d / 'status').mkdir()
+            elif text is not None:
+                (d / 'status').write_text(text)
+        return fake
+
+    def test_a_thread_group_read_is_all_or_nothing(self):
+        """Any listed tid whose status cannot be read or parsed makes the whole group unread (never main-only); only a
+        status that is provably gone (ENOENT: the thread exited) drops that tid."""
+        st = lambda tgid: 'Name:\tx\nTgid:\t%d\nPid:\t1\n' % tgid
+        self.assertEqual(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: st(500), 502: None}))), [500, 501])
+        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'DIR'}))))  # EISDIR
+        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'Name:\tx\nPid:\t501\n'}))))
+        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'Tgid:\tx500\n'}))))
+
+    def test_a_group_change_during_the_table_read_is_never_counted(self):
+        """The table read is bracketed by thread-group snapshots: a thread appearing meanwhile discards the attempt
+        (retried within the sample); if it keeps changing, the sample is unread, never a count on a stale group."""
+        st = 'Name:\tx\nTgid:\t500\n'
+        fake = self.fake_proc({500: st, 501: st})
+        added = [600]
+
+        def growing(args, **k):  # every qp read sees a new worker thread appear, owning a QP
+            tid = added[-1] + 1
+            added.append(tid)
+            (fake / '500/task' / str(tid)).mkdir(parents=True)
+            (fake / '500/task' / str(tid) / 'status').write_text(st)
+            body = [dict(pid=tid, lqpn=tid, type='RC')] if args[-1] == 'qp' else [dict(pid=500, mrlen=4096)]
+            return subprocess.CompletedProcess(args, 0, json.dumps(body), '')
+        self.assertEqual(soak_fault.rdma_sample(500, run=growing, proc=str(fake)), (None, None))
+        stable = self.fake_proc({500: st, 501: st})
+        table = lambda args, **k: subprocess.CompletedProcess(args, 0, json.dumps(
+            [dict(pid=501, lqpn=9, type='RC')] if args[-1] == 'qp' else [dict(pid=500, mrlen=4096)]), '')
+        self.assertEqual(soak_fault.rdma_sample(500, run=table, proc=str(stable)), ([500, 501], dict(qp=1, mr=1, mr_lens=[4096])))
+        once = self.fake_proc({500: st})
+        calls = []
+
+        def changes_once(args, **k):  # the group grows during the first attempt only
+            calls.append(args[-1])
+            if len(calls) == 1:
+                (once / '500/task/502').mkdir(parents=True)
+                (once / '500/task/502/status').write_text(st)
+            return table(args)
+        self.assertEqual(soak_fault.rdma_sample(500, run=changes_once, proc=str(once)), ([500, 502], dict(qp=0, mr=1, mr_lens=[4096])))
+        self.assertEqual(len(calls), 4)  # two attempts, each reading qp and mr
+
     def test_f1_and_f2_rows_sample_and_mark_but_never_inject(self):
         """The runner pins the sampler and markers with the row's own kind; F1/F2 must sample, never apply."""
         self.dummy()

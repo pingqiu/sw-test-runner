@@ -323,8 +323,10 @@ def run(config):
                 freeze = read_bound(root / ('fault-freeze-%s.json' % ep), dict(bind, episode=ep, role=role))
                 if freeze is not None:
                     fm = freeze.get('freeze_mono')
+                    sp, ss = freeze.get('stopped_pid'), freeze.get('stopped_starttime')
                     if isinstance(fm, bool) or not isinstance(fm, (int, float)) or not math.isfinite(fm) \
-                            or fm < window['ack_mono'] or fm > time.monotonic():
+                            or fm < window['ack_mono'] or fm > time.monotonic() \
+                            or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (sp, ss)):
                         raise ValueError('fault freeze malformed, before the ack or from the future')
                     after = lambda a: [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values()
                                        if c['action'] == a and c['dispatched'] > fm]
@@ -332,7 +334,7 @@ def run(config):
                     if sets and gets:
                         publish(root / ('fault-inflight-%s.json' % ep),
                                 dict(bind, role=role, episode=ep, freeze_mono=fm, ack_mono=time.monotonic(),
-                                     pending_sets=sets, pending_gets=gets))
+                                     stopped_pid=sp, stopped_starttime=ss, pending_sets=sets, pending_gets=gets))
                         window['inflight_sent'] = True
             close = read_bound(root / ('fault-close-%s.json' % ep), dict(bind, episode=ep, role=role))
             if close is not None:

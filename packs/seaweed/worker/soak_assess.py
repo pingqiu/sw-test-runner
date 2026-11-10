@@ -799,7 +799,8 @@ def assess_row(c):
         found = [k for k, v in events_.items() if v]
         mark('causal', 'FAIL' if found else 'PASS', 'R0 host events found: %s' % found)
     else:
-        outcome, why = effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, events_)
+        outcome, why = effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, events_,
+                             run=dict(run_id=c['run_id'], boot_id=c['boot_id']))
         mark('causal', outcome, why)
     if kind == 'conn_kill':
         claims['qp'] = 'NOT_COVERED'  # TCP scope only: no QP-state claim without a real RDMA effect
@@ -973,7 +974,7 @@ def host_events(kind, row, f, samples, injection, kills, ledger, lo, hi):
                          and s['fds'] >= s['limits']['nofile'][0] for s in samples))
 
 
-def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, ev):
+def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, lo, hi, ev, run=None):
     """(outcome, reason) of the row's causal witness: PASS only with its host event AND its effect in the window;
     a missing one is NOT_COVERED."""
     apply_, restore = injection.get('apply') or {}, injection.get('restore') or {}
@@ -996,9 +997,20 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         fm = w.get('freeze_mono') if isinstance(w, dict) else None
         if not isinstance(fm, (int, float)) or isinstance(fm, bool) or not fm < pre:
             return nc('no freeze witness before the kill')
+        # Both receipts must be THIS row's: this run and episode, and the exact process the restart killed.
+        victim = (kw.get('Identity') or {})
+        own = dict(run_id=(run or {}).get('run_id'), episode=f['episode'], stopped_pid=victim.get('PID'),
+                   stopped_starttime=victim.get('StartTime'))
+        foreign = [k for k, v in own.items() if v is None or w.get(k) != v]
+        if foreign:
+            return nc('freeze witness not bound to this row (%s differ)' % foreign)
         inflight = w.get('inflight')
         if not isinstance(inflight, dict):
             return nc('no in-flight PUT and GET named within the freeze bound: %s' % w.get('reason'))
+        foreign = [k for k, v in dict(own, boot_id=(run or {}).get('boot_id'), freeze_mono=fm).items()
+                   if v is None or inflight.get(k) != v]
+        if foreign:
+            return nc("the load's in-flight answer not bound to this row (%s differ)" % foreign)
         named = {a: {str(o.get('op')) for o in inflight.get(k) or [] if isinstance(o, dict)}
                  for a, k in (('set', 'pending_sets'), ('get', 'pending_gets'))}
         arms = {a: sorted(e['op'] for e in ops if e['action'] == a and str(e['op']) in named[a]

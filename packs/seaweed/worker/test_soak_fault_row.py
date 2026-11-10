@@ -148,7 +148,8 @@ def row_evidence(kind):
         r.get('k1', 1099.95, done=1104.0, fault=True)
         # freeze-then-kill: the volume was stopped at 1099.8 and the load named the ops it dispatched after that
         r.freeze = dict(run_id='run-1', episode='E1', stopped_pid=500, stopped_starttime=9, freeze_mono=1099.8, wait_s=5.0,
-                        inflight=dict(freeze_mono=1099.8, ack_mono=1099.97, pending_sets=[dict(op=put['op'], submitted=put['dispatched'])],
+                        inflight=dict(run_id='run-1', boot_id=boot_id(), episode='E1', stopped_pid=500, stopped_starttime=9,
+                                      freeze_mono=1099.8, ack_mono=1099.97, pending_sets=[dict(op=put['op'], submitted=put['dispatched'])],
                                       pending_gets=[dict(op=r.events[-1]['op'], submitted=r.events[-1]['dispatched'])]))
     if kind == 'client_kill_put':
         r.fault.update(role='client', ready_mono=1100.0)
@@ -551,6 +552,30 @@ class NotCovered(unittest.TestCase):
         for name, edit, why in (('no witness', drop, 'no freeze witness'), ('nothing named', none_named, 'no in-flight PUT and GET'),
                                 ('ops from before the freeze', before_freeze, 'no named op pending'),
                                 ('a PUT the load never named', unnamed, "['set']")):
+            with self.subTest(name=name):
+                v = verdict(self, 'volume_kill_io', edit)
+                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
+                self.assertIn(why, v['criteria']['causal']['reason'])
+
+    def test_f1_freeze_receipts_must_be_this_rows(self):
+        """Through the real CLI: a freeze witness or an in-flight answer from another run, episode, stopped pid or
+        starttime (or another boot or freeze clock, for the answer) is NOT_COVERED, never PASS."""
+        def witness(**kw):
+            return lambda ev: ev['fault-freeze-witness-E1.json'].update(kw)
+
+        def answer(**kw):
+            return lambda ev: ev['fault-freeze-witness-E1.json']['inflight'].update(kw)
+        cases = [('witness of another run', witness(run_id='run-0'), 'not bound to this row'),
+                 ('witness of another episode', witness(episode='E2'), 'not bound to this row'),
+                 ('witness of another pid', witness(stopped_pid=501), 'not bound to this row'),
+                 ('witness of another starttime', witness(stopped_starttime=10), 'not bound to this row'),
+                 ('answer of another run', answer(run_id='run-0'), 'answer not bound'),
+                 ('answer of another episode', answer(episode='E2'), 'answer not bound'),
+                 ('answer of another pid', answer(stopped_pid=501), 'answer not bound'),
+                 ('answer of another starttime', answer(stopped_starttime=10), 'answer not bound'),
+                 ('answer of another boot', answer(boot_id='0' * 32), 'answer not bound'),
+                 ('answer to another freeze', answer(freeze_mono=1099.7), 'answer not bound')]
+        for name, edit, why in cases:
             with self.subTest(name=name):
                 v = verdict(self, 'volume_kill_io', edit)
                 self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // soakWindow is the fault-window side of soakOps: the load-start witness and
@@ -50,11 +52,12 @@ func (s *soakWindow) Close(episode string, endMono float64) error {
 	b["end_mono"] = endMono
 	return publishFile(filepath.Join(s.root, "fault-close-"+episode+".json"), b)
 }
+
 // Freeze tells the load the volume is SIGSTOPped, with the controller clock read once the stop was confirmed (the
 // load runs on this host, so the clock is its own); see SoakInflight.
-func (s *soakWindow) Freeze(episode string, freezeMono float64) error {
+func (s *soakWindow) Freeze(episode string, freezeMono float64, stopped tr.ProcessIdentity) error {
 	b := s.binding(episode)
-	b["freeze_mono"] = freezeMono
+	b["freeze_mono"], b["stopped_pid"], b["stopped_starttime"] = freezeMono, stopped.PID, stopped.StartTime
 	return publishFile(filepath.Join(s.root, "fault-freeze-"+episode+".json"), b)
 }
 

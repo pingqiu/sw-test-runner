@@ -201,26 +201,45 @@ def thread_group(pid, proc='/proc'):
     for tid in tids:
         try:
             with open('%s/%d/task/%d/status' % (proc, pid, tid)) as f:
-                tgid = next((int(l.split()[1]) for l in f if l.startswith('Tgid:')), None)
-        except (OSError, ValueError, IndexError):
-            continue  # the thread exited between the listing and the read: not provably in the group
-        if tgid == pid:
+                text = f.read()
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # ENOENT/ESRCH: the thread provably exited between the listing and the read
+        except OSError:
+            return None  # any other unreadable status: the group is unread, never main-only
+        tgid = [l.split() for l in text.splitlines() if l.startswith('Tgid:')]
+        if len(tgid) != 1 or len(tgid[0]) != 2 or not tgid[0][1].isdigit():
+            return None  # a malformed status: unread
+        if int(tgid[0][1]) == pid:
             group.append(tid)
     return sorted(group) if pid in group else None
 
 
-def rdma_view(pid, run=None, group=None):
-    """QPs and MRs owned by pid's thread group: {'qp': n, 'mr': n, 'mr_lens': [...]}, or None. `group` is the tid
-    set from thread_group (read here when not given); without it the view is unread, never a main-pid-only count
-    that leaves the worker threads' objects out. A table with any row that carries no integer pid cannot be joined
-    (that row could be this process's), so the whole view is unread. The one exception is the kernel's own per-port
-    management QP (kernel_management_qp), which no process can own."""
+def rdma_sample(pid, run=None, proc='/proc', tries=3):
+    """(group, view): the volume's thread group and the QPs/MRs it owns, {'qp': n, 'mr': n, 'mr_lens': [...]}, or
+    (None, None) when unread. The table read is bracketed by a thread-group snapshot before and after it: a thread
+    that appeared or exited meanwhile may own rows the stale group would miss, so that attempt is discarded (retried
+    up to `tries` times within the sample) and never counted. Without a readable group the view is unread, never a
+    main-pid-only count. A table with any row that carries no integer pid cannot be joined (that row could be this
+    process's), so the whole view is unread; the one exception is the kernel's own per-port management QP."""
     import subprocess
     run = run or subprocess.run
-    group = thread_group(pid) if group is None else group
-    if not group or pid not in group:
-        return None
-    qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
+    for _ in range(tries):
+        group = thread_group(pid, proc)
+        if not group:
+            return None, None
+        qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
+        if thread_group(pid, proc) != group:
+            continue  # the group changed while the table was read: not this attempt
+        return group, rdma_join(group, qp, mr)
+    return None, None
+
+
+def rdma_view(pid, run=None, proc='/proc'):
+    """The view of rdma_sample alone."""
+    return rdma_sample(pid, run, proc)[1]
+
+
+def rdma_join(group, qp, mr):
     if qp is None or mr is None:
         return None
     qp = [r for r in qp if not kernel_management_qp(r)]

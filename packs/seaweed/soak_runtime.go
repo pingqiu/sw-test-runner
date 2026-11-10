@@ -87,10 +87,17 @@ type SoakOp struct {
 // SoakInflight is the load's answer to an F1 freeze: the PUTs and GETs it dispatched after the volume was stopped
 // (FreezeMono), which a stopped volume cannot have served, so they are pending by construction.
 type SoakInflight struct {
-	FreezeMono  float64  `json:"freeze_mono"`
-	AckMono     float64  `json:"ack_mono"`
-	PendingSets []SoakOp `json:"pending_sets"`
-	PendingGETs []SoakOp `json:"pending_gets"`
+	// The load's own binding and its echo of the freeze marker: the witness carries them so the assessor can tie the
+	// answer to this run, episode and stopped process (Inflight checks run/boot/episode/role when reading).
+	RunID            string   `json:"run_id"`
+	BootID           string   `json:"boot_id"`
+	Episode          string   `json:"episode"`
+	StoppedPID       int      `json:"stopped_pid"`
+	StoppedStartTime uint64   `json:"stopped_starttime"`
+	FreezeMono       float64  `json:"freeze_mono"`
+	AckMono          float64  `json:"ack_mono"`
+	PendingSets      []SoakOp `json:"pending_sets"`
+	PendingGETs      []SoakOp `json:"pending_gets"`
 }
 
 // FreezeWitness is what the F1 restart records before its kill (fault-freeze-witness-<episode>.json in the M01 run

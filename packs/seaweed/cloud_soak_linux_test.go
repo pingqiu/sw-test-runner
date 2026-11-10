@@ -5,6 +5,7 @@ package seaweed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -181,8 +182,9 @@ func f1Fixture(t *testing.T, m01, m02 *soakHost) *directSoak {
 }
 
 // playLoad answers the freeze the way soak_load.py does: once fault-freeze-E1.json appears, it names one PUT and one
-// GET dispatched `after` seconds after the freeze clock (negative: before it).
-func playLoad(t *testing.T, s *directSoak, after float64) {
+// GET dispatched `after` seconds after the freeze clock (negative: before it), echoing the stopped pid (or `pid`, if
+// non-zero: an answer bound to another stopped process).
+func playLoad(t *testing.T, s *directSoak, after float64, pid ...int) {
 	go func() {
 		path := filepath.Join(s.root, "fault-freeze-E1.json")
 		for i := 0; i < 1000; i++ {
@@ -192,6 +194,10 @@ func playLoad(t *testing.T, s *directSoak, after float64) {
 				ack, _ := controllerMono()
 				b := s.binding("E1")
 				b["freeze_mono"], b["ack_mono"] = fm, ack
+				b["stopped_pid"], b["stopped_starttime"] = f["stopped_pid"], f["stopped_starttime"] // the load's echo
+				if len(pid) > 0 {
+					b["stopped_pid"] = pid[0]
+				}
 				b["pending_sets"] = []SoakOp{{Op: "7", Submitted: fm + after}}
 				b["pending_gets"] = []SoakOp{{Op: "8", Submitted: fm + after}}
 				publishFile(filepath.Join(s.root, "fault-inflight-E1.json"), b)
@@ -248,12 +254,15 @@ func TestF1RestartWithoutAnAnswerKillsAtTheBoundAndNamesNone(t *testing.T) {
 	saved := FreezeWait
 	FreezeWait = 400 * time.Millisecond
 	t.Cleanup(func() { FreezeWait = saved })
-	for name, after := range map[string]float64{"no answer": 0, "ops from before the freeze": -0.5} {
+	for name, tc := range map[string]struct {
+		after float64
+		pid   []int
+	}{"no answer": {}, "ops from before the freeze": {after: -0.5}, "answer for another stopped pid": {after: 0.001, pid: []int{4243}}} {
 		t.Run(name, func(t *testing.T) {
 			m02 := &soakHost{}
 			s := f1Fixture(t, &soakHost{}, m02)
-			if after != 0 {
-				playLoad(t, s, after)
+			if tc.after != 0 {
+				playLoad(t, s, tc.after, tc.pid...)
 			}
 			start := time.Now()
 			_, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{})
@@ -269,6 +278,63 @@ func TestF1RestartWithoutAnAnswerKillsAtTheBoundAndNamesNone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Once the stop has been attempted, every exit kills the exact frozen victim (pid/starttime checked) or reports
+// CLEANUP_UNKNOWN: a failure at each post-STOP stage, a real freeze-marker write failure, and a failed stop step.
+func TestF1EveryExitAfterTheStopKillsTheFrozenVictim(t *testing.T) {
+	boom := errors.New("injected")
+	cases := map[string]struct {
+		stage, fail string
+		setup       func(s *directSoak)
+	}{
+		"clock fails":               {stage: "clock"},
+		"marker fails":              {stage: "marker"},
+		"witness fails":             {stage: "witness"},
+		"pre-kill clock fails":      {stage: "pre"},
+		"marker write really fails": {setup: func(s *directSoak) { os.RemoveAll(s.root) }},
+		"stop step fails":           {fail: "kill -STOP"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			saved := freezeStage
+			t.Cleanup(func() { freezeStage = saved })
+			freezeStage = func(stage string) error {
+				if stage == tc.stage {
+					return boom
+				}
+				return nil
+			}
+			m02 := &soakHost{failStep: tc.fail}
+			s := f1Fixture(t, &soakHost{}, m02)
+			if tc.setup != nil {
+				tc.setup(s)
+			}
+			_, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{})
+			if err == nil {
+				t.Fatal("a failure after the stop must fail the restart")
+			}
+			kill := m02.index("kill -KILL", "4242:66")
+			if kill < 0 || kill < m02.index("kill -STOP", "4242:66") || m02.index("CONT") >= 0 {
+				t.Fatalf("%v: the frozen victim was not killed after the stop attempt (kill=%d) or was continued: %v", err, kill, m02.commands)
+			}
+		})
+	}
+	t.Run("the owned kill cannot be proven", func(t *testing.T) {
+		saved := freezeStage
+		t.Cleanup(func() { freezeStage = saved })
+		freezeStage = func(stage string) error {
+			if stage == "marker" {
+				return boom
+			}
+			return nil
+		}
+		m02 := &soakHost{failStep: "kill -KILL"}
+		s := f1Fixture(t, &soakHost{}, m02)
+		if _, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{}); err == nil || !strings.Contains(err.Error(), "CLEANUP_UNKNOWN") {
+			t.Fatalf("an unproven kill of a frozen victim must report CLEANUP_UNKNOWN: %v", err)
+		}
+	})
 }
 
 // No kill goes out without a replace plan or without the victim's identity.

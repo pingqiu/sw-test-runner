@@ -84,7 +84,7 @@ class Rows(unittest.TestCase):
                 time.sleep(0.01)
             (self.root / 'fake-frozen').write_text('')
             seen['freeze'] = time.monotonic()
-            self.write('fault-freeze-E1.json', dict(episode='E1', role='volume', freeze_mono=seen['freeze']))
+            self.write('fault-freeze-E1.json', dict(episode='E1', role='volume', freeze_mono=seen['freeze'], stopped_pid=4242, stopped_starttime=66))
             end = time.monotonic() + 5  # the controller's bound
             while not (self.root / 'fault-inflight-E1.json').exists() and time.monotonic() < end:
                 time.sleep(0.01)
@@ -101,7 +101,7 @@ class Rows(unittest.TestCase):
         t.join()
         self.assertEqual(summary['status'], 'LOAD_DONE')
         inflight = json.loads((self.root / 'fault-inflight-E1.json').read_text())
-        self.assertEqual(inflight['freeze_mono'], seen['freeze'])
+        self.assertEqual((inflight['freeze_mono'], inflight['stopped_pid'], inflight['stopped_starttime']), (seen['freeze'], 4242, 66))
         self.assertTrue(inflight['pending_sets'] and inflight['pending_gets'], inflight)
         listed = inflight['pending_sets'] + inflight['pending_gets']
         self.assertTrue(all(o['submitted'] > seen['freeze'] for o in listed), listed)

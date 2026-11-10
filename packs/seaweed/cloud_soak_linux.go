@@ -197,12 +197,19 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 	}
 	old, err := s.identity(ctx, victim.Node, plan.Victim)
 	f1 := s.b.Plan.Soak != nil && slices.ContainsFunc(s.b.Plan.Soak.Faults, func(f SoakFault) bool { return f.Episode == episode && f.kind() == KindVolumeKillIO })
+	stopSent := false
 	if err == nil && f1 {
+		stopSent = true // from the stop attempt on, every exit kills the exact victim or reports CLEANUP_UNKNOWN
 		err = s.freeze(ctx, episode, victim.Node, plan.Victim, old)
 	}
 	var pre float64
 	if err == nil {
-		pre, err = controllerMono() // F1: after the freeze and its in-flight answer, right before the kill
+		if err = freezeStage("pre"); err == nil {
+			pre, err = controllerMono() // F1: after the freeze and its in-flight answer, right before the kill
+		}
+	}
+	if err != nil && stopSent {
+		return tr.JobHandle{}, r, errors.Join(err, s.ownedKill(episode, victim.Node, plan.Victim, old))
 	}
 	var post float64
 	if u := cloudQuote(s.unit(plan.Victim)); err == nil {
@@ -212,7 +219,11 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 			prefix := mainPID(s.unit(plan.Victim))
 			command = prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosKillScript(s.unit(plan.Victim)), prefix)
 		}
-		_, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20, command)
+		var out string
+		out, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20, command)
+		if f1 && (err != nil || !strings.Contains(out, "GONE")) {
+			return tr.JobHandle{}, r, fmt.Errorf("soak: CLEANUP_UNKNOWN: the frozen victim %d:%d was not proven killed: %v", old.PID, old.StartTime, err)
+		}
 		if err == nil && f1 {
 			post, err = controllerMono() // an op still pending now was pending across the whole kill
 		}
@@ -245,11 +256,16 @@ func (s *directSoak) freeze(ctx context.Context, episode, node, victim string, o
 		return err
 	}
 	w := FreezeWitness{RunID: s.d.RunID, Episode: episode, StoppedPID: old.PID, StoppedAt: old.StartTime, WaitS: FreezeWait.Seconds()}
-	if w.FreezeMono, err = controllerMono(); err == nil {
-		err = s.Freeze(episode, w.FreezeMono)
+	if err = freezeStage("clock"); err == nil {
+		w.FreezeMono, err = controllerMono()
+	}
+	if err == nil {
+		if err = freezeStage("marker"); err == nil {
+			err = s.Freeze(episode, w.FreezeMono, old)
+		}
 	}
 	if err != nil {
-		return err
+		return err // the caller kills the exact stopped victim
 	}
 	wctx, cancel := context.WithTimeout(ctx, FreezeWait)
 	in, werr := s.Inflight(wctx, episode)
@@ -258,18 +274,39 @@ func (s *directSoak) freeze(ctx context.Context, episode, node, victim string, o
 	switch {
 	case werr != nil:
 		w.Reason = fmt.Sprintf("no in-flight PUT and GET named within %s: %v", FreezeWait, werr)
-	case !validInflight(in, w.FreezeMono, now):
-		w.Reason = "the load's in-flight answer is not exact (needs a PUT and a GET, each dispatched after the freeze)"
+	case !validInflight(in, w.FreezeMono, now, old):
+		w.Reason = "the load's in-flight answer is not exact (needs a PUT and a GET, each dispatched after the freeze, and the stopped pid/starttime echoed)"
 	default:
 		w.Inflight = &in
+	}
+	if err = freezeStage("witness"); err != nil {
+		return err
 	}
 	return publishFile(filepath.Join(s.root, "fault-freeze-witness-"+episode+".json"), w)
 }
 
-// validInflight: the answer echoes the freeze clock, came after it, and names at least one PUT and one GET, each
-// with a unique id, dispatched after the freeze and no later than the answer.
-func validInflight(in SoakInflight, freezeMono, now float64) bool {
-	ok := in.FreezeMono == freezeMono && freezeMono < in.AckMono && in.AckMono <= now && len(in.PendingSets) > 0 && len(in.PendingGETs) > 0
+// freezeStage is a test seam on F1's post-STOP stages (clock, marker, witness, pre): production never fails it.
+var freezeStage = func(string) error { return nil }
+
+// ownedKill is the bounded SIGKILL of the exact stopped victim (pid/starttime checked) on every F1 exit after the
+// stop attempt, on its own context so a cancelled run still kills what it froze. Not proven gone: CLEANUP_UNKNOWN.
+func (s *directSoak) ownedKill(episode, node, victim string, old tr.ProcessIdentity) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	prefix := mainPID(s.unit(victim))
+	cmd := prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosKillScript(s.unit(victim)), prefix)
+	out, err := cloudStep(ctx, s.nodes[node], s.c.Output, "soak-owned-kill-"+episode+".json", "owned-kill-"+episode, 20, cmd)
+	if err != nil || !strings.Contains(out, "GONE") {
+		return fmt.Errorf("soak: CLEANUP_UNKNOWN: the frozen victim %d:%d was not proven killed: %v", old.PID, old.StartTime, err)
+	}
+	return nil
+}
+
+// validInflight: the answer echoes the freeze clock and the stopped pid/starttime, came after the freeze, and names
+// at least one PUT and one GET, each with a unique id, dispatched after the freeze and no later than the answer.
+func validInflight(in SoakInflight, freezeMono, now float64, old tr.ProcessIdentity) bool {
+	ok := in.FreezeMono == freezeMono && freezeMono < in.AckMono && in.AckMono <= now && len(in.PendingSets) > 0 && len(in.PendingGETs) > 0 &&
+		in.StoppedPID == old.PID && in.StoppedStartTime == old.StartTime
 	seen := map[string]bool{}
 	for _, o := range append(append([]SoakOp{}, in.PendingSets...), in.PendingGETs...) {
 		ok = ok && o.Op != "" && !seen[o.Op] && o.Submitted > freezeMono && o.Submitted <= in.AckMono
