@@ -258,8 +258,15 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return cloudUpload(n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, local, remote)
 	}
 	root := h.RunRoot
-	if (phase == "" || phase == "prepare") && !directTarget(d.Target) { // an existing host has no cloud-init
-		command := "timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'"
+	if (phase == "" || phase == "prepare" || phase == "cloud-init") && !directTarget(d.Target) { // an existing host has no cloud-init
+		seconds := cloudInitSeconds
+		if deadline, ok := ctx.Deadline(); ok {
+			seconds = min(seconds, int(time.Until(deadline).Seconds())-5)
+		}
+		if seconds <= 0 {
+			return "", context.DeadlineExceeded
+		}
+		command := fmt.Sprintf("timeout -k 5 %d sh -ec 'cloud-init status --wait --format json'", seconds)
 		out, stderr, rc, runErr := n.Run(ctx, command)
 		gateErr := errors.Join(runErr, qualifyCloudInit(out, rc))
 		gateErr = errors.Join(gateErr,
@@ -267,6 +274,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			os.WriteFile(filepath.Join(c.Output, "cloud-init-status.json"), []byte(out), 0600))
 		if gateErr != nil {
 			return "", fmt.Errorf("cloud step cloud-init command=%q: %w", command, gateErr)
+		}
+		if phase == "cloud-init" {
+			return "", nil
 		}
 	}
 	if phase == "before" || phase == "after" {
@@ -553,6 +563,11 @@ func cloudStep(ctx context.Context, n interface {
 	}
 	return out, nil
 }
+
+// cloudInitSeconds bounds the wait for a fresh VM's cloud-init. Measured on the first 10-VM Azure run (D2s_v5,
+// westus2): the slowest host that finished ended modules-final at 266.8 s, and a 120 s wait failed the run.
+// The cluster runs this gate on every host at once, so it costs one bound of wall time, not one per host.
+const cloudInitSeconds = 600
 
 func cloudQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
