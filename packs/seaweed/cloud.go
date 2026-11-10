@@ -48,7 +48,10 @@ type CloudConfig struct {
 	ReadCase string `json:"read_case,omitempty"`
 	KVSoak   bool   `json:"kv_soak,omitempty"`
 	// KVLoad runs the same two-host pipeline with the profile's client pattern.
-	KVLoad      bool   `json:"kv_load,omitempty"`
+	KVLoad bool `json:"kv_load,omitempty"`
+	// MountSoak runs the mount soak on the ten-node layout instead of the KV+S3 load: one worker per client.
+	// Azure, or an onprem inventory for the no-cloud rehearsal; nothing else rides along.
+	MountSoak   bool   `json:"mount_soak,omitempty"`
 	SoakProfile string `json:"-"`
 	SoakRelease string `json:"-"`
 	localHost   string // the host the controller itself runs on: reached locally, not over ssh
@@ -100,6 +103,9 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if e != nil {
 		return "", e
 	}
+	if e = mountSoakRefusal(*d, c); e != nil {
+		return "", e
+	}
 	if c.SWCtl != nil {
 		return runSWCtlSmoke(ctx, *d, c)
 	}
@@ -126,7 +132,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	if d.Target != "azure" && !directTarget(d.Target) || d.Transport != "http" || d.State != "requested" || len(c.Files) != len(c.artifactNames()) {
 		return "", errors.New("one Azure, onprem or docker HTTP host and three artifacts required")
 	}
-	if directTarget(d.Target) && len(d.Hosts) != 1 {
+	if directTarget(d.Target) && len(d.Hosts) != 1 && !c.MountSoak {
 		return "", errors.New("a direct ssh target runs one host")
 	}
 	if c.MasterWrites && (!directTarget(d.Target) || len(d.Hosts) != 1 || c.ECStage1 || c.Chaos || c.Replication != "" || c.ChaosSet != "") {
@@ -162,6 +168,16 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		}
 	}
 	return runCloudNode(ctx, *d, h, c, "")
+}
+
+// mountSoakRefusal: the mount soak runs alone, on ten hosts, on Azure or an onprem rehearsal inventory.
+func mountSoakRefusal(d inventory.Document, c CloudConfig) error {
+	if c.MountSoak && (len(d.Hosts) != 10 || d.Target != "azure" && d.Target != "onprem" || c.SWCtl != nil || len(c.ClusterChaosCases) > 0 ||
+		c.Chaos || c.Replication != "" || c.ChaosSet != "" || c.ECStage1 || c.ECUnderQuorum || c.ECReconstruction || c.ECVolumeImpl != "" ||
+		c.MasterWrites || c.KVSoak || c.KVLoad || c.ReadCase != "") {
+		return errors.New("mount_soak runs alone on the ten-node Azure (or onprem rehearsal) layout")
+	}
+	return nil
 }
 
 func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c CloudConfig, phase string) (bundle string, failure error) {
@@ -440,7 +456,7 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		}
 		defer n.Close()
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
-		if isMountCase(c.ReadCase) && len(h.Services) == 0 {
+		if (isMountCase(c.ReadCase) || c.MountSoak) && len(h.Services) == 0 {
 			// The mount worker runs as a step, never a unit, so a client host has
 			// no run unit and journalctl -u refuses a glob that matches none.
 			// The worker's logs are in its run root.
