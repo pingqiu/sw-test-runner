@@ -440,8 +440,32 @@ class Sampler(Host):
             files.append((self.tmp / name).open('rb'))
         self.addCleanup(lambda: [f.close() for f in files])
         total, dats, data = soak_fault.fd_view(os.getpid())
-        self.assertEqual((data, 5000 in dats), (3, True))
+        self.assertEqual((data, 5000 in dats), (['7.dat', '7.idx', '7.vif'], True))
         self.assertGreaterEqual(total, 4)
+
+    def test_the_volume_list_comes_from_the_servers_status(self):
+        answers = {'/good': dict(Volumes=[dict(Id=4, Collection='lmcache'), dict(Id=3, Collection='lmcache'), dict(Id=7, Collection='')]),
+                   '/bad-id': dict(Volumes=[dict(Id='4', Collection='lmcache')]), '/bool-id': dict(Volumes=[dict(Id=True, Collection='lmcache')]),
+                   '/float-id': dict(Volumes=[dict(Id=4.0, Collection='lmcache')]), '/no-list': dict(Disks=[])}
+
+        class Status(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = json.dumps(answers.get(self.path, {})).encode()
+                self.send_response(200 if self.path in answers else 500)
+                self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Status)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = 'http://127.0.0.1:%d' % server.server_address[1]
+        self.assertEqual(soak_fault.volume_list(url + '/good'), ['7', 'lmcache_3', 'lmcache_4'])
+        for path in ('/bad-id', '/bool-id', '/float-id', '/no-list', '/missing'):
+            self.assertIsNone(soak_fault.volume_list(url + path), path)
+        self.assertIsNone(soak_fault.volume_list('http://127.0.0.1:1/status'))
 
     def test_an_unreadable_view_is_null_never_zero(self):
         self.dummy()

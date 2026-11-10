@@ -112,7 +112,8 @@ func SoakFaultArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan, action s
 		"netdev": r.Netdev, "rdma_device": r.RDMADevice, "rdma_port": r.RDMAPort, "setup_ports": r.SetupPorts,
 		"memlock_bytes": r.MemlockBytes, "nofile_extra": r.NofileExtra, "mount": r.Mount, "free_below_bytes": r.FreeBelowBytes,
 		"max_ballast_bytes": r.MaxBallastBytes, "metrics_url": r.MetricsURL, "metrics": r.Metrics,
-		"sample_s": 2, "quiescence_s": r.QuiescenceS,
+		"volume_status_url": "http://" + endpoint(*m02, "volume_http") + "/status", // the product's own open-volume list
+		"sample_s":          2, "quiescence_s": r.QuiescenceS,
 		"max_s": int((DeployReserve + secs(x.DurationS) + QuiescenceReserve + secs(r.AuditS) + secs(r.QuiescenceS) + LoadExitGrace) / time.Second)}
 	raw, err := json.Marshal(config)
 	return []string{"-I", path.Join(s.HelperDir, "soak_fault.py"), "--config", string(raw), "--action", action}, err

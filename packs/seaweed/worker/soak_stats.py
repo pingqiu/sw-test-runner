@@ -70,23 +70,42 @@ VOLUME_FILE = re.compile(r'\.(dat|idx|vif|ecx|ecj|ec[0-9]{2}|cpd|cpx|note)$')  #
 
 
 def fd_view(pid):
-    """(open fd count, sizes of the regular *.dat files it holds open, how many fds are volume data/index files),
-    or None. The third lets a reader tell fds held by volumes the load created from any other fd."""
+    """(open fd count, sizes of the regular *.dat files it holds open, the base names of the fds that are volume
+    data/index files, one entry per fd), or None. The names let a reader account each data fd to a volume."""
     base = Path('/proc/%d/fd' % pid)
     try:
         names = os.listdir(base)
     except OSError:
         return None
-    dats, data = [], 0
+    dats, data = [], []
     for name in names:
         try:
             target = os.readlink(base / name)
-            data += bool(VOLUME_FILE.search(target))
+            if VOLUME_FILE.search(target):
+                data.append(os.path.basename(target))
             if target.endswith('.dat'):
                 dats.append(os.stat(base / name).st_size)
         except OSError:
             continue  # a descriptor closed between listing and reading
-    return len(names), sorted(dats), data
+    return len(names), sorted(dats), sorted(data)
+
+
+def volume_list(url, timeout=3):
+    """The volume server's own open volumes from its /status: their file stems (collection_id, or id with no
+    collection), sorted; None when unread or not that shape. The product's list, never inferred from files."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            rows = json.loads(response.read(4 << 20))['Volumes']
+        out = []
+        for v in rows:
+            vid, coll = v['Id'], v.get('Collection', '')
+            if isinstance(vid, bool) or not isinstance(vid, int) or not isinstance(coll, str):
+                return None
+            out.append('%s_%d' % (coll, vid) if coll else str(vid))
+        return sorted(out)
+    except Exception:
+        return None
 
 
 def limits(pid):

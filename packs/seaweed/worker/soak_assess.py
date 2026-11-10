@@ -803,9 +803,15 @@ def resource_classes(samples, row, pre):
     leak, or NOT_COVERED (no pre-load witness, unread, or the pre-load and final samples are not the same
     pid/starttime). `pre` are the witnessed pre-load samples only."""
     quiet = [s for s in samples if s['phase'] == 'quiescence']
-    out = {}
+    out = {'data_fds': data_fd_class(quiet[-1] if quiet else None)}
+
+    def non_data_fds(s):
+        """fds that are not volume data/index files: the leak rule's own view (ruling, option a)."""
+        fds, data = s.get('fds'), s.get('data_files')
+        return None if fds is None or data is None or s.get('data_fds') != len(data) else fds - len(data)
     for view in RESOURCES:
-        value = (lambda s: (s.get('rdma') or {}).get(view)) if view in ('qp', 'mr') else (lambda s: s.get(view))
+        value = (lambda s: (s.get('rdma') or {}).get(view)) if view in ('qp', 'mr') else non_data_fds if view == 'fds' \
+            else (lambda s: s.get(view))
         if not pre or not quiet or pre[-1].get('identity') is None or pre[-1].get('identity') != quiet[-1].get('identity') \
                 or value(pre[-1]) is None or value(quiet[-1]) is None:
             out[view] = 'NOT_COVERED'
@@ -824,6 +830,21 @@ def resource_classes(samples, row, pre):
         within = steady and 0 < held_bytes[-1] <= row['retained_budget_bytes'] and excess <= cover
         out[view] = 'retained' if within else 'leak'
     return out
+
+
+def data_fd_class(s):
+    """Data fds at the end of quiescence, bounded by the volume server's own open-volume list (its /status):
+    each listed volume may hold one fd per data/index file; any other data fd (an unlisted volume, or a second
+    fd on one file) is surplus and a leak. No product list, or no file names: NOT_COVERED, never accounted."""
+    if s is None or s.get('identity') is None or not isinstance(s.get('volumes'), list) or not isinstance(s.get('data_files'), list):
+        return 'NOT_COVERED'
+    listed, seen, surplus = set(s['volumes']), set(), 0
+    for name in s['data_files']:
+        stem, _, ext = name.rpartition('.')
+        if stem not in listed or (stem, ext) in seen:
+            surplus += 1
+        seen.add((stem, ext))
+    return 'leak' if surplus else 'accounted'
 
 
 def m02_window(t1, t2, lo, hi):

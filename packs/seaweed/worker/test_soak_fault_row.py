@@ -21,6 +21,7 @@ M02 = 4000.0  # M02 CLOCK_MONOTONIC = M01 mono + 4000 in the fixture (a differen
 WID = {i: dict(pid=10 + i, starttime=1) for i in range(4)}
 VOL, REPL = dict(pid=500, starttime=9), dict(pid=501, starttime=20)
 BOUND = 8 << 20
+DATA = ['lmcache_3.dat', 'lmcache_3.idx', 'lmcache_4.dat', 'lmcache_4.idx']
 
 
 def digest(seed, length=64):
@@ -80,7 +81,10 @@ def samples(kind, mutate=None):
         if kind in ('client_kill_put', 'conn_kill') and t >= 1105:
             released = 1
         s = dict(seq=seq, mono=t + M02, epoch=t + 1793610000.0, phase=phase, identity=dict(ident),
-                 watch=dict(master=dict(pid=600, starttime=3)), fds=50 if busy else 40, dat_sizes=[33554432],
+                 watch=dict(master=dict(pid=600, starttime=3)), dat_sizes=[33554432],
+                 # volumes the load created hold their .dat/.idx fds; the volume server lists them (/status)
+                 **(dict(fds=40, data_fds=0, data_files=[], volumes=[]) if phase == 'pre_load' else
+                    dict(fds=(50 if busy else 40) + 4, data_fds=4, data_files=DATA, volumes=['lmcache_3', 'lmcache_4'])),
                  limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), rdma=dict(qp=6 if busy else 4, mr=3, mr_lens=[1 << 20] * 3),
                  vm_pin_kB=4096 if busy else 1024, port=['4: ACTIVE', 0], free=1 << 30,
                  metrics=dict(pinned=float(1 << 20), retained_bytes=0.0, retained_sources=0.0, released=float(released),
@@ -350,6 +354,16 @@ class NotCovered(unittest.TestCase):
         self.assertEqual((v['resource_classes']['qp'], v['resource_classes']['mr']), ('NOT_COVERED', 'NOT_COVERED'))
         self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
 
+    def test_no_volume_list_leaves_data_fds_not_covered(self):
+        for missing in ('volumes', 'data_files'):
+            with self.subTest(missing=missing):
+                def edit(ev, missing=missing):
+                    for s in ev['resource-samples.jsonl']:
+                        s[missing] = None  # the product list (or the fd names) could not be read
+                v = verdict(self, 'control', edit)
+                self.assertEqual(v['resource_classes']['data_fds'], 'NOT_COVERED')
+                self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
     def test_resources_need_a_real_pre_load_sample(self):
         """Review finding: the baseline is a pre-load sample provably taken before the load started, not the
         request to start the sampler."""
@@ -365,7 +379,7 @@ class NotCovered(unittest.TestCase):
             with self.subTest(edit=edit.__name__):
                 v = verdict(self, 'control', edit)
                 self.assertNotIn('error', v, v.get('error'))
-                self.assertEqual(set(v['resource_classes'].values()), {'NOT_COVERED'})
+                self.assertEqual({k for k, x in v['resource_classes'].items() if x != 'NOT_COVERED'}, {'data_fds'})  # no baseline needed
                 self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
 
     def test_every_row_verdict_states_its_layout_scope(self):
@@ -581,6 +595,29 @@ class Fail(unittest.TestCase):
                     s['fds'] += 1
         v = self.check('control', edit, 'resources')
         self.assertEqual(v['resource_classes']['fds'], 'leak')
+
+    def test_data_fds_match_the_volume_servers_own_list(self):
+        v = verdict(self, 'control')
+        self.assertEqual((v['resource_classes']['data_fds'], v['resource_classes']['fds']), ('accounted', 'released'))
+
+    def test_a_data_fd_surplus_is_a_leak(self):
+        """Ruling (option a): data fds leave the leak class only up to the product's own volume list."""
+        for name, extra in (('unlisted volume', 'lmcache_9.dat'), ('second fd on one file', 'lmcache_3.dat')):
+            with self.subTest(name=name):
+                def edit(ev, extra=extra):
+                    for s in ev['resource-samples.jsonl']:
+                        if s['phase'] == 'quiescence':
+                            s.update(fds=s['fds'] + 1, data_fds=5, data_files=sorted(DATA + [extra]))
+                v = self.check('control', edit, 'resources')
+                self.assertEqual((v['resource_classes']['data_fds'], v['resource_classes']['fds']), ('leak', 'released'))
+
+    def test_non_data_fd_growth_stays_a_leak(self):
+        def edit(ev):  # the same 4 accounted data fds, plus one fd that is not a volume file
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['fds'] += 1
+        v = self.check('control', edit, 'resources')
+        self.assertEqual((v['resource_classes']['data_fds'], v['resource_classes']['fds']), ('accounted', 'leak'))
 
     def test_leaked_qp_row_even_with_custody_reported(self):
         def edit(ev):

@@ -143,7 +143,8 @@ func TestARowProfilePinsItsFaultJobs(t *testing.T) {
 	}
 	units, _ := config["units"].([]any)
 	if config["kind"] != KindLinkFlap || len(units) != 1 || !strings.HasSuffix(units[0].(string), "-deploy-m02-volume") ||
-		config["deadman_s"] != float64(30+120) || len(config["management_addrs"].([]any)) != 1 {
+		config["deadman_s"] != float64(30+120) || len(config["management_addrs"].([]any)) != 1 ||
+		!strings.HasPrefix(config["volume_status_url"].(string), "http://") || !strings.HasSuffix(config["volume_status_url"].(string), "/status") {
 		t.Fatalf("injector config: %v", config)
 	}
 	load := b.Jobs["soak-load-m01"].Argv[3]

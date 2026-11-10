@@ -15,7 +15,7 @@ if 'soak_stats' not in sys.modules:  # -I drops the script dir: load the exact p
     _module = sys.modules['soak_stats'] = types.ModuleType('soak_stats')
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
-from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_view, scrape, statfs_free
+from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_view, scrape, statfs_free, volume_list
 
 KINDS = ('control', 'link_flap', 'conn_kill', 'mr_pressure', 'disk_full', 'fd_exhaust')
 ROW_ONLY = ('volume_kill_io', 'client_kill_put')  # F1, F2: the runner or the load makes the fault; sample and mark only
@@ -298,12 +298,15 @@ def sample(c):
                 pid = ident['pid']
                 fv = fd_view(pid)
                 mem = proc_memory('/proc/%d/status' % pid)
-                row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, data_fds=fv[2] if fv else None, limits=limits(pid),
+                row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, data_fds=len(fv[2]) if fv else None,
+                           data_files=fv[2] if fv else None, limits=limits(pid),
                            rdma=rdma_view(pid), vm_pin_kB=(mem or {}).get('vm_pin_kB'))
             if c.get('rdma_device'):
                 row['port'] = port_view(sys_root(c), c['rdma_device'], c['rdma_port'])
             if c.get('mount'):
                 row['free'] = statfs_free(c['mount'])
+            if c.get('volume_status_url'):  # the product's own open-volume list, to account data fds
+                row['volumes'] = volume_list(c['volume_status_url'])
             if c.get('metrics_url'):
                 row['metrics'] = scrape(c['metrics_url'], c.get('metrics', {}))
             out.write(json.dumps(row, sort_keys=True) + '\n')
