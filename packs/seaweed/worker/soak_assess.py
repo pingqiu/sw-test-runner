@@ -784,12 +784,13 @@ def assess_row(c):
     clients += [dict(pid=(k.get(x) or {}).get('pid'), starttime=(k.get(x) or {}).get('starttime')) for k in kills for x in ('victim', 'replacement')]
     clients += [m['client'] for m in marks if m['event'] == 'audit_done' and isinstance(m.get('client'), dict)]
     classes = resource_classes(samples, row, before_load, clients)
-    outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned or unbounded else 'PASS'] + \
+    hidden = [v for v, ok in rdma_witness(samples, before_load, row).items() if not ok]
+    outcomes =['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned or unbounded else 'PASS'] + \
         ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
     mark('resources', rank(outcomes), 'pin max %s, bound %s (configured ranges %d + pool %s + cache %s); over %s; '
-         'product gauge disagreement %s; whole .dat %s, classes %s' % (
+         'product gauge disagreement %s; whole .dat %s, classes %s%s' % (
              max(pinned, default=None), bound, row['pin_ranges_bytes'], sizes[0], sizes[1], over[:2], sorted(set(disagree))[:2],
-             whole[:3], classes))
+             whole[:3], classes, '; %s: %s (no load sample counts one)' % ('/'.join(hidden), RDMA_HIDDEN) if hidden else ''))
 
     # 7. Causal witness: the row's host event and its effect, joined on PID/starttime and window. R0 runs every
     # host-event check and must find none.
@@ -819,11 +820,34 @@ def hashlib_sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+RDMA_HIDDEN = 'volume RDMA objects not visible to the sampler'
+
+
+def rdma_witness(samples, pre, row):
+    """{'qp': bool, 'mr': bool}: a positive witness that the sampler can see the volume's own RDMA objects. A view is
+    witnessed when some load-phase sample of the same volume (the pre-load witness's pid/starttime) counts at least
+    one QP, or at least one MR when the row expects RDMA registrations (a configured pool). Without it an empty
+    table cannot be told from a table the sampler cannot see (another user's process, CapEff 0), so 0 is never
+    read as released."""
+    ident = pre[-1].get('identity') if pre else None
+    load = [s for s in samples if s.get('phase') == 'load' and ident is not None and s.get('identity') == ident]
+
+    def counted(s, view):
+        v = (s.get('rdma') or {}).get(view)
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 1
+    seen = {view: any(counted(s, view) for s in load) for view in ('qp', 'mr')}
+    if not row.get('pin_pool_bytes'):  # no RDMA registrations expected: no MR witness is required
+        seen['mr'] = True
+    return seen
+
+
 def resource_classes(samples, row, pre, clients=()):
     """Each view's quiescence class: released, retained (the product's own custody, within budget, not growing),
-    leak, or NOT_COVERED (no pre-load witness, unread, or the pre-load and final samples are not the same
-    pid/starttime). `pre` are the witnessed pre-load samples only."""
+    leak, or NOT_COVERED (no pre-load witness, unread, the pre-load and final samples are not the same
+    pid/starttime, or, for QP/MR, no positive witness that the volume's own RDMA objects are visible: rdma_witness).
+    `pre` are the witnessed pre-load samples only."""
     quiet = [s for s in samples if s['phase'] == 'quiescence']
+    seen = rdma_witness(samples, pre, row)
     out = {'data_fds': data_fd_class(quiet[-1] if quiet else None),
            'sockets': socket_class(pre[-1] if pre else None, quiet[-1] if quiet else None, samples, clients)}
 
@@ -838,7 +862,7 @@ def resource_classes(samples, row, pre, clients=()):
         value = (lambda s: (s.get('rdma') or {}).get(view)) if view in ('qp', 'mr') else non_data_fds if view == 'fds' \
             else (lambda s: s.get(view))
         if not pre or not quiet or pre[-1].get('identity') is None or pre[-1].get('identity') != quiet[-1].get('identity') \
-                or value(pre[-1]) is None or value(quiet[-1]) is None:
+                or value(pre[-1]) is None or value(quiet[-1]) is None or view in seen and not seen[view]:
             out[view] = 'NOT_COVERED'
             continue
         excess = value(quiet[-1]) - value(pre[-1])

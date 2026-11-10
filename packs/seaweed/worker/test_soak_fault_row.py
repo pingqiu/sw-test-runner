@@ -360,6 +360,42 @@ class NotCovered(unittest.TestCase):
         self.assertEqual((v['resource_classes']['qp'], v['resource_classes']['mr']), ('NOT_COVERED', 'NOT_COVERED'))
         self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
 
+    def test_qp_and_mr_need_a_positive_witness_from_a_load_sample(self):
+        """0 QPs / 0 MRs is what the sampler records on the lab when it sees only the kernel's GSI rows (the captured
+        M02 table): that must read NOT_COVERED, never released, unless a load sample of the same volume counts its
+        own rows. An MR witness is required because the row configures a pool (RDMA registrations expected)."""
+        def rdma(qp, mr):
+            return dict(qp=qp, mr=mr, mr_lens=[8 << 20] * mr)
+
+        def phases(load, other):
+            def edit(ev):
+                for s in ev['resource-samples.jsonl']:
+                    s['rdma'] = load if s['phase'] == 'load' else other
+            return edit
+
+        def moved_load(ev):  # the load samples belong to another process: not this volume's witness
+            for s in ev['resource-samples.jsonl']:
+                s['rdma'] = rdma(2, 2) if s['phase'] == 'load' else rdma(0, 0)
+                if s['phase'] == 'load':
+                    s['identity'] = dict(pid=2 ** 22 + 9, starttime=1)
+        cases = [('idle GSI-only table in every sample', phases(rdma(0, 0), rdma(0, 0)), 'NOT_COVERED', 'NOT_COVERED'),
+                 ('the volume rows during load', phases(rdma(2, 2), rdma(0, 0)), 'released', 'released'),
+                 ('QPs seen, no MR although a pool is configured', phases(rdma(2, 0), rdma(0, 0)), 'released', 'NOT_COVERED'),
+                 ('rows only before the load', lambda ev: [s.update(rdma=rdma(2, 2) if s['phase'] == 'pre_load' else rdma(0, 0))
+                                                           for s in ev['resource-samples.jsonl']], 'NOT_COVERED', 'NOT_COVERED'),
+                 ('load rows of another process', moved_load, 'NOT_COVERED', 'NOT_COVERED')]
+        for name, edit, qp, mr in cases:
+            with self.subTest(name=name):
+                v = verdict(self, 'control', edit)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual((v['resource_classes']['qp'], v['resource_classes']['mr']), (qp, mr), v['criteria']['resources'])
+                reason = v['criteria']['resources']['reason']
+                if 'NOT_COVERED' in (qp, mr):
+                    self.assertEqual(outcome(v, 'resources'), 'NOT_COVERED')
+                    self.assertIn('volume RDMA objects not visible to the sampler', reason)
+                else:
+                    self.assertNotIn('not visible', reason)
+
     def test_a_malformed_volume_list_in_the_evidence_is_not_covered(self):
         for bad in ({}, 'lmcache_3', [3, 4], [None]):
             with self.subTest(bad=bad):
