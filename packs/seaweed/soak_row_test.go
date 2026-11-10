@@ -39,7 +39,13 @@ func rowPlan(kind string) *SoakPlan {
 		r.Mount, r.FreeBelowBytes, r.MaxBallastBytes = "/data/run/disk", 1<<20, 1<<30
 	}
 	return &SoakPlan{DurationS: 360, PacingS: 2, Faults: []SoakFault{{AtS: 60, Role: role, Episode: "E1", Kind: kind}}, Row: r,
-		Layout: AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"}}
+		Layout: AssignLayout{Collection: "lmcache", Replication: "000", TTL: "2h"}, Pattern: rowPattern()}
+}
+
+// rowPattern is a fixed-size kv_load pattern: every object is object_bytes long.
+func rowPattern() *LoadPattern {
+	return &LoadPattern{Clients: 4, Transport: "dc", Keys: 64, Distribution: "uniform", ObjectBytes: 1 << 20, RatePerClient: 4,
+		Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "mixed", DurationS: 200, ReadRatio: 0.5}}}
 }
 
 var allRowKinds = []string{KindControl, KindVolumeKillIO, KindClientKillPut, KindLinkFlap, KindConnKill, KindMRPressure, KindDiskFull, KindFDExhaust}
@@ -80,6 +86,7 @@ func TestRowAdmissionRefusals(t *testing.T) {
 		"no pin bound":           {KindControl, func(x *SoakPlan) { x.Row.PinBound = PinBound{} }, "pin bound"},
 		"fault without recovery": {KindMRPressure, func(x *SoakPlan) { x.Faults[0].AtS = 200 }, "no recovery"},
 		"refused class empty":    {KindDiskFull, func(x *SoakPlan) { x.Row.Refused = []string{""} }, "refused class"},
+		"soak mix, many sizes":   {KindVolumeKillIO, func(x *SoakPlan) { x.Pattern = nil }, "fixed-size kv_load"},
 	} {
 		x := rowPlan(c.kind)
 		c.edit(x)

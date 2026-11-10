@@ -80,12 +80,36 @@ func TestTheLoadWaitsForARealPreloadSample(t *testing.T) {
 	}
 }
 
+// Profile admission refuses a row whose load can write more than one object size (the soak's own mix), with
+// the injector's bytes pinned so that nothing else can be the reason; the same row on kv_load builds.
+func TestProfileAdmissionRefusesAMixedSizeRow(t *testing.T) {
+	for _, kind := range []string{KindVolumeKillIO, KindClientKillPut, KindControl} {
+		for _, fixed := range []bool{false, true} {
+			input := soakInput(t, 30*time.Minute, func(x *SoakPlan) {
+				row := rowPlan(kind)
+				x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = row.DurationS, row.Faults, row.Row, 0, nil, nil
+				if fixed {
+					x.Pattern = row.Pattern
+				}
+			})
+			for _, name := range []string{"soak_fault.py", "soak_stats.py"} {
+				body, _ := workerFiles.ReadFile("worker/" + name)
+				input.Files["m02"]["/opt/profile/worker/"+name] = hash(body)
+			}
+			_, err := BuildProfile(input)
+			if fixed && err != nil || !fixed && (err == nil || !strings.Contains(err.Error(), "more than one object size")) {
+				t.Errorf("%s fixed=%v: err=%v", kind, fixed, err)
+			}
+		}
+	}
+}
+
 // A row's profile pins the injector, sampler and markers on M02 from the joined inventory, requires the
 // injector's exact bytes there, and restarts nothing for an injected kind.
 func TestARowProfilePinsItsFaultJobs(t *testing.T) {
 	input := soakInput(t, 30*time.Minute, func(x *SoakPlan) {
 		row := rowPlan(KindLinkFlap)
-		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign = row.DurationS, row.Faults, row.Row, 0, nil
+		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = row.DurationS, row.Faults, row.Row, 0, nil, row.Pattern
 	})
 	if _, err := BuildProfile(input); err == nil || !strings.Contains(err.Error(), "soak_fault.py") {
 		t.Fatalf("a row profile without the injector's pinned bytes must refuse: %v", err)

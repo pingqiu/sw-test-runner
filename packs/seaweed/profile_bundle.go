@@ -191,7 +191,10 @@ func addSoak(out *ProfileBundle, d *inventory.Document, files map[string]map[str
 		}
 		x.FaultReady = append(x.FaultReady, step)
 	}
-	if x.rowMode() { // stage 3: the row's injector, sampler and phase markers, all on M02
+	if x.rowMode() { // stage 3: admitted at profile build, then the row's injector, sampler and markers on M02
+		if err := x.checkScheduleWithin(DirectSoakHorizon); err != nil {
+			return err
+		}
 		for _, action := range soakFaultActions {
 			args, e = SoakFaultArgs(d, p.Smoke, x, action)
 			if _, err = pin("fault-"+action+"-m02", "m02", args, e); err != nil {

@@ -26,11 +26,11 @@ read = lambda n: (S / n).read_text() if (S / n).exists() else ''
 port = S / 'sys/class/infiniband/mlx5_0/ports/1'
 if tool == 'systemctl':
     if a[:2] == ['show', '-p']: print(read('mainpid').strip() or '0')
-    elif a[0] == 'stop' and (S / 'stop-fails').exists(): sys.exit(1)
-    elif a[0] == 'is-active':
-        if (S / 'query-empty').exists(): sys.exit(1)  # the query itself failed: no answer at all
-        if (S / 'stop-fails').exists(): print('active'); sys.exit(0)
-        print('inactive'); sys.exit(3)
+    elif a[0] == 'stop': sys.exit(int(read('stop-rc') or 0))
+    elif a[0] == 'is-active':  # scripted "rc|stdout"; default is systemd's answer for a gone timer
+        rc, _, out = (read('is-active') or '3|inactive').partition('|')
+        if out: print(out)
+        sys.exit(int(rc))
 elif tool == 'ip':
     if a[:2] == ['-o', 'addr']: print(read('addr'), end='')
     elif a[:2] == ['route', 'show']: print(read('default'), end='')
@@ -129,23 +129,31 @@ class LinkFlap(Host):
         self.dummy()
         c = self.config('link_flap')
         self.cli(c, 'apply')
-        (self.state / 'stop-fails').touch()  # the timer stays armed: a later firing could flap the link again
+        (self.state / 'stop-rc').write_text('1')  # the timer stays armed: a later firing could flap the link again
+        (self.state / 'is-active').write_text('0|active')
         row = self.cli(c, 'restore', expect=4)
-        self.assertEqual((row['restored'], row['proof']['deadman_timer']), (False, 'active'))
+        self.assertEqual((row['restored'], row['proof']['deadman_timer'], row['proof']['deadman_stop_rc']), (False, [0, 'active'], 1))
 
-    def test_a_failed_or_empty_timer_query_leaves_the_restore_unknown(self):
-        for mode in ('query-empty', 'stop-fails+query-empty'):
-            with self.subTest(mode=mode):
+    def test_only_the_documented_timer_answers_prove_the_restore(self):
+        """systemctl is-active (rc, stdout) and the stop's rc, through the CLI: only rc 3 with inactive or failed,
+        after a stop that succeeded or found the unit not loaded, proves the dead-man is gone."""
+        cases = [('3|inactive', '0', True), ('3|failed', '0', True), ('3|inactive', '5', True),
+                 ('1|inactive', '0', False), ('0|inactive', '0', False), ('4|inactive', '0', False), ('3|', '0', False),
+                 ('1|', '0', False), ('0|active', '0', False), ('3|activating', '0', False), ('3|inactive', '1', False)]
+        for answer, stop_rc, proven in cases:
+            with self.subTest(answer=answer, stop_rc=stop_rc):
                 self.setUp()
                 p = self.dummy()
                 before = self.limits(p.pid)['nofile']
                 c = self.config('fd_exhaust')
                 self.cli(c, 'apply')
-                for name in mode.split('+'):
-                    (self.state / name).touch()
-                row = self.cli(c, 'restore', expect=4)
-                self.assertEqual((row['restored'], row['proof']['deadman_timer']), (False, ''))
-                self.assertEqual(self.limits(p.pid)['nofile'], before)  # the limit itself was put back; the timer is unknown
+                (self.state / 'is-active').write_text(answer)
+                (self.state / 'stop-rc').write_text(stop_rc)
+                row = self.cli(c, 'restore', expect=0 if proven else 4)
+                rc, _, out = answer.partition('|')
+                self.assertEqual((row['restored'], row['proof']['deadman_timer'], row['proof']['deadman_stop_rc']),
+                                 (proven, [int(rc), out], int(stop_rc)))
+                self.assertEqual(self.limits(p.pid)['nofile'], before)  # the limit itself was put back either way
 
     def test_preflight_refuses_and_changes_nothing(self):
         self.dummy()

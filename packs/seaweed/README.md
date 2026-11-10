@@ -30,6 +30,10 @@ volume it killed, and a failed PUT does not record which volume it targeted, so
 the attribution holds only with one volume. No row result covers multi-volume
 layouts, volumes on other hosts, or a kill that leaves other volumes serving.
 
+**Load scope.** A row runs only on the fixed-size kv_load pattern; profile
+admission refuses the soak's own mix, which writes more than one object size.
+Every audit read must return an allowed generation's exact bytes on its own.
+
 Outcomes are PASS, FAIL or NOT_COVERED; a missing witness is NOT_COVERED,
 never PASS. F1's resources are NOT_COVERED by design (its replacement has no
 pre-load sample to join), and an UNKNOWN PUT outside F1 and F2 stops the run,

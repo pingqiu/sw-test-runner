@@ -19,6 +19,7 @@ from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_v
 
 KINDS = ('control', 'link_flap', 'conn_kill', 'mr_pressure', 'disk_full', 'fd_exhaust')
 DEADMAN = ('link_flap', 'mr_pressure', 'disk_full', 'fd_exhaust')  # kinds that leave state behind
+DEADMAN_GONE = ((3, 'inactive'), (3, 'failed'))  # systemctl(1) exit status 3: unit not active
 
 
 class Refused(Exception):
@@ -248,12 +249,14 @@ def restore(c):
     after = snapshot(c, ident)
     if kind in DEADMAN:
         unit = deadman_unit(c)
-        run(['systemctl', 'stop', unit + '.timer'], check=False)
-        state = run(['systemctl', 'is-active', unit + '.timer'], check=False).stdout.strip()
-        proof['deadman_timer'] = state
-        # Only a positive answer that the timer is gone proves it cannot fire again; an empty, failed or any other
-        # answer leaves the restore UNKNOWN.
-        restored = restored and state in ('inactive', 'failed')
+        stop = run(['systemctl', 'stop', unit + '.timer'], check=False)
+        query = run(['systemctl', 'is-active', unit + '.timer'], check=False)
+        pair = [query.returncode, query.stdout.strip()]
+        proof.update(deadman_stop_rc=stop.returncode, deadman_timer=pair)
+        # Proof the timer cannot fire again is only an exact documented pair: is-active exits 3 ("unit is not
+        # active") printing inactive or failed. Any other pair, rc 1 with "inactive" included, is UNKNOWN; so is a
+        # stop that failed other than with 5 ("unit not loaded": a fired transient timer is already gone).
+        restored = restored and tuple(pair) in DEADMAN_GONE and stop.returncode in (0, 5)
     row = dict(action='restore', kind=kind, identity=ident, after=after, restored=restored, proof=proof)
     record(c, row)
     return row

@@ -339,7 +339,13 @@ func (x *SoakPlan) checkRow() error {
 	if h, fixed := rowHold[k]; fixed && r.HoldS != h || !fixed && f.injected() && (r.HoldS < 1 || r.HoldS > 60) || !f.injected() && r.HoldS != 0 {
 		return errors.New("stage-3 hold out of range for its kind")
 	}
-	if r.AuditS < 1 || r.AuditS > 120 || len(r.Refused) > 16 || x.Pattern != nil && x.Pattern.Keys > 4096 {
+	// One object size only: the audit judges every read on its own, so a quarantined key whose UNKNOWN
+	// generation differs in length from its survivor could never be read back exactly. kv_load writes every
+	// object at object_bytes; the soak's own mix writes 1 MiB, 4 MiB and +17 byte variants.
+	if x.Pattern == nil {
+		return errors.New("stage-3 rows need the fixed-size kv_load pattern: the soak's own mix writes more than one object size")
+	}
+	if r.AuditS < 1 || r.AuditS > 120 || len(r.Refused) > 16 || x.Pattern.Keys > 4096 {
 		return errors.New("stage-3 audit budget, refused classes or ledger size out of range")
 	}
 	for _, s := range r.Refused {
