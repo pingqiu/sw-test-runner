@@ -503,6 +503,15 @@ class Sampler(Host):
             self.assertIsNone(soak_fault.volume_list(url + path), path)
         self.assertIsNone(soak_fault.volume_list('http://127.0.0.1:1/status'))
 
+    def test_port_counter_on_a_soft_device_is_under_hw_counters(self):
+        port = self.state / 'sys/class/infiniband/s3rxe0/ports/1'
+        (port / 'hw_counters').mkdir(parents=True)
+        (port / 'state').write_text('4: ACTIVE\n')
+        (port / 'hw_counters/link_downed').write_text('2\n')
+        self.assertEqual(soak_fault.port_view(self.state / 'sys', 's3rxe0', 1), ('4: ACTIVE', 2))
+        (port / 'hw_counters/link_downed').unlink()
+        self.assertIsNone(soak_fault.port_view(self.state / 'sys', 's3rxe0', 1))  # no counter anywhere: unread
+
     def test_an_unreadable_view_is_null_never_zero(self):
         self.dummy()
         (self.state / 'rdma_qp').write_text('not json')

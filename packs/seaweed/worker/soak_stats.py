@@ -223,10 +223,12 @@ def scrape(url, series, timeout=3):
 def port_view(sys_root, device, port):
     """(state text, link_downed counter) of one RDMA port, or None."""
     base = Path(sys_root) / 'class' / 'infiniband' / device / 'ports' / str(port)
-    try:
-        return (base / 'state').read_text().strip(), int((base / 'counters' / 'link_downed').read_text())
-    except (OSError, ValueError):
-        return None
+    for counters in ('counters', 'hw_counters'):  # a NIC's IB counters; a soft device (rxe) has only hw_counters
+        try:
+            return (base / 'state').read_text().strip(), int((base / counters / 'link_downed').read_text())
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def statfs_free(mount):
