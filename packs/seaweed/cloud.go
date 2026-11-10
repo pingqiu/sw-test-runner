@@ -242,7 +242,8 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return cloudStep(ctx, n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, seconds, cmd)
 	}
 	upload := func(name, local, remote string) error {
-		if phase != "" && (phase != "prepare" || !cloudArtifact(h, name)) {
+		maintenanceHelper := c.MaintenanceTask != "" && name == "maintenance.py"
+		if phase != "" && (phase != "prepare" || (!cloudArtifact(h, name) && !maintenanceHelper)) {
 			return nil
 		}
 		if c.maintenanceRoot != nil {
