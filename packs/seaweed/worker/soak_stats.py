@@ -71,23 +71,62 @@ VOLUME_FILE = re.compile(r'\.(dat|idx|vif|ecx|ecj|ec[0-9]{2}|cpd|cpx|note)$')  #
 
 def fd_view(pid):
     """(open fd count, sizes of the regular *.dat files it holds open, the base names of the fds that are volume
-    data/index files, one entry per fd), or None. The names let a reader account each data fd to a volume."""
+    data/index files, one entry per fd, the number of socket fds), or None. The names let a reader account each
+    data fd to a volume; sockets are classified by peer (socket_view)."""
     base = Path('/proc/%d/fd' % pid)
     try:
         names = os.listdir(base)
     except OSError:
         return None
-    dats, data = [], []
+    dats, data, sockets = [], [], 0
     for name in names:
         try:
             target = os.readlink(base / name)
+            sockets += target.startswith('socket:')
             if VOLUME_FILE.search(target):
                 data.append(os.path.basename(target))
             if target.endswith('.dat'):
                 dats.append(os.stat(base / name).st_size)
         except OSError:
             continue  # a descriptor closed between listing and reading
-    return len(names), sorted(dats), sorted(data)
+    return len(names), sorted(dats), sorted(data), sockets
+
+
+def tcp_table(run=None):
+    """Every TCP socket `ss -Htanp` shows this user: [{state, local, peer, pids}], or None when unread."""
+    import subprocess
+    run = run or subprocess.run
+    try:
+        done = run(['ss', '-Htanp'], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    rows = []
+    for line in done.stdout.splitlines():
+        f = line.split()
+        if len(f) < 5:
+            continue
+        rows.append(dict(state=f[0], local=f[3], peer=f[4], pids=sorted({int(p) for p in re.findall(r'pid=(\d+)', line)})))
+    return rows
+
+
+def socket_view(pid, run=None):
+    """The process's TCP sockets [{state, local, peer}] and, for each established peer endpoint, the identity of
+    the process on this host owning that endpoint ({endpoint: {pid, starttime}}; absent when no local owner is
+    seen), or None when the table is unread."""
+    table = tcp_table(run)
+    if table is None:
+        return None
+    mine = [dict(state=r['state'], local=r['local'], peer=r['peer']) for r in table if pid in r['pids']]
+    peers = {r['peer'] for r in mine if r['state'] == 'ESTAB'}
+    owners = {}
+    for r in table:
+        if r['local'] in peers and r['pids']:
+            ident = identity(r['pids'][0])
+            if ident:
+                owners[r['local']] = dict(pid=ident['pid'], starttime=ident['starttime'])
+    return sorted(mine, key=lambda r: (r['state'], r['local'], r['peer'])), owners
 
 
 def volume_list(url, timeout=3):

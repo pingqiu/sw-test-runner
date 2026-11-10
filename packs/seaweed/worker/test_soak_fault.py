@@ -439,9 +439,30 @@ class Sampler(Host):
             (self.tmp / name).write_bytes(body)
             files.append((self.tmp / name).open('rb'))
         self.addCleanup(lambda: [f.close() for f in files])
-        total, dats, data = soak_fault.fd_view(os.getpid())
+        total, dats, data, sockets = soak_fault.fd_view(os.getpid())
         self.assertEqual((data, 5000 in dats), (['7.dat', '7.idx', '7.vif'], True))
         self.assertGreaterEqual(total, 4)
+
+    def test_socket_view_joins_each_peer_to_its_local_owner(self):
+        p = self.dummy()
+        me = os.getpid()
+        (self.state / 'ss').write_text(
+            'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:* users:(("weed-volume",pid=%d,fd=5))\n' % p.pid
+            + 'ESTAB 0 0 127.0.0.1:8080 127.0.0.1:41000 users:(("weed-volume",pid=%d,fd=9))\n' % p.pid
+            + 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8080 users:(("weed",pid=%d,fd=3))\n' % me
+            + 'ESTAB 0 0 127.0.0.1:8080 198.51.100.9:40000 users:(("weed-volume",pid=%d,fd=10))\n' % p.pid
+            + 'TIME-WAIT 0 0 127.0.0.1:8080 127.0.0.1:41999\n')
+        saved = dict(os.environ)
+        os.environ.update(self.env)
+        try:
+            rows, owners = soak_fault.socket_view(p.pid)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual([r['state'] for r in rows], ['ESTAB', 'ESTAB', 'LISTEN'])
+        ident = soak_fault.identity(me)
+        self.assertEqual(owners, {'127.0.0.1:41000': dict(pid=me, starttime=ident['starttime'])})  # the remote peer has no local owner
+        self.assertIsNone(soak_fault.socket_view(p.pid, run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', '')))
 
     def test_the_volume_list_comes_from_the_servers_status(self):
         answers = {'/good': dict(Volumes=[dict(Id=4, Collection='lmcache'), dict(Id=3, Collection='lmcache'), dict(Id=7, Collection='')]),

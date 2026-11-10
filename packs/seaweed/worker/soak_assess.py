@@ -764,7 +764,10 @@ def assess_row(c):
     # The baseline is a pre-load sample provably taken before the load started: its M02 time below the earliest M02
     # time the load-start instant can map to. Without the clock join, or with no such sample, nothing is baselined.
     before_load = [s for s in samples if s['phase'] == 'pre_load' and lo is not None and s['epoch'] < begin + lo]
-    classes = resource_classes(samples, row, before_load)
+    clients = [dict(pid=w.get('pid'), starttime=w.get('starttime')) for w in workers.values() if isinstance(w, dict)]
+    clients += [dict(pid=(k.get(x) or {}).get('pid'), starttime=(k.get(x) or {}).get('starttime')) for k in kills for x in ('victim', 'replacement')]
+    clients += [m['client'] for m in marks if m['event'] == 'audit_done' and isinstance(m.get('client'), dict)]
+    classes = resource_classes(samples, row, before_load, clients)
     outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned else 'PASS'] + \
         ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
     mark('resources', rank(outcomes), 'pin max %s bound %d, whole .dat %s, classes %s' % (
@@ -798,17 +801,21 @@ def hashlib_sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def resource_classes(samples, row, pre):
+def resource_classes(samples, row, pre, clients=()):
     """Each view's quiescence class: released, retained (the product's own custody, within budget, not growing),
     leak, or NOT_COVERED (no pre-load witness, unread, or the pre-load and final samples are not the same
     pid/starttime). `pre` are the witnessed pre-load samples only."""
     quiet = [s for s in samples if s['phase'] == 'quiescence']
-    out = {'data_fds': data_fd_class(quiet[-1] if quiet else None)}
+    out = {'data_fds': data_fd_class(quiet[-1] if quiet else None),
+           'sockets': socket_class(pre[-1] if pre else None, quiet[-1] if quiet else None, samples, clients)}
 
     def non_data_fds(s):
-        """fds that are not volume data/index files: the leak rule's own view (ruling, option a)."""
-        fds, data = s.get('fds'), s.get('data_files')
-        return None if fds is None or data is None or s.get('data_fds') != len(data) else fds - len(data)
+        """fds that are neither volume data/index files (ruling, option a) nor sockets (classified by peer): the
+        leak rule's own view."""
+        fds, data, socks = s.get('fds'), s.get('data_files'), s.get('socket_fds')
+        if fds is None or data is None or socks is None or s.get('data_fds') != len(data):
+            return None
+        return fds - len(data) - socks
     for view in RESOURCES:
         value = (lambda s: (s.get('rdma') or {}).get(view)) if view in ('qp', 'mr') else non_data_fds if view == 'fds' \
             else (lambda s: s.get(view))
@@ -830,6 +837,51 @@ def resource_classes(samples, row, pre):
         within = steady and 0 < held_bytes[-1] <= row['retained_budget_bytes'] and excess <= cover
         out[view] = 'retained' if within else 'leak'
     return out
+
+
+def socket_class(pre, final, samples, clients):
+    """The volume's TCP sockets at the end of quiescence, each classified by its peer (ruling 03:17Z):
+    - an established peer owned by a watched cluster role (master, filer, other volume servers) or by the volume
+      itself is infrastructure, capped per role at its pre-load count plus one; above the cap, a leak;
+    - a peer ever owned by a load client (workers, kill victims and replacements, the audit client): a leak, since
+      the clients have closed and exited by quiescence;
+    - a peer that cannot be attributed to a role or a client: NOT_COVERED;
+    - more listening sockets than at pre-load: a leak; more non-TCP sockets than at pre-load: NOT_COVERED.
+    Missing socket or owner data on either side: NOT_COVERED, never PASS."""
+    def ok(s):
+        return s is not None and s.get('identity') is not None and isinstance(s.get('tcp'), list) and isinstance(s.get('tcp_owners'), dict)             and isinstance(s.get('socket_fds'), int)
+    if not ok(pre) or not ok(final) or pre['identity'] != final['identity']:
+        return 'NOT_COVERED'
+    key = lambda i: (i.get('pid'), i.get('starttime')) if isinstance(i, dict) else None
+    roles = {key(v): label for s in samples for label, v in (s.get('watch') or {}).items() if v}
+    roles[key(final['identity'])] = 'self'
+    client = {key(c) for c in clients}
+    ever = {}  # every owner ever seen for each peer endpoint
+    for s in samples:
+        for endpoint, owner in (s.get('tcp_owners') or {}).items():
+            ever.setdefault(endpoint, set()).add(key(owner))
+
+    def count(s):
+        per, outcome = {}, 'infrastructure'
+        for r in s['tcp']:
+            if r.get('state') != 'ESTAB':
+                continue
+            owner = key(s['tcp_owners'].get(r.get('peer')))
+            if owner in roles:
+                per[roles[owner]] = per.get(roles[owner], 0) + 1
+            elif ever.get(r.get('peer'), set()) & client:  # every owner ever seen, the final sample's included
+                outcome = 'leak'  # a client's socket, or one whose client has exited
+            elif outcome != 'leak':
+                outcome = 'NOT_COVERED'
+        return per, outcome
+    before, _ = count(pre)
+    after, outcome = count(final)
+    listeners = lambda s: sum(r.get('state') == 'LISTEN' for r in s['tcp'])
+    if any(n > before.get(role, 0) + 1 for role, n in after.items()) or listeners(final) > listeners(pre):
+        return 'leak'
+    if outcome == 'infrastructure' and final['socket_fds'] - len(final['tcp']) > pre['socket_fds'] - len(pre['tcp']):
+        return 'NOT_COVERED'  # socket fds that are not TCP grew: nothing to attribute them to
+    return outcome
 
 
 def data_fd_class(s):

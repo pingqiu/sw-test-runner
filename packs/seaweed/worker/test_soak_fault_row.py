@@ -22,6 +22,10 @@ WID = {i: dict(pid=10 + i, starttime=1) for i in range(4)}
 VOL, REPL = dict(pid=500, starttime=9), dict(pid=501, starttime=20)
 BOUND = 8 << 20
 DATA = ['lmcache_3.dat', 'lmcache_3.idx', 'lmcache_4.dat', 'lmcache_4.idx']
+MASTER, FILER = dict(pid=600, starttime=3), dict(pid=601, starttime=4)
+TCP = [dict(state='LISTEN', local='127.0.0.1:8080', peer='*:*'), dict(state='ESTAB', local='127.0.0.1:50001', peer='127.0.0.1:19333')]
+OWNERS = {'127.0.0.1:19333': MASTER}
+FILER_CONN = dict(state='ESTAB', local='127.0.0.1:8080', peer='127.0.0.1:41000')
 
 
 def digest(seed, length=64):
@@ -81,10 +85,12 @@ def samples(kind, mutate=None):
         if kind in ('client_kill_put', 'conn_kill') and t >= 1105:
             released = 1
         s = dict(seq=seq, mono=t + M02, epoch=t + 1793610000.0, phase=phase, identity=dict(ident),
-                 watch=dict(master=dict(pid=600, starttime=3)), dat_sizes=[33554432],
-                 # volumes the load created hold their .dat/.idx fds; the volume server lists them (/status)
-                 **(dict(fds=40, data_fds=0, data_files=[], volumes=[]) if phase == 'pre_load' else
-                    dict(fds=(50 if busy else 40) + 4, data_fds=4, data_files=DATA, volumes=['lmcache_3', 'lmcache_4'])),
+                 watch=dict(master=dict(MASTER), filer=dict(FILER)), dat_sizes=[33554432],
+                 # volumes the load created hold their .dat/.idx fds (listed by the volume server's /status), and the
+                 # filer opened one connection to the volume: infrastructure, within baseline + 1 for its role
+                 **(dict(fds=38 + 2, data_fds=0, data_files=[], volumes=[], socket_fds=2, tcp=TCP, tcp_owners=dict(OWNERS)) if phase == 'pre_load' else
+                    dict(fds=(48 if busy else 38) + 3 + 4, data_fds=4, data_files=DATA, volumes=['lmcache_3', 'lmcache_4'],
+                         socket_fds=3, tcp=TCP + [FILER_CONN], tcp_owners=dict(OWNERS, **{'127.0.0.1:41000': dict(FILER)}))),
                  limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), rdma=dict(qp=6 if busy else 4, mr=3, mr_lens=[1 << 20] * 3),
                  vm_pin_kB=4096 if busy else 1024, port=['4: ACTIVE', 0], free=1 << 30,
                  metrics=dict(pinned=float(1 << 20), retained_bytes=0.0, retained_sources=0.0, released=float(released),
@@ -364,6 +370,33 @@ class NotCovered(unittest.TestCase):
                 self.assertEqual(v['resource_classes']['data_fds'], 'NOT_COVERED')
                 self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
 
+    def test_an_unattributable_socket_is_not_covered(self):
+        def edit(ev):  # a peer no sample ever saw owned by a role or a client (e.g. a process on another host)
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['tcp'] = s['tcp'] + [dict(state='ESTAB', local='127.0.0.1:8080', peer='198.51.100.9:40000')]
+                    s.update(socket_fds=s['socket_fds'] + 1, fds=s['fds'] + 1)
+        v = verdict(self, 'control', edit)
+        self.assertEqual(v['resource_classes']['sockets'], 'NOT_COVERED')
+        self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
+    def test_missing_peer_data_is_not_covered(self):
+        for missing in ('tcp', 'tcp_owners', 'socket_fds'):
+            with self.subTest(missing=missing):
+                def edit(ev, missing=missing):
+                    for s in ev['resource-samples.jsonl']:
+                        s[missing] = None
+                v = verdict(self, 'control', edit)
+                self.assertEqual(v['resource_classes']['sockets'], 'NOT_COVERED')
+                self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
+    def test_non_tcp_socket_growth_is_not_covered(self):
+        def edit(ev):  # a socket fd with no TCP row (unix, udp, ...): nothing to attribute it to
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s.update(socket_fds=s['socket_fds'] + 1, fds=s['fds'] + 1)
+        self.assertEqual(verdict(self, 'control', edit)['resource_classes']['sockets'], 'NOT_COVERED')
+
     def test_resources_need_a_real_pre_load_sample(self):
         """Review finding: the baseline is a pre-load sample provably taken before the load started, not the
         request to start the sampler."""
@@ -618,6 +651,42 @@ class Fail(unittest.TestCase):
                     s['fds'] += 1
         v = self.check('control', edit, 'resources')
         self.assertEqual((v['resource_classes']['data_fds'], v['resource_classes']['fds']), ('accounted', 'leak'))
+
+    def quiet_sockets(self, ev, extra, owners=None, socket_fds=None):
+        for s in ev['resource-samples.jsonl']:
+            if s['phase'] == 'quiescence':
+                s['tcp'] = s['tcp'] + extra
+                s['tcp_owners'] = dict(s['tcp_owners'], **(owners or {}))
+                s['socket_fds'] += len(extra) if socket_fds is None else socket_fds
+                s['fds'] += len(extra) if socket_fds is None else socket_fds
+
+    def test_cluster_sockets_within_the_cap_are_infrastructure(self):
+        v = verdict(self, 'control')  # the filer's one new connection: baseline 0 + 1
+        self.assertEqual((v['resource_classes']['sockets'], v['resource_classes']['fds']), ('infrastructure', 'released'))
+
+    def test_cluster_sockets_over_the_cap_are_a_leak(self):
+        conn = dict(state='ESTAB', local='127.0.0.1:8080', peer='127.0.0.1:41001')
+        v = self.check('control', lambda ev: self.quiet_sockets(ev, [conn], {'127.0.0.1:41001': dict(FILER)}), 'resources')
+        self.assertEqual(v['resource_classes']['sockets'], 'leak')  # the filer now holds 2 > 0 + 1
+
+    def test_a_socket_of_an_exited_client_is_a_leak(self):
+        conn = dict(state='ESTAB', local='127.0.0.1:8080', peer='127.0.0.1:52000')
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'load':  # while the load ran, a client owned the peer endpoint
+                    s['tcp_owners'] = dict(s['tcp_owners'], **{'127.0.0.1:52000': dict(WID[0])})
+            self.quiet_sockets(ev, [conn])  # at quiescence the client is gone; the volume's socket remains
+        v = self.check('control', edit, 'resources')
+        self.assertEqual(v['resource_classes']['sockets'], 'leak')
+
+    def test_a_socket_of_a_client_still_open_at_quiescence_is_a_leak(self):
+        conn = dict(state='ESTAB', local='127.0.0.1:8080', peer='127.0.0.1:52001')
+        v = self.check('control', lambda ev: self.quiet_sockets(ev, [conn], {'127.0.0.1:52001': dict(WID[1])}), 'resources')
+        self.assertEqual(v['resource_classes']['sockets'], 'leak')
+
+    def test_a_listener_above_baseline_is_a_leak(self):
+        v = self.check('control', lambda ev: self.quiet_sockets(ev, [dict(state='LISTEN', local='127.0.0.1:9999', peer='*:*')]), 'resources')
+        self.assertEqual(v['resource_classes']['sockets'], 'leak')
 
     def test_leaked_qp_row_even_with_custody_reported(self):
         def edit(ev):
