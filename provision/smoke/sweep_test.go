@@ -165,6 +165,60 @@ func TestSweepMixedExpiryIsLeft(t *testing.T) {
 	}
 }
 
+// listedAs answers the first list with exactly raw (row order, duplicates and aliases as written), then the fake.
+func listedAs(f *fakeAzure, raw string) func(context.Context, string, ...string) ([]byte, error) {
+	first := true
+	return func(ctx context.Context, tool string, args ...string) ([]byte, error) {
+		if first && len(args) > 1 && args[1] == "list" {
+			first = false
+			f.calls = append(f.calls, tool+" "+strings.Join(args, " "))
+			return []byte(raw), nil
+		}
+		return f.call(ctx, tool, args...)
+	}
+}
+
+// Every row must carry one present, readable, duplicate-free expires_at, in whatever order Azure lists the rows;
+// otherwise nothing of the run is deleted (codex01 r2 R1).
+func TestSweepAmbiguousExpiryNeverDeletes(t *testing.T) {
+	const past = "2026-11-10T10:25:00Z"
+	for name, edit := range map[string]func(rows []map[string]any) string{
+		"missing first":  func(rows []map[string]any) string { delete(rows[0]["tags"].(map[string]string), "expires_at"); return "" },
+		"missing middle": func(rows []map[string]any) string { delete(rows[1]["tags"].(map[string]string), "expires_at"); return "" },
+		"missing last":   func(rows []map[string]any) string { delete(rows[2]["tags"].(map[string]string), "expires_at"); return "" },
+		"empty first":    func(rows []map[string]any) string { rows[0]["tags"].(map[string]string)["expires_at"] = ""; return "" },
+		"duplicate future then past": func([]map[string]any) string {
+			return `"expires_at":"2030-11-10T10:25:00Z","expires_at":"` + past + `"`
+		},
+		"case alias": func([]map[string]any) string { return `"Expires_At":"2030-11-10T10:25:00Z","expires_at":"` + past + `"` },
+		"duplicate managed_by": func([]map[string]any) string {
+			return `"expires_at":"` + past + `","managed_by":"someone-else","managed_by":"sw-test-runner"`
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeAzure{rows: map[string]map[string]any{}}
+			ids := runRows(f, "ambiguous", "sw-test-runner", past)
+			rows := []map[string]any{f.rows[ids[0]], f.rows[ids[1]], f.rows[ids[2]]}
+			swap := edit(rows)
+			b, _ := json.Marshal(rows)
+			raw := string(b)
+			if swap != "" {
+				raw = strings.Replace(raw, `"expires_at":"`+past+`"`, swap, 1)
+				if strings.Contains(swap, "managed_by") {
+					raw = strings.Replace(raw, `"managed_by":"sw-test-runner",`, "", 1)
+				}
+			}
+			r := Sweep(context.Background(), sweepSub, sweepRG, sweepNow, false, noneLive, listedAs(f, raw))
+			if d := f.deletes(); len(d) != 0 {
+				t.Fatalf("ambiguous expiry authorized deletion: %+v; %v", r, d)
+			}
+			if !r.Acted() {
+				t.Fatal("an ambiguous run must be reported")
+			}
+		})
+	}
+}
+
 func TestSweepAListThatCannotBeTrustedDeletesNothing(t *testing.T) {
 	for name, f := range map[string]*fakeAzure{
 		"list error":     {listErr: errors.New("az: login required")},

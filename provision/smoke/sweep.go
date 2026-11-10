@@ -94,25 +94,29 @@ func Sweep(ctx context.Context, subscription, group string, now time.Time, dry b
 	sort.Strings(runs)
 	for _, run := range runs {
 		s := SweptRun{Run: run, Found: []string{}, Action: "left"}
-		expires := ""
+		// Every row must carry its own readable expires_at, all equal; one missing or unreadable row leaves the run.
+		expires, seen := "", false
+		var deadline time.Time
 		for _, r := range byRun[run] {
 			s.Found = append(s.Found, r.ID)
+			v, ok := r.Tags["expires_at"]
+			t, perr := time.Parse(time.RFC3339Nano, v)
 			switch {
+			case s.Reason != "":
 			case r.Tags["managed_by"] != "sw-test-runner":
 				s.Reason = "a resource with this run tag is not managed_by=sw-test-runner"
-			case expires == "":
-				expires = r.Tags["expires_at"]
-			case r.Tags["expires_at"] != expires:
+			case !ok || perr != nil:
+				s.Reason = "expires_at missing or unreadable on " + r.ID
+			case !seen:
+				expires, deadline, seen = v, t, true
+			case v != expires:
 				s.Reason = "the run's resources disagree on expires_at"
 			}
 		}
 		sort.Strings(s.Found)
 		s.ExpiresAt = expires
-		deadline, perr := time.Parse(time.RFC3339Nano, expires)
 		switch {
 		case s.Reason != "":
-		case perr != nil:
-			s.Reason = "expires_at missing or unreadable"
 		case !now.After(deadline):
 			s.Reason = "not expired"
 		case live(run):

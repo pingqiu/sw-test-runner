@@ -238,8 +238,8 @@ func resourceDecisionKeys(raw []byte, tags bool) error {
 		return errors.New("resource/tags must be an object")
 	}
 	keys := []string{"id", "type", "tags"}
-	if tags {
-		keys = []string{"seaweed_run"}
+	if tags { // managed_by and expires_at decide the scheduled sweep's deletions
+		keys = []string{"seaweed_run", "managed_by", "expires_at"}
 	}
 	seen := map[string]bool{}
 	for d.More() {

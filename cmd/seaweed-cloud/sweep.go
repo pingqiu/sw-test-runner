@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -95,9 +96,12 @@ func runSweep(args []string, w io.Writer) int {
 var sweepLive = liveController
 
 // liveController: a seaweed-cloud process whose command line names this run (its config or state path carries the
-// run id). When /proc cannot be read it answers true: an unknown controller is never treated as dead.
-func liveController(run string) bool {
-	entries, err := os.ReadDir("/proc")
+// run id). When /proc, or a still-present process's command line, cannot be read it answers true: an unknown
+// controller is never treated as dead. Only a process proven gone is skipped.
+func liveController(run string) bool { return liveControllerAt("/proc", run) }
+
+func liveControllerAt(proc, run string) bool {
+	entries, err := os.ReadDir(proc)
 	if err != nil {
 		return true
 	}
@@ -106,9 +110,12 @@ func liveController(run string) bool {
 		if !e.IsDir() || strings.Trim(e.Name(), "0123456789") != "" || e.Name() == self {
 			continue
 		}
-		cmd, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		cmd, err := os.ReadFile(filepath.Join(proc, e.Name(), "cmdline"))
 		if err != nil {
-			continue // gone while listing
+			if _, serr := os.Stat(filepath.Join(proc, e.Name())); errors.Is(serr, fs.ErrNotExist) {
+				continue // exited while listing
+			}
+			return true
 		}
 		argv := strings.Split(strings.TrimRight(string(cmd), "\x00"), "\x00")
 		if len(argv) > 1 && filepath.Base(argv[0]) == "seaweed-cloud" && argv[1] != "sweep" && strings.Contains(string(cmd), run) {
