@@ -136,9 +136,10 @@ func MountAssessArgs(d *inventory.Document, s SmokeSettings) []string {
 
 // mountVerdict is the assessor's one-line result.
 type mountVerdict struct {
-	Schema  string `json:"schema"`
-	Status  string `json:"status"`
-	Cleanup string `json:"cleanup"`
+	Schema      string   `json:"schema"`
+	Status      string   `json:"status"`
+	Cleanup     string   `json:"cleanup"`
+	GateReasons []string `json:"gate_reasons"`
 }
 
 // decodeMountVerdict accepts only the assessor's own schema and a known status.

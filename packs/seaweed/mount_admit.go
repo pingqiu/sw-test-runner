@@ -236,12 +236,17 @@ func admitMountArchive(r io.Reader, dir string, lim admitLimits, want mountListi
 // mountArchiveEnds: after tar's end, only its zero padding may remain in the one gzip member, and nothing may follow
 // that member in the stream.
 func mountArchiveEnds(z io.Reader, raw *bufio.Reader) error {
-	pad, e := io.Copy(io.Discard, io.LimitReader(z, mountPadLimit+1))
+	pad, e := io.ReadAll(io.LimitReader(z, mountPadLimit+1)) // to the member's end: gzip checks its own CRC and size
 	if e != nil {
 		return fmt.Errorf("archive end: %w", e)
 	}
-	if pad > mountPadLimit {
+	if len(pad) > mountPadLimit {
 		return errors.New("data after the archive")
+	}
+	for _, b := range pad {
+		if b != 0 {
+			return errors.New("non-zero data after the archive's end")
+		}
 	}
 	if _, e = raw.Peek(1); e != io.EOF {
 		return errors.New("data after the archive")

@@ -165,6 +165,28 @@ func TestMountArchiveRefusesEveryUnsafeOrUnboundStream(t *testing.T) {
 	}
 }
 
+// After tar's end only zero padding may remain in the gzip member: listed-looking content there is refused.
+func TestMountArchiveRefusesNonZeroBytesAfterTheEnd(t *testing.T) {
+	ms := records()
+	g, e := gzip.NewReader(bytes.NewReader(archive(t, ms, tar.FormatUSTAR)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	plain, _ := io.ReadAll(g)
+	for name, tail := range map[string][]byte{"text": []byte("UNLISTED-NONZERO-DATA"), "one byte": {1}, "zeros": make([]byte, 512)} {
+		t.Run(name, func(t *testing.T) {
+			var b bytes.Buffer
+			z := gzip.NewWriter(&b)
+			z.Write(append(append([]byte{}, plain...), tail...))
+			z.Close()
+			_, e := admit(t, b.Bytes(), listingFor(ms, testBoot, testRoot), mountAdmitLimits)
+			if name == "zeros" && e != nil || name != "zeros" && (e == nil || !strings.Contains(e.Error(), "non-zero data")) {
+				t.Fatalf("%s: %v", name, e)
+			}
+		})
+	}
+}
+
 func TestMountArchiveHashAndSizeAreBound(t *testing.T) {
 	ms := records()
 	raw := archive(t, ms, tar.FormatUSTAR)
