@@ -306,7 +306,7 @@ func TestMountSoakRefusesEveryOtherPhaseAndTarget(t *testing.T) {
 			t.Fatalf("%s was accepted", name)
 		}
 	}
-	for _, target := range []string{"onprem", "aws", "gcp"} {
+	for _, target := range []string{"docker", "aws", "gcp"} {
 		if err := mountSoakRefusal(ten(target), CloudConfig{MountSoak: true}); err == nil {
 			t.Fatalf("target %s was accepted", target)
 		}
@@ -316,7 +316,7 @@ func TestMountSoakRefusesEveryOtherPhaseAndTarget(t *testing.T) {
 	if err := mountSoakRefusal(short, CloudConfig{MountSoak: true}); err == nil {
 		t.Fatal("nine hosts were accepted")
 	}
-	for _, target := range []string{"azure", "docker"} {
+	for _, target := range []string{"azure", "onprem"} {
 		if err := mountSoakRefusal(ten(target), CloudConfig{MountSoak: true}); err != nil {
 			t.Fatalf("%s: %v", target, err)
 		}
