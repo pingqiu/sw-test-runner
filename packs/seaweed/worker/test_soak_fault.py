@@ -3,6 +3,7 @@ systemd-run, ip, ss, rdma) and a fake sysfs tree. prlimit is the real one, aimed
 owns. Nothing here touches a real device, link, socket or mount; none of it has run on lab hardware."""
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -72,18 +73,25 @@ class Host(unittest.TestCase):
         (self.state / 'ssh').write_text('0 0 192.0.2.20:22 192.0.2.5:50000\n')
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], FAKE_STATE=str(self.state))
 
-    def dummy(self, lock_bytes=0):
-        """A child this test owns: optionally mlock()s lock_bytes, then sleeps. Its pid is the fake MainPID."""
-        code = ('import ctypes, mmap, time\n'
+    def dummy(self, lock_bytes=0, threads=0):
+        """A child this test owns: optionally mlock()s lock_bytes and starts `threads` sleeping threads, then sleeps.
+        Its pid is the fake MainPID; p.tids holds its threads' native ids."""
+        code = ('import ctypes, mmap, threading, time\n'
                 'n=%d\n'
                 'if n:\n    b=mmap.mmap(-1,n); a=ctypes.addressof(ctypes.c_char.from_buffer(b))\n'
                 '    ctypes.CDLL(None).mlock(ctypes.c_void_p(a), ctypes.c_size_t(n)) == 0 or exit(9)\n'
-                'print("ok", flush=True); time.sleep(300)\n' % lock_bytes)
+                'tids, ready = [], threading.Barrier(%d + 1)\n'
+                'def run():\n    tids.append(threading.get_native_id()); ready.wait(); time.sleep(300)\n'
+                'for _ in range(%d): threading.Thread(target=run, daemon=True).start()\n'
+                'ready.wait()\n'
+                'print("ok", *tids, flush=True); time.sleep(300)\n' % (lock_bytes, threads, threads))
         p = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True)
         self.addCleanup(p.stdout.close)
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
-        self.assertEqual(p.stdout.readline().strip(), 'ok')
+        words = p.stdout.readline().split()
+        self.assertEqual(words[:1], ['ok'])
+        p.tids = [int(w) for w in words[1:]]
         (self.state / 'mainpid').write_text(str(p.pid))
         return p
 
@@ -474,6 +482,54 @@ class Sampler(Host):
                                env=self.env, timeout=30, check=True)
                 rows = [json.loads(line) for line in out.read_text().splitlines()]
                 self.assertTrue(rows and all(r['rdma'] == want for r in rows), rows[:1])
+
+    # `rdma -j resource show qp|mr` on M02 at F1 load second 30 (2026-11-10T19:15:49Z, rc 0), verbatim: the volume's
+    # main pid was 854010; its RC QPs are attributed to worker thread 854091 and its second pool MR to thread 854092.
+    F1_QP = ('[{"ifindex":0,"ifname":"rocep1s0","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":0,"comm":"ib_core"},'
+             '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":20,"comm":"ib_core"},'
+             '{"ifindex":2,"ifname":"mlx5_1","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":0,"comm":"ib_core"},'
+             '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":521,"rqpn":303,"type":"RC","state":"RTS","rq-psn":8250072,"sq-psn":8917634,"path-mig-state":"MIGRATED","pdn":25,"pid":854091,"comm":"weed-volume"},'
+             '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":522,"rqpn":304,"type":"RC","state":"RTS","rq-psn":16416420,"sq-psn":9139250,"path-mig-state":"MIGRATED","pdn":25,"pid":854091,"comm":"weed-volume"},'
+             '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":523,"type":"RC","state":"RTS","pdn":25,"pid":854091,"comm":"weed-volume"},'
+             '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":524,"type":"RC","state":"RTS","pdn":25,"pid":854091,"comm":"weed-volume"}]')
+    F1_MR = ('[{"ifindex":1,"ifname":"mlx5_0","mrn":9801,"mrlen":134217728,"pdn":26,"pid":854010,"comm":"weed-volume"},'
+             '{"ifindex":1,"ifname":"mlx5_0","mrn":9802,"mrlen":134217728,"pdn":27,"pid":854092,"comm":"weed-volume"}]')
+
+    def test_the_volumes_worker_threads_own_its_rdma_objects(self):
+        """Through the real sampler CLI, on the captured F1 tables: rows of the volume's worker threads count as the
+        volume's (qp 4, mr 2), the kernel GSI rows stay set aside, and a row of a process outside the thread group
+        stays unattributed; the sample records the thread set it joined on."""
+        p = self.dummy(threads=2)
+        remap = {'854010': str(p.pid), '854091': str(p.tids[0]), '854092': str(p.tids[1])}
+        sub = lambda s: re.sub(r'"pid":(\d+)', lambda m: '"pid":' + remap.get(m.group(1), m.group(1)), s)
+        qp = json.loads(sub(self.F1_QP)) + [dict(pid=os.getpid(), lqpn=900, type='RC', comm='python3')]  # not in the group
+        mr = json.loads(sub(self.F1_MR)) + [dict(pid=os.getpid(), mrlen=4096, comm='python3')]
+        (self.state / 'rdma_qp').write_text(json.dumps(qp))
+        (self.state / 'rdma_mr').write_text(json.dumps(mr))
+        c = self.config('control', max_s=0.5)
+        subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                       env=self.env, timeout=30, check=True)
+        rows = [json.loads(line) for line in (self.root / 'resource-samples.jsonl').read_text().splitlines()]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r['rdma'], dict(qp=4, mr=2, mr_lens=[134217728, 134217728]), r['rdma'])
+            self.assertEqual(sorted(r['threads']), sorted([p.pid] + p.tids))
+
+    def test_a_tid_outside_the_thread_group_is_never_the_volumes(self):
+        """thread_group admits only tids listed under /proc/<pid>/task whose own status names that Tgid."""
+        p = self.dummy(threads=1)
+        self.assertEqual(soak_fault.thread_group(p.pid), sorted([p.pid] + p.tids))
+        self.assertNotIn(os.getpid(), soak_fault.thread_group(p.pid))
+        self.assertIsNone(soak_fault.thread_group(2 ** 22 + 7))  # no such process: unread, never {pid}
+        gone = 2 ** 22 + 7  # its rows are listed, but its thread group cannot be read: the view is unread, not a count
+        table = lambda args, **k: subprocess.CompletedProcess(args, 0, json.dumps([dict(pid=gone, lqpn=5, type='RC')])
+                                                              if args[-1] == 'qp' else json.dumps([dict(pid=gone, mrlen=4096)]), '')
+        self.assertIsNone(soak_fault.rdma_view(gone, run=table))
+        fake = self.tmp / 'proc'
+        for tid, tgid in ((500, 500), (501, 500), (502, 999)):  # 502 is listed but belongs to another group
+            (fake / '500/task' / str(tid)).mkdir(parents=True)
+            (fake / '500/task' / str(tid) / 'status').write_text('Name:\tx\nTgid:\t%d\nPid:\t%d\n' % (tgid, tid))
+        self.assertEqual(soak_fault.thread_group(500, proc=str(fake)), [500, 501])
 
     def test_f1_and_f2_rows_sample_and_mark_but_never_inject(self):
         """The runner pins the sampler and markers with the row's own kind; F1/F2 must sample, never apply."""

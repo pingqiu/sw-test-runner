@@ -188,20 +188,46 @@ def kernel_management_qp(row):
     return 'pid' not in row and row.get('comm') == 'ib_core' and row.get('type') in ('GSI', 'SMI')
 
 
-def rdma_view(pid, run=None):
-    """QPs and MRs owned by pid: {'qp': n, 'mr': n, 'mr_lens': [...]}, or None. A table with any row that carries
-    no integer pid cannot be PID-joined (that row could be this process's), so the whole view is unread, never a
-    count that silently leaves rows out. The one exception is the kernel's own per-port management QP
-    (kernel_management_qp), which no process can own."""
+def thread_group(pid, proc='/proc'):
+    """The tids of pid's thread group, sorted, or None if unread. The kernel's rdma resource table attributes each
+    object to the THREAD that created it (M02, F1 2026-11-10: the volume's RC QPs under a worker tid), so the volume's
+    rows are joined by its thread group. A tid counts only when it is listed under /proc/<pid>/task AND that task's
+    own status names Tgid == pid; anything not provably in the group stays unattributed."""
+    try:
+        tids = [int(t) for t in os.listdir('%s/%d/task' % (proc, pid)) if t.isdigit()]
+    except OSError:
+        return None
+    group = []
+    for tid in tids:
+        try:
+            with open('%s/%d/task/%d/status' % (proc, pid, tid)) as f:
+                tgid = next((int(l.split()[1]) for l in f if l.startswith('Tgid:')), None)
+        except (OSError, ValueError, IndexError):
+            continue  # the thread exited between the listing and the read: not provably in the group
+        if tgid == pid:
+            group.append(tid)
+    return sorted(group) if pid in group else None
+
+
+def rdma_view(pid, run=None, group=None):
+    """QPs and MRs owned by pid's thread group: {'qp': n, 'mr': n, 'mr_lens': [...]}, or None. `group` is the tid
+    set from thread_group (read here when not given); without it the view is unread, never a main-pid-only count
+    that leaves the worker threads' objects out. A table with any row that carries no integer pid cannot be joined
+    (that row could be this process's), so the whole view is unread. The one exception is the kernel's own per-port
+    management QP (kernel_management_qp), which no process can own."""
     import subprocess
     run = run or subprocess.run
+    group = thread_group(pid) if group is None else group
+    if not group or pid not in group:
+        return None
     qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
     if qp is None or mr is None:
         return None
     qp = [r for r in qp if not kernel_management_qp(r)]
     if any(isinstance(r.get('pid'), bool) or not isinstance(r.get('pid'), int) for r in qp + mr):
         return None
-    mine = lambda rows: [r for r in rows if r.get('pid') == pid]
+    members = set(group)
+    mine = lambda rows: [r for r in rows if r.get('pid') in members]
     lens = [r.get('mrlen') for r in mine(mr)]
     if any(isinstance(v, bool) or not isinstance(v, int) for v in lens):
         return None

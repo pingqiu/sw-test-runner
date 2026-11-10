@@ -15,7 +15,7 @@ if 'soak_stats' not in sys.modules:  # -I drops the script dir: load the exact p
     _module = sys.modules['soak_stats'] = types.ModuleType('soak_stats')
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
-from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_view, scrape, socket_view, statfs_free, volume_list
+from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_view, scrape, socket_view, statfs_free, thread_group, volume_list
 
 KINDS = ('control', 'link_flap', 'conn_kill', 'mr_pressure', 'disk_full', 'fd_exhaust')
 ROW_ONLY = ('volume_kill_io', 'client_kill_put')  # F1, F2: the runner or the load makes the fault; sample and mark only
@@ -305,9 +305,11 @@ def sample(c):
                 pid = ident['pid']
                 fv = fd_view(pid)
                 mem = proc_memory('/proc/%d/status' % pid)
+                threads = thread_group(pid)  # the rdma table names each object's creating thread: join by group
                 row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, data_fds=len(fv[2]) if fv else None,
                            data_files=fv[2] if fv else None, socket_fds=fv[3] if fv else None, limits=limits(pid),
-                           rdma=rdma_view(pid), vm_pin_kB=(mem or {}).get('vm_pin_kB'))
+                           threads=threads, rdma=rdma_view(pid, group=threads) if threads else None,
+                           vm_pin_kB=(mem or {}).get('vm_pin_kB'))
                 sv = socket_view(pid)  # each socket and the local owner of its peer endpoint (pid/starttime)
                 row.update(tcp=sv[0] if sv else None, tcp_owners=sv[1] if sv else None)
             if c.get('rdma_device'):
