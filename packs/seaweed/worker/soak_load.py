@@ -489,11 +489,12 @@ def run(config):
         raise TimeoutError('no submitted GET to kill within 60 s')
 
     def client_kill_put(started):
-        """F2 (extends client_kill): kill an RDMA worker only while its PUT is submitted and pending. That PUT is
-        UNKNOWN, attributed to the killed worker's pid/starttime, and its key is quarantined."""
-        n = 0
+        """F2 (extends client_kill): kill a worker only while its PUT is submitted and pending: an RDMA worker when
+        the load has one, else one of the load's own (an HTTP-only load). That PUT is UNKNOWN, attributed to the
+        killed worker's pid/starttime, and its key is quarantined."""
+        n, pool = 0, [i for i in range(clients) if transport(i) in ('dc', 'rc')] or list(range(clients))
         while time.monotonic() - started < 60:
-            for i in (i for i in range(clients) if transport(i) in ('dc', 'rc')):
+            for i in pool:
                 pump(i)
                 if i in commands and commands[i]['action'] == 'set' and i in submissions:
                     witness, cmd = submissions.pop(i), commands.pop(i)

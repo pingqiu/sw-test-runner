@@ -119,6 +119,20 @@ class Rows(unittest.TestCase):
         self.assertEqual([r['seed'] for r in audit[u[0]['key']]], [u[0]['seed']])
         self.assertEqual(summary['counts']['unknown_attributed'], 1)
 
+    def test_f2_on_an_http_only_load_kills_one_of_its_own_workers(self):
+        # the rehearsal's load: kv_load over HTTP, no RDMA worker at all
+        self.row('client_kill_put')
+        self.config['pattern'] = dict(clients=2, transport='http', keys=4, distribution='uniform', object_bytes=64, rate_per_client=20,
+                                      phases=[dict(kind='write_once'), dict(kind='mixed', duration_s=2, read_ratio=0.5)])
+        self.config['native']['fake_delay_set'] = 0.5
+        self.config['fault_row']['at_s'] = 2.5  # after write_once (4 keys, 2 clients, 0.5 s per PUT)
+        self.config['duration_s'] = 6
+        summary = soak_load.run(self.config)
+        k = summary['kills'][0]
+        workers = json.loads((self.root / 'workers.json').read_text())
+        self.assertEqual((k['kind'], workers[str(k['worker'])]['transport']), ('client_kill_put', 'http'))
+        self.assertEqual(summary['counts']['unknown_attributed'], 1)
+
     def test_rows_never_run_the_soak_client_kill(self):
         self.row('control')
         self.config['client_kill_at_s'] = 0

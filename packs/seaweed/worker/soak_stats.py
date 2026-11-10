@@ -5,6 +5,7 @@ writes before its first operation, and ticks on CLOCK_MONOTONIC."""
 import json
 import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -65,22 +66,27 @@ def proc_memory(status='/proc/self/status'):
 # Stage 3 host-side views of one process (the volume), each None when it cannot be read. The sampler in
 # soak_fault.py joins them on pid/starttime; the assessor classifies them. No view is ever guessed as 0.
 
+VOLUME_FILE = re.compile(r'\.(dat|idx|vif|ecx|ecj|ec[0-9]{2}|cpd|cpx|note)$')  # a volume's own data and index files
+
+
 def fd_view(pid):
-    """(open fd count, sizes of the regular *.dat files it holds open), or None."""
+    """(open fd count, sizes of the regular *.dat files it holds open, how many fds are volume data/index files),
+    or None. The third lets a reader tell fds held by volumes the load created from any other fd."""
     base = Path('/proc/%d/fd' % pid)
     try:
         names = os.listdir(base)
     except OSError:
         return None
-    dats = []
+    dats, data = [], 0
     for name in names:
         try:
             target = os.readlink(base / name)
+            data += bool(VOLUME_FILE.search(target))
             if target.endswith('.dat'):
                 dats.append(os.stat(base / name).st_size)
         except OSError:
             continue  # a descriptor closed between listing and reading
-    return len(names), sorted(dats)
+    return len(names), sorted(dats), data
 
 
 def limits(pid):

@@ -18,8 +18,9 @@ if 'soak_stats' not in sys.modules:  # -I drops the script dir: load the exact p
 from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_view, scrape, statfs_free
 
 KINDS = ('control', 'link_flap', 'conn_kill', 'mr_pressure', 'disk_full', 'fd_exhaust')
+ROW_ONLY = ('volume_kill_io', 'client_kill_put')  # F1, F2: the runner or the load makes the fault; sample and mark only
 DEADMAN = ('link_flap', 'mr_pressure', 'disk_full', 'fd_exhaust')  # kinds that leave state behind
-DEADMAN_GONE = ((3, 'inactive'), (3, 'failed'))  # systemctl(1) exit status 3: unit not active
+DEADMAN_GONE = ((3, 'inactive'), (3, 'failed'), (4, 'inactive'))  # systemctl(1) exit 3: not active; 4: no such unit (a stopped transient timer is unloaded)
 
 
 class Refused(Exception):
@@ -297,7 +298,7 @@ def sample(c):
                 pid = ident['pid']
                 fv = fd_view(pid)
                 mem = proc_memory('/proc/%d/status' % pid)
-                row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, limits=limits(pid),
+                row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, data_fds=fv[2] if fv else None, limits=limits(pid),
                            rdma=rdma_view(pid), vm_pin_kB=(mem or {}).get('vm_pin_kB'))
             if c.get('rdma_device'):
                 row['port'] = port_view(sys_root(c), c['rdma_device'], c['rdma_port'])
@@ -329,8 +330,9 @@ def main():
     parser.add_argument('--action', required=True, choices=('apply', 'restore', 'sample', 'mark-load', 'mark-quiescence'))
     args = parser.parse_args()
     c = json.loads(args.config)
-    if c.get('kind') not in KINDS:
-        raise SystemExit('soak_fault: unknown kind')
+    # Every row samples and marks its phases (F1 and F2 included); only the injector kinds apply or restore.
+    if c.get('kind') not in KINDS + ROW_ONLY or args.action in ('apply', 'restore') and c['kind'] not in KINDS:
+        raise SystemExit('soak_fault: kind %r has no %s' % (c.get('kind'), args.action))
     if args.action == 'sample':
         return sample(c)
     try:

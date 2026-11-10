@@ -189,7 +189,7 @@ class LinkFlap(Host):
         """systemctl is-active (rc, stdout) and the stop's rc, through the CLI: only rc 3 with inactive or failed,
         after a stop that succeeded or found the unit not loaded, proves the dead-man is gone."""
         cases = [('3|inactive', '0', True), ('3|failed', '0', True), ('3|inactive', '5', True),
-                 ('1|inactive', '0', False), ('0|inactive', '0', False), ('4|inactive', '0', False), ('3|', '0', False),
+                 ('4|inactive', '0', True), ('1|inactive', '0', False), ('0|inactive', '0', False), ('4|', '0', False), ('4|unknown', '0', False), ('3|', '0', False),
                  ('1|', '0', False), ('0|active', '0', False), ('3|activating', '0', False), ('3|inactive', '1', False)]
         for answer, stop_rc, proven in cases:
             with self.subTest(answer=answer, stop_rc=stop_rc):
@@ -394,6 +394,7 @@ class Sampler(Host):
         self.assertEqual(s['metrics'], dict(released=3.0, pinned=12.0))  # an absent series is absent, not 0
         self.assertEqual(s['port'], ['4: ACTIVE', 0])
         self.assertGreater(s['fds'], 0)
+        self.assertEqual(s['data_fds'], 0)  # the dummy holds no volume file
         self.assertGreaterEqual(out[-1]['mono'] - next(x['mono'] for x in out if x['phase'] == 'quiescence'), 0.6 - 0.25)
 
     def test_rows_without_a_pid_make_the_view_unread_not_zero(self):
@@ -411,6 +412,36 @@ class Sampler(Host):
                                env=self.env, timeout=30, check=True)
                 rows = [json.loads(line) for line in out.read_text().splitlines()]
                 self.assertTrue(rows and all(r['rdma'] is None for r in rows), rows[:1])
+
+    def test_f1_and_f2_rows_sample_and_mark_but_never_inject(self):
+        """The runner pins the sampler and markers with the row's own kind; F1/F2 must sample, never apply."""
+        self.dummy()
+        for kind in ('volume_kill_io', 'client_kill_put'):
+            with self.subTest(kind=kind):
+                c = self.config(kind, root=str(self.tmp / kind), max_s=0.5)
+                Path(c['root']).mkdir()
+                self.cli(c, 'mark-load')
+                subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                               env=self.env, timeout=30, check=True)
+                self.assertTrue((Path(c['root']) / 'resource-samples.jsonl').read_text())
+                for action in ('apply', 'restore'):
+                    out = subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', action],
+                                         capture_output=True, text=True, env=self.env, timeout=30)
+                    self.assertNotEqual(out.returncode, 0)
+                    self.assertIn('has no ' + action, out.stderr)
+        self.assertFalse(self.calls('systemd-run'))
+
+    def test_fds_held_by_volume_files_are_counted_apart(self):
+        """The rehearsal's finding: volumes created during a load hold .dat/.idx/.vif fds; they are counted apart
+        (data_fds) so a reader can tell them from any other fd. The verdict rule itself is unchanged."""
+        files = []
+        for name, body in (('7.dat', b'x' * 5000), ('7.idx', b''), ('7.vif', b''), ('notes.txt', b'')):
+            (self.tmp / name).write_bytes(body)
+            files.append((self.tmp / name).open('rb'))
+        self.addCleanup(lambda: [f.close() for f in files])
+        total, dats, data = soak_fault.fd_view(os.getpid())
+        self.assertEqual((data, 5000 in dats), (3, True))
+        self.assertGreaterEqual(total, 4)
 
     def test_an_unreadable_view_is_null_never_zero(self):
         self.dummy()
