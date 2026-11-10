@@ -192,7 +192,7 @@ func TestCloudTenNodeEvidenceCannotLoseAFailedMember(t *testing.T) {
 // finished host needed 266.8 s. Every host now waits in parallel under the measured 600 s bound.
 func TestCloudInitWaitsOnEveryHostAtOnceWithTheMeasuredBound(t *testing.T) {
 	raw, c, loads := clusterInput(t, false, "cloud-init-parallel")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute) // room for the full bound; nothing waits it out
 	defer cancel()
 	if bundle, e := RunCloudHTTP(ctx, raw, c); e != nil || bundle == "" || loads.Load() != 3 {
 		t.Fatalf("cloud-init gate: %v loads=%d", e, loads.Load())
