@@ -91,7 +91,7 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if x.rowMode() { // stage 3: the row's frozen values; absent otherwise
 		f, r := x.Faults[0], x.Row
 		config["fault_row"] = map[string]any{"kind": f.kind(), "episode": f.Episode, "recovery_s": r.RecoveryS,
-			"pin_ranges_bytes": r.PinBound.bytes(), "retained_budget_bytes": r.RetainedBudgetBytes, "free_below_bytes": r.FreeBelowBytes,
+			"pin_ranges_bytes": r.PinBound.bytes(), "pin_pool_bytes": r.PinBound.PoolBytes, "pin_cache_bytes": r.PinBound.CacheBytes, "retained_budget_bytes": r.RetainedBudgetBytes, "free_below_bytes": r.FreeBelowBytes,
 			"client_fallback_counters": append([]string{}, r.ClientFallbackCounters...)}
 	}
 	if x.rc() {

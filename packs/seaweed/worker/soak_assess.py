@@ -757,18 +757,24 @@ def assess_row(c):
          '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
 
     # 6. Resources: the pin bound at every sample, no whole .dat pin, and each view's quiescence class.
-    # Pin bound per sample (ruling 05:31Z): the packet's ranges term plus the pool and cache charges the deployed
-    # product itself reports in that sample. A pinned sample without both charges has no bound: NOT_COVERED.
-    pinned, unbounded, over = [], [], []
+    # Pin bound (ruling 06:05Z): the packet's configured ranges, pool and cache sizes for the deployed row. The
+    # product's own pool/cache gauges are compared and a gauge above its configured size is flagged, but a gauge
+    # never widens the bound. A configured size that is absent (or not a number) leaves no bound: NOT_COVERED.
+    sizes = [row.get('pin_pool_bytes'), row.get('pin_cache_bytes')]
+    configured = all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in sizes)
+    bound = row['pin_ranges_bytes'] + sum(sizes) if configured else None
+    pinned, over, disagree = [], [], []
     for s in samples:
         m = s.get('metrics') if isinstance(s.get('metrics'), dict) else {}
         if 'pinned' not in m:
             continue
         pinned.append(m['pinned'])
-        if 'pool_bytes' not in m or 'cache_bytes' not in m:
-            unbounded.append(s['seq'])
-        elif m['pinned'] > row['pin_ranges_bytes'] + m['pool_bytes'] + m['cache_bytes']:
-            over.append((s['seq'], m['pinned'], row['pin_ranges_bytes'] + m['pool_bytes'] + m['cache_bytes']))
+        if configured and m['pinned'] > bound:
+            over.append((s['seq'], m['pinned'], bound))
+        for key, size in zip(('pool_bytes', 'cache_bytes'), sizes):
+            if configured and key in m and m[key] > size:
+                disagree.append('%s gauge %d > configured %d' % (key, m[key], size))
+    unbounded = pinned and not configured
     whole = [s['seq'] for s in samples if (s.get('rdma') or {}).get('mr_lens') and any(
         d > 0 and -(-d // PAGE) * PAGE in s['rdma']['mr_lens'] for d in s.get('dat_sizes') or [])]
     # The baseline is a pre-load sample provably taken before the load started: its M02 time below the earliest M02
@@ -780,8 +786,10 @@ def assess_row(c):
     classes = resource_classes(samples, row, before_load, clients)
     outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned or unbounded else 'PASS'] + \
         ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
-    mark('resources', rank(outcomes), 'pin max %s, ranges %d + product pool/cache; over %s, unbounded samples %d, whole .dat %s, classes %s' % (
-        max(pinned, default=None), row['pin_ranges_bytes'], over[:2], len(unbounded), whole[:3], classes))
+    mark('resources', rank(outcomes), 'pin max %s, bound %s (configured ranges %d + pool %s + cache %s); over %s; '
+         'product gauge disagreement %s; whole .dat %s, classes %s' % (
+             max(pinned, default=None), bound, row['pin_ranges_bytes'], sizes[0], sizes[1], over[:2], sorted(set(disagree))[:2],
+             whole[:3], classes))
 
     # 7. Causal witness: the row's host event and its effect, joined on PID/starttime and window. R0 runs every
     # host-event check and must find none.

@@ -22,7 +22,8 @@ func rowPlan(kind string) *SoakPlan {
 		Refused: []string{"No space left on device"}, MetricsURL: "http://127.0.0.1:18080/metrics",
 		Metrics: map[string]string{"released": "SeaweedFS_rdma_connections_released_total", "pinned": "SeaweedFS_rdma_range_pinned_bytes",
 			"pool_bytes": "SeaweedFS_rdma_cold_pool_bytes", "cache_bytes": "SeaweedFS_rdma_write_staging_bytes"},
-		PinBound: PinBound{MaxInflightRanges: 4, LargestRangeBytes: 1 << 20}, RetainedBudgetBytes: 4 << 20}
+		PinBound:            PinBound{MaxInflightRanges: 4, LargestRangeBytes: 1 << 20, PoolBytes: ptr(int64(2 << 20)), CacheBytes: ptr(int64(1 << 20))},
+		RetainedBudgetBytes: 4 << 20}
 	switch kind {
 	case KindControl, KindConnKill, KindDiskFull:
 		r.HoldS = 10
@@ -85,6 +86,8 @@ func TestRowAdmissionRefusals(t *testing.T) {
 		"unknown metric key":     {KindControl, func(x *SoakPlan) { x.Row.Metrics["leaks"] = "x" }, "metric"},
 		"metrics url not http":   {KindControl, func(x *SoakPlan) { x.Row.MetricsURL = "file:///etc/passwd" }, "metrics url"},
 		"no pin bound":           {KindControl, func(x *SoakPlan) { x.Row.PinBound = PinBound{} }, "pin bound"},
+		"negative pool size":     {KindControl, func(x *SoakPlan) { x.Row.PinBound.PoolBytes = ptr(int64(-1)) }, "pin bound"},
+		"huge cache size":        {KindControl, func(x *SoakPlan) { x.Row.PinBound.CacheBytes = ptr(int64(1 << 41)) }, "pin bound"},
 		"fault without recovery": {KindMRPressure, func(x *SoakPlan) { x.Faults[0].AtS = 200 }, "no recovery"},
 		"refused class empty":    {KindDiskFull, func(x *SoakPlan) { x.Row.Refused = []string{""} }, "refused class"},
 		"soak mix, many sizes":   {KindVolumeKillIO, func(x *SoakPlan) { x.Pattern = nil }, "fixed-size kv_load"},
@@ -105,6 +108,26 @@ func TestExistingSoakPlansCarryNoRowBytes(t *testing.T) {
 	}
 	if !slicesEqual(p.Soak.criteria(), soakCriteria) {
 		t.Fatal("an existing soak keeps its criteria")
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// The configured pool and cache sizes reach the assessor as given; an absent one reaches it as null (NOT_COVERED
+// there), never as 0.
+func TestThePinSizesReachTheAssessorAsConfigured(t *testing.T) {
+	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: "/r1"}},
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "b1"}, {HostID: "m02", BootID: "b2"}}}}
+	for name, c := range map[string]struct {
+		pool *int64
+		want string
+	}{"configured": {ptr(int64(2 << 20)), `"pin_pool_bytes":2097152`}, "absent": {nil, `"pin_pool_bytes":null`}} {
+		x := rowPlan(KindControl)
+		x.Row.PinBound.PoolBytes = c.pool
+		argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: "/w"}, x)
+		if err != nil || !strings.Contains(argv[3], c.want) || !strings.Contains(argv[3], `"pin_cache_bytes":1048576`) || !strings.Contains(argv[3], `"pin_ranges_bytes":4194304`) {
+			t.Errorf("%s: %v %s", name, err, argv)
+		}
 	}
 }
 

@@ -238,13 +238,25 @@ type FaultRow struct {
 	RetainedBudgetBytes    int64             `json:"retained_budget_bytes"`
 }
 
-// PinBound is the plan's formula: max inflight ranges across clients x largest range + the pool and cache
-// charges. The range terms are frozen in the packet; the pool and cache charges are the deployed product's
-// own (ruling 05:31Z): the assessor reads them from the metrics named pool_bytes and cache_bytes, sample by
-// sample, and a bound with either missing is NOT_COVERED, never a placeholder.
+// PinBound is the plan's formula: max inflight ranges across clients x largest range + the configured pool and
+// cache sizes. All terms are the packet's configuration for the deployed row (ruling 06:05Z): the product's own
+// gauges are recorded beside the bound and a disagreement is flagged, but they never widen it. An absent pool
+// or cache size leaves the bound unknown, so the resources criterion is NOT_COVERED; it is never assumed 0.
 type PinBound struct {
-	MaxInflightRanges int64 `json:"max_inflight_ranges"`
-	LargestRangeBytes int64 `json:"largest_range_bytes"`
+	MaxInflightRanges int64  `json:"max_inflight_ranges"`
+	LargestRangeBytes int64  `json:"largest_range_bytes"`
+	PoolBytes         *int64 `json:"pool_bytes,omitempty"`
+	CacheBytes        *int64 `json:"cache_bytes,omitempty"`
+}
+
+// sizesValid refuses a configured pool or cache size out of range; an absent one is allowed (NOT_COVERED later).
+func (b PinBound) sizesValid() bool {
+	for _, v := range []*int64{b.PoolBytes, b.CacheBytes} {
+		if v != nil && (*v < 0 || *v > 1<<40) {
+			return false
+		}
+	}
+	return true
 }
 
 // bytes is the ranges term of the bound, or -1 when a term is out of range.
@@ -364,7 +376,7 @@ func (x *SoakPlan) checkRow() error {
 			return errors.New("stage-3 fallback counter malformed")
 		}
 	}
-	if r.PinBound.bytes() < 0 || r.RetainedBudgetBytes < 0 || r.RetainedBudgetBytes > 1<<40 {
+	if r.PinBound.bytes() < 0 || !r.PinBound.sizesValid() || r.RetainedBudgetBytes < 0 || r.RetainedBudgetBytes > 1<<40 {
 		return errors.New("stage-3 pin bound or retained budget out of range")
 	}
 	switch k {

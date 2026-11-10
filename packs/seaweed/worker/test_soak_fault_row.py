@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 M02 = 4000.0  # M02 CLOCK_MONOTONIC = M01 mono + 4000 in the fixture (a different clock, joined only by witnesses)
 WID = {i: dict(pid=10 + i, starttime=1) for i in range(4)}
 VOL, REPL = dict(pid=500, starttime=9), dict(pid=501, starttime=20)
-BOUND = 7 << 20  # ranges 4 MiB (packet) + pool 2 MiB + cache 1 MiB (the product's own gauges)
+BOUND = 7 << 20  # configured: ranges 4 MiB + pool 2 MiB + cache 1 MiB (the product gauges agree in the fixture)
 DATA = ['lmcache_3.dat', 'lmcache_3.idx', 'lmcache_4.dat', 'lmcache_4.idx']
 MASTER, FILER = dict(pid=600, starttime=3), dict(pid=601, starttime=4)
 TCP = [dict(state='LISTEN', local='127.0.0.1:8080', peer='*:*'), dict(state='ESTAB', local='127.0.0.1:50001', peer='127.0.0.1:19333')]
@@ -195,7 +195,7 @@ def config(root, kind):
     return dict(schema=soak_assess.SCHEMA, root=str(root), run_id='run-1', boot_id=boot_id(), m02_boot_id=M02_BOOT, duration_s=300,
                 quiescence_s=60, client_kill_at_s=0, collection='lmcache',
                 fault_row=dict(kind=kind, episode='E1', recovery_s=60 if kind in ('volume_kill_io', 'client_kill_put') else 30,
-                               pin_ranges_bytes=4 << 20, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
+                               pin_ranges_bytes=4 << 20, pin_pool_bytes=2 << 20, pin_cache_bytes=1 << 20, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
                                client_fallback_counters=['rdma_fallbacks']))
 
 
@@ -795,27 +795,31 @@ class Fail(unittest.TestCase):
                         s['metrics']['retained_bytes'] = float(b)
                 self.check('control', edit, 'resources')
 
-    def test_the_pin_bound_takes_the_products_own_pool_and_cache(self):
-        def big_pool(ev):  # 6 MiB pinned is legal only because the product reports a 5 MiB pool in that sample
-            s = ev['resource-samples.jsonl'][30]
-            s['metrics'].update(pinned=float(6 << 20), pool_bytes=float(5 << 20))
-        self.assertEqual(outcome(verdict(self, 'control', big_pool), 'resources'), 'PASS')
-        def same_pin_small_pool(ev):  # 6 MiB pinned against 4 + 2 + 0 = 6 MiB: equal to the bound is allowed
-            ev['resource-samples.jsonl'][30]['metrics'].update(pinned=float(6 << 20), cache_bytes=0.0)
-        self.assertEqual(outcome(verdict(self, 'control', same_pin_small_pool), 'resources'), 'PASS')
-        def at_the_bound_with_cache(ev):  # 7 MiB pinned = 4 + 2 + 1: legal only with the product's 1 MiB cache counted
+    def test_the_pin_bound_is_the_configured_sizes(self):
+        def at_the_bound(ev):  # 7 MiB pinned = configured 4 + 2 + 1: legal only with the configured cache counted
             ev['resource-samples.jsonl'][30]['metrics']['pinned'] = float(7 << 20)
-        self.assertEqual(outcome(verdict(self, 'control', at_the_bound_with_cache), 'resources'), 'PASS')
+        self.assertEqual(outcome(verdict(self, 'control', at_the_bound), 'resources'), 'PASS')
         def one_byte_over(ev):
-            ev['resource-samples.jsonl'][30]['metrics'].update(pinned=float((6 << 20) + 1), cache_bytes=0.0)
+            ev['resource-samples.jsonl'][30]['metrics']['pinned'] = float((7 << 20) + 1)
         self.assertEqual(outcome(verdict(self, 'control', one_byte_over), 'resources'), 'FAIL')
+        def smaller_pool(ev):  # the configured pool alone sets the term: 6 MiB + 1 pinned is over 4 + 1 + 1
+            ev['resource-samples.jsonl'][30]['metrics']['pinned'] = float((6 << 20) + 1)
+        v = verdict(self, 'control', smaller_pool, fix=lambda c: c['fault_row'].update(pin_pool_bytes=1 << 20))
+        self.assertEqual(outcome(v, 'resources'), 'FAIL')
 
-    def test_a_pin_bound_without_the_products_charges_is_not_covered(self):
-        for missing in ('pool_bytes', 'cache_bytes'):
-            with self.subTest(missing=missing):
-                def edit(ev, missing=missing):
-                    del ev['resource-samples.jsonl'][30]['metrics'][missing]
-                v = verdict(self, 'control', edit)
+    def test_an_inflated_product_gauge_never_widens_the_bound(self):
+        """Ruling 06:05Z: the product under test cannot set its own bound. A pool gauge of 5 MiB would make 8 MiB
+        legal under 4 + 5 + 1; against the configured 2 MiB pool it is over, and the disagreement is reported."""
+        def inflated(ev):
+            ev['resource-samples.jsonl'][30]['metrics'].update(pinned=float(8 << 20), pool_bytes=float(5 << 20))
+        v = verdict(self, 'control', inflated)
+        self.assertEqual(outcome(v, 'resources'), 'FAIL')
+        self.assertIn('pool_bytes gauge 5242880 > configured 2097152', v['criteria']['resources']['reason'])
+
+    def test_a_pin_bound_without_a_configured_size_is_not_covered(self):
+        for key, value in (('pin_pool_bytes', None), ('pin_cache_bytes', None), ('pin_pool_bytes', '2MiB'), ('pin_cache_bytes', True)):
+            with self.subTest(key=key, value=value):
+                v = verdict(self, 'control', fix=lambda c, key=key, value=value: c['fault_row'].update({key: value}))
                 self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'), v['criteria']['resources'])
 
     def test_pin_over_the_bound_and_a_whole_dat_pin(self):
