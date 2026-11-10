@@ -2,7 +2,8 @@
 """Mount soak load (Stage 1 plan r4): real `weed mount` processes, the workloads, the partition and its witnesses.
 
 Writes the evidence mount_assess.py judges into the run root. Phases never overlap, because the partition stalls every
-mount on the host. Config JSON keys: root, weed, filer (host:port), filer_path, volume_host, volume_port, phases_s (A, B,
+mount on the host. Config JSON keys: root, weed, filer (host:port), filer_path, volume_host and volume_port (or volumes,
+a list of [host, port]: the partition cuts every one), phases_s (A, B,
 C), episodes_s, iptables (argv prefix), mounts (int), dual_append_s, write_budget_bytes (W1's total; the lab cluster is
 small and volumes only reclaim space on vacuum, so an unbounded W1 ends in ENOSPC and proves nothing).
 """
@@ -434,14 +435,26 @@ class Run:
         except (OSError, ValueError) as e:
             return [-1, str(e)]
 
-    def rule(self, action):
+    def volumes(self):
+        """Every volume server the partition cuts: `volumes` [[host, port], ...], or the single volume_host/volume_port."""
         c = self.c
-        return self.fault_cmd(['iptables', action, 'OUTPUT', '-p', 'tcp', '-d', c['volume_host'], '--dport', str(c['volume_port']),
+        v = [(h, int(p)) for h, p in c['volumes']] if 'volumes' in c else [(c['volume_host'], int(c['volume_port']))]
+        if not v:
+            raise RuntimeError('no volume server to partition')
+        return v
+
+    def rule(self, action, host, port):
+        return self.fault_cmd(['iptables', action, 'OUTPUT', '-p', 'tcp', '-d', host, '--dport', str(port),
                                '-m', 'comment', '--comment', 'swmountsoak', '-j', 'DROP'])[0]
 
+    def rules(self, action):
+        """-> the answer for each volume server's rule, in order."""
+        return [self.rule(action, h, p) for h, p in self.volumes()]
+
     def counter(self):
+        """Packets dropped by all the partition's rules; None unless every rule is listed exactly once."""
         lines = [ln for ln in self.fault_cmd(['iptables', '-L', 'OUTPUT', '-v', '-x', '-n'])[1].splitlines() if 'swmountsoak' in ln]
-        return int(lines[0].split()[0]) if lines else None
+        return sum(int(ln.split()[0]) for ln in lines) if len(lines) == len(self.volumes()) else None
 
     def episode(self, ep, secs):
         """The partition is owned here: every way out, including an exception, removes the rule."""
@@ -451,19 +464,20 @@ class Run:
             self.heal_rule()
 
     def heal_rule(self):
-        """Remove every copy of the rule; stops at the first answer other than success."""
-        for _ in range(8):
-            if self.rule('-D') != 0:
-                break
+        """Remove every copy of every volume server's rule; per rule, stops at the first answer other than success."""
+        for h, p in self.volumes():
+            for _ in range(8):
+                if self.rule('-D', h, p) != 0:
+                    break
 
     def run_episode(self, ep, secs):
         c, wb, sync = self.c, 'wb', 'sync'
         rec = dict(argv_direct=all('-volumeServerAccess=direct' in self.mounts[m]['argv'] for m in (wb, sync)))
-        if self.rule('-I') != 0:
-            raise RuntimeError('fault rule not applied')
+        if any(rc != 0 for rc in self.rules('-I')):
+            raise RuntimeError('fault rule not applied')  # episode() removes whatever was installed
         apply_t, start_count = time.monotonic(), self.counter()
         trace = lambda what: self.log(t='trace', ep=ep, what=what, after_apply_s=round(time.monotonic() - apply_t, 2))
-        rec.update(apply=apply_t, rule_confirmed=self.rule('-C') == 0 and start_count is not None)
+        rec.update(apply=apply_t, rule_confirmed=all(rc == 0 for rc in self.rules('-C')) and start_count is not None)
         files, sync_ts, cohort, flock = [], [], [], threading.Lock()
 
         def wb_write(i):
@@ -515,10 +529,10 @@ class Run:
             time.sleep(rest)
         end_count = self.counter()
         rec['counter_rose'] = end_count is not None and start_count is not None and end_count > start_count
-        self.rule('-D')
+        self.rules('-D')
         rec['heal'] = heal_t = time.monotonic()
         trace('healed')
-        rec['rule_gone'] = self.rule('-C') == IPTABLES_NO_SUCH_RULE
+        rec['rule_gone'] = all(rc == IPTABLES_NO_SUCH_RULE for rc in self.rules('-C'))
         join_all(sync_ts + wb_ts, 180)
         self.faults[ep] = rec
         (self.root / 'mount-faults.json').write_text(json.dumps(self.faults, sort_keys=True))

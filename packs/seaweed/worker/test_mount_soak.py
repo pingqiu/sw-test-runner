@@ -127,6 +127,101 @@ class Teardown(Base):
         self.assertEqual(self.run_.fault_cmd(['iptables', '-S'])[0], -1)
 
 
+class TargetFaults:
+    """iptables by target: one rule per (host, port). -I adds, -D removes one copy, -C reports presence, -S/-L list.
+    fail_insert names a target whose -I fails; stuck names a target whose rule will not delete."""
+
+    def __init__(self, fail_insert=None, stuck=None, packets=7):
+        self.rules, self.calls, self.fail_insert, self.stuck, self.packets = [], [], fail_insert, stuck, packets
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        action = argv[1]
+        if action in ('-S', '-L'):
+            body = '\n'.join('%d 0 DROP tcp -- 0.0.0.0/0 %s tcp dpt:%d /* swmountsoak */' % (self.packets, h, p) for h, p in self.rules)
+            return [0, body]
+        target = (argv[argv.index('-d') + 1], int(argv[argv.index('--dport') + 1]))
+        if action == '-I':
+            if target == self.fail_insert:
+                return [4, '']
+            self.rules.append(target)
+            return [0, '']
+        if action == '-D':
+            if target == self.stuck:
+                return [4, '']
+            if target in self.rules:
+                self.rules.remove(target)
+                return [0, '']
+            return [1, '']
+        if action == '-C':
+            return [0 if target in self.rules else 1, '']
+        return [0, '']
+
+
+class ManyVolumes(Base):
+    """The partition cuts every volume server's port, and nothing is left behind on any way out."""
+    VOLS = [['10.0.0.11', 8080], ['10.0.0.12', 8080], ['10.0.0.13', 8081]]
+
+    def setUp(self):
+        super().setUp()
+        self.run_.c['volumes'] = self.VOLS
+
+    def test_every_volume_server_is_cut_then_restored(self):
+        f = TargetFaults()
+        self.run_.fault_cmd = f
+        self.assertEqual(self.run_.rules('-I'), [0, 0, 0])
+        self.assertEqual(sorted(f.rules), sorted((h, p) for h, p in self.VOLS))
+        self.assertEqual(self.run_.counter(), 21)
+        self.assertEqual(self.run_.rules('-C'), [0, 0, 0])
+        self.run_.rules('-D')
+        self.assertEqual(self.run_.rules('-C'), [M.IPTABLES_NO_SUCH_RULE] * 3)
+
+    def test_a_partial_install_fails_the_episode_and_nothing_stays(self):
+        f = TargetFaults(fail_insert=('10.0.0.12', 8080))
+        self.run_.fault_cmd = f
+        self.run_.mounts = {m: dict(dir=self.root, proc=mock.Mock(), argv=['-volumeServerAccess=direct']) for m in ('wb', 'sync')}
+        with self.assertRaisesRegex(RuntimeError, 'fault rule not applied'):
+            self.run_.episode('E1', 1)
+        self.assertEqual(f.rules, [])  # the rule that did go in was removed
+
+    def test_heal_removes_every_volume_servers_rule(self):
+        f = TargetFaults()
+        f.rules = [(h, p) for h, p in self.VOLS] + [(self.VOLS[0][0], self.VOLS[0][1])]  # one target twice
+        self.run_.fault_cmd = f
+        self.run_.heal_rule()
+        self.assertEqual(f.rules, [])
+
+    def test_the_counter_needs_every_rule(self):
+        f = TargetFaults()
+        self.run_.fault_cmd = f
+        self.run_.rules('-I')
+        f.rules.pop()
+        self.assertIsNone(self.run_.counter())
+
+    def test_teardown_is_unknown_while_any_rule_remains(self):
+        f = TargetFaults(stuck=('10.0.0.13', 8081))
+        self.run_.fault_cmd = f
+        self.run_.rules('-I')
+        real_read = Path.read_text
+        with mock.patch.object(M.Path, 'read_text', lambda p, *a, **k: '' if str(p) == '/proc/mounts' else real_read(p, *a, **k)):
+            M.teardown(self.run_, self.root)
+        self.assertEqual(f.rules, [('10.0.0.13', 8081)])
+        self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+    def test_a_single_volume_config_cuts_exactly_that_port(self):
+        del self.run_.c['volumes']
+        f = TargetFaults()
+        self.run_.fault_cmd = f
+        self.run_.rules('-I')
+        self.assertEqual(f.calls, [['iptables', '-I', 'OUTPUT', '-p', 'tcp', '-d', 'v', '--dport', '1',
+                                    '-m', 'comment', '--comment', 'swmountsoak', '-j', 'DROP']])
+
+    def test_an_empty_volume_list_is_refused(self):
+        self.run_.c['volumes'] = []
+        with self.assertRaisesRegex(RuntimeError, 'no volume server'):
+            self.run_.volumes()
+
+
 class StartingMount:
     """A mount process that never becomes ready; it dies on terminate unless stubborn."""
 
