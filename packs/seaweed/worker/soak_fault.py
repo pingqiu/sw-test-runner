@@ -118,8 +118,12 @@ def link_preflight(c):
     ib = Path(sys_root(c)) / 'class' / 'net' / dev / 'device' / 'infiniband'
     # A PCI NIC shows its RDMA device under the netdev's sysfs device; a soft device (rxe) has no such parent, so
     # `rdma link show` naming this netdev for the row's device and port counts as the same mapping.
-    link = run(['rdma', 'link', 'show', '%s/%d' % (c['rdma_device'], c['rdma_port'])], check=False).stdout
-    if not (ib / c['rdma_device']).exists() and not re.search(r'\bnetdev %s\b' % re.escape(dev), link):
+    # Only a successful `rdma link show` (rc 0) whose `netdev` token is exactly this name counts: a VLAN or any other
+    # name with this one as a prefix is another netdev.
+    done = run(['rdma', 'link', 'show', '%s/%d' % (c['rdma_device'], c['rdma_port'])], check=False)
+    tokens = done.stdout.split()
+    soft = done.returncode == 0 and any(t == 'netdev' and n == dev for t, n in zip(tokens, tokens[1:]))
+    if not (ib / c['rdma_device']).exists() and not soft:
         raise Refused('netdev is not the row RDMA device')
     mine = addresses(dev)
     if mine & set(c['management_addrs']):

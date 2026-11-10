@@ -46,7 +46,7 @@ elif tool == 'ss':
     if '-K' in a: (S / 'ss').write_text(read('ss_after'))
     elif any('sport = :22' in x for x in a): print(read('ssh'), end='')
     else: print(read('ss'), end='')
-elif tool == 'rdma' and a[:2] == ['link', 'show']: print(read('rdma_link'), end='')
+elif tool == 'rdma' and a[:2] == ['link', 'show']: print(read('rdma_link'), end=''); sys.exit(int(read('rdma_link_rc') or 0))
 elif tool == 'rdma': print(read('rdma_' + a[-1]) or '[]')
 '''
 
@@ -220,6 +220,23 @@ class LinkFlap(Host):
         shutil.rmtree(self.state / 'sys/class/net/ens1f0/device/infiniband/mlx5_0')
         (self.state / 'rdma_link').write_text('link mlx5_0/1 state ACTIVE physical_state LINK_UP netdev ens1f9 \n')
         self.assertIn('not the row RDMA device', self.cli(self.config('link_flap'), 'apply', expect=3)['refused'])
+
+    def test_the_soft_mapping_needs_an_exact_name_and_rc_0(self):
+        """Review P1: `ens1f0.100` is another netdev, and an `rdma link show` that failed (rc 23) proves nothing,
+        whatever it printed. Each refuses before any change: no dead-man, no flap."""
+        for name, text, rc in (('VLAN-suffixed name', 'netdev ens1f0.100', '0'), ('name with a suffix', 'netdev ens1f0x', '0'),
+                               ('failed query with matching text', 'netdev ens1f0', '23')):
+            with self.subTest(name=name):
+                self.setUp()
+                self.dummy()
+                shutil.rmtree(self.state / 'sys/class/net/ens1f0/device/infiniband/mlx5_0')
+                (self.state / 'rdma_link').write_text('link mlx5_0/1 state ACTIVE physical_state LINK_UP %s \n' % text)
+                (self.state / 'rdma_link_rc').write_text(rc)
+                row = self.cli(self.config('link_flap'), 'apply', expect=3)
+                self.assertIn('not the row RDMA device', row['refused'])
+                self.assertFalse(self.calls('systemd-run'))
+                self.assertFalse([r for r in self.calls('ip') if r[1] == 'link'])
+                self.assertEqual((self.state / 'sys/class/infiniband/mlx5_0/ports/1/state').read_text().strip(), '4: ACTIVE')
 
     def test_preflight_refuses_and_changes_nothing(self):
         self.dummy()
@@ -466,6 +483,8 @@ class Sampler(Host):
             + 'ESTAB 0 0 127.0.0.1:8080 127.0.0.1:41000 users:(("weed-volume",pid=%d,fd=9))\n' % p.pid
             + 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8080 users:(("weed",pid=%d,fd=3))\n' % me
             + 'ESTAB 0 0 127.0.0.1:8080 198.51.100.9:40000 users:(("weed-volume",pid=%d,fd=10))\n' % p.pid
+            + 'CLOSE-WAIT 1 0 127.0.0.1:8080 127.0.0.1:41500 users:(("weed-volume",pid=%d,fd=11))\n' % p.pid
+            + 'FIN-WAIT-2 0 0 127.0.0.1:41500 127.0.0.1:8080 users:(("weed",pid=%d,fd=4))\n' % me
             + 'TIME-WAIT 0 0 127.0.0.1:8080 127.0.0.1:41999\n')
         saved = dict(os.environ)
         os.environ.update(self.env)
@@ -474,9 +493,11 @@ class Sampler(Host):
         finally:
             os.environ.clear()
             os.environ.update(saved)
-        self.assertEqual([r['state'] for r in rows], ['ESTAB', 'ESTAB', 'LISTEN'])
+        self.assertEqual([r['state'] for r in rows], ['CLOSE-WAIT', 'ESTAB', 'ESTAB', 'LISTEN'])
         ident = soak_fault.identity(me)
-        self.assertEqual(owners, {'127.0.0.1:41000': dict(pid=me, starttime=ident['starttime'])})  # the remote peer has no local owner
+        mine = dict(pid=me, starttime=ident['starttime'])
+        # every connected state's peer is joined (the CLOSE-WAIT one included); the remote peer has no local owner
+        self.assertEqual(owners, {'127.0.0.1:41000': mine, '127.0.0.1:41500': mine})
         self.assertIsNone(soak_fault.socket_view(p.pid, run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', '')))
 
     def test_a_malformed_volumes_field_is_unread_through_the_sampler_cli(self):

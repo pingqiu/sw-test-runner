@@ -874,8 +874,8 @@ def socket_class(pre, final, samples, clients):
     def count(s):
         per, outcome = {}, 'infrastructure'
         for r in s['tcp']:
-            if r.get('state') != 'ESTAB':
-                continue
+            if r.get('state') == 'LISTEN':
+                continue  # every other state has a peer and is classified by it (ESTAB, CLOSE-WAIT, SYN-SENT, ...)
             owner = key(s['tcp_owners'].get(r.get('peer')))
             if owner in roles:
                 per[roles[owner]] = per.get(roles[owner], 0) + 1

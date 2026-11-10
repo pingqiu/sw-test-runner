@@ -119,7 +119,7 @@ def socket_view(pid, run=None):
     if table is None:
         return None
     mine = [dict(state=r['state'], local=r['local'], peer=r['peer']) for r in table if pid in r['pids']]
-    peers = {r['peer'] for r in mine if r['state'] == 'ESTAB'}
+    peers = {r['peer'] for r in mine if r['state'] != 'LISTEN'}  # every connected state: CLOSE-WAIT, SYN-SENT, ...
     owners = {}
     for r in table:
         if r['local'] in peers and r['pids']:

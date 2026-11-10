@@ -737,6 +737,39 @@ class Fail(unittest.TestCase):
         v = self.check('control', lambda ev: self.quiet_sockets(ev, [conn], {'127.0.0.1:52001': dict(WID[1])}), 'resources')
         self.assertEqual(v['resource_classes']['sockets'], 'leak')
 
+    def test_a_client_socket_in_any_connected_state_is_a_leak(self):
+        """Review P1: retained client sockets are not only ESTAB. CLOSE-WAIT, SYN-SENT and the other non-LISTEN
+        states are classified by peer exactly like ESTAB."""
+        for state in ('CLOSE-WAIT', 'SYN-SENT', 'FIN-WAIT-1', 'LAST-ACK', 'SYN-RECV', 'CLOSING'):
+            with self.subTest(state=state):
+                conn = dict(state=state, local='127.0.0.1:8080', peer='127.0.0.1:52002')
+                def edit(ev, conn=conn):
+                    for s in ev['resource-samples.jsonl']:
+                        if s['phase'] == 'load':
+                            s['tcp_owners'] = dict(s['tcp_owners'], **{'127.0.0.1:52002': dict(WID[2])})
+                    self.quiet_sockets(ev, [conn])
+                v = self.check('control', edit, 'resources')
+                self.assertEqual(v['resource_classes']['sockets'], 'leak')
+
+    def test_a_role_peer_in_close_wait_counts_toward_its_cap(self):
+        within = dict(state='CLOSE-WAIT', local='127.0.0.1:8080', peer='127.0.0.1:41000')  # the filer's one socket, now closing
+        def only_close_wait(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] != 'pre_load':
+                    s['tcp'] = TCP + [within]
+        self.assertEqual(verdict(self, 'control', only_close_wait)['resource_classes']['sockets'], 'infrastructure')
+        over = dict(state='CLOSE-WAIT', local='127.0.0.1:8080', peer='127.0.0.1:41002')
+        v = self.check('control', lambda ev: self.quiet_sockets(ev, [over], {'127.0.0.1:41002': dict(FILER)}), 'resources')
+        self.assertEqual(v['resource_classes']['sockets'], 'leak')  # ESTAB + CLOSE-WAIT to the filer: 2 > 0 + 1
+
+    def test_an_unattributable_socket_in_close_wait_is_not_covered(self):
+        def edit(ev):
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'quiescence':
+                    s['tcp'] = s['tcp'] + [dict(state='CLOSE-WAIT', local='127.0.0.1:8080', peer='198.51.100.9:40001')]
+                    s.update(socket_fds=s['socket_fds'] + 1, fds=s['fds'] + 1)
+        self.assertEqual(verdict(self, 'control', edit)['resource_classes']['sockets'], 'NOT_COVERED')
+
     def test_a_listener_above_baseline_is_a_leak(self):
         v = self.check('control', lambda ev: self.quiet_sockets(ev, [dict(state='LISTEN', local='127.0.0.1:9999', peer='*:*')]), 'resources')
         self.assertEqual(v['resource_classes']['sockets'], 'leak')
