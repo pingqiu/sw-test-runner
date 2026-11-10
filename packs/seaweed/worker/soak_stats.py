@@ -136,6 +136,10 @@ def volume_list(url, timeout=3):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             rows = json.loads(response.read(4 << 20))['Volumes']
+        # Only a JSON array of volume objects is the product's list: an object, a string or null (which would
+        # iterate as nothing) is unread, never an empty list that would account every data fd away.
+        if not isinstance(rows, list) or not all(isinstance(v, dict) for v in rows):
+            return None
         out = []
         for v in rows:
             vid, coll = v['Id'], v.get('Collection', '')

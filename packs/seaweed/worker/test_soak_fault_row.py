@@ -360,6 +360,16 @@ class NotCovered(unittest.TestCase):
         self.assertEqual((v['resource_classes']['qp'], v['resource_classes']['mr']), ('NOT_COVERED', 'NOT_COVERED'))
         self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
 
+    def test_a_malformed_volume_list_in_the_evidence_is_not_covered(self):
+        for bad in ({}, 'lmcache_3', [3, 4], [None]):
+            with self.subTest(bad=bad):
+                def edit(ev, bad=bad):
+                    for s in ev['resource-samples.jsonl']:
+                        s['volumes'] = bad
+                v = verdict(self, 'control', edit)
+                self.assertEqual(v['resource_classes']['data_fds'], 'NOT_COVERED')
+                self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
     def test_no_volume_list_leaves_data_fds_not_covered(self):
         for missing in ('volumes', 'data_files'):
             with self.subTest(missing=missing):

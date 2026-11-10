@@ -479,6 +479,40 @@ class Sampler(Host):
         self.assertEqual(owners, {'127.0.0.1:41000': dict(pid=me, starttime=ident['starttime'])})  # the remote peer has no local owner
         self.assertIsNone(soak_fault.socket_view(p.pid, run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', '')))
 
+    def test_a_malformed_volumes_field_is_unread_through_the_sampler_cli(self):
+        """Review P2: an object, a string or null in /status `Volumes` must never become an empty list. Through the
+        real sampler CLI the row's `volumes` is null, and the assessor then leaves data_fds NOT_COVERED."""
+        self.dummy()
+        bodies = {'object': dict(Volumes={}), 'string': dict(Volumes=''), 'text': dict(Volumes='lmcache_3'), 'null': dict(Volumes=None),
+                  'bad elements': dict(Volumes=[1, 'x']), 'element without Id': dict(Volumes=[dict(Collection='lmcache')]),
+                  'empty array': dict(Volumes=[])}
+        current = {}
+
+        class Status(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = json.dumps(current['body']).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Status)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                current['body'] = body
+                root = self.tmp / name.replace(' ', '-')
+                root.mkdir()
+                c = self.config('control', root=str(root), max_s=0.5, volume_status_url='http://127.0.0.1:%d/status' % server.server_address[1])
+                subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                               env=self.env, timeout=30, check=True)
+                rows = [json.loads(line) for line in (root / 'resource-samples.jsonl').read_text().splitlines()]
+                want = [] if name == 'empty array' else None  # a well-formed empty array is a real answer: no volume open
+                self.assertTrue(rows and all(r['volumes'] == want for r in rows), rows[:1])
+
     def test_the_volume_list_comes_from_the_servers_status(self):
         answers = {'/good': dict(Volumes=[dict(Id=4, Collection='lmcache'), dict(Id=3, Collection='lmcache'), dict(Id=7, Collection='')]),
                    '/bad-id': dict(Volumes=[dict(Id='4', Collection='lmcache')]), '/bool-id': dict(Volumes=[dict(Id=True, Collection='lmcache')]),

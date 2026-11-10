@@ -888,7 +888,8 @@ def data_fd_class(s):
     """Data fds at the end of quiescence, bounded by the volume server's own open-volume list (its /status):
     each listed volume may hold one fd per data/index file; any other data fd (an unlisted volume, or a second
     fd on one file) is surplus and a leak. No product list, or no file names: NOT_COVERED, never accounted."""
-    if s is None or s.get('identity') is None or not isinstance(s.get('volumes'), list) or not isinstance(s.get('data_files'), list):
+    if s is None or s.get('identity') is None or not isinstance(s.get('volumes'), list) or not isinstance(s.get('data_files'), list) \
+            or not all(isinstance(x, str) for x in s['volumes'] + s['data_files']):
         return 'NOT_COVERED'
     listed, seen, surplus = set(s['volumes']), set(), 0
     for name in s['data_files']:
