@@ -305,7 +305,7 @@ def sample(c):
                 pid = ident['pid']
                 fv = fd_view(pid)
                 mem = proc_memory('/proc/%d/status' % pid)
-                threads, rdma = rdma_sample(pid)  # joined on the thread group, bracketed by a snapshot before and after
+                threads, rdma = rdma_sample(pid, ident['starttime'])  # (tid, starttime) group, identical before and after the read
                 row.update(fds=fv[0] if fv else None, dat_sizes=fv[1] if fv else None, data_fds=len(fv[2]) if fv else None,
                            data_files=fv[2] if fv else None, socket_fds=fv[3] if fv else None, limits=limits(pid),
                            threads=threads, rdma=rdma,

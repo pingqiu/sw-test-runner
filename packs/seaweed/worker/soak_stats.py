@@ -188,55 +188,70 @@ def kernel_management_qp(row):
     return 'pid' not in row and row.get('comm') == 'ib_core' and row.get('type') in ('GSI', 'SMI')
 
 
-def thread_group(pid, proc='/proc'):
-    """The tids of pid's thread group, sorted, or None if unread. The kernel's rdma resource table attributes each
-    object to the THREAD that created it (M02, F1 2026-11-10: the volume's RC QPs under a worker tid), so the volume's
-    rows are joined by its thread group. A tid counts only when it is listed under /proc/<pid>/task AND that task's
-    own status names Tgid == pid; anything not provably in the group stays unattributed."""
+def task_starttime(text):
+    """A /proc stat line's starttime (field 22, counted after the last ')'), or None if malformed."""
+    fields = text.rpartition(')')[2].split()
+    return int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else None
+
+
+def thread_group(pid, starttime=None, proc='/proc'):
+    """The volume's thread group as a frozenset of (tid, starttime), or None if unread. The kernel's rdma resource
+    table attributes each object to the THREAD that created it (M02, F1 2026-11-10: the volume's RC QPs under a
+    worker tid), so its rows are joined on this group. All or nothing (review of r10):
+    - each task listed under /proc/<pid>/task is identified by (tid, starttime), starttime from its own stat;
+    - every listed task's status must name Tgid == pid (a foreign Tgid refuses the group, never a partial one);
+    - the main task must be listed, and match the recorded (pid, starttime) when one is given;
+    - any read error, vanished task or malformed status/stat makes the whole group unread."""
     try:
-        tids = [int(t) for t in os.listdir('%s/%d/task' % (proc, pid)) if t.isdigit()]
+        tids = sorted(int(t) for t in os.listdir('%s/%d/task' % (proc, pid)) if t.isdigit())
     except OSError:
         return None
-    group = []
+    group = set()
     for tid in tids:
+        base = '%s/%d/task/%d/' % (proc, pid, tid)
         try:
-            with open('%s/%d/task/%d/status' % (proc, pid, tid)) as f:
-                text = f.read()
-        except (FileNotFoundError, ProcessLookupError):
-            continue  # ENOENT/ESRCH: the thread provably exited between the listing and the read
+            with open(base + 'status') as f:
+                status = f.read()
+            with open(base + 'stat') as f:
+                stat = f.read()
         except OSError:
-            return None  # any other unreadable status: the group is unread, never main-only
-        tgid = [l.split() for l in text.splitlines() if l.startswith('Tgid:')]
-        if len(tgid) != 1 or len(tgid[0]) != 2 or not tgid[0][1].isdigit():
-            return None  # a malformed status: unread
-        if int(tgid[0][1]) == pid:
-            group.append(tid)
-    return sorted(group) if pid in group else None
+            return None  # vanished or unreadable: unread, never a partial group
+        tgid = [l.split() for l in status.splitlines() if l.startswith('Tgid:')]
+        if len(tgid) != 1 or len(tgid[0]) != 2 or not tgid[0][1].isdigit() or int(tgid[0][1]) != pid:
+            return None  # malformed, or a task of another thread group: unread
+        start = task_starttime(stat)
+        if start is None:
+            return None
+        group.add((tid, start))
+    main = [s for t, s in group if t == pid]
+    if len(main) != 1 or starttime is not None and main[0] != starttime:
+        return None  # the main task is gone or is another generation of the pid
+    return frozenset(group)
 
 
-def rdma_sample(pid, run=None, proc='/proc', tries=3):
-    """(group, view): the volume's thread group and the QPs/MRs it owns, {'qp': n, 'mr': n, 'mr_lens': [...]}, or
-    (None, None) when unread. The table read is bracketed by a thread-group snapshot before and after it: a thread
-    that appeared or exited meanwhile may own rows the stale group would miss, so that attempt is discarded (retried
-    up to `tries` times within the sample) and never counted. Without a readable group the view is unread, never a
-    main-pid-only count. A table with any row that carries no integer pid cannot be joined (that row could be this
-    process's), so the whole view is unread; the one exception is the kernel's own per-port management QP."""
+def rdma_sample(pid, starttime=None, run=None, proc='/proc'):
+    """(group, view): the volume's thread group as sorted [tid, starttime] pairs and the QPs/MRs it owns,
+    {'qp': n, 'mr': n, 'mr_lens': [...]}, or (None, None) when unread. The table read is bracketed by thread-group
+    snapshots before and after it, and the two (tid, starttime) sets must be identical: a thread that appeared,
+    exited or was replaced by a recycled tid meanwhile could own rows the stale group would credit wrongly, so the
+    sample is unread (NOT_COVERED), never a count. A table with any row that carries no integer pid cannot be joined
+    (that row could be this process's), so the view is unread; the one exception is the kernel's per-port
+    management QP."""
     import subprocess
     run = run or subprocess.run
-    for _ in range(tries):
-        group = thread_group(pid, proc)
-        if not group:
-            return None, None
-        qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
-        if thread_group(pid, proc) != group:
-            continue  # the group changed while the table was read: not this attempt
-        return group, rdma_join(group, qp, mr)
-    return None, None
+    before = thread_group(pid, starttime, proc)
+    if not before:
+        return None, None
+    qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
+    after = thread_group(pid, starttime, proc)
+    if after != before:
+        return None, None
+    return sorted([t, s] for t, s in before), rdma_join([t for t, _ in before], qp, mr)
 
 
-def rdma_view(pid, run=None, proc='/proc'):
+def rdma_view(pid, run=None, proc='/proc', starttime=None):
     """The view of rdma_sample alone."""
-    return rdma_sample(pid, run, proc)[1]
+    return rdma_sample(pid, starttime, run, proc)[1]
 
 
 def rdma_join(group, qp, mr):

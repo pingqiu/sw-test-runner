@@ -513,75 +513,104 @@ class Sampler(Host):
         self.assertTrue(rows)
         for r in rows:
             self.assertEqual(r['rdma'], dict(qp=4, mr=2, mr_lens=[134217728, 134217728]), r['rdma'])
-            self.assertEqual(sorted(r['threads']), sorted([p.pid] + p.tids))
+            self.assertEqual(sorted(t for t, _ in r['threads']), sorted([p.pid] + p.tids))
+            self.assertIn([p.pid, r['identity']['starttime']], r['threads'])  # the main, at its recorded generation
 
-    def test_a_tid_outside_the_thread_group_is_never_the_volumes(self):
-        """thread_group admits only tids listed under /proc/<pid>/task whose own status names that Tgid."""
+    def test_a_real_thread_group_is_tid_and_starttime_of_the_recorded_main(self):
+        """On a real process: the group is (tid, starttime) of the main and its threads; another generation of the
+        main (a wrong recorded starttime) or a missing process is unread, and so is the view of a pid whose group
+        cannot be read even though rows carry its pid."""
         p = self.dummy(threads=1)
-        self.assertEqual(soak_fault.thread_group(p.pid), sorted([p.pid] + p.tids))
-        self.assertNotIn(os.getpid(), soak_fault.thread_group(p.pid))
-        self.assertIsNone(soak_fault.thread_group(2 ** 22 + 7))  # no such process: unread, never {pid}
-        gone = 2 ** 22 + 7  # its rows are listed, but its thread group cannot be read: the view is unread, not a count
+        start = soak_fault.identity(p.pid)['starttime']
+        g = soak_fault.thread_group(p.pid, start)
+        self.assertEqual(sorted(t for t, _ in g), sorted([p.pid] + p.tids))
+        self.assertIn((p.pid, start), g)
+        self.assertIsNone(soak_fault.thread_group(p.pid, start + 1))
+        self.assertIsNone(soak_fault.thread_group(2 ** 22 + 7))
+        gone = 2 ** 22 + 7
         table = lambda args, **k: subprocess.CompletedProcess(args, 0, json.dumps([dict(pid=gone, lqpn=5, type='RC')])
                                                               if args[-1] == 'qp' else json.dumps([dict(pid=gone, mrlen=4096)]), '')
         self.assertIsNone(soak_fault.rdma_view(gone, run=table))
-        fake = self.tmp / 'proc'
-        for tid, tgid in ((500, 500), (501, 500), (502, 999)):  # 502 is listed but belongs to another group
-            (fake / '500/task' / str(tid)).mkdir(parents=True)
-            (fake / '500/task' / str(tid) / 'status').write_text('Name:\tx\nTgid:\t%d\nPid:\t%d\n' % (tgid, tid))
-        self.assertEqual(soak_fault.thread_group(500, proc=str(fake)), [500, 501])
 
-    def fake_proc(self, statuses):
-        """A fake /proc with pid 500's task dir: tid -> status text, None (listed, status gone: ENOENT) or 'DIR'."""
+    def fake_proc(self, tasks):
+        """A fake /proc with pid 500's task dir. tasks: tid -> (tgid, starttime), or a dict of raw files
+        {'status': text|'DIR'|None, 'stat': text|'DIR'|None} (None: the file is absent)."""
         fake = self.tmp / ('proc%d' % len(list(self.tmp.glob('proc*'))))
-        for tid, text in statuses.items():
-            d = fake / '500/task' / str(tid)
-            d.mkdir(parents=True)
-            if text == 'DIR':
-                (d / 'status').mkdir()
-            elif text is not None:
-                (d / 'status').write_text(text)
+        for tid, spec in tasks.items():
+            self.put_task(fake, tid, spec)
         return fake
 
-    def test_a_thread_group_read_is_all_or_nothing(self):
-        """Any listed tid whose status cannot be read or parsed makes the whole group unread (never main-only); only a
-        status that is provably gone (ENOENT: the thread exited) drops that tid."""
-        st = lambda tgid: 'Name:\tx\nTgid:\t%d\nPid:\t1\n' % tgid
-        self.assertEqual(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: st(500), 502: None}))), [500, 501])
-        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'DIR'}))))  # EISDIR
-        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'Name:\tx\nPid:\t501\n'}))))
-        self.assertIsNone(soak_fault.thread_group(500, proc=str(self.fake_proc({500: st(500), 501: 'Tgid:\tx500\n'}))))
+    @staticmethod
+    def stat_line(tid, tgid, start):
+        """A /proc stat line: after the comm's ')', fields 3.. with starttime exactly at field 22."""
+        fields = ['S', '1', str(tgid), str(tgid), '0', '-1'] + ['0'] * 13 + [str(start), '1000', '10']
+        return '%d (weed volume) %s\n' % (tid, ' '.join(fields))
 
-    def test_a_group_change_during_the_table_read_is_never_counted(self):
-        """The table read is bracketed by thread-group snapshots: a thread appearing meanwhile discards the attempt
-        (retried within the sample); if it keeps changing, the sample is unread, never a count on a stale group."""
-        st = 'Name:\tx\nTgid:\t500\n'
-        fake = self.fake_proc({500: st, 501: st})
-        added = [600]
+    @classmethod
+    def put_task(cls, fake, tid, spec):
+        d = fake / '500/task' / str(tid)
+        d.mkdir(parents=True, exist_ok=True)
+        if isinstance(spec, tuple):
+            tgid, start = spec
+            spec = dict(status='Name:\tx\nTgid:\t%d\nPid:\t%d\n' % (tgid, tid), stat=cls.stat_line(tid, tgid, start))
+        for name, text in spec.items():
+            if (d / name).is_dir():
+                (d / name).rmdir()
+            elif (d / name).exists():
+                (d / name).unlink()
+            if text == 'DIR':
+                (d / name).mkdir()
+            elif text is not None:
+                (d / name).write_text(text)
 
-        def growing(args, **k):  # every qp read sees a new worker thread appear, owning a QP
-            tid = added[-1] + 1
-            added.append(tid)
-            (fake / '500/task' / str(tid)).mkdir(parents=True)
-            (fake / '500/task' / str(tid) / 'status').write_text(st)
-            body = [dict(pid=tid, lqpn=tid, type='RC')] if args[-1] == 'qp' else [dict(pid=500, mrlen=4096)]
-            return subprocess.CompletedProcess(args, 0, json.dumps(body), '')
-        self.assertEqual(soak_fault.rdma_sample(500, run=growing, proc=str(fake)), (None, None))
-        stable = self.fake_proc({500: st, 501: st})
+    def test_a_foreign_tgid_task_refuses_the_whole_group(self):
+        """A listed task of another thread group refuses the group, never a partial (main-only) one."""
+        self.assertEqual(soak_fault.thread_group(500, 77, proc=str(self.fake_proc({500: (500, 77), 501: (500, 88)}))),
+                         frozenset({(500, 77), (501, 88)}))
+        self.assertIsNone(soak_fault.thread_group(500, 77, proc=str(self.fake_proc({500: (500, 77), 501: (500, 88), 502: (999, 99)}))))
+
+    def test_a_vanished_or_unreadable_task_refuses_the_whole_group(self):
+        """A listed task whose status or stat is gone, unreadable or malformed refuses the group (no exemption)."""
+        good = 'Name:\tx\nTgid:\t500\n'
+        stat = self.stat_line(501, 500, 88)
+        for name, spec in (('status gone', dict(status=None, stat=stat)), ('stat gone', dict(status=good, stat=None)),
+                           ('status unreadable', dict(status='DIR', stat=stat)), ('stat unreadable', dict(status=good, stat='DIR')),
+                           ('status without Tgid', dict(status='Name:\tx\n', stat=stat)),
+                           ('stat without starttime', dict(status=good, stat='501 (w) S 1 500\n'))):
+            with self.subTest(name=name):
+                self.assertIsNone(soak_fault.thread_group(500, 77, proc=str(self.fake_proc({500: (500, 77), 501: spec}))))
+
+    def test_the_main_must_be_its_recorded_generation(self):
+        """The main task must be listed with the recorded starttime: another generation of the pid is unread."""
+        fake = str(self.fake_proc({500: (500, 77), 501: (500, 88)}))
+        self.assertIsNotNone(soak_fault.thread_group(500, 77, proc=fake))
+        self.assertIsNone(soak_fault.thread_group(500, 78, proc=fake))
+        self.assertIsNone(soak_fault.thread_group(500, None, proc=str(self.fake_proc({501: (500, 88)}))))  # main not listed
+        table = lambda args, **k: subprocess.CompletedProcess(args, 0, '[]', '')
+        self.assertEqual(soak_fault.rdma_sample(500, 78, run=table, proc=fake), (None, None))  # the sampler's own path
+
+    def test_the_snapshots_around_the_table_read_must_be_identical(self):
+        """The (tid, starttime) sets before and after the rdma read must be identical: the same numeric tids with a
+        recycled leader or worker (a new starttime), a vanished task or a new one make the sample unread. No recorded
+        starttime is passed here, so only the before/after comparison can refuse."""
         table = lambda args, **k: subprocess.CompletedProcess(args, 0, json.dumps(
             [dict(pid=501, lqpn=9, type='RC')] if args[-1] == 'qp' else [dict(pid=500, mrlen=4096)]), '')
-        self.assertEqual(soak_fault.rdma_sample(500, run=table, proc=str(stable)), ([500, 501], dict(qp=1, mr=1, mr_lens=[4096])))
-        once = self.fake_proc({500: st})
-        calls = []
+        cases = {'leader recycled (same tid, new starttime)': lambda f: self.put_task(f, 500, (500, 177)),
+                 'worker recycled (same tid, new starttime)': lambda f: self.put_task(f, 501, (500, 188)),
+                 'worker vanished': lambda f: shutil.rmtree(f / '500/task/501'),
+                 'worker appeared': lambda f: self.put_task(f, 502, (500, 99))}
+        for name, change in cases.items():
+            with self.subTest(name=name):
+                fake = self.fake_proc({500: (500, 77), 501: (500, 88)})
 
-        def changes_once(args, **k):  # the group grows during the first attempt only
-            calls.append(args[-1])
-            if len(calls) == 1:
-                (once / '500/task/502').mkdir(parents=True)
-                (once / '500/task/502/status').write_text(st)
-            return table(args)
-        self.assertEqual(soak_fault.rdma_sample(500, run=changes_once, proc=str(once)), ([500, 502], dict(qp=0, mr=1, mr_lens=[4096])))
-        self.assertEqual(len(calls), 4)  # two attempts, each reading qp and mr
+                def during(args, **k):
+                    if args[-1] == 'qp':
+                        change(fake)
+                    return table(args)
+                self.assertEqual(soak_fault.rdma_sample(500, run=during, proc=str(fake)), (None, None))
+        stable = self.fake_proc({500: (500, 77), 501: (500, 88)})  # the positive control: accounted as before
+        self.assertEqual(soak_fault.rdma_sample(500, 77, run=table, proc=str(stable)),
+                         ([[500, 77], [501, 88]], dict(qp=1, mr=1, mr_lens=[4096])))
 
     def test_f1_and_f2_rows_sample_and_mark_but_never_inject(self):
         """The runner pins the sampler and markers with the row's own kind; F1/F2 must sample, never apply."""
