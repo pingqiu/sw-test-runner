@@ -757,8 +757,18 @@ def assess_row(c):
          '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
 
     # 6. Resources: the pin bound at every sample, no whole .dat pin, and each view's quiescence class.
-    pinned = [s['metrics']['pinned'] for s in samples if isinstance(s.get('metrics'), dict) and 'pinned' in s['metrics']]
-    over = [p for p in pinned if p > row['pin_bound_bytes']]
+    # Pin bound per sample (ruling 05:31Z): the packet's ranges term plus the pool and cache charges the deployed
+    # product itself reports in that sample. A pinned sample without both charges has no bound: NOT_COVERED.
+    pinned, unbounded, over = [], [], []
+    for s in samples:
+        m = s.get('metrics') if isinstance(s.get('metrics'), dict) else {}
+        if 'pinned' not in m:
+            continue
+        pinned.append(m['pinned'])
+        if 'pool_bytes' not in m or 'cache_bytes' not in m:
+            unbounded.append(s['seq'])
+        elif m['pinned'] > row['pin_ranges_bytes'] + m['pool_bytes'] + m['cache_bytes']:
+            over.append((s['seq'], m['pinned'], row['pin_ranges_bytes'] + m['pool_bytes'] + m['cache_bytes']))
     whole = [s['seq'] for s in samples if (s.get('rdma') or {}).get('mr_lens') and any(
         d > 0 and -(-d // PAGE) * PAGE in s['rdma']['mr_lens'] for d in s.get('dat_sizes') or [])]
     # The baseline is a pre-load sample provably taken before the load started: its M02 time below the earliest M02
@@ -768,10 +778,10 @@ def assess_row(c):
     clients += [dict(pid=(k.get(x) or {}).get('pid'), starttime=(k.get(x) or {}).get('starttime')) for k in kills for x in ('victim', 'replacement')]
     clients += [m['client'] for m in marks if m['event'] == 'audit_done' and isinstance(m.get('client'), dict)]
     classes = resource_classes(samples, row, before_load, clients)
-    outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned else 'PASS'] + \
+    outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned or unbounded else 'PASS'] + \
         ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
-    mark('resources', rank(outcomes), 'pin max %s bound %d, whole .dat %s, classes %s' % (
-        max(pinned, default=None), row['pin_bound_bytes'], whole[:3], classes))
+    mark('resources', rank(outcomes), 'pin max %s, ranges %d + product pool/cache; over %s, unbounded samples %d, whole .dat %s, classes %s' % (
+        max(pinned, default=None), row['pin_ranges_bytes'], over[:2], len(unbounded), whole[:3], classes))
 
     # 7. Causal witness: the row's host event and its effect, joined on PID/starttime and window. R0 runs every
     # host-event check and must find none.
@@ -991,7 +1001,10 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
             return nc('memlock not lowered in /proc/pid/limits')
         t = (apply_.get('after') or {}).get('mono')
         tried = [counter_rose(samples, k, ident, t, span[1]) for k in ('registration_refused', 'registration_fallback')]
-        return ('PASS', 'a registration after the change was refused or fell back') if True in tried else \
+        if True in tried:
+            return 'PASS', 'a registration after the change was refused or fell back'
+        put = refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span)
+        return ('PASS', 'PUT %s REFUSED after the change, on the volume the limit was lowered on' % put) if put else \
             nc('no new registration attempted after the change')
     if kind == 'disk_full':
         if not (ev['disk_low'] and ((apply_.get('after') or {}).get('free') or math.inf) < row['free_below_bytes']):
@@ -1004,6 +1017,24 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         rose = counter_rose(samples, 'accept_errors', ident, (apply_.get('after') or {}).get('mono', start), span[1])
         return ('PASS', 'accept/open errors rose on that pid') if rose else nc('no failed accept or open observed')
     return nc('unknown row')
+
+
+def refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span):
+    """F5's write-side witness (ruling 05:31Z): a PUT the ledger records REFUSED (a named definite refusal before
+    any mutation) that certainly ended after the limit change and inside the row window, while the volume was the
+    very pid/starttime whose limit was lowered (the row has one volume, so every PUT targets it). Needs the M01-M02
+    clock join; without it, or with any other volume identity sampled in the window, there is no witness."""
+    changed = (apply_.get('after') or {}).get('epoch')
+    if lo is None or changed is None or span is None:
+        return None
+    window = [s for s in samples if span[0] <= s['mono'] <= span[1]]
+    if not window or any(s.get('identity') != ident for s in window):
+        return None
+    end = f['ready_mono'] + row['recovery_s']
+    for r in ledger:
+        if r['state'] == 'REFUSED' and r['completed'] + lo > changed and r['completed'] <= end:
+            return r['op']
+    return None
 
 
 def fallback_rose(root, workers, row, window):

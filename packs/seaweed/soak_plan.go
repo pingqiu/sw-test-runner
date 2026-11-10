@@ -238,23 +238,21 @@ type FaultRow struct {
 	RetainedBudgetBytes    int64             `json:"retained_budget_bytes"`
 }
 
-// PinBound is the plan's formula, frozen in the packet: max inflight ranges across clients x largest range
-// + configured pool and cache charges.
+// PinBound is the plan's formula: max inflight ranges across clients x largest range + the pool and cache
+// charges. The range terms are frozen in the packet; the pool and cache charges are the deployed product's
+// own (ruling 05:31Z): the assessor reads them from the metrics named pool_bytes and cache_bytes, sample by
+// sample, and a bound with either missing is NOT_COVERED, never a placeholder.
 type PinBound struct {
 	MaxInflightRanges int64 `json:"max_inflight_ranges"`
 	LargestRangeBytes int64 `json:"largest_range_bytes"`
-	PoolBytes         int64 `json:"pool_bytes"`
-	CacheBytes        int64 `json:"cache_bytes"`
 }
 
-// bytes is the bound, or -1 when a term is out of range or the sum overflows.
+// bytes is the ranges term of the bound, or -1 when a term is out of range.
 func (b PinBound) bytes() int64 {
-	const limit = 1 << 50
-	if b.MaxInflightRanges < 1 || b.MaxInflightRanges > 1<<20 || b.LargestRangeBytes < 1 || b.LargestRangeBytes > 1<<30 ||
-		b.PoolBytes < 0 || b.PoolBytes > limit || b.CacheBytes < 0 || b.CacheBytes > limit {
+	if b.MaxInflightRanges < 1 || b.MaxInflightRanges > 1<<20 || b.LargestRangeBytes < 1 || b.LargestRangeBytes > 1<<30 {
 		return -1
 	}
-	return b.MaxInflightRanges*b.LargestRangeBytes + b.PoolBytes + b.CacheBytes
+	return b.MaxInflightRanges * b.LargestRangeBytes
 }
 
 // Frozen row values from the plan: recovery 60 s for F1-F2 and 30 s for F3-F7 (R0 records a baseline under
@@ -263,7 +261,7 @@ var (
 	rowRecovery = map[string]int{KindControl: 30, KindVolumeKillIO: 60, KindClientKillPut: 60, KindLinkFlap: 30,
 		KindConnKill: 30, KindMRPressure: 30, KindDiskFull: 30, KindFDExhaust: 30}
 	rowHold       = map[string]int{KindLinkFlap: 30, KindMRPressure: 60, KindFDExhaust: 60}
-	rowMetricKeys = []string{"released", "registration_refused", "registration_fallback", "accept_errors", "pinned", "retained_bytes", "retained_sources"}
+	rowMetricKeys = []string{"released", "registration_refused", "registration_fallback", "accept_errors", "pinned", "pool_bytes", "cache_bytes", "retained_bytes", "retained_sources"}
 	rowNetdev     = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
 	rowMetricName = regexp.MustCompile(`^[A-Za-z_:][A-Za-z0-9_:]*(\{[A-Za-z0-9_]+="[^"\s]*"(,[A-Za-z0-9_]+="[^"\s]*")*\})?$`)
 	rowMetricsURL = regexp.MustCompile(`^http://[A-Za-z0-9.\[\]:-]+:[0-9]{1,5}/[A-Za-z0-9/_.-]*$`)

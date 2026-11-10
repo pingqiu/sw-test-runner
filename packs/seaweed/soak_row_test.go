@@ -20,7 +20,8 @@ func rowPlan(kind string) *SoakPlan {
 	}
 	r := &FaultRow{RecoveryS: rowRecovery[kind], HoldS: rowHold[kind], AuditS: 20, QuiescenceS: 120,
 		Refused: []string{"No space left on device"}, MetricsURL: "http://127.0.0.1:18080/metrics",
-		Metrics:  map[string]string{"released": "SeaweedFS_rdma_connections_released_total", "pinned": "SeaweedFS_rdma_range_pinned_bytes"},
+		Metrics: map[string]string{"released": "SeaweedFS_rdma_connections_released_total", "pinned": "SeaweedFS_rdma_range_pinned_bytes",
+			"pool_bytes": "SeaweedFS_rdma_cold_pool_bytes", "cache_bytes": "SeaweedFS_rdma_write_staging_bytes"},
 		PinBound: PinBound{MaxInflightRanges: 4, LargestRangeBytes: 1 << 20}, RetainedBudgetBytes: 4 << 20}
 	switch kind {
 	case KindControl, KindConnKill, KindDiskFull:

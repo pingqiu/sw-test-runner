@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 M02 = 4000.0  # M02 CLOCK_MONOTONIC = M01 mono + 4000 in the fixture (a different clock, joined only by witnesses)
 WID = {i: dict(pid=10 + i, starttime=1) for i in range(4)}
 VOL, REPL = dict(pid=500, starttime=9), dict(pid=501, starttime=20)
-BOUND = 8 << 20
+BOUND = 7 << 20  # ranges 4 MiB (packet) + pool 2 MiB + cache 1 MiB (the product's own gauges)
 DATA = ['lmcache_3.dat', 'lmcache_3.idx', 'lmcache_4.dat', 'lmcache_4.idx']
 MASTER, FILER = dict(pid=600, starttime=3), dict(pid=601, starttime=4)
 TCP = [dict(state='LISTEN', local='127.0.0.1:8080', peer='*:*'), dict(state='ESTAB', local='127.0.0.1:50001', peer='127.0.0.1:19333')]
@@ -93,7 +93,7 @@ def samples(kind, mutate=None):
                          socket_fds=3, tcp=TCP + [FILER_CONN], tcp_owners=dict(OWNERS, **{'127.0.0.1:41000': dict(FILER)}))),
                  limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), rdma=dict(qp=6 if busy else 4, mr=3, mr_lens=[1 << 20] * 3),
                  vm_pin_kB=4096 if busy else 1024, port=['4: ACTIVE', 0], free=1 << 30,
-                 metrics=dict(pinned=float(1 << 20), retained_bytes=0.0, retained_sources=0.0, released=float(released),
+                 metrics=dict(pinned=float(1 << 20), pool_bytes=float(2 << 20), cache_bytes=float(1 << 20), retained_bytes=0.0, retained_sources=0.0, released=float(released),
                               registration_refused=float(t >= 1110 and kind == 'mr_pressure'),
                               registration_fallback=0.0, accept_errors=float(t >= 1110 and kind == 'fd_exhaust')))
         if 1100 < t <= 1130:
@@ -116,7 +116,7 @@ def samples(kind, mutate=None):
 def injection(kind):
     if kind in ('volume_kill_io', 'client_kill_put'):
         return []
-    snap = lambda mono, **kw: dict(dict(mono=mono + M02, identity=VOL, limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), fds=40), **kw)
+    snap = lambda mono, **kw: dict(dict(mono=mono + M02, epoch=mono + 1793610000.0, identity=VOL, limits=dict(memlock=[-1, -1], nofile=[1024, 1024]), fds=40), **kw)
     before, after, plan, end = snap(1100.0), snap(1100.5), {}, snap(1130.0)
     if kind == 'link_flap':
         before['port'], after['port'] = ['4: ACTIVE', 0], ['1: DOWN', 1]
@@ -195,7 +195,7 @@ def config(root, kind):
     return dict(schema=soak_assess.SCHEMA, root=str(root), run_id='run-1', boot_id=boot_id(), m02_boot_id=M02_BOOT, duration_s=300,
                 quiescence_s=60, client_kill_at_s=0, collection='lmcache',
                 fault_row=dict(kind=kind, episode='E1', recovery_s=60 if kind in ('volume_kill_io', 'client_kill_put') else 30,
-                               pin_bound_bytes=BOUND, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
+                               pin_ranges_bytes=4 << 20, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
                                client_fallback_counters=['rdma_fallbacks']))
 
 
@@ -429,6 +429,49 @@ class NotCovered(unittest.TestCase):
         self.assertEqual(verdict(self, 'link_flap')['layout_scope'], soak_assess.LAYOUT_SCOPE)
         v = verdict(self, 'link_flap', lambda ev: ev.pop('faults.json'))  # an error row carries it too
         self.assertEqual((v['status'], v['layout_scope']), ('FAIL', soak_assess.LAYOUT_SCOPE))
+
+    def f5_refused_put(self, ev, at, op='777', state='REFUSED'):
+        """The registration counters stay flat; one PUT ends `state` at M01 time `at`."""
+        for s in ev['resource-samples.jsonl']:
+            s['metrics']['registration_refused'] = 0.0
+        seed = 'f5-%s' % op
+        ev['write-ledger.jsonl'].append(dict(op=op, key='f5', state=state, seed=seed, length=64, digest=digest(seed), sequence=70,
+                                             worker=1, dispatched=at - 0.2, submitted=at - 0.1, completed=at,
+                                             error='write refused before commit; nothing was written: reg_mr failed: Cannot allocate memory',
+                                             attributed=None, worker_identity=WID[1]))
+        ev['op-events.jsonl'].insert(0, dict(op=op, worker=1, action='set', key='f5', dispatched=at - 0.2, submitted=at - 0.1,
+                                             completed=at, ok=False, error='refused', state=state))
+        next(m for m in ev['op-events.jsonl'] if m.get('event') == 'quiescent')['dispatched'] = int(op)
+        renumber(ev)
+
+    def test_f5_write_side_witness_is_a_refused_put_after_the_change(self):
+        """Ruling 05:31Z: the REFUSED PUT, after the limit change, in the window, on the same volume pid/starttime."""
+        v = verdict(self, 'mr_pressure', lambda ev: self.f5_refused_put(ev, 1115.0))
+        self.assertEqual(outcome(v, 'causal'), 'PASS', v['criteria']['causal'])
+        self.assertIn('REFUSED after the change', v['criteria']['causal']['reason'])
+
+    def test_f5_refused_put_that_does_not_witness(self):
+        def before(ev):  # ended before the limit was lowered
+            self.f5_refused_put(ev, 1099.0)
+        def after_window(ev):  # ended after the row window
+            self.f5_refused_put(ev, 1300.0)
+        def other_volume(ev):  # a volume restart inside the window: not the pid the limit was lowered on
+            self.f5_refused_put(ev, 1115.0)
+            for s in ev['resource-samples.jsonl']:
+                if 1110 <= s['mono'] - M02 <= 1120:
+                    s['identity'] = dict(REPL)
+        def no_clock(ev):
+            self.f5_refused_put(ev, 1115.0)
+            del ev['soak-clock-s1.json']
+        for edit in (before, after_window, other_volume, no_clock):
+            with self.subTest(edit=edit.__name__):
+                v = verdict(self, 'mr_pressure', edit)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
+
+    def test_f5_an_unknown_put_is_no_witness_and_still_fails(self):
+        v = verdict(self, 'mr_pressure', lambda ev: self.f5_refused_put(ev, 1115.0, state='UNKNOWN'))
+        self.assertEqual((outcome(v, 'causal'), outcome(v, 'write_contract')), ('NOT_COVERED', 'FAIL'))
 
     def test_f5_without_a_new_registration(self):
         def edit(ev):
@@ -718,6 +761,29 @@ class Fail(unittest.TestCase):
                     for s, b in zip(quiet[-3:], held):
                         s['metrics']['retained_bytes'] = float(b)
                 self.check('control', edit, 'resources')
+
+    def test_the_pin_bound_takes_the_products_own_pool_and_cache(self):
+        def big_pool(ev):  # 6 MiB pinned is legal only because the product reports a 5 MiB pool in that sample
+            s = ev['resource-samples.jsonl'][30]
+            s['metrics'].update(pinned=float(6 << 20), pool_bytes=float(5 << 20))
+        self.assertEqual(outcome(verdict(self, 'control', big_pool), 'resources'), 'PASS')
+        def same_pin_small_pool(ev):  # 6 MiB pinned against 4 + 2 + 0 = 6 MiB: equal to the bound is allowed
+            ev['resource-samples.jsonl'][30]['metrics'].update(pinned=float(6 << 20), cache_bytes=0.0)
+        self.assertEqual(outcome(verdict(self, 'control', same_pin_small_pool), 'resources'), 'PASS')
+        def at_the_bound_with_cache(ev):  # 7 MiB pinned = 4 + 2 + 1: legal only with the product's 1 MiB cache counted
+            ev['resource-samples.jsonl'][30]['metrics']['pinned'] = float(7 << 20)
+        self.assertEqual(outcome(verdict(self, 'control', at_the_bound_with_cache), 'resources'), 'PASS')
+        def one_byte_over(ev):
+            ev['resource-samples.jsonl'][30]['metrics'].update(pinned=float((6 << 20) + 1), cache_bytes=0.0)
+        self.assertEqual(outcome(verdict(self, 'control', one_byte_over), 'resources'), 'FAIL')
+
+    def test_a_pin_bound_without_the_products_charges_is_not_covered(self):
+        for missing in ('pool_bytes', 'cache_bytes'):
+            with self.subTest(missing=missing):
+                def edit(ev, missing=missing):
+                    del ev['resource-samples.jsonl'][30]['metrics'][missing]
+                v = verdict(self, 'control', edit)
+                self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'), v['criteria']['resources'])
 
     def test_pin_over_the_bound_and_a_whole_dat_pin(self):
         def over(ev):
