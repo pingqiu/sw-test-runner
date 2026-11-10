@@ -260,11 +260,8 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	root := h.RunRoot
 	if (phase == "" || phase == "prepare" || phase == "cloud-init") && !directTarget(d.Target) { // an existing host has no cloud-init
 		seconds := cloudInitSeconds
-		if deadline, ok := ctx.Deadline(); ok {
-			seconds = min(seconds, int(time.Until(deadline).Seconds())-5)
-		}
-		if seconds <= 0 {
-			return "", context.DeadlineExceeded
+		if deadline, ok := ctx.Deadline(); ok { // never past the run's deadline; the context still bounds the session
+			seconds = max(1, min(seconds, int(time.Until(deadline).Seconds())-5))
 		}
 		command := fmt.Sprintf("timeout -k 5 %d sh -ec 'cloud-init status --wait --format json'", seconds)
 		out, stderr, rc, runErr := n.Run(ctx, command)
