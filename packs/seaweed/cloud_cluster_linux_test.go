@@ -37,12 +37,27 @@ func clusterInput(t *testing.T, fail bool, variants ...string) ([]byte, CloudCon
 	d.Hosts = nil
 	d.ManagedResourceIDs = nil
 	loads := &atomic.Int32{}
+	inCloudInit := &atomic.Int32{}
 	for i, id := range []string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6", "client1", "client2", "client3"} {
 		id, i := id, i
 		snap := &atomic.Int32{}
 		address, pin, key, _ := cloudSSH(t, "", func(cmd string, ch ssh.Channel) uint32 {
 
 			if strings.Contains(cmd, "cloud-init status --wait") {
+				if variant == "cloud-init-parallel" {
+					// A real Azure boot: cloud-init on every VM at once, the slowest about 267 s. The gate must give
+					// each host the measured bound and wait on all ten together, not three at a time.
+					inCloudInit.Add(1)
+					var seconds int
+					fmt.Sscanf(cmd, "timeout -k 5 %d", &seconds)
+					for end := time.Now().Add(3 * time.Second); inCloudInit.Load() < 10 && time.Now().Before(end); {
+						time.Sleep(20 * time.Millisecond)
+					}
+					if seconds < 600 || inCloudInit.Load() < 10 {
+						fmt.Fprintf(ch.Stderr(), "cloud-init still running: bound %d s, %d hosts waiting together", seconds, inCloudInit.Load())
+						return 124
+					}
+				}
 				if variant == "cancelled-peer-no-services" && id == "client2" {
 					fmt.Fprint(ch, `{"status":"done","errors":["fixture failure"],"recoverable_errors":{}}`)
 					return 2
@@ -170,6 +185,17 @@ func TestCloudTenNodeEvidenceCannotLoseAFailedMember(t *testing.T) {
 				t.Fatal("false PASS for " + variant)
 			}
 		})
+	}
+}
+
+// The first Azure run failed here: a 120 s cloud-init wait, three hosts at a time, against a boot whose slowest
+// finished host needed 266.8 s. Every host now waits in parallel under the measured 600 s bound.
+func TestCloudInitWaitsOnEveryHostAtOnceWithTheMeasuredBound(t *testing.T) {
+	raw, c, loads := clusterInput(t, false, "cloud-init-parallel")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if bundle, e := RunCloudHTTP(ctx, raw, c); e != nil || bundle == "" || loads.Load() != 3 {
+		t.Fatalf("cloud-init gate: %v loads=%d", e, loads.Load())
 	}
 }
 
