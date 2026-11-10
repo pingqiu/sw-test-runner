@@ -2,6 +2,7 @@ package seaweed
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -139,14 +140,22 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 
 // admitMountArchive reads the stream into dir (fresh, must not exist), admitting only USTAR regular files and
 // directories with safe unique names, within the limits, and returns once every admitted file matches the listing.
-func admitMountArchive(r io.Reader, dir string, lim admitLimits, want mountListing) error {
+func admitMountArchive(r io.Reader, dir string, lim admitLimits, want mountListing) (err error) {
 	if e := os.Mkdir(dir, 0700); e != nil {
 		return e
 	}
-	z, e := gzip.NewReader(&limitedReader{r: r, left: lim.Compressed, what: "compressed stream"})
+	// Our own buffer, so gzip reads no further than it needs and anything after its one member stays visible.
+	raw := bufio.NewReader(&limitedReader{r: r, left: lim.Compressed, what: "compressed stream"})
+	z, e := gzip.NewReader(raw)
 	if e != nil {
 		return fmt.Errorf("not a gzip stream: %w", e)
 	}
+	z.Multistream(false)
+	defer func() {
+		if err == nil {
+			err = mountArchiveEnds(z, raw)
+		}
+	}()
 	tr := tar.NewReader(z)
 	expanded := &limitedReader{r: tr, left: lim.Expanded, what: "expanded archive"}
 	seen, folded, got := map[string]bool{}, map[string]bool{}, map[string]listedFile{}
@@ -223,6 +232,25 @@ func admitMountArchive(r io.Reader, dir string, lim admitLimits, want mountListi
 	}
 	return nil
 }
+
+// mountArchiveEnds: after tar's end, only its zero padding may remain in the one gzip member, and nothing may follow
+// that member in the stream.
+func mountArchiveEnds(z io.Reader, raw *bufio.Reader) error {
+	pad, e := io.Copy(io.Discard, io.LimitReader(z, mountPadLimit+1))
+	if e != nil {
+		return fmt.Errorf("archive end: %w", e)
+	}
+	if pad > mountPadLimit {
+		return errors.New("data after the archive")
+	}
+	if _, e = raw.Peek(1); e != io.EOF {
+		return errors.New("data after the archive")
+	}
+	return nil
+}
+
+// mountPadLimit covers tar's end-of-archive blocks and its record padding (GNU tar's default record is 10 KiB).
+const mountPadLimit = 64 << 10
 
 // checkMountIdentity: the listing came from the expected client boot and root, and the worker's records are there.
 func checkMountIdentity(l mountListing, boot, root, dir string) error {

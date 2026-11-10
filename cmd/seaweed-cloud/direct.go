@@ -37,6 +37,10 @@ type directConfig struct {
 	SSHKey      string                       `json:"ssh_key"`
 	HostKey     string                       `json:"host_key"`
 	Files       map[string]seaweed.CloudFile `json:"files"`
+	// MountSoak with HostKeys (one pin per host id) runs the ten-node mount soak against a docker inventory: the
+	// no-cloud rehearsal of the cloud path. Refused for any other target.
+	MountSoak bool              `json:"mount_soak,omitempty"`
+	HostKeys  map[string]string `json:"host_keys,omitempty"`
 }
 
 // directResult is the one JSON line `direct` prints.
@@ -86,6 +90,9 @@ func runDirect(args []string, w io.Writer) int {
 			err = smoke.StrictJSON(raw, &c)
 		}
 	}
+	if err == nil && (c.MountSoak || len(c.HostKeys) > 0) && (target.Target != "docker" || !c.MountSoak || len(c.HostKeys) == 0) {
+		err = errors.New("mount_soak with host_keys runs only against a docker inventory")
+	}
 	if err == nil {
 		err = os.Mkdir(*outDir, 0o700) // a fresh directory: never mixes two runs' journals
 	}
@@ -102,7 +109,8 @@ func runDirect(args []string, w io.Writer) int {
 	defer cancel()
 	ctx, stop := context.WithTimeout(ctx, *timeout)
 	defer stop()
-	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SWCtl: c.SWCtl, Replication: c.Replication, ClusterChaosCases: c.ClusterChaosCases, SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, ECUnderQuorum: c.ECUnderQuorum, ECReconstruction: c.ECReconstruction, ECVolumeImpl: c.ECVolumeImpl, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease})
+	rows, err := seaweed.RunCloudHTTP(ctx, inv, seaweed.CloudConfig{SWCtl: c.SWCtl, Replication: c.Replication, ClusterChaosCases: c.ClusterChaosCases, SSHKey: c.SSHKey, HostKey: c.HostKey, Output: *outDir, Files: c.Files, ECStage1: c.ECStage1, ECUnderQuorum: c.ECUnderQuorum, ECReconstruction: c.ECReconstruction, ECVolumeImpl: c.ECVolumeImpl, MasterWrites: c.MasterWrites, KVSoak: c.KVSoak, KVLoad: c.KVLoad, ReadCase: c.ReadCase, SoakProfile: c.SoakProfile, SoakRelease: c.SoakRelease,
+		MountSoak: c.MountSoak, HostKeys: c.HostKeys})
 	out.Code, out.Rows, out.Output = "PASS", rows, *outDir
 	if err != nil {
 		out.Code, out.Error = "FAIL", err.Error()
