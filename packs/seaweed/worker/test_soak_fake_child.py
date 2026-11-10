@@ -23,6 +23,8 @@ def child(pipe, cfg):
         pipe.send(dict(event='submitted', operation_id=cmd['operation_id'], action=cmd['action'],
                        pid=os.getpid(), monotonic=submitted))
         time.sleep(cfg.get('fake_delay_' + cmd['action'], 0.01))  # long GETs: always some pending at a pause
+        while (root / 'fake-frozen').exists():  # stage 3 F1: a SIGSTOPped volume answers nothing until it is killed
+            time.sleep(0.01)
         row = dict(operation_id=cmd['operation_id'], action=cmd['action'], key=cmd['key'], submitted=submitted,
                    completed=time.monotonic(), ok=True, error=None, results=None)
         if cmd['action'] == 'set' and (root / 'fake-fail-set').exists():  # stage 3: a failed PUT; the file holds its error

@@ -78,6 +78,40 @@ func (l *loadLatch) waitFailure() error {
 }
 
 // SoakAck is the worker's fault-window acknowledgement (addendum r4).
+// SoakOp is one load operation named in a fault-window file: its id and its dispatch time on the load's clock.
+type SoakOp struct {
+	Op        string  `json:"op"`
+	Submitted float64 `json:"submitted"`
+}
+
+// SoakInflight is the load's answer to an F1 freeze: the PUTs and GETs it dispatched after the volume was stopped
+// (FreezeMono), which a stopped volume cannot have served, so they are pending by construction.
+type SoakInflight struct {
+	FreezeMono  float64  `json:"freeze_mono"`
+	AckMono     float64  `json:"ack_mono"`
+	PendingSets []SoakOp `json:"pending_sets"`
+	PendingGETs []SoakOp `json:"pending_gets"`
+}
+
+// FreezeWitness is what the F1 restart records before its kill (fault-freeze-witness-<episode>.json in the M01 run
+// root, read by the assessor): the stop, the bounded wait, and the in-flight ops, or why there are none.
+type FreezeWitness struct {
+	RunID      string        `json:"run_id"`
+	Episode    string        `json:"episode"`
+	StoppedPID int           `json:"stopped_pid"`
+	StoppedAt  uint64        `json:"stopped_starttime"`
+	FreezeMono float64       `json:"freeze_mono"`
+	WaitS      float64       `json:"wait_s"`
+	Inflight   *SoakInflight `json:"inflight"`
+	Reason     string        `json:"reason,omitempty"`
+}
+
+// FreezeWait bounds the F1 wait for the load to name a PUT and a GET in flight after the stop (a var for tests).
+var FreezeWait = 5 * time.Second
+
+// FreezeStepBound bounds the F1 stop step (SIGSTOP and every thread seen in state T), in seconds.
+const FreezeStepBound = 20
+
 type SoakAck struct {
 	PauseMono    float64 `json:"pause_mono"`
 	ObservedMono float64 `json:"observed_mono"`

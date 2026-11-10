@@ -144,8 +144,12 @@ def row_evidence(kind):
         r.fault.update(ready_mono=1110.0, receipt=dict(State='REPLACED', Kill=dict(Identity=dict(PID=500, StartTime=9), PreKillMono=1100.0,
                                                                                    PostKillMono=1100.3, Signal='SIGKILL'),
                                                        Replacement=dict(PID=501, StartTime=20)))
-        r.put('q', 1099.9, state='UNKNOWN', done=1105.0, attributed='E1', error='connection reset')
+        put = r.put('q', 1099.9, state='UNKNOWN', done=1105.0, attributed='E1', error='connection reset')
         r.get('k1', 1099.95, done=1104.0, fault=True)
+        # freeze-then-kill: the volume was stopped at 1099.8 and the load named the ops it dispatched after that
+        r.freeze = dict(run_id='run-1', episode='E1', stopped_pid=500, stopped_starttime=9, freeze_mono=1099.8, wait_s=5.0,
+                        inflight=dict(freeze_mono=1099.8, ack_mono=1099.97, pending_sets=[dict(op=put['op'], submitted=put['dispatched'])],
+                                      pending_gets=[dict(op=r.events[-1]['op'], submitted=r.events[-1]['dispatched'])]))
     if kind == 'client_kill_put':
         r.fault.update(role='client', ready_mono=1100.0)
         op = r.op()
@@ -177,7 +181,8 @@ def files(r, kind):
                        dict(event='body_end', mono=1300.0),
                        dict(event='audit_done', mono=1365.0, keys=len(r.audit), complete=True, client=dict(pid=900, starttime=50)),
                        dict(event='quiescent', mono=1366.0, dispatched=r.n)]
-    return {
+    extra = {'fault-freeze-witness-E1.json': r.freeze} if getattr(r, 'freeze', None) else {}
+    return dict(extra, **{
         'soak-load-start.json': dict(boot_id=boot, mono=1000.0),
         'faults.json': [r.fault],
         'workers.json': {str(i): dict(WID[i], transport='http' if i == 3 else 'dc') for i in range(4)},
@@ -188,7 +193,7 @@ def files(r, kind):
         'audit.jsonl': [dict(key=k, reads=v) for k, v in sorted(r.audit.items())],
         'topology-polls.jsonl': [dict(req=float(t), done=t + 0.05, ok=True, writables=[3], present=[1, 2, 3]) for t in range(1000, 1370, 10)],
         'resource-samples.jsonl': samples(kind),
-    }
+    })
 
 
 def config(root, kind):
@@ -526,6 +531,30 @@ class NotCovered(unittest.TestCase):
         v = verdict(self, 'volume_kill_io', edit)
         self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED')
         self.assertIn("['set']", v['criteria']['causal']['reason'])
+
+    def test_f1_freeze_then_kill_needs_named_ops_dispatched_after_the_freeze(self):
+        """F1's causal witness is freeze-then-kill: no witness, no named op, or an op dispatched before the freeze
+        (it may have been served before the stop) is NOT_COVERED; the fixture's named ops after the freeze PASS."""
+        def drop(ev):
+            ev.pop('fault-freeze-witness-E1.json')
+
+        def none_named(ev):  # the load named no PUT and GET within the bound
+            ev['fault-freeze-witness-E1.json'].update(inflight=None, reason='no in-flight PUT and GET named within 5s')
+
+        def before_freeze(ev):  # the stop came after both pending ops were dispatched
+            w = ev['fault-freeze-witness-E1.json']
+            w['freeze_mono'] = w['inflight']['freeze_mono'] = 1099.96
+
+        def unnamed(ev):  # pending ops the load never named
+            ev['fault-freeze-witness-E1.json']['inflight'].update(pending_sets=[dict(op='999', submitted=1099.9)])
+        self.assertEqual(outcome(verdict(self, 'volume_kill_io'), 'causal'), 'PASS')
+        for name, edit, why in (('no witness', drop, 'no freeze witness'), ('nothing named', none_named, 'no in-flight PUT and GET'),
+                                ('ops from before the freeze', before_freeze, 'no named op pending'),
+                                ('a PUT the load never named', unnamed, "['set']")):
+            with self.subTest(name=name):
+                v = verdict(self, 'volume_kill_io', edit)
+                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
+                self.assertIn(why, v['criteria']['causal']['reason'])
 
     def test_audit_missing_a_ledger_key(self):
         v = verdict(self, 'control', lambda ev: ev['audit.jsonl'].pop(0))

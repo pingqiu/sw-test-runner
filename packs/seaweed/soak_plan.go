@@ -302,6 +302,8 @@ func (x *SoakPlan) rowMode() bool {
 // existing restart budget, or F2's in-worker kill (at most 60 s to find a pending PUT).
 func (x *SoakPlan) rowBudget(f SoakFault) time.Duration {
 	switch {
+	case f.kind() == KindVolumeKillIO: // F1 freeze-then-kill: the stop step and the bounded in-flight wait come first
+		return FaultBudget + FreezeStepBound*time.Second + FreezeWait
 	case f.restarts():
 		return FaultBudget
 	case f.injected():

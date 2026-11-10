@@ -67,6 +67,49 @@ class Rows(unittest.TestCase):
         inside = [e for e in events if 'action' in e and marks[0]['mono'] < e['dispatched'] < marks[1]['mono']]
         self.assertGreater(len(inside), 2, 'no dispatch while armed')
 
+    def test_f1_freeze_answers_with_ops_dispatched_after_the_freeze(self):
+        """F1 freeze-then-kill, the load's side: after the armed ack the controller freezes the volume and publishes
+        its clock; the load answers once with PUTs and GETs dispatched after it (never one dispatched before, though
+        long PUTs from before the freeze are still pending), and keeps its contract through the kill."""
+        self.row('volume_kill_io')
+        self.config['native'].update(fake_delay_set=0.4, fake_delay_get=0.05)  # PUTs from before the freeze still run
+        seen = {}
+
+        def run():
+            while not (self.root / 'soak-load-start.json').exists():
+                time.sleep(0.01)
+            time.sleep(1.0)
+            self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=time.monotonic()))
+            while not (self.root / 'fault-ack-E1.json').exists():
+                time.sleep(0.01)
+            (self.root / 'fake-frozen').write_text('')
+            seen['freeze'] = time.monotonic()
+            self.write('fault-freeze-E1.json', dict(episode='E1', role='volume', freeze_mono=seen['freeze']))
+            end = time.monotonic() + 5  # the controller's bound
+            while not (self.root / 'fault-inflight-E1.json').exists() and time.monotonic() < end:
+                time.sleep(0.01)
+            (self.root / 'fake-fail-set').write_text('connection reset')  # the kill: every pending op errors
+            (self.root / 'fake-fail').write_text('connection reset')
+            (self.root / 'fake-frozen').unlink()
+            time.sleep(1.0)
+            for f in ('fake-fail-set', 'fake-fail'):
+                (self.root / f).unlink()
+            self.write('fault-close-E1.json', dict(episode='E1', role='volume', end_mono=time.monotonic()))
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        inflight = json.loads((self.root / 'fault-inflight-E1.json').read_text())
+        self.assertEqual(inflight['freeze_mono'], seen['freeze'])
+        self.assertTrue(inflight['pending_sets'] and inflight['pending_gets'], inflight)
+        listed = inflight['pending_sets'] + inflight['pending_gets']
+        self.assertTrue(all(o['submitted'] > seen['freeze'] for o in listed), listed)
+        events = [e for e in jsonl(self.root / 'op-events.jsonl') if 'action' in e and 'dispatched' in e]
+        before = [e for e in events if e['action'] == 'set' and e['dispatched'] < seen['freeze'] < e.get('completed', 1e18)]
+        self.assertTrue(before, 'no PUT from before the freeze was still pending: the filter is untested')
+        self.assertFalse({str(e['op']) for e in before} & {o['op'] for o in listed})
+
     def test_f1_quarantined_keys_are_never_selected_again(self):
         # a long window over the soak's 32 hot slots: without the busy pin a quarantined key is re-drawn and the
         # oracle stops the run (UNKNOWN_WRITE retry); with it the load runs to the end

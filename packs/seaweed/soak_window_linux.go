@@ -50,6 +50,31 @@ func (s *soakWindow) Close(episode string, endMono float64) error {
 	b["end_mono"] = endMono
 	return publishFile(filepath.Join(s.root, "fault-close-"+episode+".json"), b)
 }
+// Freeze tells the load the volume is SIGSTOPped, with the controller clock read once the stop was confirmed (the
+// load runs on this host, so the clock is its own); see SoakInflight.
+func (s *soakWindow) Freeze(episode string, freezeMono float64) error {
+	b := s.binding(episode)
+	b["freeze_mono"] = freezeMono
+	return publishFile(filepath.Join(s.root, "fault-freeze-"+episode+".json"), b)
+}
+
+// Inflight polls the load's answer to Freeze until ctx ends (the caller bounds it with FreezeWait).
+func (s *soakWindow) Inflight(ctx context.Context, episode string) (SoakInflight, error) {
+	var raw map[string]json.RawMessage
+	var in SoakInflight
+	if err := pollBound(ctx, filepath.Join(s.root, "fault-inflight-"+episode+".json"), &raw); err != nil {
+		return in, err
+	}
+	for k, want := range s.binding(episode) {
+		var got string
+		if json.Unmarshal(raw[k], &got) != nil || got != want {
+			return in, fmt.Errorf("soak: fault-window inflight binding differs on %s", k)
+		}
+	}
+	body, _ := json.Marshal(raw)
+	return in, json.Unmarshal(body, &in)
+}
+
 func (s *soakWindow) Ack(ctx context.Context, episode string) (SoakAck, error) {
 	var raw map[string]json.RawMessage
 	var a SoakAck

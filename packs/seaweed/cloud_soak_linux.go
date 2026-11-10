@@ -196,11 +196,14 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 		return tr.JobHandle{}, r, fmt.Errorf("soak: no replace plan for %s", episode)
 	}
 	old, err := s.identity(ctx, victim.Node, plan.Victim)
+	f1 := s.b.Plan.Soak != nil && slices.ContainsFunc(s.b.Plan.Soak.Faults, func(f SoakFault) bool { return f.Episode == episode && f.kind() == KindVolumeKillIO })
+	if err == nil && f1 {
+		err = s.freeze(ctx, episode, victim.Node, plan.Victim, old)
+	}
 	var pre float64
 	if err == nil {
-		pre, err = controllerMono()
+		pre, err = controllerMono() // F1: after the freeze and its in-flight answer, right before the kill
 	}
-	f1 := s.b.Plan.Soak != nil && slices.ContainsFunc(s.b.Plan.Soak.Faults, func(f SoakFault) bool { return f.Episode == episode && f.kind() == KindVolumeKillIO })
 	var post float64
 	if u := cloudQuote(s.unit(plan.Victim)); err == nil {
 
@@ -224,6 +227,55 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 	r.Replacement, err = s.identity(ctx, victim.Node, plan.Replacement)
 	r.State = "REPLACED"
 	return tr.JobHandle{}, r, err
+}
+
+// freeze is F1's freeze-then-kill (ruling 2026-11-10 19:30Z): SIGSTOP the exact victim (pid/starttime checked,
+// every thread seen stopped), read the controller clock, tell the load, and wait at most FreezeWait for it to name a
+// PUT and a GET dispatched after that clock. A stopped volume serves nothing, so those ops are pending across the
+// kill by construction. No answer within the bound records none (the assessor reads NOT_COVERED); the volume is
+// never continued (no SIGCONT): the kill follows either way. Only a failed stop step is an error.
+func (s *directSoak) freeze(ctx context.Context, episode, node, victim string, old tr.ProcessIdentity) error {
+	prefix := mainPID(s.unit(victim))
+	stop := prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosStopScript(s.unit(victim)), prefix)
+	out, err := cloudStep(ctx, s.nodes[node], s.c.Output, "soak-freeze-"+episode+".json", "freeze-"+episode, FreezeStepBound, stop)
+	if err == nil && !strings.Contains(out, "STOPPED") {
+		err = errors.New("soak: F1 freeze step did not confirm the stop")
+	}
+	if err != nil {
+		return err
+	}
+	w := FreezeWitness{RunID: s.d.RunID, Episode: episode, StoppedPID: old.PID, StoppedAt: old.StartTime, WaitS: FreezeWait.Seconds()}
+	if w.FreezeMono, err = controllerMono(); err == nil {
+		err = s.Freeze(episode, w.FreezeMono)
+	}
+	if err != nil {
+		return err
+	}
+	wctx, cancel := context.WithTimeout(ctx, FreezeWait)
+	in, werr := s.Inflight(wctx, episode)
+	cancel()
+	now, _ := controllerMono()
+	switch {
+	case werr != nil:
+		w.Reason = fmt.Sprintf("no in-flight PUT and GET named within %s: %v", FreezeWait, werr)
+	case !validInflight(in, w.FreezeMono, now):
+		w.Reason = "the load's in-flight answer is not exact (needs a PUT and a GET, each dispatched after the freeze)"
+	default:
+		w.Inflight = &in
+	}
+	return publishFile(filepath.Join(s.root, "fault-freeze-witness-"+episode+".json"), w)
+}
+
+// validInflight: the answer echoes the freeze clock, came after it, and names at least one PUT and one GET, each
+// with a unique id, dispatched after the freeze and no later than the answer.
+func validInflight(in SoakInflight, freezeMono, now float64) bool {
+	ok := in.FreezeMono == freezeMono && freezeMono < in.AckMono && in.AckMono <= now && len(in.PendingSets) > 0 && len(in.PendingGETs) > 0
+	seen := map[string]bool{}
+	for _, o := range append(append([]SoakOp{}, in.PendingSets...), in.PendingGETs...) {
+		ok = ok && o.Op != "" && !seen[o.Op] && o.Submitted > freezeMono && o.Submitted <= in.AckMono
+		seen[o.Op] = true
+	}
+	return ok
 }
 
 func (s *directSoak) RunJob(ctx context.Context, label string) (tr.ExitInfo, error) {

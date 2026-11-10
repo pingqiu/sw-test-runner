@@ -989,11 +989,24 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         pre, post = kw.get('PreKillMono'), kw.get('PostKillMono')
         if not ev['kill'] or not isinstance(pre, (int, float)) or not isinstance(post, (int, float)) or not pre < post:
             return nc('no witnessed victim kill with its pre/post-kill clock')
-        arms = {a: sorted(e['op'] for e in ops if e['action'] == a and e['submitted'] <= pre and e['completed'] >= post)
+        # F1 is freeze-then-kill (ruling 2026-11-10 19:30Z): the restart SIGSTOPs the volume, the load names the PUTs
+        # and GETs it dispatched after the stop (which a stopped volume cannot serve), then the kill. An arm counts
+        # only with such a named op, dispatched after the freeze clock and terminal after the kill.
+        w = read_evidence(Path(root) / ('fault-freeze-witness-%s.json' % f['episode']), OBJECT)
+        fm = w.get('freeze_mono') if isinstance(w, dict) else None
+        if not isinstance(fm, (int, float)) or isinstance(fm, bool) or not fm < pre:
+            return nc('no freeze witness before the kill')
+        inflight = w.get('inflight')
+        if not isinstance(inflight, dict):
+            return nc('no in-flight PUT and GET named within the freeze bound: %s' % w.get('reason'))
+        named = {a: {str(o.get('op')) for o in inflight.get(k) or [] if isinstance(o, dict)}
+                 for a, k in (('set', 'pending_sets'), ('get', 'pending_gets'))}
+        arms = {a: sorted(e['op'] for e in ops if e['action'] == a and str(e['op']) in named[a]
+                          and fm < e['submitted'] <= pre and e['completed'] >= post)
                 for a in ('set', 'get')}
         missing = [a for a, v in arms.items() if not v]
-        return (nc('arm(s) %s with no op pending at the kill' % missing) if missing else
-                ('PASS', 'pending at the kill: PUT %s, GET %s' % (arms['set'][:3], arms['get'][:3])))
+        return (nc('arm(s) %s with no named op pending across the freeze and kill' % missing) if missing else
+                ('PASS', 'pending at the kill (dispatched after the freeze): PUT %s, GET %s' % (arms['set'][:3], arms['get'][:3])))
     if kind == 'client_kill_put':
         k = kills[0] if len(kills) == 1 else {}
         op = str((k.get('witness') or {}).get('operation_id'))

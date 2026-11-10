@@ -282,7 +282,7 @@ def run(config):
                 observed = time.monotonic()  # captured once; a pause from the future is refused
                 if pm > observed:
                     raise ValueError('fault pause dated after its observation')
-                window.update(episode=ep, acked=False, pause=row, observed=observed, armed=bool(row_cfg))
+                window.update(episode=ep, acked=False, pause=row, observed=observed, armed=bool(row_cfg), inflight_sent=False)
                 window['done'].add(ep)
                 if not row_cfg:
                     return
@@ -316,6 +316,24 @@ def run(config):
             window['acked'] = True
         else:
             ep, role = window['episode'], window['pause']['role']
+            if window.get('armed') and not window.get('inflight_sent'):
+                # F1 freeze-then-kill: the controller has SIGSTOPped the volume and published its controller clock
+                # (this host's monotonic clock). Ops dispatched after it cannot have been served, so they are pending
+                # by construction; answer once with them, as soon as there is at least one PUT and one GET.
+                freeze = read_bound(root / ('fault-freeze-%s.json' % ep), dict(bind, episode=ep, role=role))
+                if freeze is not None:
+                    fm = freeze.get('freeze_mono')
+                    if isinstance(fm, bool) or not isinstance(fm, (int, float)) or not math.isfinite(fm) \
+                            or fm < window['ack_mono'] or fm > time.monotonic():
+                        raise ValueError('fault freeze malformed, before the ack or from the future')
+                    after = lambda a: [dict(op=c['operation_id'], submitted=c['dispatched']) for c in commands.values()
+                                       if c['action'] == a and c['dispatched'] > fm]
+                    sets, gets = after('set'), after('get')
+                    if sets and gets:
+                        publish(root / ('fault-inflight-%s.json' % ep),
+                                dict(bind, role=role, episode=ep, freeze_mono=fm, ack_mono=time.monotonic(),
+                                     pending_sets=sets, pending_gets=gets))
+                        window['inflight_sent'] = True
             close = read_bound(root / ('fault-close-%s.json' % ep), dict(bind, episode=ep, role=role))
             if close is not None:
                 end = close.get('end_mono')
