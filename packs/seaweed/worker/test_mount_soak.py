@@ -198,6 +198,37 @@ class ManyVolumes(Base):
         f.rules.pop()
         self.assertIsNone(self.run_.counter())
 
+    def test_a_failed_listing_is_not_a_witness(self):
+        f = TargetFaults()
+        f.rules = [tuple(v) for v in self.VOLS]
+        body = f(['iptables', '-L'])[1]
+        self.run_.fault_cmd = lambda argv: [1, body]  # complete-looking rows, failed command
+        self.assertIsNone(self.run_.counter())
+
+    def test_a_duplicate_row_cannot_stand_for_a_missing_destination(self):
+        f = TargetFaults()
+        f.rules = [tuple(self.VOLS[0]), tuple(self.VOLS[0]), tuple(self.VOLS[1])]  # A, A, B for frozen A, B, C
+        self.run_.fault_cmd = f
+        self.assertIsNone(self.run_.counter())
+
+    def test_a_foreign_or_malformed_row_is_not_a_witness(self):
+        f = TargetFaults()
+        f.rules = [tuple(v) for v in self.VOLS]
+        good = f(['iptables', '-L'])[1]
+        for extra in ('5 0 DROP tcp -- 0.0.0.0/0 10.9.9.9 tcp dpt:8080 /* swmountsoak */',  # not owned
+                      'x 0 DROP tcp -- 0.0.0.0/0 10.0.0.11 tcp dpt:8080 /* swmountsoak */',  # not a count
+                      '5 0 ACCEPT tcp -- 0.0.0.0/0 10.0.0.11 tcp dpt:8080 /* swmountsoak */',  # not a drop
+                      'swmountsoak'):
+            with self.subTest(extra=extra):
+                self.run_.fault_cmd = lambda argv, body=good + '\n' + extra: [0, body]
+                self.assertIsNone(self.run_.counter())
+
+    def test_real_iptables_rows_are_read(self):
+        body = '\n'.join('%8d %8d DROP       6    --  *      *       0.0.0.0/0            %-20s tcp dpt:%d /* swmountsoak */' % (n, n * 60, h, p)
+                         for n, (h, p) in zip((3, 0, 4), self.VOLS))
+        self.run_.fault_cmd = lambda argv: [0, 'Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n    pkts      bytes target     prot opt in     out     source               destination\n' + body]
+        self.assertEqual(self.run_.counter(), 7)
+
     def test_teardown_is_unknown_while_any_rule_remains(self):
         f = TargetFaults(stuck=('10.0.0.13', 8081))
         self.run_.fault_cmd = f

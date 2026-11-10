@@ -452,9 +452,26 @@ class Run:
         return [self.rule(action, h, p) for h, p in self.volumes()]
 
     def counter(self):
-        """Packets dropped by all the partition's rules; None unless every rule is listed exactly once."""
-        lines = [ln for ln in self.fault_cmd(['iptables', '-L', 'OUTPUT', '-v', '-x', '-n'])[1].splitlines() if 'swmountsoak' in ln]
-        return sum(int(ln.split()[0]) for ln in lines) if len(lines) == len(self.volumes()) else None
+        """Packets dropped by the partition, or None. The listing must succeed and hold exactly one well-formed row per
+        owned destination: no duplicate, missing, foreign or malformed row. A sum, since a partition does not promise
+        traffic to every volume server."""
+        rc, out = self.fault_cmd(['iptables', '-L', 'OUTPUT', '-v', '-x', '-n'])
+        if rc != 0:
+            return None
+        want, seen = set(self.volumes()), {}
+        for ln in out.splitlines():
+            if 'swmountsoak' not in ln:
+                continue
+            t = ln.split()  # pkts bytes DROP prot opt [in out] source destination tcp dpt:N /* swmountsoak */
+            try:
+                key, pkts = (t[-6], int(t[-4][len('dpt:'):])), int(t[0])
+                well_formed = t[2] == 'DROP' and t[-5] == 'tcp' and t[-4].startswith('dpt:') and t[-3:] == ['/*', 'swmountsoak', '*/']
+            except (IndexError, ValueError):
+                return None
+            if not well_formed or key not in want or key in seen:
+                return None
+            seen[key] = pkts
+        return sum(seen.values()) if set(seen) == want else None
 
     def episode(self, ep, secs):
         """The partition is owned here: every way out, including an exception, removes the rule."""
