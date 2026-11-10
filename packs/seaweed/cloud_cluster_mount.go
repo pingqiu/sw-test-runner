@@ -50,6 +50,7 @@ type clientMount struct {
 	Verdict       json.RawMessage `json:"verdict,omitempty"`
 	status        string
 	cleanup       string
+	gates         int
 }
 
 type clusterMountResult struct {
@@ -60,24 +61,23 @@ type clusterMountResult struct {
 	Clients []clientMount `json:"clients"`
 }
 
-// mountRunStatus: FAIL if any client has a valid FAIL (published, cleanup PROVEN); else INVALID if any client is not a
-// PASS or has no verdict; else PASS. Cleanup is PROVEN only if every client's is. A FAIL with cleanup not proven stays
-// in its client's verdict but does not make the run FAIL.
+// mountRunStatus. A client verdict is valid only when it is present, its worker cleanup is PROVEN and it has no gate
+// reason. The run is FAIL if any client has a valid FAIL, never hidden by another client; PASS only if all three are
+// valid PASS; otherwise INVALID. Cleanup is PROVEN only if every client's is, and is reported beside the status.
 func mountRunStatus(cs []clientMount) (status, cleanup string) {
+	valid := func(c clientMount) bool { return c.Missing == "" && c.cleanup == "PROVEN" && c.gates == 0 }
 	status, cleanup = "PASS", "PROVEN"
 	for _, c := range cs {
 		if c.Missing != "" || c.cleanup != "PROVEN" {
 			cleanup = "UNKNOWN"
 		}
-	}
-	for _, c := range cs {
-		if c.Missing == "" && c.status == "FAIL" && c.cleanup == "PROVEN" {
-			return "FAIL", cleanup
+		if !valid(c) || c.status != "PASS" {
+			status = "INVALID"
 		}
 	}
 	for _, c := range cs {
-		if c.Missing != "" || c.status != "PASS" {
-			status = "INVALID"
+		if valid(c) && c.status == "FAIL" {
+			return "FAIL", cleanup
 		}
 	}
 	return status, cleanup
@@ -230,13 +230,17 @@ func runClientMount(ctx context.Context, c CloudConfig, h inventory.Host, cfg []
 		return
 	}
 	raw, e := mountAssess(actx, script, dir)
-	_ = os.WriteFile(filepath.Join(out, "mount-verdict.json"), raw, 0600)
-	v, verr := decodeMountVerdict(raw)
-	if verr != nil {
-		r.Missing = "assessor: " + errors.Join(e, verr).Error()
+	_ = os.WriteFile(filepath.Join(out, "mount-verdict.json"), raw, 0600) // kept as a diagnostic whatever happened
+	if e != nil {
+		r.Missing = "assessor did not complete: " + e.Error() // its output is not a verdict, even if it decodes
 		return
 	}
-	r.Verdict, r.status, r.cleanup = json.RawMessage(raw), v.Status, v.Cleanup
+	v, verr := decodeMountVerdict(raw)
+	if verr != nil {
+		r.Missing = "assessor: " + verr.Error()
+		return
+	}
+	r.Verdict, r.status, r.cleanup, r.gates = json.RawMessage(raw), v.Status, v.Cleanup, len(v.GateReasons)
 	return
 }
 

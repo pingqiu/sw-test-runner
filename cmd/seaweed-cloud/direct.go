@@ -37,7 +37,7 @@ type directConfig struct {
 	SSHKey      string                       `json:"ssh_key"`
 	HostKey     string                       `json:"host_key"`
 	Files       map[string]seaweed.CloudFile `json:"files"`
-	// MountSoak with HostKeys (one pin per host id) runs the ten-node mount soak against a docker inventory: the
+	// MountSoak with HostKeys (one pin per host id) runs the ten-node mount soak against an onprem inventory: the
 	// no-cloud rehearsal of the cloud path. Refused for any other target.
 	MountSoak bool              `json:"mount_soak,omitempty"`
 	HostKeys  map[string]string `json:"host_keys,omitempty"`
@@ -90,8 +90,8 @@ func runDirect(args []string, w io.Writer) int {
 			err = smoke.StrictJSON(raw, &c)
 		}
 	}
-	if err == nil && (c.MountSoak || len(c.HostKeys) > 0) && (target.Target != "docker" || !c.MountSoak || len(c.HostKeys) == 0) {
-		err = errors.New("mount_soak with host_keys runs only against a docker inventory")
+	if err == nil && (c.MountSoak || len(c.HostKeys) > 0) && (target.Target != "onprem" || !c.MountSoak || len(c.HostKeys) == 0) {
+		err = errors.New("mount_soak with host_keys runs only against an onprem inventory")
 	}
 	if err == nil {
 		err = os.Mkdir(*outDir, 0o700) // a fresh directory: never mixes two runs' journals

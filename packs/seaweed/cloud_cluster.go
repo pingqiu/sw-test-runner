@@ -133,6 +133,11 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 	servers := append(append([]inventory.Host{}, groups["master"]...), groups["volume"]...)
 	if c.MountSoak {
 		// The mount soak replaces the KV+S3 load: the same deploy, then one mount phase on the three clients.
+		if directTarget(d.Target) {
+			// Existing hosts outlive the run, and cluster phases never stop their units: every host is stopped and
+			// postflighted on every way out, as a single direct host is.
+			defer func() { failure = errors.Join(failure, cleanupDirectCluster(c, d)) }()
+		}
 		for _, s := range []struct {
 			name  string
 			hosts []inventory.Host
@@ -174,6 +179,18 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		return "", e
 	}
 	return assessCloudCluster(ctx, d, c.Output, "--assess", c.Replication)
+}
+
+// cleanupDirectCluster runs the direct teardown on every host of a cluster on existing hosts, each with its own pin
+// and output directory.
+func cleanupDirectCluster(c CloudConfig, d inventory.Document) (failure error) {
+	for _, h := range d.Hosts {
+		hc := c
+		hc.HostKey = c.HostKeys[h.ID]
+		hc.Output = filepath.Join(c.Output, "cleanup", h.ID)
+		failure = errors.Join(failure, os.MkdirAll(hc.Output, 0700), directCleanup(hc, d, h))
+	}
+	return failure
 }
 
 func assessCloudCluster(ctx context.Context, d inventory.Document, root, mode, replication string) (string, error) {

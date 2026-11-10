@@ -160,6 +160,39 @@ func TestClusterMountAValidFailIsNeverHidden(t *testing.T) {
 	}
 }
 
+func TestClusterMountAFailedAssessorIsMissingEvenIfItsOutputDecodes(t *testing.T) {
+	f := newMountFixture(t)
+	mountAssess = func(context.Context, string, string) ([]byte, error) {
+		return verdictJSON("PASS", "PROVEN"), errors.New("assessor killed")
+	}
+	r, err := f.run()
+	if err == nil || r.Status == "PASS" || !strings.Contains(client(r, "client1").Missing, "assessor did not complete") {
+		t.Fatalf("a failed assessor's output was taken as a verdict: %+v %v", r, err)
+	}
+}
+
+func TestClusterMountPassNeedsProvenCleanupAndNoGate(t *testing.T) {
+	for name, v := range map[string][]byte{
+		"cleanup unknown": verdictJSON("PASS", "UNKNOWN"),
+		"gate reason":     []byte(`{"schema":"seaweed-mount-verdict/1","status":"PASS","cleanup":"PROVEN","gate_reasons":["coverage"],"rows":{}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newMountFixture(t)
+			f.verdicts["client2"] = v
+			r, err := f.run()
+			if err == nil || r.Status != "INVALID" {
+				t.Fatalf("%+v %v", r, err)
+			}
+		})
+	}
+	f := newMountFixture(t)
+	f.verdicts["client2"] = verdictJSON("PASS", "UNKNOWN")
+	f.verdicts["client3"] = verdictJSON("FAIL", "PROVEN")
+	if r, _ := f.run(); r.Status != "FAIL" || r.Cleanup != "UNKNOWN" {
+		t.Fatalf("a valid FAIL beside an unproven cleanup: %+v", r)
+	}
+}
+
 func TestClusterMountFailWithoutProvenCleanupIsNotAValidFail(t *testing.T) {
 	f := newMountFixture(t)
 	f.verdicts["client2"] = verdictJSON("FAIL", "UNKNOWN")
@@ -306,7 +339,7 @@ func TestMountSoakRefusesEveryOtherPhaseAndTarget(t *testing.T) {
 			t.Fatalf("%s was accepted", name)
 		}
 	}
-	for _, target := range []string{"onprem", "aws", "gcp"} {
+	for _, target := range []string{"docker", "aws", "gcp"} {
 		if err := mountSoakRefusal(ten(target), CloudConfig{MountSoak: true}); err == nil {
 			t.Fatalf("target %s was accepted", target)
 		}
@@ -316,7 +349,7 @@ func TestMountSoakRefusesEveryOtherPhaseAndTarget(t *testing.T) {
 	if err := mountSoakRefusal(short, CloudConfig{MountSoak: true}); err == nil {
 		t.Fatal("nine hosts were accepted")
 	}
-	for _, target := range []string{"azure", "docker"} {
+	for _, target := range []string{"azure", "onprem"} {
 		if err := mountSoakRefusal(ten(target), CloudConfig{MountSoak: true}); err != nil {
 			t.Fatalf("%s: %v", target, err)
 		}
