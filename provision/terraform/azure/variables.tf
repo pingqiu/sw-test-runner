@@ -66,6 +66,11 @@ variable "host_keys" {
   sensitive   = true
   default     = null
 }
+variable "fuse_clients" {
+  description = "Mount soak only: client-role nodes also get fuse3 and user_allow_other. False leaves every node's cloud-init unchanged."
+  type        = bool
+  default     = false
+}
 variable "node_host_keys" {
   type      = map(object({ ed25519_private = string, ed25519_public = string }))
   sensitive = true

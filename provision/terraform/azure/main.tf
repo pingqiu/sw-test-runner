@@ -85,6 +85,15 @@ resource "azurerm_network_interface" "node" {
     public_ip_address_id          = azurerm_public_ip.node[each.key].id
   }
 }
+locals {
+  cloud_init_file = file("${path.module}/cloud-init.yaml")
+  cloud_init_base = yamldecode(local.cloud_init_file)
+  # A mount soak client: weed mount needs FUSE, and allow_other for the worker's mounts.
+  cloud_init_fuse = {
+    packages = concat(local.cloud_init_base.packages, ["fuse3"])
+    runcmd   = [["sh", "-c", "grep -qx user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf"]]
+  }
+}
 resource "azurerm_linux_virtual_machine" "node" {
   for_each                        = var.nodes
   name                            = "${var.run_id}-${each.key}"
@@ -111,8 +120,14 @@ resource "azurerm_linux_virtual_machine" "node" {
     sku       = "server"
     version   = var.image_version
   }
-  custom_data = base64encode(try(var.node_host_keys[each.key], var.host_keys) == null ? file("${path.module}/cloud-init.yaml") : "#cloud-config\n${yamlencode(merge(yamldecode(file("${path.module}/cloud-init.yaml")), { ssh_keys = try(var.node_host_keys[each.key], var.host_keys) }))}")
-  depends_on  = [azurerm_subnet_network_security_group_association.run]
+  # A mount soak client (fuse_clients) also gets fuse3 and user_allow_other; every other node's cloud-init is the
+  # same bytes as before: the file as is, or the file merged with its server key.
+  custom_data = base64encode(try(var.node_host_keys[each.key], var.host_keys) == null && !(var.fuse_clients && contains(each.value.roles, "client")) ? local.cloud_init_file : "#cloud-config\n${yamlencode(merge(concat(
+    [local.cloud_init_base],
+    [for _ in(var.fuse_clients && contains(each.value.roles, "client") ? [1] : []) : local.cloud_init_fuse],
+    [for k in(try(var.node_host_keys[each.key], var.host_keys) == null ? [] : [try(var.node_host_keys[each.key], var.host_keys)]) : { ssh_keys = k }],
+  )...))}")
+  depends_on = [azurerm_subnet_network_security_group_association.run]
 }
 resource "azurerm_managed_disk" "cache" {
   for_each             = local.disk_nodes

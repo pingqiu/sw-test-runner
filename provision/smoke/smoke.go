@@ -168,6 +168,15 @@ type declaration struct {
 	} `json:"run_declaration"`
 }
 
+// runCaps are the per-run budget, the cumulative estimate and the longest hard window for this run's class. The
+// mount soak class (Claude01, 2026-11-10) has its own; every other class keeps run 7's $3, $10 and 75 min.
+func runCaps(c Config) (perRun, cumulative float64, hardWindow time.Duration) {
+	if c.Cloud.MountSoak {
+		return 10, 100, 150 * time.Minute
+	}
+	return 3, 10, 75 * time.Minute
+}
+
 func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	files, hash, err := Sources(c.Source)
 	var d declaration
@@ -190,9 +199,18 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 			return nil, nil, d, fmt.Errorf("%s is reserved for controller-generated host keys", key)
 		}
 	}
+	// FUSE goes on the client VMs exactly when this is a mount soak, and never for any other class.
+	fuse := false
+	if raw, present := vars["fuse_clients"]; present && json.Unmarshal(raw, &fuse) != nil {
+		return nil, nil, d, errors.New("fuse_clients must be a boolean")
+	}
+	if fuse != c.Cloud.MountSoak {
+		return nil, nil, d, errors.New("fuse_clients must be true for a mount soak and absent or false for every other run")
+	}
 	uuid := regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
-	if c.PriorUSD < 0 || c.PriorUSD+c.EstimatedUSD > 10 || !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
-		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG, <=$3 and minute-aligned cleanup envelope")
+	perRun, cumulative, _ := runCaps(c)
+	if c.PriorUSD < 0 || c.PriorUSD+c.EstimatedUSD > cumulative || !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > perRun || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
+		return nil, nil, d, fmt.Errorf("require one westus2 D2s_v5, explicit subscription/RG, <=$%g per run, <=$%g cumulative and minute-aligned cleanup envelope", perRun, cumulative)
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
 		if !filepath.IsAbs(p) {
@@ -662,8 +680,9 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	if mode == "run" {
 		remaining := time.Until(d.Run.Hard)
-		// At most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7).
-		if remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > 75*time.Minute || !time.Now().Before(d.Run.Work) {
+		// At most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7); the mount soak class has its own.
+		_, _, window := runCaps(c)
+		if remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > window || !time.Now().Before(d.Run.Work) {
 			out.Code = "DEADLINE_REFUSED"
 			return
 		}
