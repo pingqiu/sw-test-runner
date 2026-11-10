@@ -28,6 +28,7 @@ if tool == 'systemctl':
     if a[:2] == ['show', '-p']: print(read('mainpid').strip() or '0')
     elif a[0] == 'stop' and (S / 'stop-fails').exists(): sys.exit(1)
     elif a[0] == 'is-active':
+        if (S / 'query-empty').exists(): sys.exit(1)  # the query itself failed: no answer at all
         if (S / 'stop-fails').exists(): print('active'); sys.exit(0)
         print('inactive'); sys.exit(3)
 elif tool == 'ip':
@@ -131,6 +132,20 @@ class LinkFlap(Host):
         (self.state / 'stop-fails').touch()  # the timer stays armed: a later firing could flap the link again
         row = self.cli(c, 'restore', expect=4)
         self.assertEqual((row['restored'], row['proof']['deadman_timer']), (False, 'active'))
+
+    def test_a_failed_or_empty_timer_query_leaves_the_restore_unknown(self):
+        for mode in ('query-empty', 'stop-fails+query-empty'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                p = self.dummy()
+                before = self.limits(p.pid)['nofile']
+                c = self.config('fd_exhaust')
+                self.cli(c, 'apply')
+                for name in mode.split('+'):
+                    (self.state / name).touch()
+                row = self.cli(c, 'restore', expect=4)
+                self.assertEqual((row['restored'], row['proof']['deadman_timer']), (False, ''))
+                self.assertEqual(self.limits(p.pid)['nofile'], before)  # the limit itself was put back; the timer is unknown
 
     def test_preflight_refuses_and_changes_nothing(self):
         self.dummy()
@@ -276,7 +291,7 @@ class Control(Host):
 class Sampler(Host):
     def test_samples_by_pid_through_the_phases(self):
         p = self.dummy()
-        rows = [dict(pid=p.pid, lqpn=1), dict(pid=p.pid, lqpn=2), dict(pid=1, lqpn=3), dict(lqpn=4)]
+        rows = [dict(pid=p.pid, lqpn=1), dict(pid=p.pid, lqpn=2), dict(pid=1, lqpn=3)]
         (self.state / 'rdma_qp').write_text(json.dumps(rows))
         (self.state / 'rdma_mr').write_text(json.dumps([dict(pid=p.pid, mrlen=4096), dict(pid=7, mrlen=1)]))
 
@@ -315,6 +330,22 @@ class Sampler(Host):
         self.assertEqual(s['port'], ['4: ACTIVE', 0])
         self.assertGreater(s['fds'], 0)
         self.assertGreaterEqual(out[-1]['mono'] - next(x['mono'] for x in out if x['phase'] == 'quiescence'), 0.6 - 0.25)
+
+    def test_rows_without_a_pid_make_the_view_unread_not_zero(self):
+        """Through the real sampler CLI: a QP or MR row with no pid cannot be joined, so rdma is null."""
+        p = self.dummy()
+        for qp, mr in (([dict(lqpn=4)], []), ([dict(pid=p.pid, lqpn=1)], [dict(mrlen=4096)]), ([dict(pid='7', lqpn=2)], [])):
+            with self.subTest(qp=qp, mr=mr):
+                (self.state / 'rdma_qp').write_text(json.dumps(qp))
+                (self.state / 'rdma_mr').write_text(json.dumps(mr))
+                out = self.root / 'resource-samples.jsonl'
+                if out.exists():
+                    out.unlink()
+                c = self.config('control', max_s=0.5)
+                subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                               env=self.env, timeout=30, check=True)
+                rows = [json.loads(line) for line in out.read_text().splitlines()]
+                self.assertTrue(rows and all(r['rdma'] is None for r in rows), rows[:1])
 
     def test_an_unreadable_view_is_null_never_zero(self):
         self.dummy()

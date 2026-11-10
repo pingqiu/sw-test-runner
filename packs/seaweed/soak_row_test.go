@@ -240,7 +240,7 @@ func rowVerdict(status string, outcomes map[string]string, extra string) string 
 		crit = append(crit, `"`+c+`":{"outcome":"`+o+`","reason":""}`)
 	}
 	return `{"status":"` + status + `","row":"F3","criteria":{` + strings.Join(crit, ",") + `},"claims":{},"unknown_attributed":0,` +
-		`"resources":"ACCOUNTED","resource_classes":{"fds":"released"},` + extra + `"binding":{"schema":"seaweed-soak-verdict/1","run_id":"run-1","boot_id":"boot-1","root":"/r"}}`
+		`"resources":"ACCOUNTED","resource_classes":{"fds":"released"},"layout_scope":"` + rowLayoutScope + `",` + extra + `"binding":{"schema":"seaweed-soak-verdict/1","run_id":"run-1","boot_id":"boot-1","root":"/r"}}`
 }
 
 func TestRowVerdictDecodesOnlyItsWorstStatus(t *testing.T) {
@@ -257,6 +257,8 @@ func TestRowVerdictDecodesOnlyItsWorstStatus(t *testing.T) {
 		"pass without its count":    {strings.Replace(rowVerdict("PASS", nil, ""), `"unknown_attributed":0,`, "", 1), false},
 		"unknown claim":             {strings.Replace(rowVerdict("PASS", nil, ""), `"claims":{}`, `"claims":{"qp":"PASS"}`, 1), false},
 		"soak resources form":       {strings.Replace(rowVerdict("PASS", nil, ""), `"ACCOUNTED"`, `"NOT_OBSERVED"`, 1), false},
+		"no layout scope":           {strings.Replace(rowVerdict("PASS", nil, ""), `"layout_scope":"`+rowLayoutScope+`",`, "", 1), false},
+		"wider layout scope":        {strings.Replace(rowVerdict("PASS", nil, ""), rowLayoutScope, "any layout", 1), false},
 	} {
 		_, err := decodeVerdict(captured([]byte(c.row)), want, rowCriteria)
 		if (err == nil) != c.ok {

@@ -114,11 +114,15 @@ def rdma_rows(kind, run):
 
 
 def rdma_view(pid, run=None):
-    """QPs and MRs owned by pid (rows carrying that pid): {'qp': n, 'mr': n, 'mr_lens': [...]}, or None."""
+    """QPs and MRs owned by pid: {'qp': n, 'mr': n, 'mr_lens': [...]}, or None. A table with any row that carries
+    no integer pid cannot be PID-joined (that row could be this process's), so the whole view is unread, never a
+    count that silently leaves rows out."""
     import subprocess
     run = run or subprocess.run
     qp, mr = rdma_rows('qp', run), rdma_rows('mr', run)
     if qp is None or mr is None:
+        return None
+    if any(isinstance(r.get('pid'), bool) or not isinstance(r.get('pid'), int) for r in qp + mr):
         return None
     mine = lambda rows: [r for r in rows if r.get('pid') == pid]
     lens = [r.get('mrlen') for r in mine(mr)]

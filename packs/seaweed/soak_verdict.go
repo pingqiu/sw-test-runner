@@ -130,7 +130,12 @@ type SoakVerdict struct {
 	Claims            map[string]string `json:"claims,omitempty"`
 	UnknownAttributed *int              `json:"unknown_attributed,omitempty"`
 	ResourceClasses   map[string]string `json:"resource_classes,omitempty"`
+	LayoutScope       string            `json:"layout_scope,omitempty"`
 }
+
+// rowLayoutScope is the layout every stage-3 row result is limited to (soak_assess.LAYOUT_SCOPE): one volume
+// process, on M02, which F1's PUT attribution needs. A row verdict without exactly this scope does not decode.
+const rowLayoutScope = "single volume process, on M02: multi-volume layouts are not covered"
 
 // MissUndecidable is one rule-A miss: exactly these four members, each required and typed.
 type MissUndecidable struct {
@@ -147,7 +152,7 @@ var verdictFields = []string{"status", "criteria", "k7", "resources", "binding",
 	"misses_qualification", "method", "limit",
 	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s",
 	"file", "bytes", "sha256", // the M02 evidence reference row (#1002)
-	"row", "claims", "unknown_attributed", "resource_classes"} // stage 3 rows
+	"row", "claims", "unknown_attributed", "resource_classes", "layout_scope"} // stage 3 rows
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -213,7 +218,7 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if row {
 		return v, decodeRowVerdict(v, want, criteria)
 	}
-	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil {
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -250,7 +255,7 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 // never be read as PASS. A PASS also carries every criterion, the attributed UNKNOWN count and the classes.
 func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error {
 	outcomes := []string{"PASS", "FAIL", "NOT_COVERED"}
-	if !slices.Contains(outcomes, v.Status) || v.Resources != "ACCOUNTED" || v.MissesQualification.Method != "" || len(v.MissesUndecidable) != 0 {
+	if !slices.Contains(outcomes, v.Status) || v.Resources != "ACCOUNTED" || v.LayoutScope != rowLayoutScope || v.MissesQualification.Method != "" || len(v.MissesUndecidable) != 0 {
 		return errors.New("soak row verdict malformed")
 	}
 	if v.Binding != want {

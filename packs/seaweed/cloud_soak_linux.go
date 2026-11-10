@@ -241,13 +241,24 @@ func (s *directSoak) Inject(ctx context.Context, action string) (json.RawMessage
 	return nil, errors.Join(err, derr, fmt.Errorf("soak: fault %s printed no witness row", action))
 }
 
-// rowSampler starts the stage-3 resource sampler on M02 before the load and marks the load phase.
+// rowSampler starts the stage-3 resource sampler on M02 and, before the load phase is marked, waits for its
+// first pre-load sample to exist: the request to start the unit is not a baseline. No sample, no load.
 func (s *directSoak) rowSampler(ctx context.Context) error {
 	if err := s.start(ctx, "fault-sample-m02"); err != nil {
 		return err
 	}
+	samples := path.Join(s.hosts["m02"].RunRoot, "resource-samples.jsonl")
+	if _, err := cloudStep(ctx, s.nodes["m02"], s.c.Output, "soak-sample-preload.json", "sample-preload", 40, preloadWitnessScript(samples, 60)); err != nil {
+		return fmt.Errorf("soak: no pre-load resource sample before the load: %w", err)
+	}
 	_, err := s.step(ctx, "fault-mark-load-m02", 30)
 	return err
+}
+
+// preloadWitnessScript exits 0 once the sampler file holds a pre-load row (a line of the sampler's sort_keys
+// JSON with phase pre_load, ending in its closing brace), and 1 after tries half-second polls without one.
+func preloadWitnessScript(file string, tries int) string {
+	return "for i in $(seq " + strconv.Itoa(tries) + "); do if grep -q '\"phase\": \"pre_load\".*}$' " + cloudQuote(file) + " 2>/dev/null; then exit 0; fi; sleep 0.5; done; exit 1"
 }
 
 // rowResources marks quiescence, waits (bounded) for the sampler to end its 120 s, and publishes its

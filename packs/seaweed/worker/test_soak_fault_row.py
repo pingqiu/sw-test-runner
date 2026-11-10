@@ -342,6 +342,37 @@ class NotCovered(unittest.TestCase):
                 self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
                 self.assertNotEqual(v['status'], 'PASS')
 
+    def test_an_rdma_view_that_could_not_be_pid_joined(self):
+        def edit(ev):  # the sampler records null when any row lacks a pid: never a zero count
+            for s in ev['resource-samples.jsonl']:
+                s['rdma'] = None
+        v = verdict(self, 'control', edit)
+        self.assertEqual((v['resource_classes']['qp'], v['resource_classes']['mr']), ('NOT_COVERED', 'NOT_COVERED'))
+        self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
+    def test_resources_need_a_real_pre_load_sample(self):
+        """Review finding: the baseline is a pre-load sample provably taken before the load started, not the
+        request to start the sampler."""
+        def none(ev):
+            ev['resource-samples.jsonl'] = [s for s in ev['resource-samples.jsonl'] if s['phase'] != 'pre_load']
+        def late(ev):  # labelled pre_load, but sampled after the load began (M02 time past the load-start bound)
+            for s in ev['resource-samples.jsonl']:
+                if s['phase'] == 'pre_load':
+                    s['epoch'] += 60
+        def no_clock(ev):
+            del ev['soak-clock-s2.json']
+        for edit in (none, late, no_clock):
+            with self.subTest(edit=edit.__name__):
+                v = verdict(self, 'control', edit)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertEqual(set(v['resource_classes'].values()), {'NOT_COVERED'})
+                self.assertEqual((outcome(v, 'resources'), v['status']), ('NOT_COVERED', 'NOT_COVERED'))
+
+    def test_every_row_verdict_states_its_layout_scope(self):
+        self.assertEqual(verdict(self, 'link_flap')['layout_scope'], soak_assess.LAYOUT_SCOPE)
+        v = verdict(self, 'link_flap', lambda ev: ev.pop('faults.json'))  # an error row carries it too
+        self.assertEqual((v['status'], v['layout_scope']), ('FAIL', soak_assess.LAYOUT_SCOPE))
+
     def test_f5_without_a_new_registration(self):
         def edit(ev):
             for s in ev['resource-samples.jsonl']:
@@ -407,6 +438,23 @@ class Fail(unittest.TestCase):
             g = next(e for e in ev['op-events.jsonl'] if e.get('action') == 'get' and e.get('ok'))
             g['sha256'] = '0' * 64
         self.check('control', edit, 'bytes')
+
+    def test_a_wrong_audit_read_fails_whatever_a_later_read_returns(self):
+        """Review finding: an earlier wrong-digest read (at another length, or the same) followed by a good read of
+        the same key was satisfied by the retry. Every audit read counts."""
+        for length in (128, 64):
+            with self.subTest(length=length):
+                def edit(ev, length=length):
+                    u = next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')
+                    a = next(a for a in ev['audit.jsonl'] if a['key'] == u['key'])
+                    a['reads'] = [dict(case='hit', sha256='4' * 64, length=length), dict(case='hit', sha256=u['digest'], length=64)]
+                self.check('volume_kill_io', edit, 'audit')
+
+    def test_an_audit_error_read_then_a_good_read_fails(self):
+        def edit(ev):
+            a = next(a for a in ev['audit.jsonl'] if a['key'] == 'k1')
+            a['reads'] = [dict(case='unexpected', ok=False, error='timed out')] + a['reads']
+        self.check('control', edit, 'audit')
 
     def test_an_ack_whose_digest_is_not_its_seeds_bytes(self):
         def edit(ev):

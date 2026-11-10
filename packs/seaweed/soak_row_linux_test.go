@@ -52,8 +52,30 @@ func TestTheAdmittedRowAssessorChain(t *testing.T) {
 			t.Fatalf("%s: admitted argv failed: %v", name, err)
 		}
 		v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root}, x.criteria())
-		if err != nil || v.Status != c.status || v.Criteria["causal"].Outcome != c.causal {
+		if err != nil || v.Status != c.status || v.Criteria["causal"].Outcome != c.causal || v.LayoutScope != rowLayoutScope {
 			t.Fatalf("%s: got %+v %v\n%s", name, v, err, raw)
+		}
+	}
+}
+
+// The load is gated on a real pre-load sample: the script the runner runs on M02, against rows written by the
+// sampler's own serializer (Python json.dumps, sort_keys), accepts only a pre_load row, never a request or later phase.
+func TestTheLoadWaitsForARealPreloadSample(t *testing.T) {
+	dir := t.TempDir()
+	for name, c := range map[string]struct {
+		phases []string
+		ok     bool
+	}{"pre-load row": {[]string{"pre_load"}, true}, "no file": {nil, false}, "only load rows": {[]string{"load", "quiescence"}, false}} {
+		file := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")
+		if c.phases != nil {
+			code := "import json, sys\nwith open(sys.argv[1], 'w') as f:\n    for p in sys.argv[2:]:\n        f.write(json.dumps(dict(seq=0, mono=1.5, phase=p, identity=dict(pid=7, starttime=9)), sort_keys=True) + '\\n')\n"
+			if out, err := exec.Command("python3", append([]string{"-c", code, file}, c.phases...)...).CombinedOutput(); err != nil {
+				t.Fatalf("%s: %v %s", name, err, out)
+			}
+		}
+		err := exec.Command("bash", "-c", preloadWitnessScript(file, 2)).Run()
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err=%v, want ok=%v", name, err, c.ok)
 		}
 	}
 }

@@ -251,7 +251,9 @@ def restore(c):
         run(['systemctl', 'stop', unit + '.timer'], check=False)
         state = run(['systemctl', 'is-active', unit + '.timer'], check=False).stdout.strip()
         proof['deadman_timer'] = state
-        restored = restored and state != 'active'
+        # Only a positive answer that the timer is gone proves it cannot fire again; an empty, failed or any other
+        # answer leaves the restore UNKNOWN.
+        restored = restored and state in ('inactive', 'failed')
     row = dict(action='restore', kind=kind, identity=ident, after=after, restored=restored, proof=proof)
     record(c, row)
     return row

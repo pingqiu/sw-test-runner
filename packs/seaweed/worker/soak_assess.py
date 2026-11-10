@@ -558,6 +558,8 @@ def assess(c):
 # NOT_COVERED and never PASS; any FAIL fails the row. Each criterion recomputes from the run's own evidence.
 
 ROW_CRITERIA = ('bytes', 'write_contract', 'audit', 'failure_mode', 'recovery', 'resources', 'causal')  # Go's rowCriteria
+# Carried on every row verdict, PASS or not (Go's rowLayoutScope): a row result never reads as covering more.
+LAYOUT_SCOPE = 'single volume process, on M02: multi-volume layouts are not covered'
 ROW_KINDS = {'control': 'R0', 'volume_kill_io': 'F1', 'client_kill_put': 'F2', 'link_flap': 'F3', 'conn_kill': 'F4',
              'mr_pressure': 'F5', 'disk_full': 'F6', 'fd_exhaust': 'F7'}
 RECOVERY_S = {'volume_kill_io': 60, 'client_kill_put': 60}  # frozen by the plan; every other row 30 s
@@ -707,14 +709,18 @@ def assess_row(c):
         reads = audited.get(key)
         if not reads:
             continue
-        last = typed(reads[-1], case=str)
         allowed = ([k['survivor']] if k['survivor'] else []) + k['unknown']
-        exact = last['case'] == 'hit' and any(last.get('sha256') == v['digest'] and last.get('length') == v['length'] for v in allowed)
         vids = {str(x).split(',')[0] for x in fids.get((key, k['survivor']['sequence']), [])} if k['survivor'] else set()
-        miss_ok = last['case'] == 'miss' and (not k['survivor'] and k['unknown'] or (vids and vids <= {str(v) for v in retired}))
-        earlier_ok = all(x.get('case') == 'hit' and (x.get('sha256') == last.get('sha256') or x.get('length') != last.get('length'))
-                         for x in reads[:-1])
-        if not ((exact or miss_ok) and earlier_ok):
+        miss_ok = bool(not k['survivor'] and k['unknown'] or (vids and vids <= {str(v) for v in retired}))
+
+        def good(x):
+            """One audit read on its own: the exact bytes of an allowed generation, or an allowed not-found."""
+            case = typed(x, case=str)['case']
+            if case == 'hit':
+                return any(x.get('sha256') == v['digest'] and x.get('length') == v['length'] for v in allowed)
+            return case == 'miss' and miss_ok
+        # Every read counts: one wrong-bytes, partial or error read fails the key, whatever a later read returns.
+        if not all(good(x) for x in reads):
             failed.append(key[-12:])
     covered = bool(done) and done[-1].get('complete') is True and set(audited) == set(keys) and bool(fresh)
     mark('audit', 'FAIL' if failed else 'PASS' if covered else 'NOT_COVERED',
@@ -755,7 +761,10 @@ def assess_row(c):
     over = [p for p in pinned if p > row['pin_bound_bytes']]
     whole = [s['seq'] for s in samples if (s.get('rdma') or {}).get('mr_lens') and any(
         d > 0 and -(-d // PAGE) * PAGE in s['rdma']['mr_lens'] for d in s.get('dat_sizes') or [])]
-    classes = resource_classes(samples, row)
+    # The baseline is a pre-load sample provably taken before the load started: its M02 time below the earliest M02
+    # time the load-start instant can map to. Without the clock join, or with no such sample, nothing is baselined.
+    before_load = [s for s in samples if s['phase'] == 'pre_load' and lo is not None and s['epoch'] < begin + lo]
+    classes = resource_classes(samples, row, before_load)
     outcomes = ['FAIL' if over or whole else 'PASS', 'NOT_COVERED' if not pinned else 'PASS'] + \
         ['FAIL' if v == 'leak' else 'NOT_COVERED' if v == 'NOT_COVERED' else 'PASS' for v in classes.values()]
     mark('resources', rank(outcomes), 'pin max %s bound %d, whole .dat %s, classes %s' % (
@@ -774,7 +783,7 @@ def assess_row(c):
         claims['qp'] = 'NOT_COVERED'  # TCP scope only: no QP-state claim without a real RDMA effect
     status = rank([v['outcome'] for v in crit.values()])
     return dict(status=status, row=ROW_KINDS[kind], criteria=crit, claims=claims, unknown_attributed=attributed,
-                resources='ACCOUNTED', resource_classes=classes)
+                resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE)
 
 
 def receipt_identities(f):
@@ -789,10 +798,10 @@ def hashlib_sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def resource_classes(samples, row):
+def resource_classes(samples, row, pre):
     """Each view's quiescence class: released, retained (the product's own custody, within budget, not growing),
-    leak, or NOT_COVERED (unread, or the pre-load and final samples are not the same pid/starttime)."""
-    pre = [s for s in samples if s['phase'] == 'pre_load']
+    leak, or NOT_COVERED (no pre-load witness, unread, or the pre-load and final samples are not the same
+    pid/starttime). `pre` are the witnessed pre-load samples only."""
     quiet = [s for s in samples if s['phase'] == 'quiescence']
     out = {}
     for view in RESOURCES:
@@ -965,7 +974,7 @@ def main():
     except Exception as error:  # any unreadable or malformed evidence fails closed
         row = dict(status='FAIL', error=repr(error)[:500], resources='NOT_OBSERVED', misses_qualification=QUALIFICATION)
         if config.get('fault_row'):
-            row.update(resources='ACCOUNTED')
+            row.update(resources='ACCOUNTED', layout_scope=LAYOUT_SCOPE)
             del row['misses_qualification']
     row['binding'] = binding(config)
     print(json.dumps(row, sort_keys=True), flush=True)
