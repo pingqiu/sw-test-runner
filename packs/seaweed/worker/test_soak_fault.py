@@ -445,6 +445,36 @@ class Sampler(Host):
                 rows = [json.loads(line) for line in out.read_text().splitlines()]
                 self.assertTrue(rows and all(r['rdma'] is None for r in rows), rows[:1])
 
+    # `rdma -j resource show qp` on M02 as testdev, verbatim (2026-11-10T17:16:44Z, rc 0): the kernel's GSI QP1 per
+    # device, with no pid key. Before the fix this made every lab sample's rdma view null.
+    M02_QP = ('[{"ifindex":0,"ifname":"rocep1s0","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":0,"comm":"ib_core"},'
+              '{"ifindex":1,"ifname":"mlx5_0","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":8,"comm":"ib_core"},'
+              '{"ifindex":2,"ifname":"mlx5_1","port":1,"lqpn":1,"type":"GSI","state":"RTS","sq-psn":0,"comm":"ib_core"}]')
+
+    def test_the_kernels_management_qps_do_not_make_the_view_unread(self):
+        """Through the real sampler CLI, on the captured M02 table: the kernel GSI rows are set aside and the process's
+        own QPs and MRs are counted; any other pid-less row (or a GSI row not owned by ib_core) still makes it null."""
+        p = self.dummy()
+        mine = [dict(pid=p.pid, lqpn=700, type='RC', comm='weed-volume'), dict(pid=p.pid, lqpn=701, type='UD', comm='weed-volume')]
+        cases = [(json.loads(self.M02_QP), [], dict(qp=0, mr=0, mr_lens=[])),
+                 (json.loads(self.M02_QP) + mine, [dict(pid=p.pid, mrlen=8388608), dict(pid=1, mrlen=4)], dict(qp=2, mr=1, mr_lens=[8388608])),
+                 (json.loads(self.M02_QP) + [dict(pid=p.pid, lqpn=1, type='GSI', comm='ib_core')], [], dict(qp=1, mr=0, mr_lens=[])),
+                 (json.loads(self.M02_QP) + [dict(lqpn=9, type='RC', comm='ib_core')], [], None),
+                 (json.loads(self.M02_QP) + [dict(lqpn=1, type='GSI', comm='python3')], [], None),
+                 (json.loads(self.M02_QP), [dict(mrlen=4096, comm='ib_core')], None)]
+        for qp, mr, want in cases:
+            with self.subTest(qp=qp[3:], mr=mr):
+                (self.state / 'rdma_qp').write_text(json.dumps(qp))
+                (self.state / 'rdma_mr').write_text(json.dumps(mr))
+                out = self.root / 'resource-samples.jsonl'
+                if out.exists():
+                    out.unlink()
+                c = self.config('control', max_s=0.5)
+                subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                               env=self.env, timeout=30, check=True)
+                rows = [json.loads(line) for line in out.read_text().splitlines()]
+                self.assertTrue(rows and all(r['rdma'] == want for r in rows), rows[:1])
+
     def test_f1_and_f2_rows_sample_and_mark_but_never_inject(self):
         """The runner pins the sampler and markers with the row's own kind; F1/F2 must sample, never apply."""
         self.dummy()
