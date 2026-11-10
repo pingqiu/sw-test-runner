@@ -116,7 +116,10 @@ def link_preflight(c):
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', dev):
         raise Refused('netdev name')
     ib = Path(sys_root(c)) / 'class' / 'net' / dev / 'device' / 'infiniband'
-    if not (ib / c['rdma_device']).exists():
+    # A PCI NIC shows its RDMA device under the netdev's sysfs device; a soft device (rxe) has no such parent, so
+    # `rdma link show` naming this netdev for the row's device and port counts as the same mapping.
+    link = run(['rdma', 'link', 'show', '%s/%d' % (c['rdma_device'], c['rdma_port'])], check=False).stdout
+    if not (ib / c['rdma_device']).exists() and not re.search(r'\bnetdev %s\b' % re.escape(dev), link):
         raise Refused('netdev is not the row RDMA device')
     mine = addresses(dev)
     if mine & set(c['management_addrs']):

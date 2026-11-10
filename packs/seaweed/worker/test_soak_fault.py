@@ -46,6 +46,7 @@ elif tool == 'ss':
     if '-K' in a: (S / 'ss').write_text(read('ss_after'))
     elif any('sport = :22' in x for x in a): print(read('ssh'), end='')
     else: print(read('ss'), end='')
+elif tool == 'rdma' and a[:2] == ['link', 'show']: print(read('rdma_link'), end='')
 elif tool == 'rdma': print(read('rdma_' + a[-1]) or '[]')
 '''
 
@@ -205,6 +206,20 @@ class LinkFlap(Host):
                 self.assertEqual((row['restored'], row['proof']['deadman_timer'], row['proof']['deadman_stop_rc']),
                                  (proven, [int(rc), out], int(stop_rc)))
                 self.assertEqual(self.limits(p.pid)['nofile'], before)  # the limit itself was put back either way
+
+    def test_a_soft_rdma_device_maps_through_rdma_link(self):
+        """rxe on a veth has no sysfs device parent; `rdma link show` naming the netdev is the mapping."""
+        self.dummy()
+        shutil.rmtree(self.state / 'sys/class/net/ens1f0/device/infiniband/mlx5_0')
+        (self.state / 'rdma_link').write_text('link mlx5_0/1 state ACTIVE physical_state LINK_UP netdev ens1f0 \n')
+        c = self.config('link_flap')
+        self.assertEqual(self.cli(c, 'apply')['after']['port'], ['1: DOWN', 1])
+        self.assertTrue(self.cli(c, 'restore')['restored'])
+        self.setUp()  # a fresh host: the device names another netdev
+        self.dummy()
+        shutil.rmtree(self.state / 'sys/class/net/ens1f0/device/infiniband/mlx5_0')
+        (self.state / 'rdma_link').write_text('link mlx5_0/1 state ACTIVE physical_state LINK_UP netdev ens1f9 \n')
+        self.assertIn('not the row RDMA device', self.cli(self.config('link_flap'), 'apply', expect=3)['refused'])
 
     def test_preflight_refuses_and_changes_nothing(self):
         self.dummy()
