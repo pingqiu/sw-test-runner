@@ -6,7 +6,7 @@ mount on the host. Config JSON keys: root, weed, filer (host:port), filer_path, 
 C), episodes_s, iptables (argv prefix), mounts (int), dual_append_s, write_budget_bytes (W1's total; the lab cluster is
 small and volumes only reclaim space on vacuum, so an unbounded W1 ends in ENOSPC and proves nothing).
 """
-import argparse, concurrent.futures, errno as E, hashlib, json, os, random, signal, subprocess, sys, threading, time, urllib.error, urllib.request
+import argparse, concurrent.futures, errno as E, hashlib, json, os, random, signal, stat, struct, subprocess, sys, threading, time, urllib.error, urllib.request
 from pathlib import Path
 
 CHUNK, RECORD = 1 << 18, 256
@@ -16,6 +16,13 @@ W2_RECORDS_PER_FILE, W2_APPEND_PAUSE_S, W2_ATTR_PAUSE_S = 64, 0.2, 0.1
 W3_FILES, W3_SYNC_FILES, W3_SIZE = 24, 4, 1 << 20
 W1_BURST_BYTES = 1 << 25  # the largest write has to fit in the bucket
 SIZES, SIZE_WEIGHTS = (4096, 1 << 16, 1 << 20, 1 << 24), (50, 30, 19, 1)
+
+
+def mount_socket(d):
+    """The Unix socket weed mount creates for mount dir d and never removes (mono #1176; mount_std.go: md5 of the
+    dir, first 4 bytes as a big-endian int32, absolute value). None for the one hash Go cannot negate."""
+    v = struct.unpack('>i', hashlib.md5(str(d).encode()).digest()[:4])[0]
+    return None if v == -2 ** 31 else Path('/tmp/seaweedfs-mount-%d.sock' % abs(v))
 
 
 def payload(seed, n):  # as mount_assess.payload
@@ -74,6 +81,7 @@ class Run:
         self.c, self.root, self.lock, self.op = c, Path(c['root']), threading.Lock(), 0
         self.journal = open(self.root / 'mount-journal.jsonl', 'a', buffering=1)
         self.mounts, self.procs, self.spawned = {}, [], {}  # spawned: every mount process from Popen until reaped
+        self.sockets = {}  # name -> the socket its weed mount leaves behind, removed once that process has exited
         self.cohorts, self.faults, self.w1_state, self.w2_current = {}, {}, {}, {}
         self.w1_left = c['write_budget_bytes']
         self.w1_rate = c['write_budget_bytes'] / max(1, sum(c['phases_s']))  # bytes per second over all load phases
@@ -101,6 +109,7 @@ class Run:
                 '-volumeServerAccess=direct', '-dirAutoCreate']
         if writeback:
             argv.append('-writebackCache')
+        self.sockets[name] = mount_socket(d)
         with TermHold():
             p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=open(self.root / ('mount-%s.log' % name), 'ab'),
                                  stderr=subprocess.STDOUT, start_new_session=True)
@@ -132,10 +141,20 @@ class Run:
             try:
                 p.wait(10)
                 del self.spawned[name]
+                self.drop_socket(name)
                 return True
             except subprocess.TimeoutExpired:
                 pass
         return False
+
+    def drop_socket(self, name):
+        """Remove this mount's own socket, only after its process has exited, and only if it is a socket."""
+        p = self.sockets.get(name)
+        try:
+            if p and stat.S_ISSOCK(os.lstat(p).st_mode):
+                os.unlink(p)
+        except OSError:
+            pass  # teardown's check decides
 
     def path(self, mount, rel):
         return self.mounts[mount]['dir'] / rel
@@ -665,7 +684,8 @@ def teardown(run, root):
         mounts = [ln for ln in Path('/proc/mounts').read_text().splitlines() if str(root) in ln]
     except OSError:
         mounts = None
-    proven = reaped and rc == 0 and 'swmountsoak' not in listing and mounts == []
+    sockets_left = [str(p) for p in run.sockets.values() if p and os.path.lexists(p)]
+    proven = reaped and rc == 0 and 'swmountsoak' not in listing and mounts == [] and not sockets_left
     (root / 'mount-cleanup.json').write_text(json.dumps('PROVEN' if proven else 'UNKNOWN'))
 
 

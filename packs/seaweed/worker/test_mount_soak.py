@@ -1,6 +1,6 @@
 """Caller controls for the mount soak load: teardown owns the rule and the mounts on every path, and absence is only
 ever proven by a successful check. No FUSE, iptables or network: the effects are recorded by fakes."""
-import inspect, json, os, signal, sys, tempfile, threading, unittest
+import hashlib, inspect, json, os, signal, socket, stat, struct, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -175,6 +175,63 @@ class PendingStart(Base):
         self.assertEqual(child.signals, ['term', 'kill'])
         self.assertIn('m0', self.run_.spawned)
         self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+
+def weed_socket(d):
+    """weed mount's socket name for mount dir d, computed here independently of the worker (mount_std.go:61-65)."""
+    v = struct.unpack('>i', hashlib.md5(str(d).encode()).digest()[:4])[0]
+    return Path('/tmp/seaweedfs-mount-%d.sock' % abs(v))
+
+
+class OwnSockets(Base):
+    """mono #1176: weed mount never removes its socket. The worker removes each mount's own socket after that
+    mount's process has exited, and cleanup is not PROVEN while one is left."""
+
+    def mount_leaving(self, child, kind='socket'):
+        d = self.root / 'mnt' / 'm0'
+        path = weed_socket(d)
+        self.addCleanup(lambda: path.unlink() if os.path.lexists(path) else None)
+
+        def popen(*a, **k):  # the started mount creates its socket, as weed mount does
+            if kind == 'socket':
+                s = socket.socket(socket.AF_UNIX)
+                s.bind(str(path))
+                s.close()
+            else:
+                path.write_text('not a socket')
+            return child
+        self.run_.fault_cmd = FakeFaults()
+        real_read = Path.read_text
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=popen), mock.patch.object(M.os.path, 'ismount', return_value=False), \
+                mock.patch.object(M.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'did not start'):
+                self.run_.mount('m0')
+            self.assertTrue(os.path.lexists(path))
+            with mock.patch.object(M.Path, 'read_text', lambda p, *a, **k: '' if str(p) == '/proc/mounts' else real_read(p, *a, **k)):
+                M.teardown(self.run_, self.root)
+        return path
+
+    def test_an_exited_mount_leaves_no_socket(self):
+        path = self.mount_leaving(StartingMount())
+        self.assertFalse(os.path.lexists(path))
+        self.assertEqual(self.cleanup_state(), 'PROVEN')
+
+    def test_a_live_mount_keeps_its_socket_and_cleanup_is_unknown(self):
+        path = self.mount_leaving(StartingMount(stubborn=True))
+        self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+        self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+    def test_only_a_socket_is_removed(self):
+        path = self.mount_leaving(StartingMount(), kind='file')
+        self.assertEqual(path.read_text(), 'not a socket')
+        self.assertEqual(self.cleanup_state(), 'UNKNOWN')
+
+    def test_the_name_is_the_one_weed_mount_uses(self):
+        # The 10 sockets the second lab smoke left on M01, as observed and removed by hand.
+        root = Path('/opt/rdma-lab-ci/work/claude04-mountsmoke2-20261109/mnt')
+        names = ['m0', 'm1', 'm2', 'm3', 'wb', 'sync', 'fresh-E1-45s', 'fresh-E2-60s', 'barrier', 'final']
+        observed = {227686937, 235780097, 358778235, 621450614, 1213839488, 1214827200, 1665966658, 1672653377, 1861612155, 1914377927}
+        self.assertEqual({int(str(M.mount_socket(root / n))[len('/tmp/seaweedfs-mount-'):-len('.sock')]) for n in names}, observed)
 
 
 class StopAroundSpawn(unittest.TestCase):
