@@ -1,0 +1,4 @@
+#!/bin/sh
+# az for a WSL controller: the Windows Azure CLI's own Python, so the existing Windows login is used and no Linux
+# credential store exists. Arguments pass through WSL interop unchanged (no cmd.exe parsing); nothing is logged.
+exec "/mnt/c/Program Files/Microsoft SDKs/Azure/CLI2/python.exe" -IBm azure.cli "$@"
