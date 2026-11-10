@@ -199,6 +199,17 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 			return nil, nil, d, fmt.Errorf("%s is reserved for controller-generated host keys", key)
 		}
 	}
+	// The mount soak's class is closed and checked before anything else, so no mixed or partial run borrows its caps:
+	// no other phase or class with it, and the ten-node cluster layout.
+	if e := seaweed.MountSoakClassRefusal(c.Cloud); e != nil {
+		return nil, nil, d, e
+	}
+	if c.Cloud.MountSoak {
+		var cluster bool
+		if raw, present := vars["cluster"]; !present || json.Unmarshal(raw, &cluster) != nil || !cluster {
+			return nil, nil, d, errors.New("a mount soak needs the ten-node cluster layout (cluster: true)")
+		}
+	}
 	// FUSE goes on the client VMs exactly when this is a mount soak, and never for any other class.
 	fuse := false
 	if raw, present := vars["fuse_clients"]; present && json.Unmarshal(raw, &fuse) != nil {

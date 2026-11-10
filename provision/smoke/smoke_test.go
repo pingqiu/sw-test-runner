@@ -287,7 +287,7 @@ func TestMountSoakClassHasItsOwnCapsAndNoOtherClassDoes(t *testing.T) {
 		var v map[string]any
 		_ = json.Unmarshal(b, &v)
 		if c.Cloud.MountSoak {
-			v["fuse_clients"] = true
+			v["fuse_clients"], v["cluster"] = true, true
 		}
 		r := v["run_declaration"].(map[string]any)
 		hard := time.Now().Add(away).UTC().Truncate(time.Minute)
@@ -355,6 +355,9 @@ func TestFuseClientsGoExactlyWithTheMountSoak(t *testing.T) {
 			if tc.fuse != nil {
 				v["fuse_clients"] = tc.fuse
 			}
+			if tc.mount {
+				v["cluster"] = true
+			}
 			b, _ = json.Marshal(v)
 			_ = os.WriteFile(c.Variables, b, 0600)
 			c.VariablesSHA256 = digest(b)
@@ -362,6 +365,44 @@ func TestFuseClientsGoExactlyWithTheMountSoak(t *testing.T) {
 			out := controller(f).Execute(context.Background(), "run", c)
 			if refused := out.Code == "INPUT_REFUSED"; refused == tc.ok || !tc.ok && len(f.events) != 0 {
 				t.Fatalf("%+v %v", out, f.events)
+			}
+		})
+	}
+}
+
+// The mount soak's widened caps are chosen only after its class is proven closed: a mount soak mixed with another
+// phase or class, or without the ten-node layout, is refused before any command, even with an estimate only the
+// mount soak's caps would allow.
+func TestAMixedOrPartialMountSoakNeverReachesTheCloud(t *testing.T) {
+	for name, mutate := range map[string]func(*Config, map[string]any){
+		"with chaos":         func(c *Config, v map[string]any) { c.Cloud.Chaos = true },
+		"with replication":   func(c *Config, v map[string]any) { c.Cloud.Replication = "001" },
+		"with chaos set":     func(c *Config, v map[string]any) { c.Cloud.ChaosSet = "A" },
+		"with kv soak":       func(c *Config, v map[string]any) { c.Cloud.KVSoak = true },
+		"with a read case":   func(c *Config, v map[string]any) { c.Cloud.ReadCase = "mount-soak" },
+		"single VM layout":   func(c *Config, v map[string]any) { delete(v, "cluster") },
+		"cluster false":      func(c *Config, v map[string]any) { v["cluster"] = false },
+		"cluster not a bool": func(c *Config, v map[string]any) { v["cluster"] = "yes" },
+		"with ec stage1":     func(c *Config, v map[string]any) { c.Cloud.ECStage1 = true },
+		"with master writes": func(c *Config, v map[string]any) { c.Cloud.MasterWrites = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fixture(t)
+			c.Cloud.MountSoak, c.EstimatedUSD, c.PriorUSD = true, 9, 90
+			b, _ := os.ReadFile(c.Variables)
+			var v map[string]any
+			_ = json.Unmarshal(b, &v)
+			v["fuse_clients"], v["cluster"] = true, true
+			r := v["run_declaration"].(map[string]any)
+			r["budget_usd"], r["abort_estimate_usd"] = 10, 10
+			mutate(&c, v)
+			b, _ = json.Marshal(v)
+			_ = os.WriteFile(c.Variables, b, 0600)
+			c.VariablesSHA256 = digest(b)
+			f := &fake{}
+			out := controller(f).Execute(context.Background(), "run", c)
+			if out.Code != "INPUT_REFUSED" || len(f.events) != 0 {
+				t.Fatalf("code %s, events %v", out.Code, f.events)
 			}
 		})
 	}
