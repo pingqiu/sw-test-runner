@@ -440,6 +440,9 @@ def transfer_progress(text, vid, state, at):
 
 
 def task(c, root):
+    seconds = int(os.environ.get('SW_MAINTENANCE_TASK_SECONDS', '570'))
+    if not 1 <= seconds <= 570:
+        raise ValueError('task lifetime outside admitted bound')
     manifest = strict((root / 'manifest.json').read_bytes())
     identity = proc_identity(os.getpid())
     identity.update(task=c['task'], run_id=c['run_id'], config_sha256=c['config_sha256'])
@@ -453,7 +456,7 @@ def task(c, root):
         params=proposal['parameters']
         if str(params.get('volume_id',{}).get('int64_value',''))!=manifest['vid'] or params.get('collection',{}).get('string_value')!=c['collection']:
             raise ValueError('foreign stored proposal')
-        request_body = dict(job=dict(job_id=job, job_type=c['task'],parameters=params),attempt=1,timeout_seconds=570)
+        request_body = dict(job=dict(job_id=job, job_type=c['task'],parameters=params),attempt=1,timeout_seconds=seconds)
         argv = None
     else:
         command = ('volume.balance -apply -collection=^' + c['collection'] + '$ -maxParallelization=1 -ioBytePerSecond=1048576'
@@ -489,8 +492,8 @@ def task(c, root):
                 retained = bytearray(); pending = bytearray(); progress_state=dict(phase=None,operation=0)
                 with events.open('xb', buffering=0) as out, transcript.open('xb', buffering=0) as log:
                     while selector.get_map():
-                        if time.monotonic() - start > 570:
-                            raise TimeoutError('task570s')
+                        if time.monotonic() - start > seconds:
+                            raise TimeoutError('task%ds' % seconds)
                         for key, _ in selector.select(.1):
                             chunk = os.read(key.fd, 65536)
                             if not chunk:
@@ -506,7 +509,7 @@ def task(c, root):
                                 write(root/'progress.json',progress)
                                 if progress['state']=='in_flight':
                                     out.write(json.dumps(dict(event='actual_progress', at=at, vid=manifest['vid'], bytes=progress['bytes'])).encode()+b'\n')
-                    rc = process.wait(timeout=max(.01, 570 - (time.monotonic()-start)))
+                    rc = process.wait(timeout=max(.01, seconds - (time.monotonic()-start)))
                     write(root/'progress.json',dict(state='idle',vid=manifest['vid'],operation=str(progress_state['operation']),bytes=0,begin=0,source='',target=''))
                 text = retained.decode('utf-8', 'replace')
                 failure=re.search(r'(?im)^(?:error|failed)\b|^fixing under replicated volume [0-9]+:',text)
@@ -524,7 +527,7 @@ def task(c, root):
         else:
             # The blocking execute RPC is bounded; the controller's separate
             # snapshot stage reads the same admin's job/activities while it runs.
-            status, raw = request(c['admin'] + '/api/plugin/jobs/execute', request_body, 'POST', timeout=570)
+            status, raw = request(c['admin'] + '/api/plugin/jobs/execute', request_body, 'POST', timeout=seconds)
             transcript.write_bytes(raw)
             done = strict(raw)
             completion = done.get('completion', done)

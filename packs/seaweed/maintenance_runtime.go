@@ -682,12 +682,23 @@ func (m *maintenanceRuntime) removeFixture(ctx context.Context, id string, shard
 }
 
 func (m *maintenanceRuntime) startTask(ctx context.Context) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errors.New("maintenance task requires its original phase deadline")
+	}
+	// Keep timeout -k 5 grace plus a second for dispatch inside the SAME
+	// phase. Nested unit/leaf bounds leave room to stop/join and report.
+	seconds := min(590, int(time.Until(deadline)/time.Second)-6)
+	unitSeconds, taskSeconds := seconds-10, seconds-20
+	if taskSeconds < 1 {
+		return errors.New("maintenance task cannot fit leaf/unit/step grace in original phase")
+	}
 	m.done = make(chan struct{})
 	go func() {
 		defer close(m.done)
 		h := m.hosts["meta"]
-		cmd := cloudStart(m.r.docs["meta"], h.RunRoot, "maintenance-task", "--wait --pipe --collect --property=User="+cloudQuote(h.Management.User)+" --property=UMask=0077 --property=RuntimeMaxSec=580 --property=TimeoutStopSec=3 --property=KillMode=control-group "+m.command("meta", "task", nil))
-		out, err := m.r.step(ctx, "meta", "maintenance-task", 590, cmd)
+		cmd := cloudStart(m.r.docs["meta"], h.RunRoot, "maintenance-task", "--wait --pipe --collect --property=User="+cloudQuote(h.Management.User)+" --property=UMask=0077 --property=RuntimeMaxSec="+strconv.Itoa(unitSeconds)+" --property=TimeoutStopSec=3 --property=KillMode=control-group /usr/bin/env SW_MAINTENANCE_TASK_SECONDS="+strconv.Itoa(taskSeconds)+" "+m.command("meta", "task", nil))
+		out, err := m.r.step(ctx, "meta", "maintenance-task", seconds, cmd)
 		var result maintenanceTaskResult
 		if err == nil {
 			err = maintenanceDecode([]byte(out), &result)

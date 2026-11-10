@@ -66,7 +66,7 @@ def wait(check):
         if check():return
         time.sleep(.01)
     raise AssertionError('process fixture deadline')
-for mode in ('success','refusal','fast-noop'):
+for mode in ('success','refusal','fast-noop','bounded-timeout'):
  with tempfile.TemporaryDirectory() as temporary:
     root=pathlib.Path(temporary);(root/'worker').mkdir();helper=root/'worker/maintenance.py';helper.write_bytes(pathlib.Path(sys.argv[1]).read_bytes())
     weed=root/'weed';shutil.copyfile(sys.argv[2],weed);weed.chmod(0o700)
@@ -77,6 +77,7 @@ for mode in ('success','refusal','fast-noop'):
     oldenv=os.environ.copy();os.environ.update(PATH=str(bin)+':'+oldenv['PATH'],MAINT_UNIT=unit,MAINT_PID_FILE=str(pidfile),MAINT_ADVANCE=str(root/'advance'),MAINT_FINISH=str(root/'finish'))
     if mode=='refusal':os.environ['MAINT_REFUSE']='1'
     if mode=='fast-noop':os.environ['MAINT_FAST']='1'
+    if mode=='bounded-timeout':os.environ['SW_MAINTENANCE_TASK_SECONDS']='1'
     subprocess.run([sys.executable,'-I',str(helper),json.dumps(dict(c,stage='init'))],check=True,stdout=subprocess.PIPE,timeout=5)
     m.write(root/'maintenance/manifest.json',dict(run_id='run',task=c['task'],collection='owned',vid='7',objects=[]),True)
     process=subprocess.Popen([sys.executable,'-I',str(helper),json.dumps(dict(c,stage='task'))],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -103,6 +104,12 @@ for mode in ('success','refusal','fast-noop'):
         stdout,stderr=process.communicate(timeout=5);assert process.returncode==0,(stdout,stderr)
         result=m.strict(stdout)
         if mode=='refusal':assert result['terminal']=='refused' and result['refusal']=='RPC_UNAVAILABLE' and result['exit']==73,result
+        elif mode=='bounded-timeout':
+            assert result['terminal']=='unknown' and result['exit'] is None and 'TimeoutError: task1s' in result['diagnostic'],result
+            child=m.strict((root/'maintenance/child.json').read_bytes())
+            try:observed=m.proc_identity(child['pid'])
+            except (FileNotFoundError,ProcessLookupError):pass
+            else:assert not all(observed[k]==child[k] for k in ('pid','start','boot')),'timed-out child was not joined'
         else:assert result['terminal']=='succeeded' and result['exit']==0,result
         assert not m.sample(dict(c,stage='sample'),root/'maintenance')['alive'],'dead process remained a work witness'
         if mode=='success':
@@ -122,5 +129,5 @@ for mode in ('success','refusal','fast-noop'):
                 if all(observed[k]==identity[k] for k in ('pid','start','boot')):os.killpg(identity['pid'],signal.SIGKILL)
             except (FileNotFoundError,ProcessLookupError):pass
         os.environ.clear();os.environ.update(oldenv)
-print('real task: success/refusal/fast-noop + MainPID/helper/executable negatives PASS')
+print('real task: success/refusal/fast-noop/bounded-timeout + joined child/MainPID/helper/executable negatives PASS')
 `
