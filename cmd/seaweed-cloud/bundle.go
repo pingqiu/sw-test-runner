@@ -47,7 +47,8 @@ func runBundle(args []string, w io.Writer) int {
 }
 
 // keyMaterial is what must never be in a shared bundle.
-var keyMaterial = regexp.MustCompile(`PRIVATE KEY-----|"(?i:access_?token|refresh_?token|client_?secret|password)"\s*:|ed25519_private`)
+// A Terraform schema may name these fields (`ed25519_private = string`); only a value is refused.
+var keyMaterial = regexp.MustCompile(`PRIVATE KEY-----|"(?i:access_?token|refresh_?token|client_?secret|password|ed25519_private)"\s*:`)
 
 // withheld names the controller-only files: Terraform state, variables, plans and the provider cache.
 func withheld(rel string, dir bool) bool {

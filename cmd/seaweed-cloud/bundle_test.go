@@ -16,6 +16,7 @@ func savedRun(t *testing.T) string {
 		"prepare/vol1/cloud-init-step.json":                             `{"exit_code":124}`,
 		"recovery.json":                                                 `{"output":"/root/.local/state/seaweed-cloud/runs/x"}`,
 		"provision/terraform/azure-validation/main.tf":                  `resource "x" "y" {}`,
+		"provision/terraform/azure/variables.tf":                        `type = map(object({ ed25519_private = string, ed25519_public = string }))`,
 		"provision/terraform/azure-validation/host.auto.tfvars.json":    `{"node_host_keys":{"vol1":{"ed25519_private":"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"}}}`,
 		"provision/terraform/azure-validation/run.auto.tfvars.json":     `{"operator_cidr":"192.0.2.1/32"}`,
 		"provision/terraform/azure-validation/terraform.tfstate":        `{"resources":[]}`,
@@ -46,7 +47,7 @@ func TestBundleWithholdsTerraformVariablesStateAndKeys(t *testing.T) {
 			t.Fatalf("bundled a controller-only file: %s", f)
 		}
 	}
-	if len(files) != 4 || len(excluded) != 6 {
+	if len(files) != 5 || len(excluded) != 6 { // the module schema naming ed25519_private is bundled
 		t.Fatalf("files %v excluded %v", files, excluded)
 	}
 	_ = filepath.WalkDir(dest, func(p string, d os.DirEntry, e error) error {
