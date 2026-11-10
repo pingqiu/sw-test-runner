@@ -125,6 +125,8 @@ def product_command(config, role):
                 '--dir', str(root / 'volume'), '--max', '24',
                 '--fileSizeLimitMB', '32', '--rdma.enabled', '--rdma.ip', address,
                 '--rdma.port', str(ports['rdma']), '--rdma.kv-transport', 'rc']
+        if 'volume_metrics' in ports:  # declared: serve /metrics there (the volume serves none without --metricsPort)
+            argv += ['--metricsPort', str(ports['volume_metrics']), '--metricsIp', address]
         env.update(SWFS_RDMA_DC_DEVICE=config['device'], SWFS_RDMA_DC_PORT='1',
                    SWFS_RDMA_DC_GID_INDEX=str(config['gid_index']),
                    SWFS_RDMA_DC_PUSH_CONTROL_PORT=str(ports['dc_control']),

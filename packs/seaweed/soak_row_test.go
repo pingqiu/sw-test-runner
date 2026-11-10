@@ -19,7 +19,7 @@ func rowPlan(kind string) *SoakPlan {
 		role = "client"
 	}
 	r := &FaultRow{RecoveryS: rowRecovery[kind], HoldS: rowHold[kind], AuditS: 20, QuiescenceS: 120,
-		Refused: []string{"No space left on device"}, MetricsURL: "http://127.0.0.1:18080/metrics",
+		Refused: []string{"No space left on device"}, MetricsURL: "http://192.0.2.2:18530/metrics", // the fixture M02 volume_metrics endpoint
 		Metrics: map[string]string{"released": "SeaweedFS_rdma_connections_released_total", "pinned": "SeaweedFS_rdma_range_pinned_bytes",
 			"pool_bytes": "SeaweedFS_rdma_cold_pool_bytes", "cache_bytes": "SeaweedFS_rdma_write_staging_bytes"},
 		PinBound:            PinBound{MaxInflightRanges: 4, LargestRangeBytes: 1 << 20, PoolBytes: ptr(int64(2 << 20)), CacheBytes: ptr(int64(1 << 20))},
@@ -136,7 +136,8 @@ func slicesEqual(a, b []string) bool { return strings.Join(a, ",") == strings.Jo
 func TestARowNeedsExactlyOneVolumeOnM02(t *testing.T) {
 	doc := func(m01Roles ...string) *inventory.Document {
 		return &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: "/r1", Roles: m01Roles},
-			{ID: "m02", RunRoot: "/r2", Roles: []string{"master", "volume"}}}}
+			{ID: "m02", RunRoot: "/r2", Roles: []string{"master", "volume"}, Data: inventory.DataNetwork{Address: "192.0.2.2"},
+				Services: []inventory.Service{{Name: "volume_metrics", Port: 18530}}}}}
 	}
 	if _, err := SoakFaultArgs(doc("client"), SmokeSettings{HelperDir: "/w"}, rowPlan(KindVolumeKillIO), "apply"); err != nil {
 		t.Fatal(err)

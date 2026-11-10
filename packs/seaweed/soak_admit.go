@@ -95,6 +95,10 @@ func SoakFaultArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan, action s
 	if volumes != 1 || !contains(m02.Roles, "volume") { // F1 attributes every PUT to the one volume it kills
 		return nil, errors.New("a stage-3 row needs exactly one volume, on M02")
 	}
+	// The row reads the volume's metrics where the profile makes the volume serve them: its declared volume_metrics.
+	if m := endpoint(*m02, "volume_metrics"); m == "" || x.Row.MetricsURL != "http://"+m+"/metrics" {
+		return nil, errors.New("a stage-3 row's metrics_url must be the M02 volume_metrics endpoint the profile declares")
+	}
 	unit := func(label string) string { return "sw-cloud-" + d.RunID + "-" + label }
 	f, r := x.Faults[0], x.Row
 	units, watch := []string{unit("deploy-m02-volume")}, map[string]string{}

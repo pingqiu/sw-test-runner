@@ -80,6 +80,60 @@ func TestTheLoadWaitsForARealPreloadSample(t *testing.T) {
 	}
 }
 
+// withVolumeMetrics declares the M02 volume's metrics endpoint (the fixture's rowPlan reads http://192.0.2.2:18530).
+func withVolumeMetrics(d *inventory.Document) {
+	d.Hosts[1].Services = append(d.Hosts[1].Services, inventory.Service{Name: "volume_metrics", Port: 18530})
+}
+
+// The caller chain of the metrics change: the real profile build pins the M02 volume's deploy job, and the volume
+// argv the real lab_profile.py computes from that job's config serves /metrics on the declared endpoint, which is
+// the row's metrics_url. Without the declaration the volume serves none, and a row is refused at profile build.
+func TestTheLabVolumeServesTheRowsDeclaredMetrics(t *testing.T) {
+	helpers, _ := filepath.Abs("worker")
+	row := func(x *SoakPlan) {
+		r := rowPlan(KindControl)
+		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = r.DurationS, r.Faults, r.Row, 0, nil, r.Pattern
+	}
+	pin := func(in ProfileInput) {
+		for _, name := range []string{"soak_fault.py", "soak_stats.py"} {
+			body, _ := workerFiles.ReadFile("worker/" + name)
+			in.Files["m02"]["/opt/profile/worker/"+name] = hash(body)
+		}
+	}
+	in := soakInput(t, 30*time.Minute, row, withVolumeMetrics)
+	pin(in)
+	b, err := BuildProfile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := b.Jobs["deploy-m02-volume"].Argv[3]
+	code := "import json, sys\nsys.path.insert(0, sys.argv[1])\nimport lab_profile\nargv, _ = lab_profile.product_command(json.loads(sys.argv[2]), 'volume')\nprint(json.dumps(argv))\n"
+	out, err := exec.Command("python3", "-c", code, helpers, cfg).Output()
+	if err != nil {
+		t.Fatalf("lab_profile on the pinned config: %v", err)
+	}
+	var argv []string
+	if err = json.Unmarshal(out, &argv); err != nil {
+		t.Fatal(err)
+	}
+	at := func(flag string) string {
+		for i, a := range argv[:len(argv)-1] {
+			if a == flag {
+				return argv[i+1]
+			}
+		}
+		return ""
+	}
+	if got := "http://" + at("--metricsIp") + ":" + at("--metricsPort") + "/metrics"; got != b.Plan.Soak.Row.MetricsURL {
+		t.Fatalf("the volume serves %s, the row reads %s (argv %v)", got, b.Plan.Soak.Row.MetricsURL, argv)
+	}
+	plain := soakInput(t, 30*time.Minute, row) // no volume_metrics declared: the volume would serve nothing
+	pin(plain)
+	if _, err := BuildProfile(plain); err == nil || !strings.Contains(err.Error(), "volume_metrics endpoint") {
+		t.Fatalf("a row without the declared endpoint must be refused: %v", err)
+	}
+}
+
 // Profile admission refuses a row whose load can write more than one object size (the soak's own mix), with
 // the injector's bytes pinned so that nothing else can be the reason; the same row on kv_load builds.
 func TestProfileAdmissionRefusesAMixedSizeRow(t *testing.T) {
@@ -91,7 +145,7 @@ func TestProfileAdmissionRefusesAMixedSizeRow(t *testing.T) {
 				if fixed {
 					x.Pattern = row.Pattern
 				}
-			})
+			}, withVolumeMetrics)
 			for _, name := range []string{"soak_fault.py", "soak_stats.py"} {
 				body, _ := workerFiles.ReadFile("worker/" + name)
 				input.Files["m02"]["/opt/profile/worker/"+name] = hash(body)
@@ -110,7 +164,7 @@ func TestARowProfilePinsItsFaultJobs(t *testing.T) {
 	input := soakInput(t, 30*time.Minute, func(x *SoakPlan) {
 		row := rowPlan(KindLinkFlap)
 		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = row.DurationS, row.Faults, row.Row, 0, nil, row.Pattern
-	})
+	}, withVolumeMetrics)
 	if _, err := BuildProfile(input); err == nil || !strings.Contains(err.Error(), "soak_fault.py") {
 		t.Fatalf("a row profile without the injector's pinned bytes must refuse: %v", err)
 	}
