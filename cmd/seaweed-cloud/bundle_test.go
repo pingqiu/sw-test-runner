@@ -77,7 +77,12 @@ func TestBundleRefusesKeyMaterialOutsideTheWithheldFiles(t *testing.T) {
 		"double-nested.json":    `{"stdout":"{\"stdout\":\"{\\\"refresh_token\\\":\\\"FAKE\\\"}\"}"}`,
 		"lines.jsonl":           "{\"ok\":1}\n{\"Client-Secret\":\"FAKE\"}\n",
 		"text-with-escaped.log": `curl output: {\"idToken\": \"FAKE\"}`,
-		"too-deep.json":         strings.Repeat("[", 40) + strings.Repeat("]", 40),
+		// codex01 r7: a duplicate key hides one value from a decoder while the bundle would export both.
+		"duplicate-stdout.json":  `{"stdout":"{\"access\\u005ftoken\":\"FAKE\"}","stdout":"ordinary output"}`,
+		"escaped-duplicate.json": `{"stdout":"a","std\u006fut":"b"}`,
+		"case-duplicate.json":    `{"stdout":"a","Stdout":"b"}`,
+		"nested-duplicate.json":  `{"stdout":"{\"x\":1,\"x\":2}"}`,
+		"too-deep.json":          strings.Repeat("[", 40) + strings.Repeat("]", 40),
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := savedRun(t)

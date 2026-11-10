@@ -57,55 +57,93 @@ var secretNames = map[string]bool{"accesstoken": true, "refreshtoken": true, "id
 // jsonDepth bounds the walk, including JSON decoded from string values (a journal's stdout); deeper is refused.
 const jsonDepth = 32
 
-// holdsSecret refuses raw key material, and any decoded JSON key or string value that is or holds a secret: whole-file
-// JSON, else each JSON line, with string values that are themselves JSON decoded in turn (escapes, \u sequences and
-// nested stdout all decode to the same keys).
+// holdsSecret refuses raw key material, and any JSON key or string value that is or holds a secret: whole-file JSON,
+// else each JSON line, with string values that are themselves JSON walked in turn (escapes, \u sequences and nested
+// stdout all decode to the same keys). The walk reads tokens, so it sees every pair as written: a duplicate key
+// (also a case alias) is refused outright, since a decoder would keep only one of the values the bundle exports.
 func holdsSecret(b []byte) bool {
 	if keyMaterial.Match(b) {
 		return true
 	}
-	var walk func(v any, depth int) bool
-	walk = func(v any, depth int) bool {
-		if depth > jsonDepth {
-			return true
-		}
-		switch t := v.(type) {
-		case map[string]any:
-			for k, x := range t {
-				if secretNames[strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(k))] || walk(x, depth+1) {
-					return true
-				}
-			}
-		case []any:
-			for _, x := range t {
-				if walk(x, depth+1) {
-					return true
-				}
-			}
-		case string:
-			if keyMaterial.MatchString(t) {
-				return true
-			}
-			if s := strings.TrimSpace(t); len(s) > 1 && (s[0] == '{' || s[0] == '[') {
-				var inner any
-				if json.Unmarshal([]byte(s), &inner) == nil {
-					return walk(inner, depth+1)
-				}
-				for _, line := range strings.Split(s, "\n") {
-					if json.Unmarshal([]byte(line), &inner) == nil && walk(inner, depth+1) {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	var v any
-	if json.Unmarshal(b, &v) == nil {
-		return walk(v, 0)
+	if valid, refuse := jsonSecret(b, 0); valid {
+		return refuse
 	}
 	for _, line := range bytes.Split(b, []byte("\n")) {
-		if json.Unmarshal(line, &v) == nil && walk(v, 0) {
+		if _, refuse := jsonSecret(line, 0); refuse {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonSecret walks one JSON text token by token. valid is false when b is not exactly one JSON value; refuse is true on
+// a secret, a duplicate key, or depth beyond jsonDepth.
+func jsonSecret(b []byte, depth int) (valid, refuse bool) {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	refuse, err := walkTokens(d, depth)
+	if refuse {
+		return true, true
+	}
+	if err != nil {
+		return false, false
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return false, false
+	}
+	return true, false
+}
+
+func walkTokens(d *json.Decoder, depth int) (bool, error) {
+	if depth > jsonDepth {
+		return true, nil
+	}
+	tok, err := d.Token()
+	if err != nil {
+		return false, err
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		object := t == '{'
+		seen := map[string]bool{}
+		for d.More() {
+			if object {
+				k, err := d.Token()
+				if err != nil {
+					return false, err
+				}
+				key, _ := k.(string)
+				lower := strings.ToLower(key)
+				if seen[lower] || secretNames[strings.NewReplacer("_", "", "-", "", ".", "").Replace(lower)] {
+					return true, nil
+				}
+				seen[lower] = true
+			}
+			if refuse, err := walkTokens(d, depth+1); refuse || err != nil {
+				return refuse, err
+			}
+		}
+		_, err = d.Token() // the closing delimiter
+		return false, err
+	case string:
+		return stringSecret(t, depth), nil
+	}
+	return false, nil
+}
+
+// stringSecret checks a string value raw, then as JSON (whole, else per line) when it looks like JSON.
+func stringSecret(s string, depth int) bool {
+	if keyMaterial.MatchString(s) {
+		return true
+	}
+	if t := strings.TrimSpace(s); len(t) < 2 || (t[0] != '{' && t[0] != '[') {
+		return false
+	}
+	if valid, refuse := jsonSecret([]byte(s), depth+1); valid {
+		return refuse
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if _, refuse := jsonSecret([]byte(line), depth+1); refuse {
 			return true
 		}
 	}
