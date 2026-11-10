@@ -28,6 +28,8 @@ func (m *maintenanceRuntime) startObserver(ctx context.Context) (first, changed,
 			started := time.Now()
 			sample, e := m.sample(observe)
 			m.mu.Lock()
+			m.latestError = e
+			m.latestReceived = time.Now()
 			if e == nil {
 				m.latest = sample
 				for _, f := range m.faults {

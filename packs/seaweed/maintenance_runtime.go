@@ -153,6 +153,9 @@ type maintenanceRuntime struct {
 	mixedWrong       bool
 	failureCancel    context.CancelFunc
 	latest           maintenanceSample
+	latestError      error
+	latestReceived   time.Time
+	admitFirstFault  func(context.Context) error
 	observerNode     *infra.Node
 	observerSequence int
 	retain           bool

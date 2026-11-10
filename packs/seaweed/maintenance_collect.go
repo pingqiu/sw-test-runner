@@ -254,6 +254,9 @@ func (m *maintenanceRuntime) concurrent(ctx context.Context, run func(context.Co
 		return err
 	}
 	defer cancel()
+	if err := m.r.save("maintenance-phase.json", map[string]string{"deadline": deadlineString(phase)}); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	m.failureCancel = cancel
 	m.mu.Unlock()
@@ -263,15 +266,29 @@ func (m *maintenanceRuntime) concurrent(ctx context.Context, run func(context.Co
 		return observeErr
 	}
 	defer func() { stop(); <-done }()
-	if err = m.startTask(phase); err != nil {
-		return err
-	}
-	m.retain = true // uncertainty is settled only by the independent post-readback
-	// One observer-start receipt, not a wait for work or successful coverage.
-	select {
-	case <-first:
-	case <-phase.Done():
-		return phase.Err()
+	calibrated := m.c.MaintenanceTask == "volume.balance" && len(m.c.ClusterChaosCases) == 1 && m.c.ClusterChaosCases[0] == "C1-single-kill"
+	if calibrated {
+		m.admitFirstFault = func(ctx context.Context) error {
+			if err := m.admitCalibrationBudget(ctx, maintenanceAdmissionMaximum); err != nil {
+				return err
+			}
+			if err := m.startTask(ctx); err != nil {
+				return err
+			}
+			m.retain = true
+			return m.awaitCopyAdmission(ctx, changed)
+		}
+		defer func() { m.admitFirstFault = nil }()
+	} else {
+		if err = m.startTask(phase); err != nil {
+			return err
+		}
+		m.retain = true // uncertainty is settled only by the independent post-readback
+		select {
+		case <-first:
+		case <-phase.Done():
+			return phase.Err()
+		}
 	}
 	m.injecting = true
 	err = run(phase)
@@ -279,12 +296,14 @@ func (m *maintenanceRuntime) concurrent(ctx context.Context, run func(context.Co
 	if err != nil {
 		cancel()
 	}
-	select {
-	case <-m.done:
-		_, taskErr := m.taskSnapshot()
-		err = errors.Join(err, taskErr)
-	case <-phase.Done():
-		err = errors.Join(err, phase.Err())
+	if m.done != nil {
+		select {
+		case <-m.done:
+			_, taskErr := m.taskSnapshot()
+			err = errors.Join(err, taskErr)
+		case <-phase.Done():
+			err = errors.Join(err, phase.Err())
+		}
 	}
 	err = errors.Join(err, m.finishObserver(phase, changed, done, stop))
 	return err

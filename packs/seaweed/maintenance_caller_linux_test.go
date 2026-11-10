@@ -32,6 +32,8 @@ type maintenanceCallerHost struct {
 	manifest                                       maintenanceManifest
 	identity                                       maintenanceIdentity
 	finished, removedReplica                       bool
+	firstPlacementSeen, taskBeforePlacement        bool
+	faultCalls, samplesAtFault                     int
 	ready, release                                 chan struct{}
 	postReadback                                   chan struct{}
 	releaseSample                                  int
@@ -67,6 +69,12 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 		return 0
 	}
 	inner := maintenanceInner(cmd)
+	if strings.Contains(inner, `echo "OLD`) && strings.Contains(inner, "kill -KILL") {
+		f.mu.Lock()
+		f.faultCalls++
+		f.samplesAtFault = f.samples
+		f.mu.Unlock()
+	}
 	if f.variant == "pre-GONE-RPC" {
 		if strings.Contains(inner, "kill -KILL") {
 			select {
@@ -166,6 +174,14 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 		case "task":
 			f.mu.Lock()
 			f.identity = maintenanceIdentity{PID: 444, Start: "55", Boot: "meta-boot", Task: c["task"].(string), RunID: c["run_id"].(string), ConfigSHA: c["config_sha256"].(string)}
+			if strings.HasPrefix(f.variant, "early-ended") {
+				f.finished = true
+				zero := 0
+				result := maintenanceTaskResult{Job: c["run_id"].(string) + "-maintenance", Attempt: "1", Terminal: "succeeded", Exit: &zero, Identity: f.identity, Started: 50, Ended: 51}
+				f.mu.Unlock()
+				close(f.ready)
+				return emit(result)
+			}
 			f.mu.Unlock()
 			close(f.ready)
 			select {
@@ -194,7 +210,7 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 			f.samples++
 			n := f.samples
 			f.mu.Unlock()
-			if f.variant == "pre-GONE-RPC" && n == 2 {
+			if f.variant == "pre-GONE-RPC" && n == 4 {
 				close(f.secondEntered)
 				select {
 				case <-f.restartSeen:
@@ -211,7 +227,15 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 			s.Progress.Source = fmt.Sprintf("%s:%d", f.base.data, f.base.ports["1"])
 			s.Progress.Target = fmt.Sprintf("%s:%d", f.base.data, f.base.ports["3"])
 			s.Progress.Bytes += int64(f.samples * 1024)
-			if f.finished || f.variant == "pre-GONE-RPC" && n > 2 {
+			if f.variant == "unrelated-victim" {
+				s.Progress.Source = fmt.Sprintf("%s:%d", f.base.data, f.base.ports["3"])
+				s.Progress.Target = fmt.Sprintf("%s:%d", f.base.data, f.base.ports["2"])
+			}
+			if f.variant == "stale-progress" {
+				s.Before, s.After = 100, 101
+				s.Progress.Bytes = 1048576
+			}
+			if f.finished || f.variant == "pre-GONE-RPC" && n > 4 {
 				s.Alive = false
 				s.Progress = nil
 			}
@@ -229,7 +253,7 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 			rows := []maintenanceData{}
 			for _, o := range f.manifest.Objects {
 				d := maintenanceData{Key: o.Key, ActualSHA256: o.SHA, ActualLength: o.Length, Status: 200, Observed: true}
-				if f.variant == "wrong-bytes" {
+				if f.variant == "wrong-bytes" || f.variant == "early-ended-wrong-bytes" {
 					d.ActualSHA256 = strings.Repeat("b", 64)
 				}
 				rows = append(rows, d)
@@ -294,6 +318,12 @@ func (f *maintenanceCallerHost) exec(cmd string, ch ssh.Channel) uint32 {
 		return 0
 	}
 	if strings.Contains(inner, "curl") && strings.Contains(inner, "/status") && !strings.Contains(inner, "until") {
+		f.mu.Lock()
+		if !f.firstPlacementSeen {
+			f.firstPlacementSeen = true
+			f.taskBeforePlacement = f.identity.PID != 0
+		}
+		f.mu.Unlock()
 		for index, port := range f.base.ports {
 			if strings.Contains(inner, fmt.Sprintf(":%d/status", port)) {
 				i, _ := strconv.Atoi(index)
@@ -371,6 +401,9 @@ func maintenanceSampleFixtureForCaller(identity maintenanceIdentity, at float64,
 func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 	oldSettle, oldDown, oldBase := chaos2Settle, chaos2Down, chaosBase
 	oldObserve := maintenanceObservationPeriod
+	oldAdmission := maintenanceAdmissionMaximum
+	maintenanceAdmissionMaximum = 100 * time.Millisecond
+	defer func() { maintenanceAdmissionMaximum = oldAdmission }()
 	maintenanceObservationPeriod = time.Millisecond
 	defer func() { maintenanceObservationPeriod = oldObserve }()
 	chaos2Settle, chaos2Down = time.Millisecond, time.Millisecond
@@ -378,6 +411,8 @@ func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 	defer func() { chaos2Settle, chaos2Down, chaosBase = oldSettle, oldDown, oldBase }()
 	for _, tc := range []struct{ task, scenario, variant, status string }{
 		{"volume.balance", "C1-single-kill", "", "PASS"},
+		{"volume.balance", "C1-single-kill", "early-ended", "NOT_COVERED"},
+		{"volume.balance", "C1-single-kill", "early-ended-wrong-bytes", "FAIL"},
 		// The modeled copy touches vol1/vol3, not all six rolling victims.
 		{"volume.balance", "C2-rolling", "", "NOT_COVERED"},
 		{"volume.fix.replication", "C1-single-kill", "", "PASS"},
@@ -385,6 +420,8 @@ func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 		{"volume.balance", "C1-single-kill", "queued", "NOT_COVERED"},
 		{"volume.balance", "C1-single-kill", "pre-GONE-RPC", "NOT_COVERED"},
 		{"volume.balance", "C1-single-kill", "foreign-VID", "NOT_COVERED"},
+		{"volume.balance", "C1-single-kill", "unrelated-victim", "NOT_COVERED"},
+		{"volume.balance", "C1-single-kill", "stale-progress", "NOT_COVERED"},
 		{"volume.balance", "C1-single-kill", "no-op", "NOT_COVERED"},
 		{"volume.balance", "C1-single-kill", "wrong-bytes", "FAIL"},
 		{"volume.balance", "C1-single-kill", "pending-effect", "UNKNOWN"},
@@ -439,6 +476,45 @@ func TestMaintenancePublicCallerLifecycleAndIndependentOracle(t *testing.T) {
 			json.Unmarshal(raw, &row)
 			if row["status"] != tc.status {
 				t.Fatalf("wanted %s got %s; caller=%v", tc.status, raw, err)
+			}
+			if tc.task == "volume.balance" && tc.scenario == "C1-single-kill" {
+				if f.taskBeforePlacement {
+					t.Fatal("maintenance started before chaos placement/settle")
+				}
+				if tc.variant == "early-ended" && (f.faultCalls != 0 || row["data"] != "PASS" || row["covered_faults"] != float64(0)) {
+					t.Fatalf("early completion dispatched %d faults or skipped the data oracle: %s", f.faultCalls, raw)
+				}
+				if (tc.variant == "queued" || tc.variant == "foreign-VID" || tc.variant == "unrelated-victim" || tc.variant == "stale-progress") && (f.faultCalls != 0 || row["data"] != "PASS") {
+					t.Fatalf("ineligible signal dispatched a fault or skipped data: calls=%d %s", f.faultCalls, raw)
+				}
+				if tc.variant == "" && (f.faultCalls != 1 || f.samplesAtFault < 2) {
+					t.Fatalf("fault admitted without two live progress samples: calls=%d samples=%d", f.faultCalls, f.samplesAtFault)
+				}
+				if tc.variant == "" {
+					b, err := os.ReadFile(filepath.Join(c.Output, "maintenance-admission.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var admission struct {
+						PhaseDeadline string `json:"phase_deadline"`
+					}
+					if json.Unmarshal(b, &admission) != nil {
+						t.Fatal("invalid admission receipt")
+					}
+					original, err := os.ReadFile(filepath.Join(c.Output, "maintenance-phase.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var phase struct {
+						Deadline string `json:"deadline"`
+					}
+					if json.Unmarshal(original, &phase) != nil {
+						t.Fatal("invalid phase receipt")
+					}
+					if admission.PhaseDeadline != phase.Deadline {
+						t.Fatalf("phase budget reset after placement: %s", b)
+					}
+				}
 			}
 			if tc.scenario == "C2-rolling" && (row["total_faults"] != float64(6) || row["coverage"] != "NOT_COVERED") {
 				t.Fatalf("partial rolling coverage became a pass: %s", raw)

@@ -199,6 +199,15 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 	defer cancelLoad()
 	f := &chaos2Fault{r: r, d: d, x: x, hosts: hosts, g: g, witness: map[string]string{}}
 	faultErr := f.run(ctx)
+	noAdmission := errors.Is(faultErr, errMaintenanceNoAdmission)
+	if noAdmission {
+		// No fault was dispatched. Still finish the load and its independent
+		// readback, then the maintenance ACK oracle and partial-effect checks.
+		if e := r.save("maintenance-no-admission.json", map[string]string{"coverage": "NOT_COVERED", "reason": faultErr.Error()}); e != nil {
+			return e
+		}
+		faultErr = nil
+	}
 	if faultErr != nil {
 		cancelLoad()
 	}
@@ -249,7 +258,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 				w.Unavailable[a.Key] = unavailable
 			}
 		}
-		if e := checkChaosOps(out.Outcomes, w); e != nil {
+		check := checkChaosOps
+		if noAdmission {
+			check = checkMaintenanceUnfaultedOps
+		}
+		if e := check(out.Outcomes, w); e != nil {
 			return fmt.Errorf("%s: %w", id, e)
 		}
 		for _, eligible := range w.Unavailable {
@@ -403,6 +416,11 @@ func (f *chaos2Fault) run(ctx context.Context) error {
 	wait := func(t time.Duration) func() error { return func() error { return f.wait(ctx, t) } }
 	if e := f.wait(ctx, chaos2Settle); e != nil {
 		return e
+	}
+	if m := f.r.maintenance; m != nil && m.admitFirstFault != nil {
+		if e := m.admitFirstFault(ctx); e != nil {
+			return e
+		}
 	}
 	switch f.x.Kind {
 	case "kill-hold":
