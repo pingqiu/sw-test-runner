@@ -1,30 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// A saved run as the first Azure attempt left it: journal, prepare evidence, recovery config, and the Terraform
-// directory whose host.auto.tfvars.json holds the VMs' SSH host private keys.
+const fakePEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+
+// savedRun is a saved run laid out as the first Azure attempt left it (journal, prepare and collect records, the
+// Terraform working copy with host keys), plus the mount soak's success files.
 func savedRun(t *testing.T) string {
 	src := t.TempDir()
-	for p, body := range map[string]string{
-		"001-az-intent.json":                                            `["resource","list"]`,
-		"prepare/vol1/cloud-init-step.json":                             `{"exit_code":124}`,
-		"recovery.json":                                                 `{"output":"/root/.local/state/seaweed-cloud/runs/x"}`,
-		"provision/terraform/azure-validation/main.tf":                  `resource "x" "y" {}`,
-		"provision/terraform/azure/variables.tf":                        `type = map(object({ ed25519_private = string, ed25519_public = string }))`,
-		"provision/terraform/azure-validation/host.auto.tfvars.json":    `{"node_host_keys":{"vol1":{"ed25519_private":"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"}}}`,
-		"provision/terraform/azure-validation/run.auto.tfvars.json":     `{"operator_cidr":"192.0.2.1/32"}`,
-		"provision/terraform/azure-validation/terraform.tfstate":        `{"resources":[]}`,
-		"provision/terraform/azure-validation/terraform.tfstate.backup": `{}`,
-		"provision/terraform/azure-validation/smoke.tfplan":             `plan`,
-		"provision/terraform/azure-validation/.terraform/providers/p":   `binary PRIVATE KEY----- strings`,
-	} {
-		p = filepath.Join(src, filepath.FromSlash(p))
+	write := func(rel, body string) {
+		p := filepath.Join(src, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -32,28 +24,63 @@ func savedRun(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
+	for rel, body := range map[string]string{
+		// exported
+		"001-az-intent.json":                         `["resource","list","--output","json"]`,
+		"003-terraform-intent.json":                  `["init","-backend=false"]`,
+		"requested-inventory.json":                   `{"run_id":"r","hosts":[{"id":"vol1"}]}`,
+		"recovery.json":                              `{"output":"/root/.local/state/seaweed-cloud/runs/r"}`,
+		"prepare/vol1/cloud-init-step.json":          `{"command":"timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'","exit_code":124,"stdout":"Failed to write to /dev/console\nReceived signal 15\n"}`,
+		"prepare/vol6/cloud-init-step.json":          `{"exit_code":0,"stdout":"{\n  \"status\": \"done\",\n  \"errors\": []\n}\n"}`,
+		"prepare/vol6/cloud-step-001.json":           `{"name":"prepare","exit_code":0,"stdout":""}`,
+		"collect/meta/cloud-failure-fetch.json":      `{"step":"failure-log-fetch","stdout":"-- No entries --\n"}`,
+		"mount-verdicts.json":                        `{"schema":"seaweed-mount-cluster/1","status":"FAIL"}`,
+		"mount/client1/mount-step-001.json":          `{"name":"mount-soak","stdout":"{\"event\":\"ACK\",\"n\":1}\n{\"event\":\"ACK\",\"n\":2}\n"}`,
+		"mount/client1/mount-verdict.json":           `{"schema":"seaweed-mount-verdict/1","status":"FAIL"}`,
+		"mount/client1/run-root/mount-journal.jsonl": "{\"e\":1}\n{\"e\":2}\n",
+		"mount/client1/run-root/mount-env.json":      `{"kernel":"6.8"}`,
+		// withheld: known, stays on the controller
+		"001-az-output":                                               `[]`,
+		"001-az-status":                                               `OK`,
+		"003-terraform-output":                                        "Terraform has been successfully initialized!\n",
+		"apply-started":                                               "apply may have issued creates",
+		"prepare/vol1/cloud-init-status.json":                         "Failed to write to /dev/console\n",
+		"collect/meta/cloud-services.log":                             "-- No entries --\n",
+		"mount/client1/run-root/mount-w1.log":                         "weed mount log\n",
+		"provision/terraform/azure/variables.tf":                      `type = map(object({ ed25519_private = string }))`,
+		"provision/terraform/azure-validation/host.auto.tfvars.json":  `{"node_host_keys":{"vol1":{"ed25519_private":"` + strings.ReplaceAll(fakePEM, "\n", `\n`) + `"}}}`,
+		"provision/terraform/azure-validation/terraform.tfstate":      `{"resources":[]}`,
+		"provision/terraform/azure-validation/.terraform/providers/p": "binary PRIVATE KEY----- strings",
+	} {
+		write(rel, body)
+	}
 	return src
 }
 
-func TestBundleWithholdsTerraformVariablesStateAndKeys(t *testing.T) {
+func TestBundleExportsOnlyAllowlistedArtifacts(t *testing.T) {
 	src := savedRun(t)
 	dest := filepath.Join(t.TempDir(), "bundle")
-	files, excluded, err := bundleRun(src, dest)
+	files, withheld, err := bundleRun(src, dest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range files {
-		if strings.Contains(f, ".tfvars") || strings.Contains(f, ".tfstate") || strings.Contains(f, ".terraform/") || strings.HasSuffix(f, ".tfplan") {
-			t.Fatalf("bundled a controller-only file: %s", f)
-		}
+	want := []string{"001-az-intent.json", "003-terraform-intent.json", "collect/meta/cloud-failure-fetch.json",
+		"mount-verdicts.json", "mount/client1/mount-step-001.json", "mount/client1/mount-verdict.json",
+		"mount/client1/run-root/mount-env.json", "mount/client1/run-root/mount-journal.jsonl",
+		"prepare/vol1/cloud-init-step.json", "prepare/vol6/cloud-init-step.json", "prepare/vol6/cloud-step-001.json",
+		"recovery.json", "requested-inventory.json"}
+	sort.Strings(want)
+	if strings.Join(files, ",") != strings.Join(want, ",") {
+		t.Fatalf("exported %v\nwant %v", files, want)
 	}
-	if len(files) != 5 || len(excluded) != 6 { // the module schema naming ed25519_private is bundled
-		t.Fatalf("files %v excluded %v", files, excluded)
+	// 7 known raw files, plus the Terraform working copy as one subtree.
+	if len(withheld) != 8 || !contains(withheld, "provision/terraform/") {
+		t.Fatalf("withheld %v", withheld)
 	}
 	_ = filepath.WalkDir(dest, func(p string, d os.DirEntry, e error) error {
 		if e == nil && !d.IsDir() {
-			if b, _ := os.ReadFile(p); holdsSecret(b) || strings.Contains(p, "tfvars") {
-				t.Fatalf("key material in the bundle: %s", p)
+			if b, _ := os.ReadFile(p); keyMaterial.Match(b) || strings.Contains(p, "tfvars") || strings.Contains(p, "provision") {
+				t.Fatalf("controller-only content in the bundle: %s", p)
 			}
 		}
 		return nil
@@ -63,39 +90,77 @@ func TestBundleWithholdsTerraformVariablesStateAndKeys(t *testing.T) {
 	}
 }
 
-// Key or token material anywhere else refuses the whole bundle, and nothing is written.
-func TestBundleRefusesKeyMaterialOutsideTheWithheldFiles(t *testing.T) {
-	for name, body := range map[string]string{
-		"prepare/vol1/stray.json": "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
-		"collect/meta/env.json":   `{"accessToken": "eyJ0eXAi"}`,
-		"node-keys.json":          `{"vol1":{"ed25519_private":"x"}}`,
-		"az/secret.json":          `{"client_secret" : "s"}`,
-		// codex01 r6: escaped keys and tokens inside a journal's JSON-encoded stdout.
-		"escaped-key.json":      `{"access\u005ftoken":"FAKE"}`,
-		"unicode-key.json":      `{"\u0061ccessToken":"FAKE"}`,
-		"journal-stdout.json":   `{"stdout":"{\"accessToken\":\"FAKE\"}"}`,
-		"double-nested.json":    `{"stdout":"{\"stdout\":\"{\\\"refresh_token\\\":\\\"FAKE\\\"}\"}"}`,
-		"lines.jsonl":           "{\"ok\":1}\n{\"Client-Secret\":\"FAKE\"}\n",
-		"text-with-escaped.log": `curl output: {\"idToken\": \"FAKE\"}`,
-		// codex01 r7: a duplicate key hides one value from a decoder while the bundle would export both.
-		"duplicate-stdout.json":  `{"stdout":"{\"access\\u005ftoken\":\"FAKE\"}","stdout":"ordinary output"}`,
-		"escaped-duplicate.json": `{"stdout":"a","std\u006fut":"b"}`,
-		"case-duplicate.json":    `{"stdout":"a","Stdout":"b"}`,
-		"nested-duplicate.json":  `{"stdout":"{\"x\":1,\"x\":2}"}`,
-		"too-deep.json":          strings.Repeat("[", 40) + strings.Repeat("]", 40),
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func refused(t *testing.T, src string) {
+	t.Helper()
+	dest := filepath.Join(t.TempDir(), "bundle")
+	if _, _, err := bundleRun(src, dest); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("bundled: %v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("a refused bundle left a directory behind")
+	}
+}
+
+// A file on neither list is unknown: the whole bundle is refused, whatever it holds.
+func TestBundleRefusesUnknownFiles(t *testing.T) {
+	for _, rel := range []string{"evidence.json", "prepare/vol1/notes.txt", "mount/client1/run-root/extra.json", "prepare/vol7/cloud-step-001.json", "node-keys.json"} {
+		t.Run(rel, func(t *testing.T) {
+			src := savedRun(t)
+			p := filepath.Join(src, filepath.FromSlash(rel))
+			os.MkdirAll(filepath.Dir(p), 0700)
+			os.WriteFile(p, []byte(`{}`), 0600)
+			refused(t, src)
+		})
+	}
+}
+
+// An allowlisted file must be complete JSON (one value; a .jsonl one per line), with unique keys, no secret-named
+// key, no key material, and every JSON-like string value admitted the same way.
+func TestBundleRefusesAllowlistedFilesThatAreNotCleanJSON(t *testing.T) {
+	encoded, _ := json.Marshal(`{"access\u005ftoken":"FAKE"}`)
+	journal, _ := json.Marshal(map[string]string{"stdout": string(encoded)})
+	step := "prepare/vol1/cloud-step-001.json"
+	lines := "mount/client1/run-root/mount-journal.jsonl"
+	for name, c := range map[string]struct{ rel, body string }{
+		"pem":                 {step, `{"stdout":"` + strings.ReplaceAll(fakePEM, "\n", `\n`) + `"}`},
+		"accessToken":         {step, `{"accessToken": "eyJ0eXAi"}`},
+		"ed25519_private":     {step, `{"vol1":{"ed25519_private":"x"}}`},
+		"client_secret":       {step, `{"client_secret" : "s"}`},
+		"escaped key":         {step, `{"access\u005ftoken":"FAKE"}`},
+		"unicode key":         {step, `{"\u0061ccessToken":"FAKE"}`},
+		"stdout token":        {step, `{"stdout":"{\"accessToken\":\"FAKE\"}"}`},
+		"double nested":       {step, `{"stdout":"{\"stdout\":\"{\\\"refresh_token\\\":\\\"FAKE\\\"}\"}"}`},
+		"jsonl secret line":   {lines, "{\"ok\":1}\n{\"Client-Secret\":\"FAKE\"}\n"},
+		"escaped in text":     {step, `{"stdout":"curl output: {\"idToken\": \"FAKE\"}"}`},
+		"too deep":            {step, strings.Repeat("[", 40) + strings.Repeat("]", 40)},
+		"duplicate stdout":    {step, `{"stdout":"{\"access\\u005ftoken\":\"FAKE\"}","stdout":"ordinary output"}`},
+		"escaped duplicate":   {step, `{"stdout":"a","std\u006fut":"b"}`},
+		"case duplicate":      {step, `{"stdout":"a","Stdout":"b"}`},
+		"nested duplicate":    {step, `{"stdout":"{\"x\":1,\"x\":2}"}`},
+		"trailing value":      {step, `{} {"access\u005ftoken":"FAKE"}`},
+		"stdout trailing":     {step, `{"stdout":"{} {\"access\\u005ftoken\":\"FAKE\"}"}`},
+		"encoded string":      {step, string(journal)},
+		"not JSON":            {step, "Failed to write to /dev/console\n"},
+		"empty":               {step, ""},
+		"jsonl blank line":    {lines, "{\"e\":1}\n\n{\"e\":2}\n"},
+		"jsonl trailing text": {lines, "{\"e\":1}\n{\"e\":2} tail\n"},
+		"stdout broken JSON":  {step, `{"stdout":"{\"a\":"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := savedRun(t)
-			p := filepath.Join(src, filepath.FromSlash(name))
-			os.MkdirAll(filepath.Dir(p), 0700)
-			os.WriteFile(p, []byte(body), 0600)
-			dest := filepath.Join(t.TempDir(), "bundle")
-			if _, _, err := bundleRun(src, dest); err == nil || !strings.Contains(err.Error(), "refused") {
-				t.Fatalf("key material was bundled: %v", err)
+			if err := os.WriteFile(filepath.Join(src, filepath.FromSlash(c.rel)), []byte(c.body), 0600); err != nil {
+				t.Fatal(err)
 			}
-			if _, err := os.Stat(dest); !os.IsNotExist(err) {
-				t.Fatal("a refused bundle left a directory behind")
-			}
+			refused(t, src)
 		})
 	}
 }
