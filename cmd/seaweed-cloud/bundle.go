@@ -47,8 +47,70 @@ func runBundle(args []string, w io.Writer) int {
 }
 
 // keyMaterial is what must never be in a shared bundle.
-// A Terraform schema may name these fields (`ed25519_private = string`); only a value is refused.
-var keyMaterial = regexp.MustCompile(`PRIVATE KEY-----|"(?i:access_?token|refresh_?token|client_?secret|password|ed25519_private)"\s*:`)
+// A Terraform schema may name these fields (`ed25519_private = string`); only a key with a value is refused. The raw
+// pattern also matches quotes escaped inside text (`\"accessToken\":`); holdsSecret decodes JSON for the rest.
+var keyMaterial = regexp.MustCompile(`PRIVATE KEY-----|\\*"(?i:access_?token|refresh_?token|id_?token|client_?secret|secret|password|ed25519_private|private_?key)\\*"\s*:`)
+
+// secretNames are the decoded JSON keys refused, compared lower-case without '_', '-' and '.'.
+var secretNames = map[string]bool{"accesstoken": true, "refreshtoken": true, "idtoken": true, "clientsecret": true, "secret": true, "password": true, "ed25519private": true, "privatekey": true}
+
+// jsonDepth bounds the walk, including JSON decoded from string values (a journal's stdout); deeper is refused.
+const jsonDepth = 32
+
+// holdsSecret refuses raw key material, and any decoded JSON key or string value that is or holds a secret: whole-file
+// JSON, else each JSON line, with string values that are themselves JSON decoded in turn (escapes, \u sequences and
+// nested stdout all decode to the same keys).
+func holdsSecret(b []byte) bool {
+	if keyMaterial.Match(b) {
+		return true
+	}
+	var walk func(v any, depth int) bool
+	walk = func(v any, depth int) bool {
+		if depth > jsonDepth {
+			return true
+		}
+		switch t := v.(type) {
+		case map[string]any:
+			for k, x := range t {
+				if secretNames[strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(k))] || walk(x, depth+1) {
+					return true
+				}
+			}
+		case []any:
+			for _, x := range t {
+				if walk(x, depth+1) {
+					return true
+				}
+			}
+		case string:
+			if keyMaterial.MatchString(t) {
+				return true
+			}
+			if s := strings.TrimSpace(t); len(s) > 1 && (s[0] == '{' || s[0] == '[') {
+				var inner any
+				if json.Unmarshal([]byte(s), &inner) == nil {
+					return walk(inner, depth+1)
+				}
+				for _, line := range strings.Split(s, "\n") {
+					if json.Unmarshal([]byte(line), &inner) == nil && walk(inner, depth+1) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	var v any
+	if json.Unmarshal(b, &v) == nil {
+		return walk(v, 0)
+	}
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if json.Unmarshal(line, &v) == nil && walk(v, 0) {
+			return true
+		}
+	}
+	return false
+}
 
 // withheld names the controller-only files: Terraform state, variables, plans and the provider cache.
 func withheld(rel string, dir bool) bool {
@@ -86,7 +148,7 @@ func bundleRun(src, dest string) (files, excluded []string, err error) {
 		if e != nil {
 			return e
 		}
-		if keyMaterial.Match(b) {
+		if holdsSecret(b) {
 			return fmt.Errorf("refused: %s holds key or token material; nothing was bundled", filepath.ToSlash(rel))
 		}
 		bodies[filepath.ToSlash(rel)] = b

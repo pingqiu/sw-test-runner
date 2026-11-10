@@ -52,7 +52,7 @@ func TestBundleWithholdsTerraformVariablesStateAndKeys(t *testing.T) {
 	}
 	_ = filepath.WalkDir(dest, func(p string, d os.DirEntry, e error) error {
 		if e == nil && !d.IsDir() {
-			if b, _ := os.ReadFile(p); keyMaterial.Match(b) || strings.Contains(p, "tfvars") {
+			if b, _ := os.ReadFile(p); holdsSecret(b) || strings.Contains(p, "tfvars") {
 				t.Fatalf("key material in the bundle: %s", p)
 			}
 		}
@@ -70,6 +70,14 @@ func TestBundleRefusesKeyMaterialOutsideTheWithheldFiles(t *testing.T) {
 		"collect/meta/env.json":   `{"accessToken": "eyJ0eXAi"}`,
 		"node-keys.json":          `{"vol1":{"ed25519_private":"x"}}`,
 		"az/secret.json":          `{"client_secret" : "s"}`,
+		// codex01 r6: escaped keys and tokens inside a journal's JSON-encoded stdout.
+		"escaped-key.json":      `{"access\u005ftoken":"FAKE"}`,
+		"unicode-key.json":      `{"\u0061ccessToken":"FAKE"}`,
+		"journal-stdout.json":   `{"stdout":"{\"accessToken\":\"FAKE\"}"}`,
+		"double-nested.json":    `{"stdout":"{\"stdout\":\"{\\\"refresh_token\\\":\\\"FAKE\\\"}\"}"}`,
+		"lines.jsonl":           "{\"ok\":1}\n{\"Client-Secret\":\"FAKE\"}\n",
+		"text-with-escaped.log": `curl output: {\"idToken\": \"FAKE\"}`,
+		"too-deep.json":         strings.Repeat("[", 40) + strings.Repeat("]", 40),
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := savedRun(t)
