@@ -183,14 +183,25 @@ func listedAs(f *fakeAzure, raw string) func(context.Context, string, ...string)
 func TestSweepAmbiguousExpiryNeverDeletes(t *testing.T) {
 	const past = "2026-11-10T10:25:00Z"
 	for name, edit := range map[string]func(rows []map[string]any) string{
-		"missing first":  func(rows []map[string]any) string { delete(rows[0]["tags"].(map[string]string), "expires_at"); return "" },
-		"missing middle": func(rows []map[string]any) string { delete(rows[1]["tags"].(map[string]string), "expires_at"); return "" },
-		"missing last":   func(rows []map[string]any) string { delete(rows[2]["tags"].(map[string]string), "expires_at"); return "" },
-		"empty first":    func(rows []map[string]any) string { rows[0]["tags"].(map[string]string)["expires_at"] = ""; return "" },
+		"missing first": func(rows []map[string]any) string {
+			delete(rows[0]["tags"].(map[string]string), "expires_at")
+			return ""
+		},
+		"missing middle": func(rows []map[string]any) string {
+			delete(rows[1]["tags"].(map[string]string), "expires_at")
+			return ""
+		},
+		"missing last": func(rows []map[string]any) string {
+			delete(rows[2]["tags"].(map[string]string), "expires_at")
+			return ""
+		},
+		"empty first": func(rows []map[string]any) string { rows[0]["tags"].(map[string]string)["expires_at"] = ""; return "" },
 		"duplicate future then past": func([]map[string]any) string {
 			return `"expires_at":"2030-11-10T10:25:00Z","expires_at":"` + past + `"`
 		},
-		"case alias": func([]map[string]any) string { return `"Expires_At":"2030-11-10T10:25:00Z","expires_at":"` + past + `"` },
+		"case alias": func([]map[string]any) string {
+			return `"Expires_At":"2030-11-10T10:25:00Z","expires_at":"` + past + `"`
+		},
 		"duplicate managed_by": func([]map[string]any) string {
 			return `"expires_at":"` + past + `","managed_by":"someone-else","managed_by":"sw-test-runner"`
 		},
