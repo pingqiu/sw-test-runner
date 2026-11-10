@@ -26,7 +26,10 @@ read = lambda n: (S / n).read_text() if (S / n).exists() else ''
 port = S / 'sys/class/infiniband/mlx5_0/ports/1'
 if tool == 'systemctl':
     if a[:2] == ['show', '-p']: print(read('mainpid').strip() or '0')
-    elif a[0] == 'stop': sys.exit(int(read('stop-rc') or 0))
+    elif a[0] == 'stop':
+        rc = int(read('stop-rc') or 0)
+        if rc == 0 and read('after-stop'): (S / 'is-active').write_text(read('after-stop'))  # a pending timer, disarmed
+        sys.exit(rc)
     elif a[0] == 'is-active':  # scripted "rc|stdout"; default is systemd's answer for a gone timer
         rc, _, out = (read('is-active') or '3|inactive').partition('|')
         if out: print(out)
@@ -34,6 +37,7 @@ if tool == 'systemctl':
 elif tool == 'ip':
     if a[:2] == ['-o', 'addr']: print(read('addr'), end='')
     elif a[:2] == ['route', 'show']: print(read('default'), end='')
+    elif a[:2] == ['link', 'set'] and a[-1] == 'up' and (S / 'ip-up-noop').exists(): pass  # "succeeds", port stays down
     elif a[:2] == ['link', 'set']:
         down = a[-1] == 'down'
         (port / 'state').write_text('1: DOWN\n' if down else '4: ACTIVE\n')
@@ -133,6 +137,53 @@ class LinkFlap(Host):
         (self.state / 'is-active').write_text('0|active')
         row = self.cli(c, 'restore', expect=4)
         self.assertEqual((row['restored'], row['proof']['deadman_timer'], row['proof']['deadman_stop_rc']), (False, [0, 'active'], 1))
+
+    def stops(self):
+        return [r for r in self.calls('systemctl') if r[1] == 'stop']
+
+    def pending_timer(self):
+        (self.state / 'is-active').write_text('0|active')
+        (self.state / 'after-stop').write_text('3|inactive')
+
+    def test_an_unproven_restore_leaves_the_dead_man_armed_then_a_proven_one_stops_it(self):
+        p = self.dummy()
+        before = self.limits(p.pid)['nofile']
+        c = self.config('fd_exhaust')
+        self.cli(c, 'apply')
+        self.pending_timer()
+        real = shutil.which('prlimit')
+        (self.bin / 'prlimit').write_text('#!/bin/sh\nexit 0\n')  # reports success, changes nothing: the proof read fails
+        (self.bin / 'prlimit').chmod(0o755)
+        row = self.cli(c, 'restore', expect=4)
+        self.assertEqual((row['restored'], row['proof']['deadman'], row['proof']['deadman_before']), (False, 'left_armed', 'pending'))
+        self.assertEqual(self.stops(), [])  # the backstop was not cancelled
+        (self.bin / 'prlimit').unlink()
+        self.assertTrue(real)
+        row = self.cli(c, 'restore')  # now the limits read back restored: only then is the dead-man stopped
+        self.assertEqual((row['restored'], row['proof']['deadman_before'], row['proof']['deadman_timer']), (True, 'pending', [3, 'inactive']))
+        self.assertEqual(len(self.stops()), 1)
+        self.assertEqual(self.limits(p.pid)['nofile'], before)
+
+    def test_an_unproven_link_restore_leaves_the_dead_man_armed(self):
+        self.dummy()
+        c = self.config('link_flap', restore_wait_s=1)
+        self.cli(c, 'apply')
+        self.pending_timer()
+        (self.state / 'ip-up-noop').touch()
+        row = self.cli(c, 'restore', expect=4)
+        self.assertEqual((row['restored'], row['proof']['deadman']), (False, 'left_armed'))
+        self.assertEqual(self.stops(), [])
+
+    def test_a_timer_that_already_fired_or_is_unavailable_is_recorded(self):
+        for answer, state, proven in (('3|inactive', 'fired_or_gone', True), ('1|', 'unavailable', False)):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.dummy()
+                c = self.config('fd_exhaust')
+                self.cli(c, 'apply')
+                (self.state / 'is-active').write_text(answer)
+                row = self.cli(c, 'restore', expect=0 if proven else 4)
+                self.assertEqual((row['proof']['deadman_before'], row['restored']), (state, proven))
 
     def test_only_the_documented_timer_answers_prove_the_restore(self):
         """systemctl is-active (rc, stdout) and the stop's rc, through the CLI: only rc 3 with inactive or failed,
@@ -275,6 +326,12 @@ class DiskFull(Host):
             self.assertLess(row['after']['free'], c['free_below_bytes'])
             self.assertEqual(sized, [(64 << 20) - (1 << 19)])
             self.assertTrue(soak_fault.ballast(c).exists())
+            # statfs still reads below the threshold after the unlink: unproven, so the dead-man is not stopped
+            (self.state / 'is-active').write_text('0|active')
+            row = soak_fault.restore(c)
+            self.assertEqual((row['restored'], row['proof'].get('deadman')), (False, 'left_armed'))
+            self.assertFalse([r for r in self.calls('systemctl') if r[1] == 'stop'])
+            (self.state / 'is-active').write_text('3|inactive')
             free['v'] = 64 << 20
             self.assertTrue(soak_fault.restore(c)['restored'])
             self.assertFalse(soak_fault.ballast(c).exists())

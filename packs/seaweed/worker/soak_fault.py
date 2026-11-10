@@ -221,8 +221,17 @@ def wait_port(c, ok, seconds):
     raise RuntimeError('port state did not change within %d s' % seconds)
 
 
+def timer_state(unit):
+    """The dead-man timer as systemctl reports it, read only: pending (0, active), fired_or_gone (3, inactive or
+    failed), or unavailable (any other pair, the query's own failure included)."""
+    query = run(['systemctl', 'is-active', unit + '.timer'], check=False)
+    pair = (query.returncode, query.stdout.strip())
+    return ('pending' if pair == (0, 'active') else 'fired_or_gone' if pair in DEADMAN_GONE else 'unavailable'), list(pair)
+
+
 def restore(c):
-    """Undo to the arm row's values, prove it, then cancel the dead-man. Restored is True only when proven."""
+    """Undo to the arm row's values and prove it by reading the state back; only then cancel the dead-man. An
+    unproven restore leaves the dead-man armed as the backstop and reports restored False (CLEANUP_UNKNOWN)."""
     kind, arm = c['kind'], armed(c)
     ident = target(c)
     proof, restored = {}, arm is None  # nothing was armed, so nothing was changed
@@ -230,8 +239,11 @@ def restore(c):
         same = ident == arm['identity']
         if kind == 'link_flap':
             run(['ip', 'link', 'set', 'dev', c['netdev'], 'up'])
-            wait_port(c, lambda s: 'ACTIVE' in s, 30)
-            restored = True
+            try:
+                wait_port(c, lambda s: 'ACTIVE' in s, c.get('restore_wait_s', 30))
+                restored = True  # the port read back ACTIVE
+            except RuntimeError:
+                restored = False
         elif kind in ('mr_pressure', 'fd_exhaust') and same:
             key = 'memlock' if kind == 'mr_pressure' else 'nofile'
             soft = arm['before']['limits'][key][0]
@@ -249,14 +261,17 @@ def restore(c):
     after = snapshot(c, ident)
     if kind in DEADMAN:
         unit = deadman_unit(c)
-        stop = run(['systemctl', 'stop', unit + '.timer'], check=False)
-        query = run(['systemctl', 'is-active', unit + '.timer'], check=False)
-        pair = [query.returncode, query.stdout.strip()]
-        proof.update(deadman_stop_rc=stop.returncode, deadman_timer=pair)
-        # Proof the timer cannot fire again is only an exact documented pair: is-active exits 3 ("unit is not
-        # active") printing inactive or failed. Any other pair, rc 1 with "inactive" included, is UNKNOWN; so is a
-        # stop that failed other than with 5 ("unit not loaded": a fired transient timer is already gone).
-        restored = restored and tuple(pair) in DEADMAN_GONE and stop.returncode in (0, 5)
+        proof['deadman_before'], proof['deadman_before_pair'] = timer_state(unit)  # read only: nothing stopped yet
+        if restored:  # disarm only after the state itself was read back as restored
+            stop = run(['systemctl', 'stop', unit + '.timer'], check=False)
+            state, pair = timer_state(unit)
+            proof.update(deadman_stop_rc=stop.returncode, deadman_timer=pair)
+            # Proof the timer cannot fire again is only an exact documented pair: is-active exits 3 ("unit is not
+            # active") printing inactive or failed. Any other pair, rc 1 with "inactive" included, is UNKNOWN; so is
+            # a stop that failed other than with 5 ("unit not loaded": a fired transient timer is already gone).
+            restored = state == 'fired_or_gone' and stop.returncode in (0, 5)
+        else:
+            proof['deadman'] = 'left_armed'  # unproven: the dead-man stays the backstop
     row = dict(action='restore', kind=kind, identity=ident, after=after, restored=restored, proof=proof)
     record(c, row)
     return row
