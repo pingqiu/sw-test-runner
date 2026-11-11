@@ -65,13 +65,14 @@ def k8_refusal_misses(stats):
 
 def unavailable_gets(stats):
     """#1187: the connector's volume-unavailable GET counter (connector_unavailable_ops.get) of one stats object, or
-    None when malformed. The same strict decoding as k8_refusal_misses: a non-negative, non-bool int; no
-    connector_unavailable_ops at all is 0 (a build before #1187)."""
+    None when malformed. Only an ABSENT connector_unavailable_ops is 0 (a build before #1187); a present one must be
+    an object whose `get` is a non-negative, non-bool int, so a present null, a non-object, a missing or a non-int
+    `get` is malformed (None): only a real numeric delta can flag a GET."""
     if not isinstance(stats,dict): return None
-    u=stats.get('connector_unavailable_ops')
-    if u is None: return 0
-    if not isinstance(u,dict): return None
-    v=u.get('get',0)
+    if 'connector_unavailable_ops' not in stats: return 0
+    u=stats['connector_unavailable_ops']
+    if not isinstance(u,dict) or 'get' not in u: return None
+    v=u['get']
     if isinstance(v,bool) or not isinstance(v,int) or v<0: return None
     return v
 

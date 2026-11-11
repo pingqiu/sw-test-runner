@@ -520,6 +520,39 @@ class UnavailableFlag(unittest.TestCase):
         conn = self.Conn(True, start=0.9)  # 0.9 -> 1.9 must not read as a counted GET
         self.assertNotIn('unavailable', soak_native_worker.work(conn, self.CMD))
 
+    def test_only_an_absent_counter_is_legacy_a_present_malformed_one_is_none(self):
+        """codex01 on 92c87a8: absent connector_unavailable_ops = a build before #1187 (0); a PRESENT but null,
+        non-object, get-less or non-int-get one is malformed (None), never 0."""
+        from soak_native_worker import unavailable_gets as u
+        self.assertEqual(u(dict(native_budget_refusal_process={})), 0)  # absent: legacy
+        self.assertEqual(u(dict(connector_unavailable_ops=dict(get=6))), 6)
+        for bad in (None, [], 3, 'x', dict(), dict(set=1), dict(get=None), dict(get='7'), dict(get=False), dict(get=-1)):
+            with self.subTest(present=bad):
+                self.assertIsNone(u(dict(connector_unavailable_ops=bad)))
+
+    class Scripted(RefusalCause.Conn):
+        """stats_json answers the scripted readings in order (before, after the GET); each None is a present null."""
+        def __init__(self, *readings):
+            super().__init__(False)
+            self.readings = list(readings)
+
+        def stats_json(self):
+            r = self.readings.pop(0)
+            return json.dumps({} if r == 'absent' else dict(connector_unavailable_ops=None if r is None else dict(get=r)))
+
+    def test_a_present_null_reading_on_either_side_records_no_flag(self):
+        import soak_native_worker
+        for name, readings in (('null before, numeric after', (None, 7)), ('numeric before, null after', (6, None)),
+                               ('null both', (None, None))):
+            with self.subTest(case=name):
+                self.assertNotIn('unavailable', soak_native_worker.work(self.Scripted(*readings), self.CMD))
+
+    def test_numeric_and_legacy_readings_keep_their_flags(self):
+        import soak_native_worker
+        for readings, want in (((6, 7), True), ((7, 7), False), (('absent', 'absent'), False)):
+            with self.subTest(readings=readings):
+                self.assertIs(soak_native_worker.work(self.Scripted(*readings), self.CMD).get('unavailable'), want)
+
 
 class HotKeyReads(unittest.TestCase):
     """kv_load run 2 (2026-11-04): the top-1% of keys drew 0.540 of the reads, declared 0.590, because
