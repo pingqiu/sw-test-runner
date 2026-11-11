@@ -202,7 +202,8 @@ def config(root, kind):
                 quiescence_s=60, client_kill_at_s=0, collection='lmcache',
                 fault_row=dict(kind=kind, episode='E1', recovery_s=60 if kind in ('volume_kill_io', 'client_kill_put') else 30,
                                pin_ranges_bytes=4 << 20, pin_pool_bytes=2 << 20, pin_cache_bytes=1 << 20, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
-                               client_fallback_counters=['rdma_fallbacks']))
+                               client_fallback_counters=['rdma_fallbacks'],
+                               **(dict(netdev='enp1s0v0', rdma_device='mlx5_0') if kind == 'link_flap' else {})))
 
 
 def write_row(root, kind, edit=None):
@@ -962,6 +963,162 @@ class Fail(unittest.TestCase):
         v = verdict(self, 'link_flap', fix=lambda c: c['fault_row'].update(recovery_s=45))
         self.assertEqual(v['status'], 'FAIL')
         self.assertIn('recovery bound moved', v['error'])
+
+
+# ---- F3 link flap attribution (ruling 2026-11-11 01:54Z), through the real CLI. The window is re-derived from the
+# controller's M01 marks only: fault-pause pause_mono (before the apply is issued) and fault-close end_mono (after
+# the restore proved restored=true) + recovery_s. The fixture's controller marks: dispatch 1100.0, ready 1130.0.
+PAUSE_M01, CLOSE_M01 = 1099.9, 1130.01
+FLAP_END = CLOSE_M01 + 30
+TIMEOUT = "TimeoutError('native completion deadline')"
+
+
+def flap_reason(submitted, **kw):
+    """The receipt the load writes for one attributed UNKNOWN (LinkFlapWindow.reason)."""
+    r = dict(run_id='run-1', boot_id=boot_id(), episode='E1', kind='link_flap', netdev='enp1s0v0', rdma_device='mlx5_0',
+             start=PAUSE_M01, end=None, start_mark='fault-pause pause_mono', end_mark='fault-close end_mono + recovery_s',
+             case='in flight at link-down' if submitted < PAUSE_M01 else 'submitted in the down window')
+    r.update(kw)
+    return r
+
+
+def mixed(new_seed, old_seed, length=64):
+    """A partial PUT read back: the first half of the new generation over the old one."""
+    half = length // 2
+    return hashlib.sha256(payload(new_seed, length)[:half] + payload(old_seed, length)[half:]).hexdigest()
+
+
+def flap_verdict(test, submitted=1100.2, completed=1130.2, prior=True, audit='old', reason=None, edit=None, fix=None):
+    """The F3 fixture row plus key f3: an optional prior ACK, then one quarantined UNKNOWN PUT with its receipt and
+    the fresh audit's reads (the load's order: survivor first, then the UNKNOWN generation, stopping at an exact
+    match or a miss); the controller's M01 pause/close marks bound to this run and boot."""
+    r = row_evidence('link_flap')
+    old = r.put('f3', 1050.0) if prior else None
+    u = r.put('f3', submitted, state='UNKNOWN', done=completed, attributed='E1', error=TIMEOUT)
+    u['reason'] = flap_reason(submitted) if reason is None else reason
+    hit = lambda d: dict(case='hit', sha256=d, length=64)
+    new = u['digest']
+    reads = {'old': [hit(old['digest'])] if prior else None,
+             'new': [hit(new), hit(new)] if prior else [hit(new)],
+             'miss': [dict(case='miss')],
+             'corrupt': [hit('9' * 64)] * (2 if prior else 1),
+             'partial': [hit(mixed(u['seed'], old['seed']))] * 2 if prior else None}[audit]
+    r.audit['f3'] = reads
+    ev = files(r, 'link_flap')
+    bind = dict(run_id='run-1', boot_id=boot_id(), episode='E1', role='volume')
+    ev['fault-pause-E1.json'] = dict(bind, pause_mono=PAUSE_M01)
+    ev['fault-close-E1.json'] = dict(bind, end_mono=CLOSE_M01)
+    if edit:
+        edit(ev)
+    root = Path(tempfile.mkdtemp())
+    test.addCleanup(shutil.rmtree, root)
+    for name, body in ev.items():
+        (root / name).write_text(''.join(json.dumps(x) + '\n' for x in body) if name.endswith('.jsonl') else json.dumps(body))
+    c = config(root, 'link_flap')
+    if fix:
+        fix(c)
+    out = subprocess.run([sys.executable, '-I', str(HERE / 'soak_assess.py'), '--config', json.dumps(c)],
+                         capture_output=True, text=True, timeout=60)
+    test.assertEqual(out.returncode, 0, out.stderr)
+    return json.loads(out.stdout)
+
+
+class LinkFlapAttribution(unittest.TestCase):
+    def passes(self, v):
+        self.assertNotIn('error', v, v.get('error'))
+        self.assertEqual({k: x['outcome'] for k, x in v['criteria'].items() if x['outcome'] != 'PASS'}, {}, v['criteria'])
+        self.assertEqual((v['status'], v['unknown_attributed']), ('PASS', 1))
+
+    def refused(self, v, criterion='write_contract', why='outside the attributed window'):
+        self.assertNotIn('error', v, v.get('error'))
+        self.assertEqual({k: x['outcome'] for k, x in v['criteria'].items() if x['outcome'] != 'PASS'}, {criterion: 'FAIL'}, v['criteria'])
+        self.assertIn(why, v['criteria'][criterion]['reason'])
+
+    # (1) in the window: attributed, quarantined, the row passes
+    def test_an_unknown_submitted_in_the_down_window_is_attributed(self):
+        self.passes(flap_verdict(self))
+
+    def test_an_unknown_in_flight_at_link_down_is_attributed(self):
+        self.passes(flap_verdict(self, submitted=1099.0, completed=1101.0))
+
+    def test_an_unknown_submitted_after_the_close_within_the_recovery_bound_is_attributed(self):
+        self.passes(flap_verdict(self, submitted=1140.0, completed=1145.0, reason=flap_reason(1140.0, end=FLAP_END)))
+
+    # (2) outside the window: unattributed, the write contract fails
+    def test_an_unknown_that_ended_before_the_pause_mark_is_refused(self):
+        self.refused(flap_verdict(self, submitted=1095.0, completed=1099.5))
+
+    def test_an_unknown_submitted_after_the_window_end_is_refused(self):
+        self.refused(flap_verdict(self, submitted=1161.0, completed=1165.0, reason=flap_reason(1161.0, end=FLAP_END)))
+
+    # (3) a quarantined key read back as partial or wrong bytes fails the audit
+    def test_a_quarantined_key_read_back_corrupt_or_partial_fails(self):
+        for audit in ('corrupt', 'partial'):
+            with self.subTest(audit=audit):
+                self.refused(flap_verdict(self, audit=audit), 'audit', 'failed')
+
+    def test_a_quarantined_key_with_a_prior_ack_read_back_missing_fails(self):
+        self.refused(flap_verdict(self, audit='miss'), 'audit', 'failed')
+
+    # (4) the old value or the new value passes; a miss only without a prior ACK (F2's rule)
+    def test_a_quarantined_key_read_back_old_or_new_passes(self):
+        for audit in ('old', 'new'):
+            with self.subTest(audit=audit):
+                self.passes(flap_verdict(self, audit=audit))
+
+    def test_a_quarantined_key_without_a_prior_ack_may_read_back_new_or_missing(self):
+        for audit in ('new', 'miss'):
+            with self.subTest(audit=audit):
+                self.passes(flap_verdict(self, prior=False, audit=audit))
+
+    # (5) a bound on another host's clock cannot make the window
+    def test_a_close_bound_to_another_hosts_boot_is_refused(self):
+        def edit(ev):
+            ev['fault-close-E1.json']['boot_id'] = M02_BOOT
+        self.refused(flap_verdict(self, edit=edit))
+
+    def test_a_pause_on_the_m02_clock_is_refused(self):
+        def edit(ev):  # the injector's M02 monotonic value (fixture: M02 = M01 + 4000) in place of the M01 mark
+            ev['fault-pause-E1.json']['pause_mono'] = PAUSE_M01 + M02
+        self.refused(flap_verdict(self, edit=edit))
+
+    def test_a_receipt_recorded_against_the_m02_clock_is_refused(self):
+        self.refused(flap_verdict(self, reason=flap_reason(1100.2, start=1100.0 + M02)))
+
+    def test_a_receipt_naming_another_end_is_refused(self):
+        for end in (CLOSE_M01, CLOSE_M01 + M02 + 30):  # without the recovery bound; on the M02 clock
+            with self.subTest(end=end):
+                self.refused(flap_verdict(self, reason=flap_reason(1100.2, end=end)))
+
+    def test_an_unknown_attributed_to_another_episode_is_refused(self):
+        def edit(ev):
+            next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')['attributed'] = 'E2'
+        self.refused(flap_verdict(self, edit=edit))
+
+    def test_a_missing_or_out_of_order_mark_is_refused(self):
+        cases = {'no pause': lambda ev: ev.pop('fault-pause-E1.json'),
+                 'no close': lambda ev: ev.pop('fault-close-E1.json'),
+                 'close before ready': lambda ev: ev['fault-close-E1.json'].update(end_mono=1129.0),
+                 'pause after dispatch': lambda ev: ev['fault-pause-E1.json'].update(pause_mono=1100.05)}
+        for name, edit in cases.items():
+            with self.subTest(case=name):
+                self.refused(flap_verdict(self, reason=flap_reason(1100.2, start=1100.05) if name == 'pause after dispatch' else None,
+                                          edit=edit))
+
+    def test_a_receipt_not_bound_to_this_row_is_refused(self):
+        for field, value in (('run_id', 'run-2'), ('boot_id', M02_BOOT), ('episode', 'E2'), ('kind', 'conn_kill'),
+                             ('netdev', 'enp1s0np0'), ('rdma_device', 'mlx5_1')):
+            with self.subTest(field=field):
+                self.refused(flap_verdict(self, reason=flap_reason(1100.2, **{field: value})))
+        self.refused(flap_verdict(self, reason='link flap'))  # no receipt at all
+
+    def test_an_assessor_without_the_target_attributes_nothing(self):
+        for field in ('netdev', 'rdma_device'):
+            with self.subTest(field=field):
+                self.refused(flap_verdict(self, fix=lambda c, field=field: c['fault_row'].pop(field)))
+                # even a receipt that names no target either
+                self.refused(flap_verdict(self, reason=flap_reason(1100.2, **{field: None}),
+                                          fix=lambda c, field=field: c['fault_row'].pop(field)))
 
 
 if __name__ == '__main__':

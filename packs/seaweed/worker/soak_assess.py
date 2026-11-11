@@ -12,7 +12,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
 from soak_native_worker import k8_refusal_misses, payload
-from soak_oracle import OP_LIMIT_S, Oracle, PutFaultWindow
+from soak_oracle import OP_LIMIT_S, LinkFlapWindow, Oracle, PutFaultWindow
 from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
 
@@ -646,7 +646,7 @@ def assess_row(c):
     mark('bytes', 'FAIL' if wrong else 'PASS', '%d wrong %s' % (len(wrong), wrong[:5]))
 
     # 2. Write contract: one terminal state per PUT, ACKED exactly the journal, UNKNOWN never retried or ACKed,
-    # and every UNKNOWN attributed through the named PUT window (F1, F2 only).
+    # and every UNKNOWN attributed through the named PUT window (F1, F2) or the link flap window (F3).
     bad, by_op = [], {}
     for r in ledger:
         if r['state'] not in ('ACKED', 'REFUSED', 'UNKNOWN') or r['op'] in by_op:
@@ -665,10 +665,15 @@ def assess_row(c):
     elif kind == 'client_kill_put' and len(kills) == 1:
         v = kills[0].get('victim') or {}
         window = PutFaultWindow(kills[0]['killed'], kills[0]['finished'], (v.get('pid'), v.get('starttime')))
+    elif kind == 'link_flap':
+        window = link_flap_window(root, c, f, row)
     unknown = [r for r in ledger if r['state'] == 'UNKNOWN']
     for r in unknown:
-        target = victim if kind == 'volume_kill_io' else (r['worker_identity'].get('pid'), r['worker_identity'].get('starttime'))
-        ok = window is not None and r.get('attributed') == episode and window.attributes(target, r['submitted'], r['completed'])
+        if kind == 'link_flap':  # F3: the receipt must be this row's and name these exact M01 marks
+            ok = window is not None and r.get('attributed') == episode and window.attributes(r.get('reason'), r['submitted'], r['completed'])
+        else:
+            target = victim if kind == 'volume_kill_io' else (r['worker_identity'].get('pid'), r['worker_identity'].get('starttime'))
+            ok = window is not None and r.get('attributed') == episode and window.attributes(target, r['submitted'], r['completed'])
         if kind == 'client_kill_put':
             ok = ok and r['op'] in kill_ops
         later = [x['op'] for x in ledger if x['key'] == r['key'] and x['dispatched'] > r['dispatched']] + \
@@ -807,6 +812,30 @@ def assess_row(c):
     status = rank([v['outcome'] for v in crit.values()])
     return dict(status=status, row=ROW_KINDS[kind], criteria=crit, claims=claims, unknown_attributed=attributed,
                 resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE)
+
+
+def link_flap_window(root, c, f, row):
+    """F3's attribution window (LinkFlapWindow), re-derived from M01 marks only: the controller's fault-pause and
+    fault-close of this row, each bound to this run, the admitted M01 boot and the episode, and in the controller's
+    own order pause <= dispatch (apply issued) <= ready (restore proven) <= close. Absent, foreign, malformed or out
+    of order: None, so every UNKNOWN is unattributed. The injector's M02 monotonic values never enter."""
+    ep = f['episode']
+    bind = dict(run_id=c['run_id'], boot_id=c['boot_id'], episode=ep)
+    try:
+        p = read_bound(Path(root) / ('fault-pause-%s.json' % ep), bind)
+        q = read_bound(Path(root) / ('fault-close-%s.json' % ep), bind)
+    except (ValueError, OSError):
+        return None
+    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    start, close = (p or {}).get('pause_mono'), (q or {}).get('end_mono')
+    if not (num(start) and num(close) and start <= f['dispatch_mono'] <= f['ready_mono'] <= close):
+        return None
+    netdev, dev = row.get('netdev'), row.get('rdma_device')
+    if not (isinstance(netdev, str) and netdev and isinstance(dev, str) and dev):
+        return None
+    return LinkFlapWindow(start, close + row['recovery_s'], (
+        ('run_id', c['run_id']), ('boot_id', c['boot_id']), ('episode', ep), ('kind', 'link_flap'),
+        ('netdev', netdev), ('rdma_device', dev)))
 
 
 def receipt_identities(f):

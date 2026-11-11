@@ -23,7 +23,7 @@ def pinned(name):
 for _name in ('soak_native_worker', 'soak_oracle', 'soak_stats'):
     pinned(_name)
 from soak_native_worker import child, payload
-from soak_oracle import Oracle, OracleError
+from soak_oracle import LinkFlapWindow, Oracle, OracleError
 from soak_stats import WITNESS, boot_id, identity
 
 # NOT_FOUND (status 1) in exactly the two spellings a soak read can carry: the DC batch push read, and the RC
@@ -248,7 +248,11 @@ def run(config):
     route = read_route(config)
     root = Path(config['root'])
     row_cfg = config.get('fault_row')  # stage 3: absent keeps the soak and kv_load byte for byte
-    files = {n: (root / n).open('x', buffering=1) for n in EVIDENCE + (ROW_EVIDENCE if row_cfg else ())}
+    if row_cfg and row_cfg['kind'] == 'link_flap' and not (
+            isinstance(row_cfg.get('recovery_s'), int) and not isinstance(row_cfg['recovery_s'], bool) and row_cfg['recovery_s'] > 0
+            and all(isinstance(row_cfg.get(k), str) and row_cfg[k] for k in ('netdev', 'rdma_device'))):
+        raise ValueError('link_flap row needs recovery_s, netdev and rdma_device')  # F3's window bound and receipt
+    files ={n: (root / n).open('x', buffering=1) for n in EVIDENCE + (ROW_EVIDENCE if row_cfg else ())}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
     oracle, rng, seq = Oracle(), random.Random(20261027), [0]
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
@@ -265,6 +269,7 @@ def run(config):
     # Stage 3: an armed window keeps the load running through the fault; every op dispatched or pending while
     # it is armed may end in a credited error, and in F1 an UNKNOWN PUT among them quarantines its key.
     armed_ops, ledger = set(), {}  # ledger: key -> survivor (highest ACK), UNKNOWN generations, quarantined
+    flap = {}  # F3: 'window' -> LinkFlapWindow on M01 marks only, from the armed ack on, kept after the close
 
     def fault_window():
         """Pause: stop all dispatch, drain SETs (a GET error now is fatal: no
@@ -300,6 +305,11 @@ def run(config):
                          pending_gets=gets, pending_sets=sets, armed=True))
             window['acked'] = True
             log('op-events.jsonl', dict(event='fault_window', phase='armed', episode=window['episode'], mono=window['ack_mono']))
+            if row_cfg['kind'] == 'link_flap' and window['episode'] == row_cfg['episode']:
+                # start: the controller's pause mark, published before it issues the apply (same M01 clock)
+                flap['window'] = LinkFlapWindow(p['pause_mono'], math.inf, (
+                    ('run_id', bind['run_id']), ('boot_id', bind['boot_id']), ('episode', row_cfg['episode']),
+                    ('kind', 'link_flap'), ('netdev', row_cfg['netdev']), ('rdma_device', row_cfg['rdma_device'])))
         elif window['episode'] is None:
             return
         elif not window['acked']:
@@ -341,6 +351,13 @@ def run(config):
                 end = close.get('end_mono')
                 if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end < window['ack_mono']:
                     raise ValueError('fault close malformed or before the ack')
+                if 'window' in flap and ep == row_cfg['episode']:
+                    # end: the controller's close, published only after the restore proved restored=true, plus the
+                    # row's recovery bound; a close from the future is refused like a pause from the future
+                    if end > time.monotonic():
+                        raise ValueError('fault close dated after its observation')
+                    w = flap['window']
+                    flap['window'] = LinkFlapWindow(w.start, end + row_cfg['recovery_s'], w.binding)
                 if window.get('armed'):
                     log('op-events.jsonl', dict(event='fault_window', phase='closed', episode=ep, mono=time.monotonic()))
                 window.update(episode=None, armed=False)
@@ -371,32 +388,34 @@ def run(config):
             armed_ops.add(cmd['operation_id'])
         workers[i]['pipe'].send(cmd)
 
-    def ledger_row(i, cmd, state, digest, submitted, completed, error=None, attributed=None, ident=None):
+    def ledger_row(i, cmd, state, digest, submitted, completed, error=None, attributed=None, ident=None, reason=None):
         """Stage 3 write contract: one terminal row per PUT (ACKED, REFUSED or UNKNOWN), frozen as it happens."""
         cand = dict(op=cmd['operation_id'], seed=cmd['seed'], length=cmd['length'], digest=digest, sequence=cmd['sequence'])
         ident = ident or workers[i]['identity']
         log('write-ledger.jsonl', dict(cand, key=cmd['key'], state=state, worker=i, dispatched=cmd['dispatched'],
                                        submitted=submitted, completed=completed, error=error, attributed=attributed,
-                                       worker_identity=dict(pid=ident['pid'], starttime=ident['starttime'])))
+                                       worker_identity=dict(pid=ident['pid'], starttime=ident['starttime']),
+                                       **({} if reason is None else dict(reason=reason))))
         entry = ledger.setdefault(cmd['key'], dict(survivor=None, unknown=[], quarantined=False)) if state != 'REFUSED' else None
         if state == 'ACKED':
             entry['survivor'] = cand
         elif state == 'UNKNOWN':
             entry['unknown'].append(cand)
 
-    def quarantine(i, cmd, submitted, completed, error, ident=None):
-        """An attributed UNKNOWN (F1, F2): the key leaves the load for good, pinned busy so nothing selects it."""
+    def quarantine(i, cmd, submitted, completed, error, ident=None, reason=None):
+        """An attributed UNKNOWN (F1, F2, F3): the key leaves the load for good, pinned busy so nothing selects it."""
         key = cmd['key']
         digest = oracle.pending[key].digest
         oracle.quarantine_write(key)
         busy[key] = busy.get(key, 0) + 1
-        ledger_row(i, cmd, 'UNKNOWN', digest, submitted, completed, error, row_cfg['episode'], ident)
+        ledger_row(i, cmd, 'UNKNOWN', digest, submitted, completed, error, row_cfg['episode'], ident, reason)
         ledger[key]['quarantined'] = True
         counts['unknown_attributed'] += 1
 
     def put_failed(i, cmd, row, event):
-        """REFUSED for a named definite error; in F1 an UNKNOWN among the armed ops quarantines; any other
-        UNKNOWN stops the run as today."""
+        """REFUSED for a named definite error; in F1 an UNKNOWN among the armed ops quarantines; in F3 an UNKNOWN in
+        the link flap's window (LinkFlapWindow, M01 marks) quarantines with its receipt; any other UNKNOWN stops the
+        run as today."""
         error, key = str(row.get('error')), cmd['key']
         if any(s in error for s in row_cfg['refused']):
             digest = oracle.pending[key].digest
@@ -405,6 +424,10 @@ def run(config):
             event['state'] = 'REFUSED'
         elif row_cfg['kind'] == 'volume_kill_io' and cmd['operation_id'] in armed_ops:
             quarantine(i, cmd, row['submitted'], row['completed'], error)
+            event['state'] = 'UNKNOWN'
+        elif row_cfg['kind'] == 'link_flap' and 'window' in flap and flap['window'].contains(row['submitted'], row['completed']):
+            quarantine(i, cmd, row['submitted'], row['completed'], error,
+                       reason=flap['window'].reason(row['submitted'], row['completed']))
             event['state'] = 'UNKNOWN'
         else:
             ledger_row(i, cmd, 'UNKNOWN', oracle.pending[key].digest, row['submitted'], row['completed'], error)

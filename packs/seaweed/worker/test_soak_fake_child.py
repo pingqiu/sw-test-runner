@@ -44,4 +44,6 @@ def child(pipe, cfg):
         else:
             row.update(length=cmd['length'], sha256=hashlib.sha256(payload(cmd['seed'], cmd['length'])).hexdigest(),
                        untouched=False)
+        while (root / 'fake-hold-complete').exists():  # stage 3 F3: a completion recorded now, delivered late
+            time.sleep(0.01)
         pipe.send(dict(event='complete', row=row))

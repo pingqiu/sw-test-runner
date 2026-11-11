@@ -147,6 +147,37 @@ class PutFaultWindow:
         return (tuple(identity) == tuple(self.killed) and submitted <= self.end
                 and self.start <= completed <= self.end + OP_LIMIT_S)
 
+
+LINK_FLAP_BINDING = ('run_id', 'boot_id', 'episode', 'kind', 'netdev', 'rdma_device')
+
+
+@dataclass(frozen=True)
+class LinkFlapWindow:
+    """F3 (ruling 2026-11-11 01:54Z): an UNKNOWN PUT is the link flap's when it was in flight at link-down (submitted
+    before start, ended at or after it) or was submitted in [start, end]. One clock only, M01 CLOCK_MONOTONIC, where
+    the load and its ledger live: start is the controller's fault-pause pause_mono (published before the apply is
+    issued), end is its fault-close end_mono (published only after the restore returned restored=true) plus the row's
+    recovery bound. M02 clocks never enter. The load decides with end = inf while the window is still open (a
+    submission before an unpublished close is necessarily before it); the assessor re-derives both bounds."""
+    start: float
+    end: float
+    binding: tuple  # (field, value) pairs from LINK_FLAP_BINDING: run, M01 boot, episode, kind, target VF
+
+    def contains(self, submitted, completed):
+        return completed >= self.start and submitted <= self.end
+
+    def reason(self, submitted, completed):
+        """The ledger receipt of one attributed UNKNOWN."""
+        return dict(dict(self.binding), start=self.start, end=None if self.end == math.inf else self.end,
+                    start_mark='fault-pause pause_mono', end_mark='fault-close end_mono + recovery_s',
+                    case='in flight at link-down' if submitted < self.start else 'submitted in the down window')
+
+    def attributes(self, reason, submitted, completed):
+        """The assessor's check of a receipt: bound to this row, recorded against these exact marks, and inside."""
+        return (isinstance(reason, dict) and all(reason.get(k) == v for k, v in self.binding)
+                and reason.get('start') == self.start and reason.get('end') in (None, self.end)
+                and self.contains(submitted, completed))
+
 REQUIRED = {"rss_bytes", "fds", "VmPin_bytes", "VmLck_bytes", "disk_bytes", "volume_count",
             "SeaweedFS_rdma_range_pinned_bytes", "SeaweedFS_rdma_range_retained_bytes",
             "SeaweedFS_rdma_range_retained_sources"}

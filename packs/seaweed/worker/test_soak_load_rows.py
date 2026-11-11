@@ -129,10 +129,147 @@ class Rows(unittest.TestCase):
         self.assertEqual((last['state'], last['attributed']), ('UNKNOWN', None))
 
     def test_an_unknown_inside_a_non_kill_row_window_still_stops(self):
-        self.row('link_flap')
+        # F4 (r12: F3 now attributes its window, so the property is held by a row that still has none)
+        self.row('conn_kill')
         self.armed_controller(1.0, 3.0)
         with self.assertRaisesRegex(OracleError, 'UNKNOWN_WRITE'):
             soak_load.run(self.config)
+
+    # ---- F3 link flap (ruling 2026-11-11 01:54Z): an UNKNOWN in flight at link-down or submitted in [start, end]
+    # is attributed and quarantined and the load continues; start = fault-pause pause_mono, end = fault-close
+    # end_mono + recovery_s, both M01 marks; any other UNKNOWN stops the run.
+    FLAP = dict(recovery_s=1, netdev='enp1s0v0', rdma_device='mlx5_0')
+
+    def flap_row(self, **kw):
+        self.row('link_flap', **dict(self.FLAP, **kw))
+        self.config['pacing_s'] = 0.05  # a PUT is always in flight: some span the pause
+        self.config['duration_s'] = 6  # PUTs stop write_stop_s (1 s) before the end: room for the post-close cases
+
+    def flap_controller(self, at=1.0, fail=None, close_row=None, after_close=None, before_pause=None):
+        """pause at `at`; fail: seconds of failing PUTs right after the ack; after_close: (delay, seconds) of failing
+        PUTs after the close; before_pause: seconds of PUTs that fail and are delivered only after the ack."""
+        seen = {}
+
+        def run():
+            try:
+                steps()
+            except OSError:  # the load stopped and the test removed its run root: nothing left to control
+                pass
+
+        def steps():
+            while not (self.root / 'soak-load-start.json').exists():
+                time.sleep(0.01)
+            time.sleep(at)
+            if before_pause:
+                (self.root / 'fake-hold-complete').write_text('')
+                (self.root / 'fake-fail-set').write_text('connection reset')
+                time.sleep(before_pause)
+                (self.root / 'fake-fail-set').unlink()
+            seen['pause'] = time.monotonic()
+            self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=seen['pause']))
+            while not (self.root / 'fault-ack-E1.json').exists():
+                time.sleep(0.01)
+            if before_pause:
+                (self.root / 'fake-hold-complete').unlink()
+            if fail:
+                (self.root / 'fake-fail-set').write_text("TimeoutError('native completion deadline')")
+                time.sleep(fail)
+                (self.root / 'fake-fail-set').unlink()
+            seen['close'] = time.monotonic()
+            self.write('fault-close-E1.json', close_row or dict(episode='E1', role='volume', end_mono=seen['close']))
+            if after_close:
+                time.sleep(after_close[0])
+                (self.root / 'fake-fail-set').write_text('connection reset')
+                time.sleep(after_close[1])
+                (self.root / 'fake-fail-set').unlink()
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t, seen
+
+    def flap_unknowns(self):
+        return [r for r in jsonl(self.root / 'write-ledger.jsonl') if r['state'] == 'UNKNOWN']
+
+    def test_f3_an_unknown_in_the_flap_window_is_quarantined_with_its_receipt_and_the_load_continues(self):
+        self.flap_row()
+        t, seen = self.flap_controller(fail=1.0)
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        unknown = self.flap_unknowns()
+        self.assertTrue(unknown)
+        self.assertEqual(summary['counts']['unknown_attributed'], len(unknown))
+        for u in unknown:
+            r = u['reason']
+            self.assertEqual((u['attributed'], r['kind'], r['episode'], r['run_id'], r['boot_id'], r['netdev'], r['rdma_device']),
+                             ('E1', 'link_flap', 'E1', 'run-1', self.boot, 'enp1s0v0', 'mlx5_0'))
+            self.assertEqual((r['start'], r['end']), (seen['pause'], None))  # decided before the close was published
+            self.assertTrue(u['completed'] >= r['start'])
+            self.assertEqual(r['case'], 'in flight at link-down' if u['submitted'] < r['start'] else 'submitted in the down window')
+        cases = {u['reason']['case'] for u in unknown}
+        self.assertEqual(cases, {'in flight at link-down', 'submitted in the down window'}, unknown)
+        ledger = jsonl(self.root / 'write-ledger.jsonl')
+        for u in unknown:  # never retried
+            self.assertFalse([r for r in ledger if r['key'] == u['key'] and r['dispatched'] > u['dispatched']])
+        audited = {a['key'] for a in jsonl(self.root / 'audit.jsonl')}
+        self.assertTrue({u['key'] for u in unknown} <= audited)
+
+    def test_f3_an_unknown_submitted_after_the_close_within_the_recovery_bound_is_in_the_window(self):
+        self.flap_row(recovery_s=2)
+        t, seen = self.flap_controller(fail=None, after_close=(0.4, 0.5))
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        late = [u for u in self.flap_unknowns() if u['submitted'] > seen['close']]
+        self.assertTrue(late, self.flap_unknowns())
+        self.assertTrue(all(u['reason']['end'] == seen['close'] + 2 for u in late), late)
+
+    def test_f3_an_unknown_that_failed_before_the_pause_stops_the_run(self):
+        # failed (completed) before the pause mark, delivered after the ack: not in flight at link-down
+        self.flap_row()
+        self.flap_controller(before_pause=0.6)
+        with self.assertRaisesRegex(OracleError, 'UNKNOWN_WRITE'):
+            soak_load.run(self.config)
+        last = jsonl(self.root / 'write-ledger.jsonl')[-1]
+        self.assertEqual((last['state'], last['attributed'], 'reason' in last), ('UNKNOWN', None, False))
+        pause = json.loads((self.root / 'fault-pause-E1.json').read_text())['pause_mono']
+        self.assertLess(last['completed'], pause)
+
+    def test_f3_an_unknown_before_any_window_stops_the_run(self):
+        self.flap_row()
+        self.toggle('fake-fail-set', 1.0, 5)
+        with self.assertRaisesRegex(OracleError, 'UNKNOWN_WRITE'):
+            soak_load.run(self.config)
+        self.assertEqual(jsonl(self.root / 'write-ledger.jsonl')[-1]['attributed'], None)
+
+    def test_f3_an_unknown_submitted_after_the_window_end_stops_the_run(self):
+        self.flap_row(recovery_s=1)
+        t, seen = self.flap_controller(after_close=(1.6, 3.0))  # failing PUTs from close + 1.6 s, past close + 1 s
+        with self.assertRaisesRegex(OracleError, 'UNKNOWN_WRITE'):
+            soak_load.run(self.config)
+        last = jsonl(self.root / 'write-ledger.jsonl')[-1]
+        self.assertEqual((last['state'], last['attributed'], 'reason' in last), ('UNKNOWN', None, False))
+        self.assertGreater(last['submitted'], seen['close'] + 1)
+
+    def test_f3_a_close_from_another_hosts_clock_is_refused(self):
+        # M02's boot: a bound on another host's clock cannot reach the window (the binding refuses the file)
+        self.flap_row()
+        self.flap_controller(close_row=dict(episode='E1', role='volume', end_mono=time.monotonic(), boot_id='m02-boot'))
+        with self.assertRaisesRegex(ValueError, 'binding differs'):
+            soak_load.run(self.config)
+
+    def test_f3_a_close_dated_after_its_observation_is_refused(self):
+        self.flap_row()
+        self.flap_controller(close_row=dict(episode='E1', role='volume', end_mono=time.monotonic() + 1000))
+        with self.assertRaisesRegex(ValueError, 'dated after its observation'):
+            soak_load.run(self.config)
+
+    def test_f3_a_row_without_its_window_bound_or_target_is_refused(self):
+        for drop in ('recovery_s', 'netdev', 'rdma_device'):
+            with self.subTest(drop=drop):
+                self.flap_row()
+                del self.config['fault_row'][drop]
+                with self.assertRaisesRegex(ValueError, 'link_flap row needs'):
+                    soak_load.run(self.config)
 
     def test_a_named_refusal_is_refused_and_the_load_continues(self):
         self.row('disk_full')

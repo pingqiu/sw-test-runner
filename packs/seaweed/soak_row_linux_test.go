@@ -205,4 +205,28 @@ func TestARowProfilePinsItsFaultJobs(t *testing.T) {
 	if !strings.Contains(load, `"fault_row":{"at_s":60,"audit_s":20,"episode":"E1","kind":"link_flap"`) {
 		t.Fatalf("the load carries its row: %s", load)
 	}
+	// F3 (r12): the load's link flap window needs the frozen recovery bound, and its receipts name the target VF
+	if !strings.Contains(load, `"netdev":"ens1f0","rdma_device":"mlx5_0","recovery_s":30,`) {
+		t.Fatalf("the F3 load carries its window bound and target: %s", load)
+	}
+}
+
+// Every other row's load argv is unchanged by F3's window: no recovery bound, no target.
+func TestOnlyF3CarriesItsWindowToTheLoad(t *testing.T) {
+	input := soakInput(t, 30*time.Minute, func(x *SoakPlan) {
+		row := rowPlan(KindConnKill)
+		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = row.DurationS, row.Faults, row.Row, 0, nil, row.Pattern
+	}, withVolumeMetrics)
+	for _, name := range []string{"soak_fault.py", "soak_stats.py"} {
+		body, _ := workerFiles.ReadFile("worker/" + name)
+		input.Files["m02"]["/opt/profile/worker/"+name] = hash(body)
+	}
+	b, err := BuildProfile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := b.Jobs["soak-load-m01"].Argv[3]
+	if !strings.Contains(load, `"fault_row":{"at_s":60,"audit_s":20,"episode":"E1","kind":"conn_kill","refused":`) {
+		t.Fatalf("F4's load row must be exactly as before: %s", load)
+	}
 }

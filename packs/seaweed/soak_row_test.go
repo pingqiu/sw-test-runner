@@ -131,6 +131,30 @@ func TestThePinSizesReachTheAssessorAsConfigured(t *testing.T) {
 	}
 }
 
+// F3's assessor receives the target VF its attribution receipts are bound to; every other row's argv is unchanged.
+func TestOnlyF3CarriesItsTargetToTheAssessor(t *testing.T) {
+	d := &inventory.Document{RunID: "run-1", Hosts: []inventory.Host{{ID: "m01", RunRoot: "/r1"}},
+		Observation: &inventory.Observation{Hosts: []inventory.HostObservation{{HostID: "m01", BootID: "b1"}, {HostID: "m02", BootID: "b2"}}}}
+	for _, kind := range allRowKinds {
+		argv, err := SoakAssessArgs(d, SmokeSettings{HelperDir: "/w"}, rowPlan(kind))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config struct {
+			Row map[string]any `json:"fault_row"`
+		}
+		if err = json.Unmarshal([]byte(argv[3]), &config); err != nil {
+			t.Fatal(err)
+		}
+		_, hasNet := config.Row["netdev"]
+		_, hasDev := config.Row["rdma_device"]
+		if kind == KindLinkFlap && (config.Row["netdev"] != "ens1f0" || config.Row["rdma_device"] != "mlx5_0") ||
+			kind != KindLinkFlap && (hasNet || hasDev) {
+			t.Errorf("%s: assessor fault_row %v", kind, config.Row)
+		}
+	}
+}
+
 func slicesEqual(a, b []string) bool { return strings.Join(a, ",") == strings.Join(b, ",") }
 
 func TestARowNeedsExactlyOneVolumeOnM02(t *testing.T) {

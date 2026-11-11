@@ -62,7 +62,11 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 	}
 	if x.rowMode() { // stage 3; absent otherwise, so every other argv is unchanged
 		f, r := x.Faults[0], x.Row
-		config["fault_row"] = map[string]any{"kind": f.kind(), "episode": f.Episode, "at_s": f.AtS, "refused": append([]string{}, r.Refused...), "audit_s": r.AuditS}
+		row := map[string]any{"kind": f.kind(), "episode": f.Episode, "at_s": f.AtS, "refused": append([]string{}, r.Refused...), "audit_s": r.AuditS}
+		if f.kind() == KindLinkFlap { // F3: the window's recovery bound and the receipt's target VF; absent otherwise
+			row["recovery_s"], row["netdev"], row["rdma_device"] = r.RecoveryS, r.Netdev, r.RDMADevice
+		}
+		config["fault_row"] = row
 	}
 	raw, err := json.Marshal(config)
 	if err != nil {
