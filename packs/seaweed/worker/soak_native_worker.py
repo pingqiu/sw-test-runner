@@ -16,17 +16,10 @@ def payload(seed, length):
 UNSETTLED_BUFFERS = []  # Hold caller allocations until owned process teardown.
 
 def finish(conn, future, timeout=30, abandoned=None, late=None):
-    """abandoned (stage 3 F3 only, else None = the original loop, byte for byte): this worker process's futures that
-    hit the deadline, fid -> operation id; see finish_tracked."""
-    if abandoned is not None:
-        return finish_tracked(conn, future, timeout, abandoned, late)
-    end=time.monotonic()+timeout
-    while time.monotonic()<end:
-        if not select.select([conn.event_fd()],[],[],max(0,end-time.monotonic()))[0]: continue
-        for fid,ok,error,results in conn.drain_completions():
-            if int(fid)!=future: raise RuntimeError('unowned completion')
-            return bool(ok), str(error), list(results) if results is not None else None
-    raise TimeoutError('native completion deadline')
+    """abandoned (stage 3 F3 only): this worker process's futures that hit the deadline, fid -> operation id; see
+    finish_tracked. Without it (every other row, r14) the set is empty: the whole batch is still processed, and every
+    fid but the waiting op's, in any position, is fatal, including a late completion of an op that timed out."""
+    return finish_tracked(conn, future, timeout, {} if abandoned is None else abandoned, late)
 
 
 def finish_tracked(conn, future, timeout, abandoned, late):

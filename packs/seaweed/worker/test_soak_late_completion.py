@@ -165,20 +165,57 @@ class BatchOrder(unittest.TestCase):
             w.work(conn, cmd('2'), None, abandoned, self.late.append)
 
 
-NOFLAG = ('no-flag path (R0/F1/F2/F4 and the soak) finding for claude01/codex01, deliberately not changed in r13: '
-          'finish() returns on the current fid and silently drops a foreign completion later in the same batch; '
-          'run with SOAK_NOFLAG_FINDING=1 to see it fail')
+class NoFlagBatchOrder(unittest.TestCase):
+    """r14 (claude01 04:25Z on the r13 finding): without the F3 flag (R0/F1/F2/F4, the soak) the whole batch is
+    processed too. There is no abandoned set, so every fid but the waiting op's is fatal in any position, including
+    a late completion of an op that timed out. Op 2 waits on fid 12; fid 11 timed out in op 1; 99 is foreign."""
+    CUR, LATE, FOR = (12, True, '', [True]), (11, True, '', None), (99, True, '', None)
 
-
-@unittest.skipUnless(os.environ.get('SOAK_NOFLAG_FINDING') == '1', NOFLAG)
-class NoFlagFinding(unittest.TestCase):
-    def test_no_flag_current_then_foreign_should_be_fatal(self):
-        conn = Conn([12], {1: [[(12, True, '', [True]), (99, True, '', None)]]})
+    def setUp(self):
         saved = w.finish.__defaults__
         w.finish.__defaults__ = (0.2,) + saved[1:]
         self.addCleanup(setattr, w.finish, '__defaults__', saved)
-        with self.assertRaisesRegex(RuntimeError, 'unowned completion'):
+
+    def op2(self, *drains):
+        conn = Conn([11, 12], {2: [list(d) for d in drains]})
+        with self.assertRaisesRegex(TimeoutError, 'native completion deadline'):
             w.work(conn, cmd('1'))
+        return w.work(conn, cmd('2'))
+
+    def fatal(self, why, *drains):
+        with self.assertRaisesRegex(RuntimeError, why):
+            self.op2(*drains)
+
+    def test_no_flag_current_alone_is_returned(self):
+        row = self.op2([self.CUR])
+        self.assertEqual((row['operation_id'], row['ok'], row['results']), ('2', True, [True]))
+
+    def test_no_flag_current_then_foreign_should_be_fatal(self):  # the r13 finding, now in the suite
+        self.fatal('unowned completion', [self.CUR, self.FOR])
+
+    def test_no_flag_foreign_then_current_is_fatal(self):
+        self.fatal('unowned completion', [self.FOR, self.CUR])
+
+    def test_no_flag_current_twice_is_fatal(self):
+        self.fatal('duplicate completion', [self.CUR, self.CUR])
+
+    def test_no_flag_late_completion_after_the_current_one_is_fatal(self):
+        self.fatal('unowned completion', [self.CUR, self.LATE])
+
+    def test_no_flag_late_completion_before_the_current_one_is_fatal(self):
+        self.fatal('unowned completion', [self.LATE, self.CUR])
+
+    def test_no_flag_late_completion_split_before_the_current_one_is_fatal(self):
+        self.fatal('unowned completion', [self.LATE], [self.CUR])
+
+    def test_no_flag_late_completion_with_a_later_ops_own_completion_is_fatal(self):
+        # op 2 returns on its own fid; fid 11 arrives in op 3's batch after op 3's own completion
+        conn = Conn([11, 12, 13], {2: [[self.CUR]], 3: [[(13, True, '', [True]), self.LATE]]})
+        with self.assertRaisesRegex(TimeoutError, 'native completion deadline'):
+            w.work(conn, cmd('1'))
+        self.assertEqual(w.work(conn, cmd('2'))['operation_id'], '2')
+        with self.assertRaisesRegex(RuntimeError, 'unowned completion'):
+            w.work(conn, cmd('3'))
 
 
 STUB = '''import os
