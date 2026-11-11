@@ -68,14 +68,17 @@ awk -v limit="$disk_max_pct" 'NR>1 {n++; if ($5 !~ /^[0-9]+%$/ || $5+0>limit) ba
 # beside the nightly (<archive dir>/<digest hex>.tar, its sha256 in <same>.tar.sha256), and only the frozen digest is
 # accepted afterwards; every refusal is named in image-inspect.stderr and stays ENVIRONMENT.
 restore_image() {
-  local dir=${NIGHTLY_IMAGE_ARCHIVE_DIR-$root/image} archive want got
+  local dir=${NIGHTLY_IMAGE_ARCHIVE_DIR-$root/image} archive want got loaded
   if [[ ! $image =~ ^sha256:[0-9a-f]{64}$ ]]; then echo 'IMAGE_RESTORE_REFUSED: the frozen image is not a full sha256 digest' >> "$out/image-inspect.stderr"; return 1; fi
   archive=$dir/${image#sha256:}.tar
   if [[ ! -f $archive || ! -f $archive.sha256 ]]; then echo "IMAGE_ARCHIVE_MISSING: no pinned archive $archive (+ .sha256)" >> "$out/image-inspect.stderr"; return 1; fi
-  want=$(awk 'NR==1 {print $1}' "$archive.sha256"); got=$(timeout -k5 120 sha256sum -- "$archive" | awk '{print $1}')
+  # errexit is off inside an OR-list, so every read and hash checks its own status.
+  if ! want=$(awk 'NR==1 {print $1}' "$archive.sha256"); then echo "IMAGE_ARCHIVE_UNREADABLE: cannot read the pin $archive.sha256" >> "$out/image-inspect.stderr"; return 1; fi
+  if ! got=$(timeout -k5 120 sha256sum -- "$archive"); then echo "IMAGE_ARCHIVE_UNREADABLE: hashing $archive failed" >> "$out/image-inspect.stderr"; return 1; fi
+  got=${got%% *}
   if [[ ! $want =~ ^[0-9a-f]{64}$ || $got != "$want" ]]; then echo "IMAGE_ARCHIVE_SHA_MISMATCH: $archive is $got, pinned $want" >> "$out/image-inspect.stderr"; return 1; fi
   timeout -k5 300 docker load -i "$archive" > "$out/image-load.stdout" 2>> "$out/image-inspect.stderr" || { echo 'IMAGE_LOAD_FAILED: docker load of the pinned archive failed' >> "$out/image-inspect.stderr"; return 1; }
-  if ! timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2>> "$out/image-inspect.stderr" || [[ $(cat "$out/image-id") != "$image" ]]; then
+  if ! timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2>> "$out/image-inspect.stderr" || ! loaded=$(cat "$out/image-id") || [[ $loaded != "$image" ]]; then
     echo "IMAGE_DIGEST_MISMATCH: the pinned archive did not provide $image" >> "$out/image-inspect.stderr"; return 1
   fi
   echo "IMAGE_RESTORED: $image from $archive (sha256 $got)" > "$out/image-restored"
