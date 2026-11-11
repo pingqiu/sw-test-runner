@@ -85,6 +85,14 @@ elif tool=='docker':
  if args[0]=='info':
   if os.environ.get('MODE')=='info-fails':print('Docker root unavailable',file=sys.stderr);sys.exit(23)
   print('/fixture-docker-root')
+ elif args[0]=='load':
+  if os.environ.get('MODE','').endswith('load-fails'):print('load failed',file=sys.stderr);sys.exit(1)
+  body=pathlib.Path(args[args.index('-i')+1]).read_text()
+  digest='sha256:'+('b' if body=='qualified fixture image' else 'c')*64
+  (p/'loaded').write_text(digest);print('Loaded image ID: '+digest)
+ elif args[:2]==['image','inspect'] and os.environ.get('MODE','').startswith('image-gone'):
+  if not (p/'loaded').exists():print('No such image: '+args[2],file=sys.stderr);sys.exit(1)
+  print((p/'loaded').read_text())
  elif args[:2]==['image','inspect']:
   if os.environ.get('MODE')=='image-missing':print('No such image: qualified-local-fixture',file=sys.stderr);sys.exit(1)
   mode=os.environ.get('MODE')
@@ -208,6 +216,54 @@ class NightlyCommand(unittest.TestCase):
         calls = [json.loads(s) for s in (self.root / 'commands').read_text().splitlines()]
         self.assertFalse(any(c[0] in ('make', 'go', 'cargo') or c[:2] == ['docker', 'run'] for c in calls))
         self.assertFalse((self.root / 'work').exists())
+
+    # A host-wide `docker system prune -af` deleted the qualified image twice (11-09, 11-11). The nightly restores
+    # it from the pinned archive beside it, and accepts nothing but the frozen digest.
+    def pin_archive(self, body='qualified fixture image', recorded=None):
+        import hashlib
+        d = self.root / 'image'
+        d.mkdir(exist_ok=True)
+        archive = d / ('b' * 64 + '.tar')
+        archive.write_text(body)
+        digest = recorded or hashlib.sha256(body.encode()).hexdigest()
+        (d / ('b' * 64 + '.tar.sha256')).write_text(digest + '  ' + archive.name + '\n')
+        return archive
+
+    def test_pruned_image_is_restored_from_the_pinned_archive_and_the_night_runs(self):
+        archive = self.pin_archive()
+        result = self.run_night('image-gone')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        out = self.root / 'results' / ('a' * 40)
+        self.assertEqual((out / 'TABLE.md').read_text().count('| PASS |'), 11)
+        self.assertIn('IMAGE_RESTORED: sha256:' + 'b' * 64, (out / 'image-restored').read_text())
+        calls = [json.loads(x) for x in (self.root / 'commands').read_text().splitlines()]
+        self.assertEqual([c for c in calls if c[:2] == ['docker', 'load']], [['docker', 'load', '-i', str(archive)]])
+        runs = [c for c in calls if c[:2] == ['docker', 'run']]
+        self.assertTrue(runs and all('sha256:' + 'b' * 64 in c for c in runs))
+
+    def assert_named_refusal(self, mode, name, loads):
+        result = self.run_night(mode)
+        self.assert_environment_admission(result, 'image-inspect.stderr')
+        out = self.root / 'results' / ('a' * 40)
+        self.assertIn(name, (out / 'image-inspect.stderr').read_text())
+        self.assertFalse((out / 'image-restored').exists())
+        calls = [json.loads(x) for x in (self.root / 'commands').read_text().splitlines()]
+        self.assertEqual(len([c for c in calls if c[:2] == ['docker', 'load']]), loads)
+
+    def test_pruned_image_without_an_archive_is_a_named_refusal(self):
+        self.assert_named_refusal('image-gone', 'IMAGE_ARCHIVE_MISSING', 0)
+
+    def test_archive_sha_mismatch_is_named_and_never_loaded(self):
+        self.pin_archive(recorded='d' * 64)
+        self.assert_named_refusal('image-gone', 'IMAGE_ARCHIVE_SHA_MISMATCH', 0)
+
+    def test_archive_of_another_image_is_named_and_never_run(self):
+        self.pin_archive(body='some other image')
+        self.assert_named_refusal('image-gone', 'IMAGE_DIGEST_MISMATCH', 1)
+
+    def test_failed_load_is_named(self):
+        self.pin_archive()
+        self.assert_named_refusal('image-gone-load-fails', 'IMAGE_LOAD_FAILED', 1)
 
     def assert_environment_admission(self, result, diagnostic):
         self.assertEqual(result.returncode, 78, result.stderr.decode())

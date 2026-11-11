@@ -34,6 +34,16 @@ that latest main ran. Use the existing workstation SSH access; do not copy its
 key, GitHub token, Huly token or CIFS credentials to tp01. Import the existing
 qualified image first; the job never pulls an image.
 
+A host-wide `docker system prune -a` can delete the qualified image between
+nights. Keep its saved archive beside the job as
+`<root>/image/<digest hex>.tar` with its sha256 in `<same>.tar.sha256`
+(`NIGHTLY_IMAGE_ARCHIVE_DIR` overrides the directory). When the frozen digest is
+missing, the job checks the archive's sha256, runs `docker load`, and continues
+only if the frozen digest is then present (`image-restored` in the result).
+Otherwise it refuses as ENVIRONMENT with a named reason in
+`image-inspect.stderr`: `IMAGE_ARCHIVE_MISSING`, `IMAGE_ARCHIVE_SHA_MISMATCH`,
+`IMAGE_LOAD_FAILED` or `IMAGE_DIGEST_MISMATCH`. It never runs another image.
+
 ## tp01: one local result per changed head/night
 
 Choose an owned NVMe root, e.g. `/data/nvme/seats/<seat>/main-regression`.

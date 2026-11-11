@@ -64,7 +64,23 @@ printf '%s\n' "$docker_root" > "$out/docker-root"
 [[ $docker_root == /* ]] || exit 78
 timeout -k5 30 df -P -- /data/nvme "$docker_root" > "$out/disk-preflight.txt" 2>> "$out/disk-preflight.stderr" || exit 78
 awk -v limit="$disk_max_pct" 'NR>1 {n++; if ($5 !~ /^[0-9]+%$/ || $5+0>limit) bad=1} END {exit !(n==2 && !bad)}' "$out/disk-preflight.txt" || exit 78
-timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2> "$out/image-inspect.stderr" || exit 78
+# A host-wide prune can delete the qualified image between nights. It is restored only from the pinned archive kept
+# beside the nightly (<archive dir>/<digest hex>.tar, its sha256 in <same>.tar.sha256), and only the frozen digest is
+# accepted afterwards; every refusal is named in image-inspect.stderr and stays ENVIRONMENT.
+restore_image() {
+  local dir=${NIGHTLY_IMAGE_ARCHIVE_DIR-$root/image} archive want got
+  if [[ ! $image =~ ^sha256:[0-9a-f]{64}$ ]]; then echo 'IMAGE_RESTORE_REFUSED: the frozen image is not a full sha256 digest' >> "$out/image-inspect.stderr"; return 1; fi
+  archive=$dir/${image#sha256:}.tar
+  if [[ ! -f $archive || ! -f $archive.sha256 ]]; then echo "IMAGE_ARCHIVE_MISSING: no pinned archive $archive (+ .sha256)" >> "$out/image-inspect.stderr"; return 1; fi
+  want=$(awk 'NR==1 {print $1}' "$archive.sha256"); got=$(timeout -k5 120 sha256sum -- "$archive" | awk '{print $1}')
+  if [[ ! $want =~ ^[0-9a-f]{64}$ || $got != "$want" ]]; then echo "IMAGE_ARCHIVE_SHA_MISMATCH: $archive is $got, pinned $want" >> "$out/image-inspect.stderr"; return 1; fi
+  timeout -k5 300 docker load -i "$archive" > "$out/image-load.stdout" 2>> "$out/image-inspect.stderr" || { echo 'IMAGE_LOAD_FAILED: docker load of the pinned archive failed' >> "$out/image-inspect.stderr"; return 1; }
+  if ! timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2>> "$out/image-inspect.stderr" || [[ $(cat "$out/image-id") != "$image" ]]; then
+    echo "IMAGE_DIGEST_MISMATCH: the pinned archive did not provide $image" >> "$out/image-inspect.stderr"; return 1
+  fi
+  echo "IMAGE_RESTORED: $image from $archive (sha256 $got)" > "$out/image-restored"
+}
+timeout -k5 30 docker image inspect "$image" --format '{{.Id}}' > "$out/image-id" 2> "$out/image-inspect.stderr" || restore_image || exit 78
 if [[ ! $image =~ ^sha256:[0-9a-f]{64}$ ]] || ! awk -v expected="$image" 'NR==1 && $0==expected {match_count++} END {exit !(NR==1 && match_count==1)}' "$out/image-id"; then
   echo 'Expected exactly one image ID matching the frozen full sha256 digest' >> "$out/image-inspect.stderr"
   exit 78
