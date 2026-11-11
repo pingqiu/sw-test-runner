@@ -293,6 +293,19 @@ def scrape(url, series, timeout=3):
     return out
 
 
+def carrier_view(sys_root, netdev):
+    """F3 (r15 ruling, claude01 05:16Z): one netdev's carrier counters, read-only from sysfs, plus whether it is an
+    SR-IOV VF (its device has a physfn): {'down': carrier_down_count, 'changes': carrier_changes, 'vf': bool}.
+    None when either counter cannot be read or parsed (the assessor reads that as NOT_COVERED, never PASS)."""
+    base = Path(sys_root) / 'class' / 'net' / netdev
+    try:
+        down = int((base / 'carrier_down_count').read_text())
+        changes = int((base / 'carrier_changes').read_text())
+    except (OSError, ValueError):
+        return None
+    return dict(down=down, changes=changes, vf=(base / 'device' / 'physfn').exists())
+
+
 def port_view(sys_root, device, port):
     """(state text, link_downed counter) of one RDMA port, or None."""
     base = Path(sys_root) / 'class' / 'infiniband' / device / 'ports' / str(port)

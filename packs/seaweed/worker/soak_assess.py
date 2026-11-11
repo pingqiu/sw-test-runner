@@ -1073,7 +1073,12 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         return nc('no injector witness')
     if kind == 'link_flap':
         b, a = (apply_.get('before') or {}).get('port'), (apply_.get('after') or {}).get('port')
-        if not (ev['port_down'] and b and a and 'ACTIVE' not in a[0]):
+        carrier = (apply_.get('before') or {}).get('carrier')
+        if 'carrier' in (apply_.get('before') or {}) and not (isinstance(carrier, dict) and carrier.get('vf') is False):
+            ok, why = vf_flap_witness(apply_, restore, samples, ident, span)  # r15: a VF, or carrier unreadable
+            if not ok:
+                return nc(why)
+        elif not (ev['port_down'] and b and a and 'ACTIVE' not in a[0]):
             return nc('port never DOWN with a link_downed delta')
         rdma = {i for i, w in workers.items() if isinstance(w, dict) and w.get('transport') in ('dc', 'rc')}
         hit = [e['op'] for e in ops if str(e['worker']) in rdma and m01[0] <= e['completed'] <= m01[1]
@@ -1111,6 +1116,41 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         rose = counter_rose(samples, 'accept_errors', ident, (apply_.get('after') or {}).get('mono', start), span[1])
         return ('PASS', 'accept/open errors rose on that pid') if rose else nc('no failed accept or open observed')
     return nc('unknown row')
+
+
+def vf_flap_witness(apply_, restore, samples, ident, span):
+    """(ok, reason): F3's host event on a VF (ruling claude01 2026-11-11 05:16Z). Both must hold, on the M02 clock and
+    for the injector's volume identity (pid/starttime):
+    - the port state goes ACTIVE -> DOWN -> ACTIVE inside the episode window `span` (the injector's apply.before to
+      restore.after + recovery), with the DOWN observed by the periodic sampler itself; the injector's own
+      before/after readings may supply the ACTIVE ends;
+    - carrier_down_count or carrier_changes of the VF rises by >= 1 from the injector's before reading.
+    link_downed is recorded and reported but not required. An unreadable or missing carrier reading (the injector's
+    before or after-restore, or every reading in the window) is NOT_COVERED, never PASS."""
+    before, after, end = apply_.get('before') or {}, apply_.get('after') or {}, restore.get('after') or {}
+    lo, hi = span
+    inside = lambda r: r.get('identity') == ident and isinstance(r.get('mono'), (int, float)) and lo <= r['mono'] <= hi
+    seq = sorted([(r['mono'], r['port'][0], src) for src, r in (('injector', before), ('injector', after), ('injector', end))
+                  if inside(r) and isinstance(r.get('port'), list) and r['port']] +
+                 [(s['mono'], s['port'][0], 'sampler') for s in samples
+                  if inside(s) and isinstance(s.get('port'), list) and s['port']])
+    active = lambda st: 'ACTIVE' in st
+    first_up = next((i for i, (_, st, _) in enumerate(seq) if active(st)), None)
+    down = next((i for i, (_, st, src) in enumerate(seq) if first_up is not None and i > first_up and not active(st) and src == 'sampler'), None)
+    back = next((i for i, (_, st, _) in enumerate(seq) if down is not None and i > down and active(st)), None)
+    downed = sorted({(r.get('port') or [None, None])[1] for r in [before, after, end] + list(samples) if inside(r) and isinstance(r.get('port'), list)} - {None})
+    if back is None:
+        return False, 'VF port never ACTIVE -> DOWN (sampled) -> ACTIVE inside the episode window (link_downed %s)' % downed
+    c0, c9 = before.get('carrier'), end.get('carrier')
+    if not isinstance(c0, dict) or not isinstance(c9, dict):
+        return False, 'VF carrier counters unreadable or not recorded (before %s, after restore %s)' % (c0, c9)
+    later = [r['carrier'] for r in [after, end] + [s for s in samples if inside(s)] if isinstance(r.get('carrier'), dict)]
+    d_down = max(x['down'] for x in later) - c0['down']
+    d_changes = max(x['changes'] for x in later) - c0['changes']
+    if d_down < 1 and d_changes < 1:
+        return False, 'VF carrier did not move (carrier_down_count +%d, carrier_changes +%d; link_downed %s)' % (d_down, d_changes, downed)
+    return True, 'VF port ACTIVE -> DOWN -> ACTIVE in the window; carrier_down_count +%d, carrier_changes +%d; link_downed %s (not required)' % (
+        d_down, d_changes, downed)
 
 
 def refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span):

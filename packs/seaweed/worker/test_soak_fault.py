@@ -43,6 +43,10 @@ elif tool == 'ip':
         down = a[-1] == 'down'
         (port / 'state').write_text('1: DOWN\n' if down else '4: ACTIVE\n')
         c = port / 'counters/link_downed'; c.write_text(str(int(c.read_text()) + down))
+        net = S / 'sys/class/net' / a[-2]  # r15: the netdev's carrier counters, when the fake tree has them
+        for name, inc in (('carrier_down_count', down), ('carrier_changes', 1)):
+            if (net / name).is_file():
+                (net / name).write_text(str(int((net / name).read_text()) + inc))
 elif tool == 'ss':
     if '-K' in a: (S / 'ss').write_text(read('ss_after'))
     elif any('sport = :22' in x for x in a): print(read('ssh'), end='')
@@ -391,6 +395,67 @@ class Control(Host):
         self.assertTrue(self.cli(c, 'restore')['restored'])
         self.assertEqual(self.limits(p.pid), before)
         self.assertFalse(self.calls('systemd-run') + [r for r in self.calls('ip') if r[1] == 'link'])
+
+
+class Carrier(Host):
+    """r15 (claude01 05:16Z): F3 records the VF's carrier_down_count and carrier_changes, read-only from sysfs, in
+    the injector's before / after-down / after-restore rows and in every periodic sample; other kinds do not."""
+
+    def vf(self, physfn=True):
+        net = self.state / 'sys/class/net/ens1f0'
+        (net / 'carrier_down_count').write_text('3\n')
+        (net / 'carrier_changes').write_text('7\n')
+        if physfn:
+            (net / 'device/physfn').mkdir(parents=True)
+
+    def sample(self, c):
+        def marks():
+            time.sleep(0.3)
+            self.cli(c, 'mark-load')
+            time.sleep(0.3)
+            self.cli(c, 'mark-quiescence')
+        t = threading.Thread(target=marks)
+        t.start()
+        subprocess.run([sys.executable, '-I', str(HERE / 'soak_fault.py'), '--config', json.dumps(c), '--action', 'sample'],
+                       env=self.env, timeout=30, check=True)
+        t.join()
+        return [json.loads(line) for line in (self.root / 'resource-samples.jsonl').read_text().splitlines()]
+
+    def test_the_flap_witness_carries_the_vf_carrier_counters(self):
+        self.vf()
+        self.dummy()
+        c = self.config('link_flap')
+        row = self.cli(c, 'apply')
+        self.assertEqual(row['before']['carrier'], dict(down=3, changes=7, vf=True))
+        self.assertEqual(row['after']['carrier'], dict(down=4, changes=8, vf=True))
+        self.assertEqual(self.cli(c, 'restore')['after']['carrier'], dict(down=4, changes=9, vf=True))
+
+    def test_a_netdev_without_physfn_is_recorded_as_not_a_vf(self):
+        self.vf(physfn=False)
+        self.dummy()
+        self.assertEqual(self.cli(self.config('link_flap'), 'apply')['before']['carrier'], dict(down=3, changes=7, vf=False))
+
+    def test_an_unreadable_carrier_counter_is_recorded_as_none(self):
+        for broken in ('carrier_down_count', 'carrier_changes'):
+            with self.subTest(broken=broken):
+                self.setUp()
+                self.vf()
+                net = self.state / 'sys/class/net/ens1f0'
+                (net / broken).unlink()
+                (net / broken).mkdir()  # EISDIR on read
+                self.dummy()
+                self.assertIsNone(self.cli(self.config('link_flap'), 'apply')['before']['carrier'])
+
+    def test_the_periodic_samples_carry_it_for_f3_only(self):
+        self.vf()
+        self.dummy()
+        out = self.sample(self.config('link_flap'))
+        self.assertTrue(out and all(s['carrier'] == dict(down=3, changes=7, vf=True) for s in out), out[:2])
+        self.setUp()
+        self.vf()
+        self.dummy()
+        self.assertTrue(all('carrier' not in s for s in self.sample(self.config('control'))))
+        self.assertNotIn('carrier', self.cli(self.config('control'), 'apply')['before'])
 
 
 class Sampler(Host):

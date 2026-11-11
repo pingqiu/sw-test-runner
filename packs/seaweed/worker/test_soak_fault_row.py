@@ -967,6 +967,104 @@ class Fail(unittest.TestCase):
         self.assertIn('recovery bound moved', v['error'])
 
 
+# ---- F3 causal witness on a VF (ruling claude01 2026-11-11 05:16Z, r15): pid-bound port state ACTIVE -> DOWN ->
+# ACTIVE inside the episode window (M02 clock; the DOWN sampled) AND carrier_down_count or carrier_changes +1;
+# link_downed recorded, not required. The fixture's episode window: apply.before 1100 to restore.after 1130 + 30.
+def vf_flap(ev, before=(5, 10), after=(6, 11), end=(6, 12), vf=True, down=(1100, 1130), carrier_in_samples=True,
+            sample_ident=None):
+    """r14's shape on the F3 fixture: link_downed 0 everywhere; the VF's carrier counters in the injector's rows and
+    the samples; the sampled DOWN where `down` says (M01-fixture time, written at M02 = + M02)."""
+    c = lambda v: None if v is None else dict(down=v[0], changes=v[1], vf=vf)
+    ap, rs = ev['faults.json'][0]['injection']
+    ap['before'].update(port=['4: ACTIVE', 0], carrier=c(before))
+    ap['after'].update(port=['1: DOWN', 0], carrier=c(after))
+    rs['after'].update(port=['4: ACTIVE', 0], carrier=c(end))
+    for s in ev['resource-samples.jsonl']:
+        t = s['mono'] - M02
+        s['port'] = ['1: DOWN', 0] if down and down[0] < t <= down[1] else ['4: ACTIVE', 0]
+        if carrier_in_samples:
+            s['carrier'] = c(before if t <= 1100 else after if t <= 1130 else end)
+        if sample_ident and down and down[0] < t <= down[1]:
+            s['identity'] = dict(sample_ident)
+
+
+class VfLinkFlapCausal(unittest.TestCase):
+    def causal(self, **kw):
+        v = verdict(self, 'link_flap', lambda ev: vf_flap(ev, **kw))
+        self.assertNotIn('error', v, v.get('error'))
+        return v['criteria']['causal']
+
+    def test_state_and_carrier_on_a_vf_is_credited(self):
+        c = self.causal()
+        self.assertEqual(c['outcome'], 'PASS', c)
+
+    def test_carrier_changes_alone_is_enough(self):
+        c = self.causal(after=(5, 11), end=(5, 12))
+        self.assertEqual(c['outcome'], 'PASS', c)
+
+    def test_carrier_down_count_alone_is_enough(self):
+        c = self.causal(after=(6, 10), end=(6, 10))
+        self.assertEqual(c['outcome'], 'PASS', c)
+
+    def test_a_port_already_down_at_the_episode_start_is_not_covered(self):
+        def edit(ev):
+            vf_flap(ev, down=(1095, 1130))  # sampled DOWN from before the episode; the injector saw it DOWN too
+            ev['faults.json'][0]['injection'][0]['before']['port'] = ['1: DOWN', 0]
+        v = verdict(self, 'link_flap', edit)
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertIn('never ACTIVE -> DOWN', v['criteria']['causal']['reason'])
+
+    def test_a_port_still_down_at_the_window_end_is_not_covered(self):
+        def edit(ev):  # sampled DOWN through the window end, and the injector's after-restore row still DOWN
+            vf_flap(ev, down=(1100, 1300))
+            ev['faults.json'][0]['injection'][1]['after']['port'] = ['1: DOWN', 0]
+        v = verdict(self, 'link_flap', edit)
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertIn('never ACTIVE -> DOWN', v['criteria']['causal']['reason'])
+
+    def test_state_without_a_carrier_delta_is_not_covered(self):
+        c = self.causal(after=(5, 10), end=(5, 10))
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('carrier did not move', c['reason'])
+
+    def test_carrier_delta_without_the_state_transition_is_not_covered(self):
+        c = self.causal(down=None)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('never ACTIVE -> DOWN', c['reason'])
+
+    def test_the_state_transition_outside_the_episode_window_is_not_covered(self):
+        c = self.causal(down=(1200, 1230))  # sampled DOWN, but after restore.after + recovery (1160)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('never ACTIVE -> DOWN', c['reason'])
+
+    def test_a_down_sampled_on_another_volume_identity_is_not_covered(self):
+        c = self.causal(sample_ident=REPL)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_an_unreadable_carrier_is_not_covered(self):
+        for kw in (dict(before=None), dict(end=None)):
+            with self.subTest(**{k: 'unreadable' for k in kw}):
+                c = self.causal(**kw)
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+                self.assertIn('unreadable', c['reason'])
+
+    def test_the_f3_r14_evidence_shape_is_not_covered(self):
+        # r14: port DOWN sampled 14 times, link_downed 0 throughout, no carrier recorded at all
+        def edit(ev):
+            vf_flap(ev, carrier_in_samples=False)
+            for r in ev['faults.json'][0]['injection']:
+                for k in ('before', 'after'):
+                    (r.get(k) or {}).pop('carrier', None)
+        v = verdict(self, 'link_flap', edit)
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertIn('link_downed', v['criteria']['causal']['reason'])
+
+    def test_a_link_flap_on_a_non_vf_keeps_the_link_downed_rule(self):
+        c = self.causal(vf=False)  # carrier moved but link_downed stayed 0: today's rule, not credited
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('link_downed delta', c['reason'])
+
+
 # ---- F3 link flap attribution (ruling 2026-11-11 01:54Z), through the real CLI. The window is re-derived from the
 # controller's M01 marks only: fault-pause pause_mono (before the apply is issued) and fault-close end_mono (after
 # the restore proved restored=true) + recovery_s. The fixture's controller marks: dispatch 1100.0, ready 1130.0.

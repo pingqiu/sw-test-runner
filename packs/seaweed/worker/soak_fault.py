@@ -15,7 +15,7 @@ if 'soak_stats' not in sys.modules:  # -I drops the script dir: load the exact p
     _module = sys.modules['soak_stats'] = types.ModuleType('soak_stats')
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
-from soak_stats import fd_view, identity, limits, port_view, proc_memory, rdma_sample, rdma_view, scrape, socket_view, statfs_free, thread_group, volume_list
+from soak_stats import carrier_view, fd_view, identity, limits, port_view, proc_memory, rdma_sample, rdma_view, scrape, socket_view, statfs_free, thread_group, volume_list
 
 KINDS = ('control', 'link_flap', 'conn_kill', 'mr_pressure', 'disk_full', 'fd_exhaust')
 ROW_ONLY = ('volume_kill_io', 'client_kill_put')  # F1, F2: the runner or the load makes the fault; sample and mark only
@@ -97,6 +97,8 @@ def snapshot(c, ident):
     row.update(limits=limits(pid), fds=fv[0] if fv else None)
     if kind in ('link_flap', 'control'):
         row['port'] = port_view(sys_root(c), c['rdma_device'], c['rdma_port']) if c.get('rdma_device') else None
+    if kind == 'link_flap':  # r15: the VF's carrier counters in the before / after-down / after-restore witness
+        row['carrier'] = carrier_view(sys_root(c), c['netdev']) if c.get('netdev') else None
     if kind in ('conn_kill', 'control'):
         row['conns'] = conns(c, pid) if c.get('setup_ports') else None
     if kind in ('disk_full', 'control'):
@@ -314,6 +316,8 @@ def sample(c):
                 row.update(tcp=sv[0] if sv else None, tcp_owners=sv[1] if sv else None)
             if c.get('rdma_device'):
                 row['port'] = port_view(sys_root(c), c['rdma_device'], c['rdma_port'])
+            if c.get('kind') == 'link_flap' and c.get('netdev'):  # r15: the periodic carrier sample, F3 only
+                row['carrier'] = carrier_view(sys_root(c), c['netdev'])
             if c.get('mount'):
                 row['free'] = statfs_free(c['mount'])
             if c.get('volume_status_url'):  # the product's own open-volume list, to account data fds
