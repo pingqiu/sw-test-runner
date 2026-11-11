@@ -809,9 +809,17 @@ def assess_row(c):
         mark('causal', outcome, why)
     if kind == 'conn_kill':
         claims['qp'] = 'NOT_COVERED'  # TCP scope only: no QP-state claim without a real RDMA effect
+    extra = {}
+    if kind == 'link_flap':
+        # F3: late completions of futures abandoned at their deadline. Reported for the reader, never in a criterion:
+        # a late ok=true does not upgrade an UNKNOWN (the audit decides old or new).
+        late = [typed(x, op=str, action=str, worker=int, fid=int, ok=bool, received_mono=float) for x in lines(root, 'late-completions.jsonl')]
+        if any(x.get('run_id') != c['run_id'] or x.get('episode') != episode for x in late):
+            raise ValueError('late completion not bound to this row')
+        extra['late_completions'] = len(late)
     status = rank([v['outcome'] for v in crit.values()])
     return dict(status=status, row=ROW_KINDS[kind], criteria=crit, claims=claims, unknown_attributed=attributed,
-                resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE)
+                resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE, **extra)
 
 
 def link_flap_window(root, c, f, row):

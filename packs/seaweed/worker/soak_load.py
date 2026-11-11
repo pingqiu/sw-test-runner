@@ -34,6 +34,7 @@ MISS = re.compile(r'DC batch push-read response status 1(?:\D|$)'
 TRANSIENT = re.compile(r'timeout|timed out|reset|unavailable|refused|closed|broken pipe', re.I)  # r9's fault kinds
 EVIDENCE = ('ack-journal.jsonl', 'op-events.jsonl', 'topology-polls.jsonl', 'completions.jsonl')
 ROW_EVIDENCE = ('write-ledger.jsonl', 'audit.jsonl')  # stage 3 fault rows only
+FLAP_EVIDENCE = ('late-completions.jsonl',)  # F3 only: completions of futures abandoned at their deadline
 AUDIT_OP_S = 35  # one audit GET: the 30 s op limit plus margin; past it the audit stops incomplete
 
 
@@ -252,7 +253,8 @@ def run(config):
             isinstance(row_cfg.get('recovery_s'), int) and not isinstance(row_cfg['recovery_s'], bool) and row_cfg['recovery_s'] > 0
             and all(isinstance(row_cfg.get(k), str) and row_cfg[k] for k in ('netdev', 'rdma_device'))):
         raise ValueError('link_flap row needs recovery_s, netdev and rdma_device')  # F3's window bound and receipt
-    files ={n: (root / n).open('x', buffering=1) for n in EVIDENCE + (ROW_EVIDENCE if row_cfg else ())}
+    flap_row = bool(row_cfg) and row_cfg['kind'] == 'link_flap'  # F3: late completions of abandoned futures
+    files ={n: (root / n).open('x', buffering=1) for n in EVIDENCE + (ROW_EVIDENCE if row_cfg else ()) + (FLAP_EVIDENCE if flap_row else ())}
     ctx, workers, busy, commands, seeds, verify, available = mp.get_context('spawn'), {}, {}, {}, {}, [], {}
     oracle, rng, seq = Oracle(), random.Random(20261027), [0]
     counts = dict(acks=0, hits=0, misses=0, wrong_bytes=0, worker_errors=0)
@@ -270,6 +272,7 @@ def run(config):
     # it is armed may end in a credited error, and in F1 an UNKNOWN PUT among them quarantines its key.
     armed_ops, ledger = set(), {}  # ledger: key -> survivor (highest ACK), UNKNOWN generations, quarantined
     flap = {}  # F3: 'window' -> LinkFlapWindow on M01 marks only, from the armed ack on, kept after the close
+    timed_out = {}  # F3: (worker, op) -> (action, key) for ops that hit the native deadline; consumed by one late row
 
     def fault_window():
         """Pause: stop all dispatch, drain SETs (a GET error now is fatal: no
@@ -367,6 +370,8 @@ def run(config):
         parent, remote = ctx.Pipe()
         cfg = dict(config['native'], root=str(root), stats_horizon_s=config['duration_s'] + config['quiescence_s'],
                    transport=transport(i))
+        if flap_row:  # F3 only: every other row's worker config is unchanged
+            cfg['late_completions'] = True
         p = ctx.Process(target=child, args=(remote, cfg))
         p.start()
         remote.close()
@@ -495,9 +500,22 @@ def run(config):
             elif row['event'] == 'complete':
                 complete(i, row['row'])
                 submissions.pop(i, None)
+            elif row['event'] == 'late' and flap_row and (i, row.get('operation_id')) in timed_out:
+                # F3: the native completion of an op this worker abandoned at its deadline. Evidence only: the op
+                # keeps its terminal state (a PUT stays UNKNOWN and quarantined; the audit decides old or new).
+                action, key = timed_out.pop((i, row['operation_id']))
+                entry = ledger.get(key) or {}
+                log('late-completions.jsonl', dict(
+                    run_id=bind['run_id'], episode=row_cfg['episode'], worker=i, worker_identity=workers[i]['identity'],
+                    op=row['operation_id'], action=action, key=key, fid=row.get('fid'), ok=row.get('ok'),
+                    error=row.get('error'), results=row.get('results'), worker_mono=row.get('mono'),
+                    received_mono=time.monotonic(), ledger_state='UNKNOWN' if any(c['op'] == row['operation_id'] for c in entry.get('unknown', ())) else None,
+                    quarantined=bool(entry.get('quarantined')) if action == 'set' else None))
             elif row['event'] == 'error' and row_cfg and i in commands and row.get('operation_id') == commands[i]['operation_id']:
                 # Stage 3: an op that raised in its worker (a completion deadline, a lost connection) still ends in
                 # exactly one terminal state, judged like a failed completion; outside a row it stays fatal.
+                if flap_row and 'native completion deadline' in str(row.get('error')):
+                    timed_out[(i, row['operation_id'])] = (commands[i]['action'], commands[i]['key'])
                 sub = submissions.pop(i, None)
                 complete(i, dict(operation_id=row['operation_id'], action=row.get('action'), ok=False, results=None,
                                  error=str(row.get('error')), completed=time.monotonic(),
@@ -697,6 +715,7 @@ def main():
     root = Path(config['root'])
     summary['evidence'] = {n: dict(sha256=hashlib.sha256((root / n).read_bytes()).hexdigest(), bytes=(root / n).stat().st_size)
                            for n in EVIDENCE + (ROW_EVIDENCE if config.get('fault_row') else ())
+                           + (FLAP_EVIDENCE if (config.get('fault_row') or {}).get('kind') == 'link_flap' else ())
                            + tuple(sorted(p.name for p in root.glob('native-stats-*.jsonl')))}
     print(json.dumps(summary, sort_keys=True), flush=True)
 

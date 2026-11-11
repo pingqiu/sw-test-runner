@@ -145,7 +145,7 @@ class Rows(unittest.TestCase):
         self.config['pacing_s'] = 0.05  # a PUT is always in flight: some span the pause
         self.config['duration_s'] = 6  # PUTs stop write_stop_s (1 s) before the end: room for the post-close cases
 
-    def flap_controller(self, at=1.0, fail=None, close_row=None, after_close=None, before_pause=None):
+    def flap_controller(self, at=1.0, fail=None, close_row=None, after_close=None, before_pause=None, fail_file='fake-fail-set'):
         """pause at `at`; fail: seconds of failing PUTs right after the ack; after_close: (delay, seconds) of failing
         PUTs after the close; before_pause: seconds of PUTs that fail and are delivered only after the ack."""
         seen = {}
@@ -172,9 +172,9 @@ class Rows(unittest.TestCase):
             if before_pause:
                 (self.root / 'fake-hold-complete').unlink()
             if fail:
-                (self.root / 'fake-fail-set').write_text("TimeoutError('native completion deadline')")
+                (self.root / fail_file).write_text("TimeoutError('native completion deadline')")
                 time.sleep(fail)
-                (self.root / 'fake-fail-set').unlink()
+                (self.root / fail_file).unlink()
             seen['close'] = time.monotonic()
             self.write('fault-close-E1.json', close_row or dict(episode='E1', role='volume', end_mono=seen['close']))
             if after_close:
@@ -262,6 +262,50 @@ class Rows(unittest.TestCase):
         self.flap_controller(close_row=dict(episode='E1', role='volume', end_mono=time.monotonic() + 1000))
         with self.assertRaisesRegex(ValueError, 'dated after its observation'):
             soak_load.run(self.config)
+
+    # ---- F3 late completions (r12 (b), team-lead 02:3xZ): a completion of a future the worker abandoned at its
+    # deadline is evidence only; the op keeps its terminal state.
+    def test_f3_a_late_ok_completion_is_recorded_and_never_upgrades_the_ledger(self):
+        self.flap_row()
+        t, seen = self.flap_controller(fail=0.6, fail_file='fake-deadline-set')
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        late = jsonl(self.root / 'late-completions.jsonl')
+        self.assertTrue(late)
+        ledger = jsonl(self.root / 'write-ledger.jsonl')
+        acks = jsonl(self.root / 'ack-journal.jsonl')
+        workers = json.loads((self.root / 'workers.json').read_text())
+        for x in late:
+            self.assertEqual((x['run_id'], x['episode'], x['action'], x['ok'], x['ledger_state'], x['quarantined']),
+                             ('run-1', 'E1', 'set', True, 'UNKNOWN', True), x)
+            self.assertEqual(x['worker_identity']['pid'], workers[str(x['worker'])]['pid'])
+            rows = [r for r in ledger if r['op'] == x['op']]
+            self.assertEqual([r['state'] for r in rows], ['UNKNOWN'], rows)  # never upgraded by the late ok
+            self.assertFalse([a for a in acks if a['key'] == x['key'] and a['sequence'] == rows[0]['sequence']])
+            self.assertGreaterEqual(x['received_mono'], rows[0]['completed'])
+
+    def test_f3_a_late_completion_of_an_op_that_never_timed_out_stops_the_run(self):
+        self.flap_row()
+        self.toggle('fake-late-bogus', 1.0, 3)
+        with self.assertRaisesRegex(RuntimeError, 'worker error'):
+            soak_load.run(self.config)
+
+    def test_only_f3_workers_get_the_late_completion_flag(self):
+        for kind in ('control', 'volume_kill_io', 'client_kill_put', 'conn_kill', 'link_flap'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                if kind == 'link_flap':
+                    self.flap_row()
+                else:
+                    self.row(kind)
+                self.config['duration_s'] = 3
+                soak_load.run(self.config)
+                flags = [json.loads(p.read_text()) for p in self.root.glob('fake-late-flag-*')]
+                self.assertEqual(flags, [True] * len(flags) if kind == 'link_flap' else [], kind)
+                if kind == 'link_flap':
+                    self.assertGreaterEqual(len(flags), 4)  # every load worker (and the audit client)
+                self.assertEqual((self.root / 'late-completions.jsonl').exists(), kind == 'link_flap')
 
     def test_f3_a_row_without_its_window_bound_or_target_is_refused(self):
         for drop in ('recovery_s', 'netdev', 'rdma_device'):

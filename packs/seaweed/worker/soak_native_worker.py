@@ -15,12 +15,20 @@ def payload(seed, length):
 
 UNSETTLED_BUFFERS = []  # Hold caller allocations until owned process teardown.
 
-def finish(conn, future, timeout=30):
+def finish(conn, future, timeout=30, abandoned=None, late=None):
+    """abandoned (stage 3 F3 only, else None = unchanged): this worker process's futures that hit the deadline,
+    fid -> operation id. A completion carrying one of them is consumed once: reported through late(row) and skipped,
+    never handed to the waiting op. Any other foreign fid, or an abandoned fid seen a second time, stays fatal."""
     end=time.monotonic()+timeout
     while time.monotonic()<end:
         if not select.select([conn.event_fd()],[],[],max(0,end-time.monotonic()))[0]: continue
         for fid,ok,error,results in conn.drain_completions():
-            if int(fid)!=future: raise RuntimeError('unowned completion')
+            if int(fid)!=future:
+                if abandoned is None or int(fid) not in abandoned: raise RuntimeError('unowned completion')
+                op=abandoned.pop(int(fid))
+                late(dict(operation_id=op,fid=int(fid),ok=bool(ok),error=str(error),
+                          results=list(results) if results is not None else None,mono=time.monotonic()))
+                continue
             return bool(ok), str(error), list(results) if results is not None else None
     raise TimeoutError('native completion deadline')
 
@@ -45,7 +53,7 @@ def refusal_misses(conn):
     return k8_refusal_misses(json.loads(conn.stats_json()))
 
 
-def work(conn, command, submitted=None):
+def work(conn, command, submitted=None, abandoned=None, late=None):
     action=command['action']; key=command['key']
     expected=payload(command['seed'],command['length'])
     if action not in ('set','get'): raise ValueError('unknown operation')
@@ -59,7 +67,11 @@ def work(conn, command, submitted=None):
         submitted(dict(event='submitted',operation_id=command['operation_id'],
                        action=action,future=future,pid=os.getpid(),monotonic=time.monotonic()))
     try:
-        ok,error,results=finish(conn,future)
+        ok,error,results=finish(conn,future) if abandoned is None else finish(conn,future,abandoned=abandoned,late=late)
+    except TimeoutError:
+        UNSETTLED_BUFFERS.append(buf)
+        if abandoned is not None: abandoned[future]=command['operation_id']  # F3: its completion may still arrive
+        raise
     except BaseException:
         UNSETTLED_BUFFERS.append(buf)
         raise
@@ -109,6 +121,9 @@ def child(pipe,config):
     recorder=threading.Thread(target=native_stats,args=(conn,Path(config['root']),recorder_stop,config['stats_horizon_s']),daemon=True)
     recorder.start()
     pipe.send(dict(event='ready',pid=os.getpid(),stats=json.loads(conn.stats_json()),backing=backing))
+    # F3 only (the load sets late_completions for link_flap rows): this process's abandoned futures, empty at start
+    abandoned={} if config.get('late_completions') is True else None
+    late=(lambda row: pipe.send(dict(row,event='late'))) if abandoned is not None else None
     try:
         while True:
             command=pipe.recv()
@@ -116,7 +131,7 @@ def child(pipe,config):
             if command['action']=='stats':
                 pipe.send(dict(event='stats',stats=json.loads(conn.stats_json())));continue
             try:
-                row=work(conn,command,pipe.send)
+                row=work(conn,command,pipe.send) if abandoned is None else work(conn,command,pipe.send,abandoned,late)
                 if row['ok'] and command['action']=='set':
                     path=config['native_options']['root'].rstrip('/')+'/'+command['key']
                     url=config['filer_http']+quote(path,safe='/')+'?metadata=true&resolveManifest=true'

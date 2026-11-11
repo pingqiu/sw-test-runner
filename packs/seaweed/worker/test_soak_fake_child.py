@@ -2,6 +2,7 @@
 GETs answer the exact payload digest from the command's seed; while the file
 `fake-fail` exists in the run root, a completing GET fails with a timeout."""
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -11,7 +12,10 @@ from soak_native_worker import payload
 
 def child(pipe, cfg):
     root = Path(cfg['root'])
+    if 'late_completions' in cfg:  # r12: the worker flag, recorded for the load test that it reaches F3 only
+        (root / ('fake-late-flag-%d' % os.getpid())).write_text(json.dumps(cfg['late_completions']))
     pipe.send(dict(event='ready', pid=os.getpid(), stats={}, backing='fake'))
+    abandoned = []  # r12 F3: ops this process abandoned at a (fake) deadline, as soak_native_worker.finish keeps them
     while True:
         cmd = pipe.recv()
         if cmd['action'] == 'stop':
@@ -22,6 +26,19 @@ def child(pipe, cfg):
         submitted = time.monotonic()
         pipe.send(dict(event='submitted', operation_id=cmd['operation_id'], action=cmd['action'],
                        pid=os.getpid(), monotonic=submitted))
+        if cmd['action'] == 'set' and (root / 'fake-deadline-set').exists():  # the real child's deadline error event
+            time.sleep(0.05)
+            if cfg.get('late_completions') is True:
+                abandoned.append(cmd['operation_id'])
+            pipe.send(dict(event='error', operation_id=cmd['operation_id'], action='set',
+                           error="TimeoutError('native completion deadline')", epoch=time.time()))
+            continue
+        if cmd['action'] == 'set' and (root / 'fake-late-bogus').exists():  # a late row for an op that never timed out
+            pipe.send(dict(event='late', operation_id=cmd['operation_id'], fid=8, ok=True, error='', results=None,
+                           mono=time.monotonic()))
+        while abandoned:  # its native completion arrives during this process's next op: ok=true, too late
+            pipe.send(dict(event='late', operation_id=abandoned.pop(0), fid=7, ok=True, error='', results=None,
+                           mono=time.monotonic()))
         time.sleep(cfg.get('fake_delay_' + cmd['action'], 0.01))  # long GETs: always some pending at a pause
         while (root / 'fake-frozen').exists():  # stage 3 F1: a SIGSTOPped volume answers nothing until it is killed
             time.sleep(0.01)

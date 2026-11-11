@@ -183,6 +183,8 @@ def files(r, kind):
                        dict(event='audit_done', mono=1365.0, keys=len(r.audit), complete=True, client=dict(pid=900, starttime=50)),
                        dict(event='quiescent', mono=1366.0, dispatched=r.n)]
     extra = {'fault-freeze-witness-E1.json': r.freeze} if getattr(r, 'freeze', None) else {}
+    if kind == 'link_flap':  # r12: the F3 load always writes it (empty when nothing completed late)
+        extra['late-completions.jsonl'] = getattr(r, 'late', [])
     return dict(extra, **{
         'soak-load-start.json': dict(boot_id=boot, mono=1000.0),
         'faults.json': [r.fault],
@@ -1111,6 +1113,35 @@ class LinkFlapAttribution(unittest.TestCase):
             with self.subTest(field=field):
                 self.refused(flap_verdict(self, reason=flap_reason(1100.2, **{field: value})))
         self.refused(flap_verdict(self, reason='link flap'))  # no receipt at all
+
+    # r12 (b): late completions are counted for the reader and never used by a criterion
+    @staticmethod
+    def late_row(ev, **kw):
+        u = next(x for x in ev['write-ledger.jsonl'] if x['state'] == 'UNKNOWN')
+        ev['late-completions.jsonl'].append(dict(dict(
+            run_id='run-1', episode='E1', worker=1, worker_identity=WID[1], op=u['op'], action='set', key=u['key'], fid=7,
+            ok=True, error='', results=None, worker_mono=1131.0, received_mono=1131.01, ledger_state='UNKNOWN',
+            quarantined=True), **kw))
+
+    def test_a_late_ok_completion_is_counted_and_changes_no_criterion(self):
+        v = flap_verdict(self, edit=self.late_row)
+        self.passes(v)
+        self.assertEqual(v['late_completions'], 1)
+        self.assertEqual(flap_verdict(self)['late_completions'], 0)
+
+    def test_a_late_completion_of_another_run_is_refused(self):
+        for field, value in (('run_id', 'run-2'), ('episode', 'E2')):
+            with self.subTest(field=field):
+                v = flap_verdict(self, edit=lambda ev, field=field, value=value: self.late_row(ev, **{field: value}))
+                self.assertIn('late completion not bound', v.get('error', ''))
+                self.assertEqual(v['status'], 'FAIL')
+
+    def test_only_f3_reports_late_completions(self):
+        for kind in ('control', 'volume_kill_io', 'client_kill_put', 'conn_kill'):
+            with self.subTest(kind=kind):
+                v = verdict(self, kind)
+                self.assertNotIn('error', v, v.get('error'))
+                self.assertNotIn('late_completions', v)
 
     def test_an_assessor_without_the_target_attributes_nothing(self):
         for field in ('netdev', 'rdma_device'):

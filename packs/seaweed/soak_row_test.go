@@ -295,7 +295,7 @@ func rowVerdict(status string, outcomes map[string]string, extra string) string 
 		}
 		crit = append(crit, `"`+c+`":{"outcome":"`+o+`","reason":""}`)
 	}
-	return `{"status":"` + status + `","row":"F3","criteria":{` + strings.Join(crit, ",") + `},"claims":{},"unknown_attributed":0,` +
+	return `{"status":"` + status + `","row":"F3","criteria":{` + strings.Join(crit, ",") + `},"claims":{},"unknown_attributed":0,"late_completions":0,` +
 		`"resources":"ACCOUNTED","resource_classes":{"fds":"released"},"layout_scope":"` + rowLayoutScope + `",` + extra + `"binding":{"schema":"seaweed-soak-verdict/1","run_id":"run-1","boot_id":"boot-1","root":"/r"}}`
 }
 
@@ -315,6 +315,12 @@ func TestRowVerdictDecodesOnlyItsWorstStatus(t *testing.T) {
 		"soak resources form":       {strings.Replace(rowVerdict("PASS", nil, ""), `"ACCOUNTED"`, `"NOT_OBSERVED"`, 1), false},
 		"no layout scope":           {strings.Replace(rowVerdict("PASS", nil, ""), `"layout_scope":"`+rowLayoutScope+`",`, "", 1), false},
 		"wider layout scope":        {strings.Replace(rowVerdict("PASS", nil, ""), rowLayoutScope, "any layout", 1), false},
+		// r12: F3's late-completion count, reported only, present exactly on F3
+		"F3 late completions counted":  {strings.Replace(rowVerdict("PASS", nil, ""), `"late_completions":0`, `"late_completions":2`, 1), true},
+		"F3 pass without its late count": {strings.Replace(rowVerdict("PASS", nil, ""), `"late_completions":0,`, "", 1), false},
+		"negative late count":          {strings.Replace(rowVerdict("PASS", nil, ""), `"late_completions":0`, `"late_completions":-1`, 1), false},
+		"late count outside F3":        {strings.Replace(rowVerdict("PASS", nil, ""), `"row":"F3"`, `"row":"F4"`, 1), false},
+		"F4 pass without a late count": {strings.Replace(strings.Replace(rowVerdict("PASS", nil, ""), `"row":"F3"`, `"row":"F4"`, 1), `"late_completions":0,`, "", 1), true},
 	} {
 		_, err := decodeVerdict(captured([]byte(c.row)), want, rowCriteria)
 		if (err == nil) != c.ok {

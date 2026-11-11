@@ -94,6 +94,7 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		}),
 		"PASS with an error":      passRow(t, func(r map[string]any) { r["error"] = "x" }),
 		"unknown field":           passRow(t, func(r map[string]any) { r["extra"] = 1 }),
+		"F3 late count on a soak":  passRow(t, func(r map[string]any) { r["late_completions"] = 0 }), // r12: stage 3 F3 only
 		"resources observed":      passRow(t, func(r map[string]any) { r["resources"] = "PASS" }),
 		"PASS with a FAIL inside": passRow(t, func(r map[string]any) { r["criteria"].(map[string]any)["routes"] = map[string]any{"outcome": "FAIL"} }),
 		"unknown status":          passRow(t, func(r map[string]any) { r["status"] = "MAYBE" }),

@@ -135,6 +135,8 @@ type SoakVerdict struct {
 	UnknownAttributed *int              `json:"unknown_attributed,omitempty"`
 	ResourceClasses   map[string]string `json:"resource_classes,omitempty"`
 	LayoutScope       string            `json:"layout_scope,omitempty"`
+	// F3 only (r12): late completions of futures abandoned at their deadline, reported for the reader; no criterion.
+	LateCompletions *int `json:"late_completions,omitempty"`
 }
 
 // rowLayoutScope is the layout every stage-3 row result is limited to (soak_assess.LAYOUT_SCOPE): one volume
@@ -222,7 +224,7 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if row {
 		return v, decodeRowVerdict(v, want, criteria)
 	}
-	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" {
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -284,6 +286,9 @@ func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error 
 	}
 	if v.Status == "PASS" && (len(v.Criteria) != len(criteria) || v.UnknownAttributed == nil || len(v.ResourceClasses) == 0 || v.Row == "") {
 		return errors.New("soak row verdict PASS without every criterion, its UNKNOWN count and resource classes")
+	}
+	if v.LateCompletions != nil && (*v.LateCompletions < 0 || v.Row != "F3") || v.Status == "PASS" && v.Row == "F3" && v.LateCompletions == nil {
+		return errors.New("soak row verdict late-completion count missing, negative or outside F3")
 	}
 	return nil
 }
