@@ -95,6 +95,92 @@ class LateCompletion(unittest.TestCase):
         self.assertEqual(abandoned, {})
 
 
+class BatchOrder(unittest.TestCase):
+    """r13 (codex01 on r12): with the F3 flag, finish() processes each drained batch WHOLE, in any order. Fid 11 is
+    abandoned by op 1's deadline; op 2 waits on fid 12; 99 is foreign."""
+    CUR, ABN, FOR = (12, True, '', [True]), (11, True, '', None), (99, True, '', None)
+
+    def setUp(self):
+        saved = w.finish.__defaults__
+        w.finish.__defaults__ = (0.2,) + saved[1:]
+        self.addCleanup(setattr, w.finish, '__defaults__', saved)
+        self.late = []
+
+    def op2(self, *drains):
+        abandoned = {}
+        conn = Conn([11, 12], {2: [list(d) for d in drains]})
+        with self.assertRaisesRegex(TimeoutError, 'native completion deadline'):
+            w.work(conn, cmd('1'), None, abandoned, self.late.append)
+        self.assertEqual(abandoned, {11: '1'})
+        return w.work(conn, cmd('2'), None, abandoned, self.late.append), abandoned
+
+    def fatal(self, why, *drains):
+        with self.assertRaisesRegex(RuntimeError, why):
+            self.op2(*drains)
+
+    def returned_and_recorded(self, *drains):
+        row, abandoned = self.op2(*drains)
+        self.assertEqual((row['operation_id'], row['ok'], row['results']), ('2', True, [True]))
+        self.assertEqual([(x['operation_id'], x['fid']) for x in self.late], [('1', 11)])  # recorded exactly once
+        self.assertEqual(abandoned, {})
+
+    def test_current_then_foreign_is_fatal(self):
+        self.fatal('unowned completion', [self.CUR, self.FOR])
+
+    def test_foreign_then_current_is_fatal(self):
+        self.fatal('unowned completion', [self.FOR, self.CUR])
+
+    def test_current_then_abandoned_returns_current_and_records_the_late_one(self):
+        self.returned_and_recorded([self.CUR, self.ABN])
+
+    def test_abandoned_then_current_returns_current_and_records_the_late_one(self):
+        self.returned_and_recorded([self.ABN, self.CUR])
+
+    def test_current_twice_is_fatal(self):
+        self.fatal('duplicate completion', [self.CUR, self.CUR])
+
+    def test_the_same_abandoned_fid_twice_in_one_batch_is_fatal(self):
+        self.fatal('unowned completion', [self.ABN, self.ABN, self.CUR])
+
+    def test_a_batch_split_across_two_drains(self):
+        self.returned_and_recorded([self.ABN], [self.CUR])
+
+    def test_a_late_one_arriving_with_the_next_ops_completion(self):
+        # op 2 returns on its own fid; fid 11 arrives in op 3's batch, after op 3's own completion
+        abandoned = {}
+        conn = Conn([11, 12, 13], {2: [[self.CUR]], 3: [[(13, True, '', [True]), self.ABN]]})
+        with self.assertRaisesRegex(TimeoutError, 'native completion deadline'):
+            w.work(conn, cmd('1'), None, abandoned, self.late.append)
+        w.work(conn, cmd('2'), None, abandoned, self.late.append)
+        self.assertEqual(self.late, [])
+        row = w.work(conn, cmd('3'), None, abandoned, self.late.append)
+        self.assertEqual(row['operation_id'], '3')
+        self.assertEqual([x['fid'] for x in self.late], [11])
+
+    def test_a_current_fid_completing_again_in_a_later_op_is_fatal(self):
+        abandoned = {}
+        conn = Conn([12, 13], {1: [[self.CUR]], 2: [[(13, True, '', None), self.CUR]]})
+        w.work(conn, cmd('1'), None, abandoned, self.late.append)
+        with self.assertRaisesRegex(RuntimeError, 'unowned completion'):
+            w.work(conn, cmd('2'), None, abandoned, self.late.append)
+
+
+NOFLAG = ('no-flag path (R0/F1/F2/F4 and the soak) finding for claude01/codex01, deliberately not changed in r13: '
+          'finish() returns on the current fid and silently drops a foreign completion later in the same batch; '
+          'run with SOAK_NOFLAG_FINDING=1 to see it fail')
+
+
+@unittest.skipUnless(os.environ.get('SOAK_NOFLAG_FINDING') == '1', NOFLAG)
+class NoFlagFinding(unittest.TestCase):
+    def test_no_flag_current_then_foreign_should_be_fatal(self):
+        conn = Conn([12], {1: [[(12, True, '', [True]), (99, True, '', None)]]})
+        saved = w.finish.__defaults__
+        w.finish.__defaults__ = (0.2,) + saved[1:]
+        self.addCleanup(setattr, w.finish, '__defaults__', saved)
+        with self.assertRaisesRegex(RuntimeError, 'unowned completion'):
+            w.work(conn, cmd('1'))
+
+
 STUB = '''import os
 class SeaweedKVConnector:
     script = None  # set by the test: dict(fids=[...], batches={n: [batch, ...]})

@@ -16,20 +16,41 @@ def payload(seed, length):
 UNSETTLED_BUFFERS = []  # Hold caller allocations until owned process teardown.
 
 def finish(conn, future, timeout=30, abandoned=None, late=None):
-    """abandoned (stage 3 F3 only, else None = unchanged): this worker process's futures that hit the deadline,
-    fid -> operation id. A completion carrying one of them is consumed once: reported through late(row) and skipped,
-    never handed to the waiting op. Any other foreign fid, or an abandoned fid seen a second time, stays fatal."""
+    """abandoned (stage 3 F3 only, else None = the original loop, byte for byte): this worker process's futures that
+    hit the deadline, fid -> operation id; see finish_tracked."""
+    if abandoned is not None:
+        return finish_tracked(conn, future, timeout, abandoned, late)
     end=time.monotonic()+timeout
     while time.monotonic()<end:
         if not select.select([conn.event_fd()],[],[],max(0,end-time.monotonic()))[0]: continue
         for fid,ok,error,results in conn.drain_completions():
-            if int(fid)!=future:
-                if abandoned is None or int(fid) not in abandoned: raise RuntimeError('unowned completion')
-                op=abandoned.pop(int(fid))
-                late(dict(operation_id=op,fid=int(fid),ok=bool(ok),error=str(error),
-                          results=list(results) if results is not None else None,mono=time.monotonic()))
-                continue
+            if int(fid)!=future: raise RuntimeError('unowned completion')
             return bool(ok), str(error), list(results) if results is not None else None
+    raise TimeoutError('native completion deadline')
+
+
+def finish_tracked(conn, future, timeout, abandoned, late):
+    """F3 (r13, codex01 on r12): every drained batch is processed WHOLE before returning, in any order. The waiting
+    op's fid is taken once (a second one, in this batch or a later drain, is fatal); each abandoned fid is consumed
+    once and reported through late(row); any other fid is fatal ('unowned completion'). A worker has exactly one op in
+    flight (work() submits one future and waits for it), so no other fid can legitimately be owned."""
+    end=time.monotonic()+timeout
+    while time.monotonic()<end:
+        if not select.select([conn.event_fd()],[],[],max(0,end-time.monotonic()))[0]: continue
+        got=None
+        for fid,ok,error,results in conn.drain_completions():
+            fid=int(fid)
+            if fid==future:
+                if got is not None: raise RuntimeError('duplicate completion')
+                got=(bool(ok), str(error), list(results) if results is not None else None)
+            elif fid in abandoned:
+                op=abandoned.pop(fid)
+                late(dict(operation_id=op,fid=fid,ok=bool(ok),error=str(error),
+                          results=list(results) if results is not None else None,mono=time.monotonic()))
+            else:
+                raise RuntimeError('unowned completion')
+        if got is not None:
+            return got
     raise TimeoutError('native completion deadline')
 
 
