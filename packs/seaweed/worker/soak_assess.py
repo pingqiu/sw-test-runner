@@ -502,6 +502,11 @@ def assess(c):
         refused = [e for e, _ in misses if e.get('cause') == 'budget_refusal']
         unexcused = [e for e in unexcused if e.get('cause') != 'budget_refusal']
         clock_error += '; %d budget-refusal misses excused' % len(refused)
+    # #1187: a miss the connector counted volume-unavailable is named in the reason (never a silent miss); it is judged
+    # like every miss (the per-miss join, or the fault windows), and an unflagged miss stays exactly as before.
+    flagged = [e['op'] for e, _ in misses if e.get('unavailable') is True]
+    if flagged:
+        clock_error += '; %d named volume-unavailable misses %s' % (len(flagged), flagged[:10])
     if undecidable:
         clock_error += '; %d undecidable inside the clock bracket around B (rule A) %s' % (
             len({u['op'] for u in undecidable}), sorted({u['op'] for u in undecidable}, key=int)[:10])
@@ -1053,9 +1058,16 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         arms = {a: sorted(e['op'] for e in ops if e['action'] == a and str(e['op']) in named[a]
                           and fm < e['submitted'] <= pre and e['completed'] >= post)
                 for a in ('set', 'get')}
+        # #1187 (ruling claude01 2026-11-11 19:39Z): a named GET dispatched after the freeze that the connector answered
+        # while the volume was down (completed after the freeze, at the latest when the kill is done) is credited when
+        # the connector counted it volume-unavailable: the worker's per-op flag from connector_unavailable_ops.get.
+        down = sorted(e['op'] for e in ops if e['action'] == 'get' and str(e['op']) in named['get'] and fm < e['submitted'] <= pre
+                      and fm < e['completed'] <= post and e.get('unavailable') is True and get_case(e) == 'miss')
+        arms['get'] = sorted(set(arms['get']) | set(down))
         missing = [a for a, v in arms.items() if not v]
         return (nc('arm(s) %s with no named op pending across the freeze and kill' % missing) if missing else
-                ('PASS', 'pending at the kill (dispatched after the freeze): PUT %s, GET %s' % (arms['set'][:3], arms['get'][:3])))
+                ('PASS', 'pending at the kill (dispatched after the freeze): PUT %s, GET %s%s' % (
+                    arms['set'][:3], arms['get'][:3], '; GET %s answered while down, counted volume-unavailable' % down[:3] if down else '')))
     if kind == 'client_kill_put':
         k = kills[0] if len(kills) == 1 else {}
         op = str((k.get('witness') or {}).get('operation_id'))
@@ -1089,7 +1101,9 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         hit = [e['op'] for e in ops if str(e['worker']) in rdma and m01[0] <= e['completed'] <= m01[1]
                and (e.get('fault_error') or e.get('state') in ('REFUSED', 'UNKNOWN'))]
         fb = fallback_rose(root, workers, row, m01)
-        return ('PASS', 'RDMA ops ended in clean error %s / fallback %s' % (hit[:3], fb)) if hit or fb else \
+        # P3: the PASS reason carries the host event it rests on (on a VF, the port sequence and the carrier deltas)
+        witness = '; ' + why if declared == 'vf' else ''
+        return ('PASS', 'RDMA ops ended in clean error %s / fallback %s%s' % (hit[:3], fb, witness)) if hit or fb else \
             nc('no RDMA op ended in fallback or a clean error in the window')
     if kind == 'conn_kill':
         gone = ev['conns_gone']
@@ -1104,9 +1118,13 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         if not (ev['memlock_lowered'] and changed):
             return nc('memlock not lowered in /proc/pid/limits')
         t = (apply_.get('after') or {}).get('mono')
-        tried = [counter_rose(samples, k, ident, t, span[1]) for k in ('registration_refused', 'registration_fallback')]
-        if True in tried:
-            return 'PASS', 'a registration after the change was refused or fell back'
+        # registration_fallback is the product's SeaweedFS_rdma_range_registration_fallback_total (#1181: a range MR the
+        # lowered limit refuses is served from the cold pool), mapped by the row's profile; each counter is joined on the
+        # volume identity and must rise after the change, inside the row window.
+        keys = ('registration_refused', 'registration_fallback')
+        rose = [k for k in keys if counter_rose(samples, k, ident, t, span[1]) is True]
+        if rose:
+            return 'PASS', 'a registration after the change was refused or fell back: %s rose on the volume the limit was lowered on' % rose
         put = refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span)
         return ('PASS', 'PUT %s REFUSED after the change, on the volume the limit was lowered on' % put) if put else \
             nc('no new registration attempted after the change')

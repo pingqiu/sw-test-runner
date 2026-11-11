@@ -50,6 +50,8 @@ def child(pipe, cfg):
             row['fids'] = ['3,0a1b2c']
         elif (root / 'fake-refused').exists():  # a K8 budget-refusal miss: the worker's counter delta names it
             row.update(results=[False], error='', cause='budget_refusal')
+        elif (root / 'fake-unavailable').exists():  # #1187: a miss the connector counted volume-unavailable (the worker's flag)
+            row.update(results=[False], error='', unavailable=True)
         elif (root / 'fake-notfound').exists():  # r9's miss-candidate shape: ok, the key not returned, no error text
             row.update(results=[False], error='')
         elif (root / 'fake-status1').exists():  # a native NOT_FOUND-shaped failure; the file holds its error text

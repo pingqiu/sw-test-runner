@@ -485,6 +485,8 @@ def run(config):
                 event.update(miss=True, fids=list(v.fids), results=row['results'])  # judged in 3b by the decision-3 join
                 if row.get('cause') == 'budget_refusal':  # the worker's counter delta: a K8 refusal miss
                     event['cause'] = 'budget_refusal'
+                if row.get('unavailable') is True:  # #1187: the connector counted it volume-unavailable (a named miss)
+                    event['unavailable'] = True
                 counts['misses'] += 1
             elif case == 'fault':  # acked + r9 kind
                 event.update(fault_error=True, episode=window['allowed'].get(cmd['operation_id']) or row_cfg['episode'])  # credited only by 3b, within [P, P+60]

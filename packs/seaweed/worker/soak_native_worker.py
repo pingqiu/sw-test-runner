@@ -63,6 +63,19 @@ def k8_refusal_misses(stats):
     return total
 
 
+def unavailable_gets(stats):
+    """#1187: the connector's volume-unavailable GET counter (connector_unavailable_ops.get) of one stats object, or
+    None when malformed. The same strict decoding as k8_refusal_misses: a non-negative, non-bool int; no
+    connector_unavailable_ops at all is 0 (a build before #1187)."""
+    if not isinstance(stats,dict): return None
+    u=stats.get('connector_unavailable_ops')
+    if u is None: return 0
+    if not isinstance(u,dict): return None
+    v=u.get('get',0)
+    if isinstance(v,bool) or not isinstance(v,int) or v<0: return None
+    return v
+
+
 def refusal_misses(conn):
     return k8_refusal_misses(json.loads(conn.stats_json()))
 
@@ -71,8 +84,11 @@ def work(conn, command, submitted=None, abandoned=None, late=None):
     action=command['action']; key=command['key']
     expected=payload(command['seed'],command['length'])
     if action not in ('set','get'): raise ValueError('unknown operation')
-    # One op in flight per worker process: the counter's delta across this GET is this GET's miss cause.
-    refused_before=refusal_misses(conn) if action=='get' else None
+    # One op in flight per worker process: a counter's delta across this GET is this GET's (its miss cause, and #1187's
+    # volume-unavailable answer).
+    stats_before=json.loads(conn.stats_json()) if action=='get' else None
+    refused_before=k8_refusal_misses(stats_before) if action=='get' else None
+    unavailable_before=unavailable_gets(stats_before) if action=='get' else None
     buf=expected if action=='set' else bytearray(v^255 for v in expected)
     start=time.monotonic();start_epoch=time.time()
     future=int(getattr(conn,'submit_batch_'+action)([key],[memoryview(buf)]))
@@ -94,9 +110,15 @@ def work(conn, command, submitted=None, abandoned=None, late=None):
     if action=='get':
         row.update(length=len(buf),sha256=hashlib.sha256(buf).hexdigest(),
                    untouched=buf==bytearray(v^255 for v in expected))
-        refused_after=refusal_misses(conn)
+        stats_after=json.loads(conn.stats_json())
+        refused_after=k8_refusal_misses(stats_after)
         if refused_before is not None and refused_after is not None and refused_after>refused_before:
             row['cause']='budget_refusal'
+        # #1187: True when the connector counted this GET as volume-unavailable, False when it did not; absent when
+        # either reading is malformed (nothing is inferred then).
+        unavailable_after=unavailable_gets(stats_after)
+        if unavailable_before is not None and unavailable_after is not None:
+            row['unavailable']=unavailable_after>unavailable_before
     return row
 
 

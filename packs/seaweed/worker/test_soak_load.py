@@ -207,6 +207,18 @@ class FaultWindowWorker(unittest.TestCase):
         self.assertTrue(refused and len(refused) < len(misses), misses)  # plain misses carry no cause
         self.assertTrue(all(set(e) >= {'miss', 'fids', 'results'} for e in refused))
 
+    def test_a_volume_unavailable_miss_carries_its_flag_into_the_op_event(self):
+        # #1187: the worker's per-op flag (connector_unavailable_ops.get delta) reaches the op-event of that miss only.
+        self.toggle('fake-unavailable', 1.0, 1.5)
+        self.toggle('fake-notfound', 3.0, 1.5)
+        summary = soak_load.run(self.config)
+        misses = [e for e in self.events() if e.get('miss')]
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        flagged = [e for e in misses if e.get('unavailable') is True]
+        self.assertTrue(flagged and len(flagged) < len(misses), misses)  # plain misses carry no flag
+        self.assertTrue(all('unavailable' not in e for e in misses if e not in flagged))
+        self.assertTrue(all(set(e) >= {'miss', 'fids', 'results'} and 'cause' not in e for e in flagged))
+
     def test_a_failed_get_with_an_empty_error_is_still_fatal_and_its_row_is_kept(self):
         self.toggle('fake-fail-empty', 1.5, 10)
         with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
@@ -468,6 +480,45 @@ class RefusalCause(unittest.TestCase):
         plain = soak_native_worker.work(self.Conn(False), cmd)
         self.assertEqual(refused.get('cause'), 'budget_refusal')
         self.assertNotIn('cause', plain)
+
+
+class UnavailableFlag(unittest.TestCase):
+    """#1187: soak_native_worker.work records a GET's per-op `unavailable` flag from the connector's own
+    connector_unavailable_ops.get counter: one op in flight per worker process, so the delta across the GET is that GET's."""
+
+    class Conn(RefusalCause.Conn):
+        def __init__(self, unavailable, start=0):
+            super().__init__(False)
+            self.unavailable, self.count = unavailable, start
+
+        def stats_json(self):
+            return json.dumps(dict(connector_unavailable_ops=dict(get=self.count, exists=0, set=0, delete=0)))
+
+        def submit_batch_get(self, keys, bufs):
+            if self.unavailable:
+                self.count += 1
+            return super().submit_batch_get(keys, bufs)
+
+    CMD = dict(action='get', key='k', seed='s', length=8, operation_id='1')
+
+    def test_the_counter_decoder_is_strict(self):
+        from soak_native_worker import unavailable_gets as u
+        self.assertEqual(u(dict(connector_unavailable_ops=dict(get=3, set=1))), 3)
+        self.assertEqual(u(dict()), 0)  # a build before #1187
+        for bad in (-1, 0.9, True, '3', None):
+            self.assertIsNone(u(dict(connector_unavailable_ops=dict(get=bad))), bad)
+        self.assertIsNone(u(dict(connector_unavailable_ops=[])))
+        self.assertIsNone(u([]))
+
+    def test_a_counted_get_is_flagged_and_an_uncounted_one_is_not(self):
+        import soak_native_worker
+        self.assertIs(soak_native_worker.work(self.Conn(True), self.CMD).get('unavailable'), True)
+        self.assertIs(soak_native_worker.work(self.Conn(False), self.CMD).get('unavailable'), False)
+
+    def test_a_malformed_counter_records_no_flag(self):
+        import soak_native_worker
+        conn = self.Conn(True, start=0.9)  # 0.9 -> 1.9 must not read as a counted GET
+        self.assertNotIn('unavailable', soak_native_worker.work(conn, self.CMD))
 
 
 class HotKeyReads(unittest.TestCase):

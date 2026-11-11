@@ -1235,6 +1235,122 @@ def flap_verdict(test, submitted=1100.2, completed=1130.2, prior=True, audit='ol
     return json.loads(out.stdout)
 
 
+def f1_down_get(ev, unavailable=True, submitted=1099.95, completed=1100.2, named=True, hit=False):
+    """#1187 on the F1 fixture: the named post-freeze GET is answered while the volume is down (before the kill is
+    done, 1100.3), as a miss, with the worker's per-op `unavailable` flag (None: the flag absent)."""
+    w = ev['fault-freeze-witness-E1.json']
+    op = w['inflight']['pending_gets'][0]['op']
+    e = next(x for x in ev['op-events.jsonl'] if x.get('op') == op)
+    for k in ('fault_error', 'episode', 'error'):
+        e.pop(k, None)
+    e.update(ok=True, submitted=submitted, dispatched=submitted - 0.01, completed=completed)
+    if hit:  # a served read (impossible with the flag, but the arm must not credit it)
+        ack = [a for a in ev['ack-journal.jsonl'] if a['key'] == e['key']][-1]
+        e.update(length=64, sha256=ack['digest'])
+    else:
+        e.pop('sha256', None), e.pop('length', None)
+        e.update(miss=True, fids=['3,ab'], results=[False])
+    if unavailable is not None:
+        e['unavailable'] = unavailable
+    w['inflight']['pending_gets'][0]['submitted'] = submitted - 0.01
+    if not named:
+        w['inflight']['pending_gets'] = [dict(op='999', submitted=1099.9)]
+
+
+class F1UnavailableGet(unittest.TestCase):
+    """G5 (ruling claude01 2026-11-11 19:39Z, mono #1187): F1's GET arm also credits a named GET dispatched after the
+    freeze that the connector answered while the volume was down and counted volume-unavailable (the worker's per-op
+    flag). Each case below differs from the PASS in one fact only; the pending-across-kill path is unchanged."""
+
+    def causal(self, **kw):
+        v = verdict(self, 'volume_kill_io', lambda ev: f1_down_get(ev, **kw))
+        self.assertNotIn('error', v, v.get('error'))
+        return v['criteria']['causal']
+
+    def test_a_named_get_answered_while_down_and_counted_unavailable_covers(self):
+        c = self.causal()
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertIn('answered while down, counted volume-unavailable', c['reason'])
+
+    def test_the_same_get_without_the_flag_is_not_covered(self):
+        for name, flag in (('flag false', False), ('flag absent', None)):
+            with self.subTest(name=name):
+                c = self.causal(unavailable=flag)
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+                self.assertIn("['get']", c['reason'])
+
+    def test_a_flagged_get_dispatched_before_the_freeze_is_not_credited(self):
+        c = self.causal(submitted=1099.7)  # the freeze is at 1099.8: it may have been served before the stop
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn("['get']", c['reason'])
+
+    def test_a_flagged_get_the_load_never_named_is_not_credited(self):
+        c = self.causal(named=False)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn("['get']", c['reason'])
+
+    def test_a_flagged_read_that_was_served_is_not_credited(self):
+        c = self.causal(hit=True)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn("['get']", c['reason'])
+
+    def test_the_pending_across_kill_path_is_unchanged(self):
+        c = verdict(self, 'volume_kill_io')['criteria']['causal']
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertNotIn('answered while down', c['reason'])
+
+
+class F3ReasonCarriesTheVfWitness(unittest.TestCase):
+    """P3: the F3 PASS reason names the host event it rests on: the VF port sequence and the carrier deltas."""
+
+    def test_the_pass_reason_carries_port_and_carrier(self):
+        c = verdict(self, 'link_flap', lambda ev: vf_flap(ev))['criteria']['causal']
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertIn('VF port ACTIVE -> DOWN -> ACTIVE in the window', c['reason'])
+        self.assertIn('carrier_down_count +1, carrier_changes +2', c['reason'])
+
+
+def f5_fallback(ev, rise_at=1110, identity=None):
+    """F5 on the new product counter only (registration_refused flat, no refused PUT): registration_fallback rises at
+    M01 time `rise_at` (None: flat), on the samples' own identity unless `identity` overrides the rising samples'."""
+    for s in ev['resource-samples.jsonl']:
+        t = s['mono'] - M02
+        s['metrics']['registration_refused'] = 0.0
+        s['metrics']['registration_fallback'] = float(rise_at is not None and t >= rise_at)
+        if identity is not None and rise_at is not None and t >= rise_at:
+            s['identity'] = dict(identity)
+
+
+class F5RegistrationFallback(unittest.TestCase):
+    """G5 (mono #1181): F5's causal witness on SeaweedFS_rdma_range_registration_fallback_total (the profile's
+    registration_fallback): it must rise after the memlock change, inside the row window, on the volume identity."""
+
+    def causal(self, **kw):
+        v = verdict(self, 'mr_pressure', lambda ev: f5_fallback(ev, **kw))
+        self.assertNotIn('error', v, v.get('error'))
+        return v['criteria']['causal']
+
+    def test_the_fallback_counter_rising_after_the_change_passes(self):
+        c = self.causal()
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertIn("['registration_fallback'] rose", c['reason'])
+
+    def test_a_flat_fallback_counter_is_not_covered(self):
+        c = self.causal(rise_at=None)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('no new registration', c['reason'])
+
+    def test_a_rise_outside_the_window_is_not_credited(self):
+        for name, at in (('before the change', 1050), ('after the row window', 1250)):
+            with self.subTest(name=name):
+                c = self.causal(rise_at=at)
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_a_rise_on_another_volume_identity_is_not_credited(self):
+        v = verdict(self, 'mr_pressure', lambda ev: f5_fallback(ev, identity=REPL))
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+
+
 class LinkFlapAttribution(unittest.TestCase):
     def passes(self, v):
         self.assertNotIn('error', v, v.get('error'))
