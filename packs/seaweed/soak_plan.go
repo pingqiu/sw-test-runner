@@ -220,6 +220,9 @@ type FaultRow struct {
 	// F3
 	Netdev     string `json:"netdev,omitempty"`
 	RDMADevice string `json:"rdma_device,omitempty"`
+	// NetdevClass is the data netdev's declared class, "vf" or "pf" (r16, from the packet's observed preflight
+	// fact): it alone selects the assessor's causal rule (VF: port state + carrier; PF: link_downed).
+	NetdevClass string `json:"netdev_class,omitempty"`
 	RDMAPort   int    `json:"rdma_port,omitempty"`
 	// F4
 	SetupPorts []int `json:"setup_ports,omitempty"`
@@ -381,10 +384,17 @@ func (x *SoakPlan) checkRow() error {
 	if r.PinBound.bytes() < 0 || !r.PinBound.sizesValid() || r.RetainedBudgetBytes < 0 || r.RetainedBudgetBytes > 1<<40 {
 		return errors.New("stage-3 pin bound or retained budget out of range")
 	}
+	// r16: the data netdev's declared class selects F3's causal rule; it exists on F3 only
+	if k != KindLinkFlap && r.NetdevClass != "" {
+		return errors.New("stage-3 netdev_class is an F3 field")
+	}
 	switch k {
 	case KindLinkFlap:
 		if !rowNetdev.MatchString(r.Netdev) || !rowNetdev.MatchString(r.RDMADevice) || r.RDMAPort < 1 || r.RDMAPort > 8 {
 			return errors.New("stage-3 F3 needs the data netdev, its RDMA device and port")
+		}
+		if r.NetdevClass != "vf" && r.NetdevClass != "pf" {
+			return errors.New("stage-3 F3 needs netdev_class vf or pf")
 		}
 	case KindConnKill:
 		if len(r.SetupPorts) == 0 || len(r.SetupPorts) > 8 {

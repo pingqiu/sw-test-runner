@@ -28,7 +28,7 @@ func rowPlan(kind string) *SoakPlan {
 	case KindControl, KindConnKill, KindDiskFull:
 		r.HoldS = 10
 	case KindLinkFlap:
-		r.Netdev, r.RDMADevice, r.RDMAPort = "ens1f0", "mlx5_0", 1
+		r.Netdev, r.RDMADevice, r.RDMAPort, r.NetdevClass = "ens1f0", "mlx5_0", 1, "vf"
 	case KindMRPressure:
 		r.MemlockBytes = 1 << 20
 	case KindFDExhaust:
@@ -79,6 +79,10 @@ func TestRowAdmissionRefusals(t *testing.T) {
 		"restart with a row":     {KindControl, func(x *SoakPlan) { x.Faults[0].Kind = "" }, "kind unknown"},
 		"kind without a row":     {KindControl, func(x *SoakPlan) { x.Row = nil }, "needs fault_row"},
 		"F3 without its netdev":  {KindLinkFlap, func(x *SoakPlan) { x.Row.Netdev = "" }, "data netdev"},
+		"F3 without its class":   {KindLinkFlap, func(x *SoakPlan) { x.Row.NetdevClass = "" }, "netdev_class vf or pf"},
+		"F3 unknown class":       {KindLinkFlap, func(x *SoakPlan) { x.Row.NetdevClass = "physical" }, "netdev_class vf or pf"},
+		"F4 carrying a class":    {KindConnKill, func(x *SoakPlan) { x.Row.NetdevClass = "vf" }, "netdev_class is an F3 field"},
+		"R0 carrying a class":    {KindControl, func(x *SoakPlan) { x.Row.NetdevClass = "pf" }, "netdev_class is an F3 field"},
 		"F4 on the ssh port":     {KindConnKill, func(x *SoakPlan) { x.Row.SetupPorts = []int{22} }, "setup port"},
 		"F6 relative mount":      {KindDiskFull, func(x *SoakPlan) { x.Row.Mount = "disk" }, "loop mount"},
 		"F7 large margin":        {KindFDExhaust, func(x *SoakPlan) { x.Row.NofileExtra = 1000 }, "small"},
@@ -148,8 +152,9 @@ func TestOnlyF3CarriesItsTargetToTheAssessor(t *testing.T) {
 		}
 		_, hasNet := config.Row["netdev"]
 		_, hasDev := config.Row["rdma_device"]
-		if kind == KindLinkFlap && (config.Row["netdev"] != "ens1f0" || config.Row["rdma_device"] != "mlx5_0") ||
-			kind != KindLinkFlap && (hasNet || hasDev) {
+		_, hasClass := config.Row["netdev_class"]
+		if kind == KindLinkFlap && (config.Row["netdev"] != "ens1f0" || config.Row["rdma_device"] != "mlx5_0" || config.Row["netdev_class"] != "vf") ||
+			kind != KindLinkFlap && (hasNet || hasDev || hasClass) {
 			t.Errorf("%s: assessor fault_row %v", kind, config.Row)
 		}
 	}

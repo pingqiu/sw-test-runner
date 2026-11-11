@@ -127,6 +127,10 @@ def link_preflight(c):
     soft = done.returncode == 0 and any(t == 'netdev' and n == dev for t, n in zip(tokens, tokens[1:]))
     if not (ib / c['rdma_device']).exists() and not soft:
         raise Refused('netdev is not the row RDMA device')
+    # r16: the row's declared class (vf | pf) must be the netdev's live one (a VF's device has a physfn)
+    declared, live = c.get('netdev_class'), 'vf' if (Path(sys_root(c)) / 'class' / 'net' / dev / 'device' / 'physfn').exists() else 'pf'
+    if declared not in ('vf', 'pf') or declared != live:
+        raise Refused('netdev class %s is not the declared %s' % (live, declared))
     mine = addresses(dev)
     if mine & set(c['management_addrs']):
         raise Refused('netdev carries a management address')

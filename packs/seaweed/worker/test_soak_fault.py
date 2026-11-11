@@ -102,7 +102,7 @@ class Host(unittest.TestCase):
     def config(self, kind, **kw):
         return dict(dict(root=str(self.root), run_id='run-1', episode='E1', kind=kind, units=['sw-cloud-run-1-deploy-m02-volume'],
                          python=sys.executable, script=str(HERE / 'soak_fault.py'), deadman_s=40, sys_root=str(self.state / 'sys'),
-                         netdev='ens1f0', rdma_device='mlx5_0', rdma_port=1, management_addrs=['192.0.2.20'],
+                         netdev='ens1f0', netdev_class='pf', rdma_device='mlx5_0', rdma_port=1, management_addrs=['192.0.2.20'],
                          setup_ports=[18888], memlock_bytes=1 << 20, nofile_extra=4, free_below_bytes=1 << 20,
                          max_ballast_bytes=1 << 30, sample_s=0.2, quiescence_s=0.6, max_s=8), **kw)
 
@@ -424,7 +424,7 @@ class Carrier(Host):
     def test_the_flap_witness_carries_the_vf_carrier_counters(self):
         self.vf()
         self.dummy()
-        c = self.config('link_flap')
+        c = self.config('link_flap', netdev_class='vf')
         row = self.cli(c, 'apply')
         self.assertEqual(row['before']['carrier'], dict(down=3, changes=7, vf=True))
         self.assertEqual(row['after']['carrier'], dict(down=4, changes=8, vf=True))
@@ -444,18 +444,52 @@ class Carrier(Host):
                 (net / broken).unlink()
                 (net / broken).mkdir()  # EISDIR on read
                 self.dummy()
-                self.assertIsNone(self.cli(self.config('link_flap'), 'apply')['before']['carrier'])
+                self.assertIsNone(self.cli(self.config('link_flap', netdev_class='vf'), 'apply')['before']['carrier'])
 
     def test_the_periodic_samples_carry_it_for_f3_only(self):
         self.vf()
         self.dummy()
-        out = self.sample(self.config('link_flap'))
+        out = self.sample(self.config('link_flap', netdev_class='vf'))
         self.assertTrue(out and all(s['carrier'] == dict(down=3, changes=7, vf=True) for s in out), out[:2])
         self.setUp()
         self.vf()
         self.dummy()
         self.assertTrue(all('carrier' not in s for s in self.sample(self.config('control'))))
         self.assertNotIn('carrier', self.cli(self.config('control'), 'apply')['before'])
+
+
+class DeclaredClass(Host):
+    """r16: the injector refuses a netdev whose live class (a VF has device/physfn) is not the row's declared one,
+    before any change."""
+
+    def refused(self, declared, physfn):
+        if physfn:
+            (self.state / 'sys/class/net/ens1f0/device/physfn').mkdir(parents=True)
+        self.dummy()
+        c = self.config('link_flap')
+        c.pop('netdev_class')
+        if declared is not None:
+            c['netdev_class'] = declared
+        row = self.cli(c, 'apply', expect=3)
+        self.assertIn('is not the declared', row['refused'])
+        self.assertFalse(self.calls('ip') and [x for x in self.calls('ip') if x[1:3] == ['link', 'set']])
+
+    def test_declared_vf_on_a_pf_is_refused(self):
+        self.refused('vf', physfn=False)
+
+    def test_declared_pf_on_a_vf_is_refused(self):
+        self.refused('pf', physfn=True)
+
+    def test_no_or_another_declared_class_is_refused(self):
+        for declared in (None, 'physical'):
+            with self.subTest(declared=declared):
+                self.setUp()
+                self.refused(declared, physfn=True)
+
+    def test_the_declared_class_matching_the_live_one_flaps(self):
+        (self.state / 'sys/class/net/ens1f0/device/physfn').mkdir(parents=True)
+        self.dummy()
+        self.assertEqual(self.cli(self.config('link_flap', netdev_class='vf'), 'apply')['after']['port'], ['1: DOWN', 1])
 
 
 class Sampler(Host):

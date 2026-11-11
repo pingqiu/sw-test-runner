@@ -107,6 +107,8 @@ def samples(kind, mutate=None):
                 s['free'] = 1000
         if kind == 'link_flap' and t > 1130:
             s['port'] = ['4: ACTIVE', 1]
+        if kind == 'link_flap':  # r16: the declared VF's carrier counters, +1 down / +2 changes across the flap
+            s['carrier'] = dict(down=5 if t <= 1100 else 6, changes=10 if t <= 1100 else 11 if t <= 1130 else 12, vf=True)
         if mutate:
             mutate(s, t)
         out.append(s)
@@ -120,6 +122,8 @@ def injection(kind):
     before, after, plan, end = snap(1100.0), snap(1100.5), {}, snap(1130.0)
     if kind == 'link_flap':
         before['port'], after['port'] = ['4: ACTIVE', 0], ['1: DOWN', 1]
+        before['carrier'], after['carrier'], end['carrier'] = (dict(down=5, changes=10, vf=True), dict(down=6, changes=11, vf=True),
+                                                               dict(down=6, changes=12, vf=True))
     if kind in ('conn_kill', 'control'):
         before['conns'], after['conns'] = ['198.51.100.2:18888>198.51.100.1:5000'], ([] if kind == 'conn_kill' else ['198.51.100.2:18888>198.51.100.1:5000'])
         end['conns'] = ['198.51.100.2:18888>198.51.100.1:5001'] if kind == 'conn_kill' else before['conns']
@@ -205,7 +209,7 @@ def config(root, kind):
                 fault_row=dict(kind=kind, episode='E1', recovery_s=60 if kind in ('volume_kill_io', 'client_kill_put') else 30,
                                pin_ranges_bytes=4 << 20, pin_pool_bytes=2 << 20, pin_cache_bytes=1 << 20, retained_budget_bytes=4 << 20, free_below_bytes=1 << 20,
                                client_fallback_counters=['rdma_fallbacks'],
-                               **(dict(netdev='enp1s0v0', rdma_device='mlx5_0') if kind == 'link_flap' else {})))
+                               **(dict(netdev='enp1s0v0', rdma_device='mlx5_0', netdev_class='vf') if kind == 'link_flap' else {})))
 
 
 def write_row(root, kind, edit=None):
@@ -971,7 +975,7 @@ class Fail(unittest.TestCase):
 # ACTIVE inside the episode window (M02 clock; the DOWN sampled) AND carrier_down_count or carrier_changes +1;
 # link_downed recorded, not required. The fixture's episode window: apply.before 1100 to restore.after 1130 + 30.
 def vf_flap(ev, before=(5, 10), after=(6, 11), end=(6, 12), vf=True, down=(1100, 1130), carrier_in_samples=True,
-            sample_ident=None):
+            sample_ident=None, samples_c=None):
     """r14's shape on the F3 fixture: link_downed 0 everywhere; the VF's carrier counters in the injector's rows and
     the samples; the sampled DOWN where `down` says (M01-fixture time, written at M02 = + M02)."""
     c = lambda v: None if v is None else dict(down=v[0], changes=v[1], vf=vf)
@@ -983,7 +987,7 @@ def vf_flap(ev, before=(5, 10), after=(6, 11), end=(6, 12), vf=True, down=(1100,
         t = s['mono'] - M02
         s['port'] = ['1: DOWN', 0] if down and down[0] < t <= down[1] else ['4: ACTIVE', 0]
         if carrier_in_samples:
-            s['carrier'] = c(before if t <= 1100 else after if t <= 1130 else end)
+            s['carrier'] = c(samples_c or (before if t <= 1100 else after if t <= 1130 else end))
         if sample_ident and down and down[0] < t <= down[1]:
             s['identity'] = dict(sample_ident)
 
@@ -1055,14 +1059,122 @@ class VfLinkFlapCausal(unittest.TestCase):
             for r in ev['faults.json'][0]['injection']:
                 for k in ('before', 'after'):
                     (r.get(k) or {}).pop('carrier', None)
+            for s in ev['resource-samples.jsonl']:
+                s.pop('carrier', None)
         v = verdict(self, 'link_flap', edit)
         self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
-        self.assertIn('link_downed', v['criteria']['causal']['reason'])
+        self.assertIn('carrier', v['criteria']['causal']['reason'])  # r16: declared vf, so the VF rule, never link_downed
 
-    def test_a_link_flap_on_a_non_vf_keeps_the_link_downed_rule(self):
-        c = self.causal(vf=False)  # carrier moved but link_downed stayed 0: today's rule, not credited
+    # r16 (codex01 on r15): every carrier row used for the delta must pass the port sequence's own filter (volume
+    # identity, episode window) and be a proven VF with valid counters. The bound rows stay at 5/10 below.
+    def unbound(self, edit_rows, **kw):
+        def edit(ev):
+            vf_flap(ev, **dict(dict(before=(5, 10), after=(5, 10), end=(5, 10), samples_c=(5, 10)), **kw))
+            ap, rs = ev['faults.json'][0]['injection']
+            edit_rows(ev, ap, rs)
+        v = verdict(self, 'link_flap', edit)
+        self.assertNotIn('error', v, v.get('error'))
+        return v['criteria']['causal']
+
+    def test_only_a_foreign_pid_restore_row_moved_is_not_covered(self):  # codex01's exact case
+        def rows(ev, ap, rs):
+            rs['after'].update(identity=dict(pid=999, starttime=9), carrier=dict(down=6, changes=11, vf=True))
+        c = self.unbound(rows)
         self.assertEqual(c['outcome'], 'NOT_COVERED', c)
-        self.assertIn('link_downed delta', c['reason'])
+        self.assertIn('after-restore', c['reason'])
+
+    def test_only_a_foreign_starttime_restore_row_moved_is_not_covered(self):
+        def rows(ev, ap, rs):
+            rs['after'].update(identity=dict(pid=500, starttime=99), carrier=dict(down=6, changes=11, vf=True))
+        self.assertEqual(self.unbound(rows)['outcome'], 'NOT_COVERED')
+
+    def test_a_restore_row_that_lost_its_vf_classification_is_not_covered(self):
+        def rows(ev, ap, rs):
+            rs['after']['carrier'] = dict(down=6, changes=11, vf=False)
+        self.assertEqual(self.unbound(rows)['outcome'], 'NOT_COVERED')
+
+    def test_a_foreign_or_non_vf_baseline_is_not_covered(self):
+        for name, change in (('foreign pid', lambda ap: ap['before'].update(identity=dict(pid=999, starttime=9))),
+                             ('foreign starttime', lambda ap: ap['before'].update(identity=dict(pid=500, starttime=99))),
+                             ('vf false', lambda ap: ap['before']['carrier'].update(vf=False))):
+            with self.subTest(baseline=name):
+                def rows(ev, ap, rs, change=change):
+                    change(ap)
+                    rs['after']['carrier'] = dict(down=6, changes=11, vf=True)  # the bound after-restore row moved
+                    for s in ev['resource-samples.jsonl']:
+                        s['carrier'] = dict(down=6, changes=11, vf=True)
+                self.assertEqual(self.unbound(rows)['outcome'], 'NOT_COVERED')
+
+    def test_a_carrier_row_outside_the_episode_window_is_not_counted(self):
+        def rows(ev, ap, rs):
+            late = next(s for s in ev['resource-samples.jsonl'] if s['mono'] - M02 >= 1200)  # window ends 1160
+            late['carrier'] = dict(down=6, changes=11, vf=True)
+        c = self.unbound(rows)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('carrier did not move', c['reason'])
+
+    def test_a_restore_row_with_an_invalid_counter_is_not_covered(self):
+        for bad in (dict(down='6', changes=11, vf=True), dict(down=6, changes=None, vf=True), dict(down=True, changes=11, vf=True)):
+            with self.subTest(carrier=bad):
+                def rows(ev, ap, rs, bad=bad):
+                    rs['after']['carrier'] = dict(bad)
+                c = self.unbound(rows)
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_an_unusable_after_restore_row_is_not_covered_even_with_a_bound_delta(self):
+        # a bound in-window sample moved, but the after-restore row is foreign: the after-restore reading must itself
+        # qualify (identity, window, VF, counters), so no delta elsewhere can stand in for it
+        def rows(ev, ap, rs):
+            mid = next(s for s in ev['resource-samples.jsonl'] if 1110 <= s['mono'] - M02 <= 1120)
+            mid['carrier'] = dict(down=6, changes=11, vf=True)
+            rs['after']['identity'] = dict(pid=999, starttime=9)
+        c = self.unbound(rows)
+        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+        self.assertIn('unreadable or not usable', c['reason'])
+
+    def test_a_bound_sample_alone_carries_the_delta(self):
+        # positive control for the filter: only an in-window, bound, VF sample moved (after-down and restore rows 5/10)
+        def rows(ev, ap, rs):
+            mid = next(s for s in ev['resource-samples.jsonl'] if 1110 <= s['mono'] - M02 <= 1120)
+            mid['carrier'] = dict(down=6, changes=11, vf=True)
+        self.assertEqual(self.unbound(rows)['outcome'], 'PASS')
+
+    def test_a_declared_pf_keeps_the_link_downed_rule(self):
+        pf = lambda c: c['fault_row'].update(netdev_class='pf')
+        v = verdict(self, 'link_flap', lambda ev: vf_flap(ev, vf=False), fix=pf)  # carrier moved, link_downed 0
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertIn('link_downed delta', v['criteria']['causal']['reason'])
+        v = verdict(self, 'link_flap', fix=pf)  # the base fixture's link_downed moved 0 -> 1
+        self.assertEqual(v['criteria']['causal']['outcome'], 'PASS', v['criteria']['causal'])
+
+    def test_a_declared_vf_with_a_non_vf_baseline_has_no_link_downed_fallback(self):
+        # r16: lost VF classification is NOT_COVERED under the VF rule, even when link_downed DID move
+        for downed in (0, 1):
+            with self.subTest(link_downed_moved=bool(downed)):
+                def edit(ev, downed=downed):
+                    vf_flap(ev)
+                    ap, rs = ev['faults.json'][0]['injection']
+                    ap['before']['carrier']['vf'] = False
+                    if downed:
+                        ap['after']['port'] = ['1: DOWN', 1]
+                        rs['after']['port'] = ['4: ACTIVE', 1]
+                        for x in ev['resource-samples.jsonl']:
+                            if x['mono'] - M02 > 1100:
+                                x['port'] = [x['port'][0], 1]
+                c = verdict(self, 'link_flap', edit)['criteria']['causal']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+                self.assertIn('before', c['reason'])
+
+    def test_a_row_without_a_declared_class_is_not_covered(self):
+        for cls in (None, 'physical'):
+            with self.subTest(netdev_class=cls):
+                def fix(c, cls=cls):
+                    c['fault_row'].pop('netdev_class')
+                    if cls:
+                        c['fault_row']['netdev_class'] = cls
+                c = verdict(self, 'link_flap', fix=fix)['criteria']['causal']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+                self.assertIn('declares no netdev_class', c['reason'])
 
 
 # ---- F3 link flap attribution (ruling 2026-11-11 01:54Z), through the real CLI. The window is re-derived from the

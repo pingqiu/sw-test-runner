@@ -94,7 +94,7 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 			"pin_ranges_bytes": r.PinBound.bytes(), "pin_pool_bytes": r.PinBound.PoolBytes, "pin_cache_bytes": r.PinBound.CacheBytes, "retained_budget_bytes": r.RetainedBudgetBytes, "free_below_bytes": r.FreeBelowBytes,
 			"client_fallback_counters": append([]string{}, r.ClientFallbackCounters...)}
 		if f.kind() == KindLinkFlap { // F3: the attribution receipt's target VF; absent otherwise
-			row["netdev"], row["rdma_device"] = r.Netdev, r.RDMADevice
+			row["netdev"], row["rdma_device"], row["netdev_class"] = r.Netdev, r.RDMADevice, r.NetdevClass
 		}
 		config["fault_row"] = row
 	}

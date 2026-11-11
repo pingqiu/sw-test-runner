@@ -196,7 +196,7 @@ func TestARowProfilePinsItsFaultJobs(t *testing.T) {
 		}
 	}
 	units, _ := config["units"].([]any)
-	if config["kind"] != KindLinkFlap || len(units) != 1 || !strings.HasSuffix(units[0].(string), "-deploy-m02-volume") ||
+	if config["kind"] != KindLinkFlap || config["netdev_class"] != "vf" || len(units) != 1 || !strings.HasSuffix(units[0].(string), "-deploy-m02-volume") ||
 		config["deadman_s"] != float64(30+120) || len(config["management_addrs"].([]any)) != 1 ||
 		!strings.HasPrefix(config["volume_status_url"].(string), "http://") || !strings.HasSuffix(config["volume_status_url"].(string), "/status") {
 		t.Fatalf("injector config: %v", config)
@@ -228,5 +228,8 @@ func TestOnlyF3CarriesItsWindowToTheLoad(t *testing.T) {
 	load := b.Jobs["soak-load-m01"].Argv[3]
 	if !strings.Contains(load, `"fault_row":{"at_s":60,"audit_s":20,"episode":"E1","kind":"conn_kill","refused":`) {
 		t.Fatalf("F4's load row must be exactly as before: %s", load)
+	}
+	if apply := b.Jobs["fault-apply-m02"].Argv[3]; strings.Contains(apply, "netdev_class") { // r16: F3 only
+		t.Fatalf("F4's injector config must carry no netdev_class: %s", apply)
 	}
 }

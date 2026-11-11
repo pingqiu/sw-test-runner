@@ -123,6 +123,9 @@ func SoakFaultArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan, action s
 		"volume_status_url": "http://" + endpoint(*m02, "volume_http") + "/status", // the product's own open-volume list
 		"sample_s":          2, "quiescence_s": r.QuiescenceS,
 		"max_s": int((DeployReserve + secs(x.DurationS) + QuiescenceReserve + secs(r.AuditS) + secs(r.QuiescenceS) + LoadExitGrace) / time.Second)}
+	if f.kind() == KindLinkFlap { // r16: the injector refuses a netdev whose live class is not the declared one
+		config["netdev_class"] = r.NetdevClass
+	}
 	raw, err := json.Marshal(config)
 	return []string{"-I", path.Join(s.HelperDir, "soak_fault.py"), "--config", string(raw), "--action", action}, err
 }

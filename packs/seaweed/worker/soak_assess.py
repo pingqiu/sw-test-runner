@@ -1073,13 +1073,18 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         return nc('no injector witness')
     if kind == 'link_flap':
         b, a = (apply_.get('before') or {}).get('port'), (apply_.get('after') or {}).get('port')
-        carrier = (apply_.get('before') or {}).get('carrier')
-        if 'carrier' in (apply_.get('before') or {}) and not (isinstance(carrier, dict) and carrier.get('vf') is False):
-            ok, why = vf_flap_witness(apply_, restore, samples, ident, span)  # r15: a VF, or carrier unreadable
+        # r16: the causal rule follows the row's DECLARED class only (the profile's netdev_class, bound into this
+        # assessor's config), never a reading's own vf flag: a row that lost its VF classification cannot downgrade it
+        declared = row.get('netdev_class')
+        if declared == 'vf':
+            ok, why = vf_flap_witness(apply_, restore, samples, ident, span)
             if not ok:
                 return nc(why)
-        elif not (ev['port_down'] and b and a and 'ACTIVE' not in a[0]):
-            return nc('port never DOWN with a link_downed delta')
+        elif declared == 'pf':
+            if not (ev['port_down'] and b and a and 'ACTIVE' not in a[0]):
+                return nc('port never DOWN with a link_downed delta')
+        else:
+            return nc('link_flap row declares no netdev_class (vf or pf): %r' % (declared,))
         rdma = {i for i, w in workers.items() if isinstance(w, dict) and w.get('transport') in ('dc', 'rc')}
         hit = [e['op'] for e in ops if str(e['worker']) in rdma and m01[0] <= e['completed'] <= m01[1]
                and (e.get('fault_error') or e.get('state') in ('REFUSED', 'UNKNOWN'))]
@@ -1141,14 +1146,24 @@ def vf_flap_witness(apply_, restore, samples, ident, span):
     downed = sorted({(r.get('port') or [None, None])[1] for r in [before, after, end] + list(samples) if inside(r) and isinstance(r.get('port'), list)} - {None})
     if back is None:
         return False, 'VF port never ACTIVE -> DOWN (sampled) -> ACTIVE inside the episode window (link_downed %s)' % downed
-    c0, c9 = before.get('carrier'), end.get('carrier')
-    if not isinstance(c0, dict) or not isinstance(c9, dict):
-        return False, 'VF carrier counters unreadable or not recorded (before %s, after restore %s)' % (c0, c9)
-    later = [r['carrier'] for r in [after, end] + [s for s in samples if inside(s)] if isinstance(r.get('carrier'), dict)]
+    # r16 (codex01 on r15): a carrier reading counts only from a row the port sequence's own `inside` accepts (this
+    # volume identity, in the window), proven a VF, with both counters valid. One filter for both, never two copies.
+    def counted(r):
+        c = r.get('carrier')
+        return inside(r) and isinstance(c, dict) and c.get('vf') is True and all(
+            isinstance(c.get(k), int) and not isinstance(c.get(k), bool) for k in ('down', 'changes'))
+    rows = [('before', before), ('after-down', after), ('after-restore', end)] + [('sample %s' % s.get('seq'), s) for s in samples]
+    ignored = [n for n, r in rows if 'carrier' in r and not counted(r)]
+    if not counted(before) or not counted(end):
+        return False, ('VF carrier reading unreadable or not usable (needs the volume identity, the episode window, vf=true '
+                       'and valid counters): before %s, after restore %s; ignored %s' % (before.get('carrier'), end.get('carrier'), ignored[:6]))
+    c0 = before['carrier']
+    later = [r['carrier'] for _, r in rows[1:] if counted(r) and r['mono'] > before['mono']]
     d_down = max(x['down'] for x in later) - c0['down']
     d_changes = max(x['changes'] for x in later) - c0['changes']
     if d_down < 1 and d_changes < 1:
-        return False, 'VF carrier did not move (carrier_down_count +%d, carrier_changes +%d; link_downed %s)' % (d_down, d_changes, downed)
+        return False, 'VF carrier did not move (carrier_down_count +%d, carrier_changes +%d; link_downed %s; ignored %s)' % (
+            d_down, d_changes, downed, ignored[:6])
     return True, 'VF port ACTIVE -> DOWN -> ACTIVE in the window; carrier_down_count +%d, carrier_changes +%d; link_downed %s (not required)' % (
         d_down, d_changes, downed)
 
