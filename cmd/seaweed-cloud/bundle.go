@@ -60,14 +60,15 @@ var bundleAllow = []*regexp.Regexp{
 
 // bundleWithhold is every file known to stay on the controller: raw call output and status text, apply markers, the
 // Terraform working copy (state, variables with host keys, plans, provider cache), raw cloud-init stdout and service
-// logs (their JSON step records carry the same output), and the worker's mount process logs. A file on neither list
-// is unknown and refuses the whole bundle.
+// logs (their JSON step records carry the same output), the worker's mount process logs, and the staged copies of
+// the worker helpers. A file on neither list is unknown and refuses the whole bundle.
 var bundleWithhold = []*regexp.Regexp{
 	regexp.MustCompile(`^[0-9]{3}-(az|terraform)-(output|status)$`),
 	regexp.MustCompile(`^apply-(started|succeeded)$`),
 	regexp.MustCompile(`^provision/terraform/`),
 	regexp.MustCompile(`^(cloud-init|prepare|deploy|grow|before|after|collect|cleanup)/(meta|vol[1-6]|client[1-3])/(cloud-init-status\.json|cloud-services\.log)$`),
-	regexp.MustCompile(`^mount/client[1-3]/run-root/mount-[a-z0-9_-]+\.log$`),
+	regexp.MustCompile(`^mount/client[1-3]/run-root/mount-[A-Za-z0-9_-]+\.log$`), // episode ids are upper-case: mount-fresh-E1-60s.log
+	regexp.MustCompile(`^mount/client[1-3]/(mount_soak|mount_assess)\.py$`),      // staged copies of the compiled-in helpers
 }
 
 func matches(list []*regexp.Regexp, rel string) bool {

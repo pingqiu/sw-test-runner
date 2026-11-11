@@ -110,6 +110,38 @@ func refused(t *testing.T, src string) {
 	}
 }
 
+// The first successful Azure mount soak left staged helper copies beside each client's steps and episode logs
+// named with an upper-case episode id (mount-fresh-E1-60s.log); the bundle refused them as unknown. They are known
+// controller-only files and are withheld, not exported.
+func TestBundleWithholdsStagedHelpersAndEpisodeLogs(t *testing.T) {
+	src := savedRun(t)
+	extra := []string{"mount/client1/mount_soak.py", "mount/client1/mount_assess.py",
+		"mount/client1/run-root/mount-fresh-E1-60s.log", "mount/client1/run-root/mount-fresh-E2-180s.log"}
+	for _, rel := range extra {
+		p := filepath.Join(src, filepath.FromSlash(rel))
+		if err := os.WriteFile(p, []byte("import json\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, withheld, err := bundleRun(src, filepath.Join(t.TempDir(), "bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range extra {
+		if !contains(withheld, rel) || contains(files, rel) {
+			t.Fatalf("%s: exported %v withheld %v", rel, files, withheld)
+		}
+	}
+	// Still unknown: a helper name the worker does not stage, and a log outside run-root.
+	for _, rel := range []string{"mount/client1/other.py", "mount/client1/mount-fresh-E1-60s.log"} {
+		t.Run(rel, func(t *testing.T) {
+			src := savedRun(t)
+			os.WriteFile(filepath.Join(src, filepath.FromSlash(rel)), []byte("x"), 0600)
+			refused(t, src)
+		})
+	}
+}
+
 // A file on neither list is unknown: the whole bundle is refused, whatever it holds.
 func TestBundleRefusesUnknownFiles(t *testing.T) {
 	for _, rel := range []string{"evidence.json", "prepare/vol1/notes.txt", "mount/client1/run-root/extra.json", "prepare/vol7/cloud-step-001.json", "node-keys.json"} {
