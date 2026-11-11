@@ -279,6 +279,135 @@ func TestHardDeadlineUpTo75Minutes(t *testing.T) {
 	}
 }
 
+// The mount soak class has its own ceilings ($10 per run, $100 cumulative, 150 min hard); every other class keeps
+// $3, $10 and 75 min, unchanged.
+func TestMountSoakClassHasItsOwnCapsAndNoOtherClassDoes(t *testing.T) {
+	set := func(c *Config, budget, abort float64, away time.Duration) {
+		b, _ := os.ReadFile(c.Variables)
+		var v map[string]any
+		_ = json.Unmarshal(b, &v)
+		if c.Cloud.MountSoak {
+			v["fuse_clients"], v["cluster"] = true, true
+		}
+		r := v["run_declaration"].(map[string]any)
+		hard := time.Now().Add(away).UTC().Truncate(time.Minute)
+		r["hard_deadline"], r["work_deadline"], r["budget_usd"], r["abort_estimate_usd"] = hard, hard.Add(-20*time.Minute), budget, abort
+		b, _ = json.Marshal(v)
+		_ = os.WriteFile(c.Variables, b, 0600)
+		c.VariablesSHA256 = digest(b)
+	}
+	refused := func(code string) bool { return code == "DEADLINE_REFUSED" || code == "INPUT_REFUSED" }
+	for _, tc := range []struct {
+		name               string
+		mount              bool
+		budget, abort, est float64
+		prior              float64
+		away               time.Duration
+		ok                 bool
+	}{
+		{"mount soak at its ceilings", true, 10, 10, 9, 90, 149 * time.Minute, true},
+		{"mount soak over per run", true, 10.5, 10, 9, 0, 120 * time.Minute, false},
+		{"mount soak over cumulative", true, 10, 10, 9, 91.5, 120 * time.Minute, false},
+		{"mount soak over the window", true, 10, 10, 9, 0, 151 * time.Minute, false},
+		{"other class over $3", false, 5, 4, 3.5, 0, 50 * time.Minute, false},
+		{"other class over $10 cumulative", false, 3, 2.5, 2, 8.5, 50 * time.Minute, false},
+		{"other class over 75 min", false, 3, 2.5, 2, 0, 100 * time.Minute, false},
+		{"other class inside its caps", false, 3, 2.5, 2, 7, 74 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fixture(t)
+			c.Cloud.MountSoak, c.EstimatedUSD, c.PriorUSD = tc.mount, tc.est, tc.prior
+			set(&c, tc.budget, tc.abort, tc.away)
+			f := &fake{}
+			out := controller(f).Execute(context.Background(), "run", c)
+			if tc.ok == refused(out.Code) {
+				t.Fatalf("%+v", out)
+			}
+			if !tc.ok && len(f.events) != 0 {
+				t.Fatalf("a refused run reached the cloud: %v", f.events)
+			}
+		})
+	}
+}
+
+// FUSE is set on the clients exactly for a mount soak: a mount soak without it, or any other run with it, is refused
+// before any cloud call.
+func TestFuseClientsGoExactlyWithTheMountSoak(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mount bool
+		fuse  any
+		ok    bool
+	}{
+		{"mount soak with fuse", true, true, true},
+		{"mount soak without fuse", true, nil, false},
+		{"mount soak with fuse false", true, false, false},
+		{"other run with fuse", false, true, false},
+		{"other run with fuse false", false, false, true},
+		{"fuse not a boolean", false, "yes", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fixture(t)
+			c.Cloud.MountSoak = tc.mount
+			b, _ := os.ReadFile(c.Variables)
+			var v map[string]any
+			_ = json.Unmarshal(b, &v)
+			if tc.fuse != nil {
+				v["fuse_clients"] = tc.fuse
+			}
+			if tc.mount {
+				v["cluster"] = true
+			}
+			b, _ = json.Marshal(v)
+			_ = os.WriteFile(c.Variables, b, 0600)
+			c.VariablesSHA256 = digest(b)
+			f := &fake{}
+			out := controller(f).Execute(context.Background(), "run", c)
+			if refused := out.Code == "INPUT_REFUSED"; refused == tc.ok || !tc.ok && len(f.events) != 0 {
+				t.Fatalf("%+v %v", out, f.events)
+			}
+		})
+	}
+}
+
+// The mount soak's widened caps are chosen only after its class is proven closed: a mount soak mixed with another
+// phase or class, or without the ten-node layout, is refused before any command, even with an estimate only the
+// mount soak's caps would allow.
+func TestAMixedOrPartialMountSoakNeverReachesTheCloud(t *testing.T) {
+	for name, mutate := range map[string]func(*Config, map[string]any){
+		"with chaos":         func(c *Config, v map[string]any) { c.Cloud.Chaos = true },
+		"with replication":   func(c *Config, v map[string]any) { c.Cloud.Replication = "001" },
+		"with chaos set":     func(c *Config, v map[string]any) { c.Cloud.ChaosSet = "A" },
+		"with kv soak":       func(c *Config, v map[string]any) { c.Cloud.KVSoak = true },
+		"with a read case":   func(c *Config, v map[string]any) { c.Cloud.ReadCase = "mount-soak" },
+		"single VM layout":   func(c *Config, v map[string]any) { delete(v, "cluster") },
+		"cluster false":      func(c *Config, v map[string]any) { v["cluster"] = false },
+		"cluster not a bool": func(c *Config, v map[string]any) { v["cluster"] = "yes" },
+		"with ec stage1":     func(c *Config, v map[string]any) { c.Cloud.ECStage1 = true },
+		"with master writes": func(c *Config, v map[string]any) { c.Cloud.MasterWrites = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fixture(t)
+			c.Cloud.MountSoak, c.EstimatedUSD, c.PriorUSD = true, 9, 90
+			b, _ := os.ReadFile(c.Variables)
+			var v map[string]any
+			_ = json.Unmarshal(b, &v)
+			v["fuse_clients"], v["cluster"] = true, true
+			r := v["run_declaration"].(map[string]any)
+			r["budget_usd"], r["abort_estimate_usd"] = 10, 10
+			mutate(&c, v)
+			b, _ = json.Marshal(v)
+			_ = os.WriteFile(c.Variables, b, 0600)
+			c.VariablesSHA256 = digest(b)
+			f := &fake{}
+			out := controller(f).Execute(context.Background(), "run", c)
+			if out.Code != "INPUT_REFUSED" || len(f.events) != 0 {
+				t.Fatalf("code %s, events %v", out.Code, f.events)
+			}
+		})
+	}
+}
+
 func TestRecoveryUsesSameSnapshotAndDoesNotCreate(t *testing.T) {
 	c := fixture(t)
 	f := &fake{fail: "destroy"}

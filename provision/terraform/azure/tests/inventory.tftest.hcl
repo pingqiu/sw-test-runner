@@ -158,3 +158,45 @@ run "management_port" {
   variables { nodes = { smoke = { roles = ["master"], size = "Standard_D2s_v5", private_ip = "10.84.1.10", cache_disk_gib = 0, format_allowed = false, services = [{ name = "master_http", port = 22 }, { name = "master_grpc", port = 19444 }] } } }
   expect_failures = [var.nodes]
 }
+
+# fuse_clients (mount soak only): client nodes get fuse3 and user_allow_other; nothing else changes.
+run "fuse_off_keeps_cloud_init" {
+  command = apply
+  variables {
+    nodes = { smoke = { roles = ["client"], size = "Standard_D2s_v5", private_ip = "10.84.1.10", cache_disk_gib = 0, format_allowed = false, services = [] } }
+  }
+  assert {
+    condition     = azurerm_linux_virtual_machine.node["smoke"].custom_data == base64encode(file("${path.module}/cloud-init.yaml"))
+    error_message = "Without fuse_clients a client's cloud-init must be the file unchanged."
+  }
+}
+run "fuse_on_client_gets_fuse" {
+  command = apply
+  variables {
+    fuse_clients = true
+    nodes        = { smoke = { roles = ["client"], size = "Standard_D2s_v5", private_ip = "10.84.1.10", cache_disk_gib = 0, format_allowed = false, services = [] } }
+  }
+  assert {
+    condition     = contains(yamldecode(base64decode(azurerm_linux_virtual_machine.node["smoke"].custom_data)).packages, "fuse3") && contains(yamldecode(base64decode(azurerm_linux_virtual_machine.node["smoke"].custom_data)).packages, "jq")
+    error_message = "A mount client must get fuse3 on top of every base package."
+  }
+  assert {
+    condition     = strcontains(jsonencode(yamldecode(base64decode(azurerm_linux_virtual_machine.node["smoke"].custom_data)).runcmd), "user_allow_other")
+    error_message = "A mount client must get user_allow_other in /etc/fuse.conf."
+  }
+  assert {
+    condition     = startswith(base64decode(azurerm_linux_virtual_machine.node["smoke"].custom_data), "#cloud-config\n")
+    error_message = "The rendered document must stay cloud-config."
+  }
+}
+run "fuse_on_server_unchanged" {
+  command = apply
+  variables {
+    fuse_clients = true
+    nodes        = { smoke = { roles = ["volume"], size = "Standard_D2s_v5", private_ip = "10.84.1.10", cache_disk_gib = 4, format_allowed = false, services = [{ name = "volume_http", port = 8080 }, { name = "volume_grpc", port = 18080 }] } }
+  }
+  assert {
+    condition     = azurerm_linux_virtual_machine.node["smoke"].custom_data == base64encode(file("${path.module}/cloud-init.yaml"))
+    error_message = "fuse_clients must not change a non-client node's cloud-init."
+  }
+}

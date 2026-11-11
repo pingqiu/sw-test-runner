@@ -38,11 +38,11 @@ func TestClient2CloudInitActualCommand(t *testing.T) {
 			if !allowed && loads.Load() != 0 {
 				t.Fatal("load reached after unknown cloud-init error")
 			}
-			captured, e := os.ReadFile(filepath.Join(c.Output, "prepare/client2/cloud-init-status.json"))
+			captured, e := os.ReadFile(filepath.Join(c.Output, "cloud-init/client2/cloud-init-status.json"))
 			if e != nil || strings.TrimSpace(string(captured)) != raw {
 				t.Fatalf("raw evidence lost: %s %v", captured, e)
 			}
-			step, e := os.ReadFile(filepath.Join(c.Output, "prepare/client2/cloud-init-step.json"))
+			step, e := os.ReadFile(filepath.Join(c.Output, "cloud-init/client2/cloud-init-step.json"))
 			var record struct {
 				RC    int    `json:"exit_code"`
 				Error string `json:"error"`

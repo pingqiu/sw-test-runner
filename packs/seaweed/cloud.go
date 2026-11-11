@@ -170,11 +170,22 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	return runCloudNode(ctx, *d, h, c, "")
 }
 
+// MountSoakClassRefusal checks the mount soak's closed class on the config alone, so a controller can refuse a mixed
+// class before any cloud action: the mount soak runs with no other phase or class.
+func MountSoakClassRefusal(c CloudConfig) error {
+	if c.MountSoak && (c.SWCtl != nil || len(c.ClusterChaosCases) > 0 || c.Chaos || c.Replication != "" || c.ChaosSet != "" ||
+		c.ECStage1 || c.ECUnderQuorum || c.ECReconstruction || c.ECVolumeImpl != "" || c.MasterWrites || c.KVSoak || c.KVLoad || c.ReadCase != "") {
+		return errors.New("mount_soak runs alone on the ten-node Azure (or onprem rehearsal) layout")
+	}
+	return nil
+}
+
 // mountSoakRefusal: the mount soak runs alone, on ten hosts, on Azure or an onprem rehearsal inventory.
 func mountSoakRefusal(d inventory.Document, c CloudConfig) error {
-	if c.MountSoak && (len(d.Hosts) != 10 || d.Target != "azure" && d.Target != "onprem" || c.SWCtl != nil || len(c.ClusterChaosCases) > 0 ||
-		c.Chaos || c.Replication != "" || c.ChaosSet != "" || c.ECStage1 || c.ECUnderQuorum || c.ECReconstruction || c.ECVolumeImpl != "" ||
-		c.MasterWrites || c.KVSoak || c.KVLoad || c.ReadCase != "") {
+	if e := MountSoakClassRefusal(c); e != nil {
+		return e
+	}
+	if c.MountSoak && (len(d.Hosts) != 10 || d.Target != "azure" && d.Target != "onprem") {
 		return errors.New("mount_soak runs alone on the ten-node Azure (or onprem rehearsal) layout")
 	}
 	return nil
@@ -247,8 +258,12 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return cloudUpload(n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, local, remote)
 	}
 	root := h.RunRoot
-	if (phase == "" || phase == "prepare") && !directTarget(d.Target) { // an existing host has no cloud-init
-		command := "timeout -k 5 120 sh -ec 'cloud-init status --wait --format json'"
+	if (phase == "" || phase == "prepare" || phase == "cloud-init") && !directTarget(d.Target) { // an existing host has no cloud-init
+		seconds := cloudInitSeconds
+		if deadline, ok := ctx.Deadline(); ok { // never past the run's deadline; the context still bounds the session
+			seconds = max(1, min(seconds, int(time.Until(deadline).Seconds())-5))
+		}
+		command := fmt.Sprintf("timeout -k 5 %d sh -ec 'cloud-init status --wait --format json'", seconds)
 		out, stderr, rc, runErr := n.Run(ctx, command)
 		gateErr := errors.Join(runErr, qualifyCloudInit(out, rc))
 		gateErr = errors.Join(gateErr,
@@ -256,6 +271,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 			os.WriteFile(filepath.Join(c.Output, "cloud-init-status.json"), []byte(out), 0600))
 		if gateErr != nil {
 			return "", fmt.Errorf("cloud step cloud-init command=%q: %w", command, gateErr)
+		}
+		if phase == "cloud-init" {
+			return "", nil
 		}
 	}
 	if phase == "before" || phase == "after" {
@@ -542,6 +560,11 @@ func cloudStep(ctx context.Context, n interface {
 	}
 	return out, nil
 }
+
+// cloudInitSeconds bounds the wait for a fresh VM's cloud-init. Measured on the first 10-VM Azure run (D2s_v5,
+// westus2): the slowest host that finished ended modules-final at 266.8 s, and a 120 s wait failed the run.
+// The cluster runs this gate on every host at once, so it costs one bound of wall time, not one per host.
+const cloudInitSeconds = 600
 
 func cloudQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 

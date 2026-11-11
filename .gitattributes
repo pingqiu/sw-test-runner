@@ -18,3 +18,6 @@ packs/seaweed/worker/*.py -text
 packs/seaweed/worker/soak_native_worker.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 packs/seaweed/worker/soak_oracle.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 packs/seaweed/worker/vf_preflight.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# The WSL az wrapper is pinned by sha256 and run by sh: LF only.
+provision/smoke/az-wsl text eol=lf

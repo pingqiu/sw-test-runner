@@ -26,6 +26,10 @@ variable "run_id" {
   type    = string
   default = null
 }
+variable "fuse_clients" {
+  type    = bool
+  default = false
+}
 variable "node_host_keys" {
   type      = map(object({ ed25519_private = string, ed25519_public = string }))
   sensitive = true
@@ -65,6 +69,7 @@ module "run" {
   ssh_public_key             = var.ssh_public_key
   host_keys                  = var.host_keys
   node_host_keys             = var.node_host_keys
+  fuse_clients               = var.fuse_clients
   operator_cidr              = var.operator_cidr
   image_version              = var.image_version
   artifact_manifest_sha256   = var.artifact_manifest_sha256

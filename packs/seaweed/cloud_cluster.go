@@ -88,7 +88,7 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		var mu sync.Mutex
 		var result error
 		slots := make(chan struct{}, 3)
-		if label == "collect" {
+		if label == "collect" || label == "cloud-init" { // waits, not transfers: every host at once
 			slots = make(chan struct{}, len(hosts))
 		}
 		for _, h := range hosts {
@@ -141,7 +141,7 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 		for _, s := range []struct {
 			name  string
 			hosts []inventory.Host
-		}{{"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}} {
+		}{{"cloud-init", d.Hosts}, {"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}} {
 			if e := phase(s.name, s.hosts); e != nil {
 				return "", e
 			}
@@ -154,7 +154,7 @@ func runCloudCluster(ctx context.Context, d inventory.Document, c CloudConfig) (
 	for _, s := range []struct {
 		name  string
 		hosts []inventory.Host
-	}{{"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}, {"before", servers}, {"load", groups["client"]}, {"after", servers}} {
+	}{{"cloud-init", d.Hosts}, {"prepare", d.Hosts}, {"deploy", groups["master"]}, {"deploy", groups["volume"]}, {"deploy", groups["client"]}, {"grow", groups["master"]}, {"before", servers}, {"load", groups["client"]}, {"after", servers}} {
 		if s.name == "load" {
 			if _, e := assessCloudCluster(ctx, d, c.Output, "--before", c.Replication); e != nil {
 				return "", e
