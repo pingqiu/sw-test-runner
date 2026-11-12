@@ -973,7 +973,10 @@ def raw_join(root, ops):
             continue
         r = x.get('row')
         error = isinstance(r, dict) and r.get('event') == 'error'
-        if not isinstance(r, dict) or x.get('action') != e['action'] or x.get('worker') != e['worker'] \
+        # the worker's own row.action (soak_native_worker.py: row=dict(..., action=action, ...)) and the load's envelope
+        # action must both be the op-event's, exactly: a missing or foreign one is a contradiction, never overwritten
+        if not isinstance(r, dict) or x.get('action') != e['action'] or r.get('action') != e['action'] \
+                or x.get('worker') != e['worker'] \
                 or str(r.get('operation_id')) != op or error != ('phase' in e):
             bad.append(op)
             continue

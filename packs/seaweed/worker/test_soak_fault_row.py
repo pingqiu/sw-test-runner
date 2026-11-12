@@ -1768,7 +1768,8 @@ class F5Pressure(unittest.TestCase):
 
     def test_a_raw_record_contradicting_its_op_identity_never_passes(self):
         cases = {'another key': lambda r, x: r.update(key='k@other'),
-                 'another worker': lambda r, x: x.update(worker=2),
+                 # coherent on its own (worker 2's pid), so only the worker reconciliation can refuse it
+                 'another worker': lambda r, x: (x.update(worker=2), r.update(pid=WID[2]['pid'])),
                  'another action': lambda r, x: x.update(action='set'),
                  'another operation id': lambda r, x: r.update(operation_id='4242'),
                  'ok disagrees': lambda r, x: r.update(ok=True)}
@@ -1781,6 +1782,19 @@ class F5Pressure(unittest.TestCase):
                 v = self.v(edit)
                 self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
                 self.assertNotEqual(v['status'], 'PASS')
+
+    # ---- r26 correction 3 (source review of 4b765651): the worker's own row.action joins too
+    def test_a_counted_get_whose_raw_row_action_disagrees_never_passes(self):
+        cases = {'raw row.action is set': lambda r: r.update(action='set'),
+                 'raw row.action missing': lambda r: r.pop('action'),
+                 'raw row.action foreign': lambda r: r.update(action='GET')}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                v = self.v(lambda ev, change=change: change(f5_raw(ev, f5_failed_get(ev)['op'])))
+                self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+                self.assertIn('contradicting', v['criteria']['failure_mode']['reason'])
+                self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+                self.assertEqual(v['status'], 'FAIL')
 
     def test_the_agreeing_raw_records_still_pass(self):
         v = self.v(lambda ev: f5_put(ev, failed_delta=1, audit='old'))
