@@ -32,14 +32,16 @@ Rules:
 
 1. No `project` -> project `default` = today's caps exactly ($3 per run,
    $10 cumulative). `default` is built in and cannot be redefined in `budgets`.
-2. `project` set -> it must be a key of `budgets`; both caps must be > 0 and
+2. `project` set -> it must match `[a-z0-9][a-z0-9-]{0,49}` and be a key of `budgets`; both caps must be > 0 and
    `per_run_cap_usd <= cumulative_cap_usd`. Unknown project refuses.
 3. `budget_override` (optional) must have a non-empty safe `message_id` and a
    finite `amount_usd` greater than the project's per-run cap. It raises this
    run's per-run cap to `amount_usd`. Anything malformed refuses. `approver`
-   and `message` are optional text. The override object is copied verbatim
-   (raw bytes) into the evidence: `plan.budget.override` in plan mode and
-   `budget.json` in the run's output directory.
+   and `message` are optional text; unknown keys or a non-number amount refuse.
+   The override object is copied verbatim (raw config bytes, key order kept;
+   only insignificant JSON whitespace is compacted) into the evidence:
+   `plan.budget.override` in plan mode and `budget.json` in the run's output
+   directory, together with the project and the caps that were applied.
 4. Cumulative: `prior_estimated_usd` keeps today's meaning (caller-supplied
    prior estimated spend), now read as the prior spend **of this project**.
    The check stays `prior + estimated_usd <= cumulative_cap_usd`. An override
