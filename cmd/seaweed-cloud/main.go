@@ -86,7 +86,7 @@ func run(args []string, w io.Writer) int {
 			out = (smoke.Controller{}).Execute(ctx, args[0], c)
 		}
 	}
-	if e := json.NewEncoder(w).Encode(out); e != nil {
+	if e := smoke.EncodeVerbatim(w, out); e != nil {
 		fmt.Fprintln(os.Stderr, "OUTPUT_FAILED")
 		return 1
 	}

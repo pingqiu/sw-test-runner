@@ -1,9 +1,11 @@
 package smoke
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 )
@@ -98,4 +100,22 @@ func budgetGate(c Config, d declaration) (map[string]any, error) {
 		"cumulative_estimated_usd": c.PriorUSD + c.EstimatedUSD,
 		"override":                 override,
 	}, nil
+}
+
+// EncodeVerbatim writes v as one JSON line without HTML escaping, so an
+// approval message containing <, > or & reaches the evidence byte for byte
+// (json.Marshal and a default Encoder rewrite them as <, >, &).
+func EncodeVerbatim(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// marshalVerbatim is EncodeVerbatim into bytes, without the trailing newline.
+func marshalVerbatim(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := EncodeVerbatim(&buf, v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

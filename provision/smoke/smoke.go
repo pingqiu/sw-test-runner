@@ -694,7 +694,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			return
 		}
 		// Admitted caps and the override's raw bytes, for the reviewer.
-		admitted, _ := json.Marshal(budget)
+		admitted, _ := marshalVerbatim(budget)
 		if err = os.WriteFile(filepath.Join(c.Output, "budget.json"), admitted, 0600); err != nil {
 			out.Error = err.Error()
 			return

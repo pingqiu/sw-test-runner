@@ -193,3 +193,25 @@ func TestBudgetProjectKeepsRegionSizeAndCluster(t *testing.T) {
 		}
 	}
 }
+
+// Review P2 on 6769ba0: the approval message must reach the evidence byte for
+// byte; json.Marshal and a default Encoder rewrite <, > and & as < etc.
+func TestBudgetOverrideHTMLCharsVerbatim(t *testing.T) {
+	const ov = `{"message_id":"chat-6aef0002","amount_usd":250,"approver":"owner","message":"ok <b>250</b> & no more"}`
+	base := declare(t, budgetConfig(t, fixture(t), capsule), 250, 240)
+	base.EstimatedUSD = 230
+	c := budgetConfig(t, base, `"budget_override":`+ov)
+	f := &fake{}
+	r := controller(f).Execute(context.Background(), "plan", c)
+	var out bytes.Buffer
+	if e := EncodeVerbatim(&out, r); e != nil || !bytes.Contains(out.Bytes(), []byte(ov)) {
+		t.Fatalf("plan output not verbatim: %s %v", out.Bytes(), e)
+	}
+	if r = controller(f).Execute(context.Background(), "run", c); r.Code != "COMPLETE" {
+		t.Fatalf("%+v", r)
+	}
+	saved, e := os.ReadFile(filepath.Join(c.Output, "budget.json"))
+	if e != nil || !bytes.Contains(saved, []byte(ov)) || bytes.Contains(saved, []byte("\\u003c")) {
+		t.Fatalf("budget.json not verbatim: %s %v", saved, e)
+	}
+}
