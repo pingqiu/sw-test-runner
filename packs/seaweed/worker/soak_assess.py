@@ -12,7 +12,7 @@ if 'soak_load' not in sys.modules:  # -I drops the script dir: the exact protect
     _module.__file__ = str(_source)
     exec(compile(_source.read_bytes(), str(_source), 'exec'), _module.__dict__)
 from soak_native_worker import k8_refusal_misses, payload
-from soak_oracle import OP_LIMIT_S, LinkFlapWindow, Oracle, PutFaultWindow
+from soak_oracle import OP_LIMIT_S, LinkFlapWindow, Oracle, PressureWindow, PutFaultWindow
 from soak_load import MISS, TRANSIENT, classify_get, read_bound, read_evidence
 from soak_stats import WITNESS, boot_id
 
@@ -635,6 +635,8 @@ def assess_row(c):
     except (ValueError, OSError):
         lo = hi = None  # no M01-M02 join: every witness that needs one is NOT_COVERED
     injection = {r.get('action'): r for r in f.get('injection') or [] if isinstance(r, dict)}
+    # r26 F5: the load's ownership record (each child's final row and observed exit, the teardown) is mandatory
+    own = [typed(x, event=str) for x in lines(root, 'ownership.jsonl')] if kind == 'mr_pressure' else []
 
     # 1. Bytes: every ACK re-derived from its seed; every hit the latest ACK when it completed (oracle replay).
     wrong, oracle = [], Oracle()
@@ -648,6 +650,8 @@ def assess_row(c):
         elif get_case(r) == 'hit' and not (r['key'] in oracle.latest and oracle.latest[r['key']].matches(r['length'], r['sha256'])):
             wrong.append('get ' + r['op'])
     wrong += ['ledger ' + r['op'] for r in ledger if r['digest'] != hashlib_sha(payload(r['seed'], r['length']))]
+    if kind == 'mr_pressure':  # r26 F5 (plan v3 item 7, a NEW gate): a failed GET never wrote into its buffer
+        wrong += ['failed GET %s wrote into its buffer' % e['op'] for e in gets if e.get('state') == 'failed' and e.get('untouched') is not True]
     mark('bytes', 'FAIL' if wrong else 'PASS', '%d wrong %s' % (len(wrong), wrong[:5]))
 
     # 2. Write contract: one terminal state per PUT, ACKED exactly the journal, UNKNOWN never retried or ACKed,
@@ -672,10 +676,16 @@ def assess_row(c):
         window = PutFaultWindow(kills[0]['killed'], kills[0]['finished'], (v.get('pid'), v.get('starttime')))
     elif kind == 'link_flap':
         window = link_flap_window(root, c, f, row)
+    elif kind == 'mr_pressure':
+        # r26 F5 (plan v3 item 4a): an UNKNOWN passes only inside the M01 pressure window, attributed to this episode,
+        # with the pressured volume's identity holding over the window
+        window = pressure_window(root, c, f, row)
+    held = kind != 'mr_pressure' or pressure_identity(injection, samples, row)[0] is not None
     unknown = [r for r in ledger if r['state'] == 'UNKNOWN']
     for r in unknown:
-        if kind == 'link_flap':  # F3: the receipt must be this row's and name these exact M01 marks
-            ok = window is not None and r.get('attributed') == episode and window.attributes(r.get('reason'), r['submitted'], r['completed'])
+        if kind in ('link_flap', 'mr_pressure'):  # F3/F5: the receipt must be this row's and name these exact M01 marks
+            ok = window is not None and r.get('attributed') == episode and held \
+                and window.attributes(r.get('reason'), r['submitted'], r['completed'])
         else:
             target = victim if kind == 'volume_kill_io' else (r['worker_identity'].get('pid'), r['worker_identity'].get('starttime'))
             ok = window is not None and r.get('attributed') == episode and window.attributes(target, r['submitted'], r['completed'])
@@ -736,6 +746,26 @@ def assess_row(c):
     mark('audit', 'FAIL' if failed else 'PASS' if covered else 'NOT_COVERED',
          '%d ledger keys, %d audited, fresh %s, failed %s' % (len(keys), len(audited), bool(fresh), failed[:5]))
 
+    # r26 F5 (plan v4 E): every quarantined PUT the fresh audit read as NEW (exactly its own UNKNOWN generation's
+    # digest, distinct from the survivor's) is a visible #1219 finding, PASS or FAIL. A generic error + NEW is ambiguous
+    # (generic_error_read_new; the only kind possible on today's product, whose C ABI drops the typed NotWritten); a
+    # TYPED nothing-written claim + NEW is a contradiction (typed_contradiction) and fails the write contract.
+    findings = []
+    if kind == 'mr_pressure':
+        for r in unknown:
+            survivor = (keys.get(r['key']) or {}).get('survivor')
+            if survivor and survivor['digest'] == r['digest']:
+                continue
+            if any(isinstance(x, dict) and x.get('case') == 'hit' and x.get('sha256') == r['digest'] and x.get('length') == r['length']
+                   for x in audited.get(r['key']) or []):
+                typed_claim = isinstance(r.get('reason'), dict) and r['reason'].get('not_written') is True
+                findings.append(dict(issue=1219, kind='typed_contradiction' if typed_claim else 'generic_error_read_new',
+                                     op=r['op'], key=r['key'], error=str(r.get('error') or '')[:400]))
+        contradicted = [x['op'] for x in findings if x['kind'] == 'typed_contradiction']
+        if contradicted:
+            mark('write_contract', 'FAIL', '#1219 typed nothing-written contradicted by an audit read of NEW: %s; %s' % (
+                contradicted[:3], crit['write_contract']['reason']))
+
     # 4. Failure mode: every op terminal within the op limit, every op settled exactly once, and no crash of a
     # process the row did not target (M01 workers; every watched M02 unit; the volume, F1 aside).
     late = [e['op'] for e in ops if e['completed'] - e['submitted'] > OP_LIMIT_S + (SET_EXTRA_S if e['action'] == 'set' else 1)]
@@ -755,16 +785,34 @@ def assess_row(c):
     for label in {k for s in samples for k in (s.get('watch') or {})}:
         if len({json.dumps(s['watch'].get(label), sort_keys=True) for s in samples}) != 1:
             crash.append('watched %s changed' % label)
+    if kind == 'mr_pressure':
+        crash += pressure_failures(root, c, f, row, ops, audits, own, workers)
+        open_ = [e['op'] for e in ops if e.get('state') == 'unresolved' or e.get('phase') in ('submit', 'wait', 'ack')]
     outcome = 'FAIL' if late or not terminal or crash else 'NOT_COVERED' if not samples else 'PASS'
-    mark('failure_mode', outcome, 'late %s, terminal %s, %s' % (late[:5], terminal, crash[:4]))
+    mark('failure_mode', outcome, 'late %s, terminal %s, %s%s' % (
+        late[:5], terminal, crash[:4], '; unresolved (never settled failures) %s' % open_[:5] if kind == 'mr_pressure' and open_ else ''))
 
     # 5. Recovery: an RDMA GET submitted after the heal and served within the frozen bound.
     heal = kills[0]['finished'] if kind == 'client_kill_put' and kills else f['ready_mono']
     rdma = {str(i) for i, w in workers.items() if isinstance(w, dict) and w.get('transport') in ('dc', 'rc')}
     after = [e for e in gets if str(e['worker']) in rdma and heal <= e['submitted'] <= heal + row['recovery_s']]
     served = [e for e in after if get_case(e) == 'hit' and e['completed'] <= heal + row['recovery_s']]
-    mark('recovery', 'PASS' if served else 'FAIL' if after else 'NOT_COVERED',
-         '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
+    if kind == 'mr_pressure':
+        # r26 F5 (plan v3 item 8, v4 D): GETs AND PUTs after the restore, every one served or ACKED by heal + recovery_s
+        # (30 s frozen; SET_EXTRA_S is no extension here). A GET is served when a hit, exact (no bytes finding), and
+        # completed by the bound; a PUT when ACKED and the parent RECEIVED its post-metadata complete row by the bound.
+        # FAIL on any op that is not, which overrides a count shortage; then NOT_COVERED below 8 GETs or 4 PUTs.
+        end, exact = heal + row['recovery_s'], {w[4:] for w in wrong if w.startswith('get ')}
+        puts = [e for e in ops if e['action'] == 'set' and heal <= e['submitted'] <= end]
+        ok_g = {e['op'] for e in served} - exact
+        bad_g = [e['op'] for e in after if e['op'] not in ok_g]
+        bad_p = [e['op'] for e in puts if not (e.get('state') == 'ACKED' and num(e.get('received')) and e['received'] <= end)]
+        mark('recovery', 'FAIL' if bad_g or bad_p else 'NOT_COVERED' if len(after) < 8 or len(puts) < 4 else 'PASS',
+             '%d RDMA GETs and %d PUTs in the %d s after the restore (floors 8/4); not served %s, not ACKED by the bound %s' % (
+                 len(after), len(puts), row['recovery_s'], bad_g[:3], bad_p[:3]))
+    else:
+        mark('recovery', 'PASS' if served else 'FAIL' if after else 'NOT_COVERED',
+             '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
 
     # 6. Resources: the pin bound at every sample, no whole .dat pin, and each view's quiescence class.
     # Pin bound (ruling 06:05Z): the packet's configured ranges, pool and cache sizes for the deployed row. The
@@ -815,8 +863,10 @@ def assess_row(c):
     if kind == 'conn_kill':
         claims['qp'] = 'NOT_COVERED'  # TCP scope only: no QP-state claim without a real RDMA effect
     extra = {}
-    if kind == 'link_flap':
-        # F3: late completions of futures abandoned at their deadline. Reported for the reader, never in a criterion:
+    if kind == 'mr_pressure':
+        extra['findings'] = findings  # r26: always present on F5, empty included
+    if kind in ('link_flap', 'mr_pressure'):
+        # F3/F5: late completions of futures abandoned at their deadline. Reported for the reader, never in a criterion:
         # a late ok=true does not upgrade an UNKNOWN (the audit decides old or new).
         late = [typed(x, op=str, action=str, worker=int, fid=int, ok=bool, received_mono=float) for x in lines(root, 'late-completions.jsonl')]
         if any(x.get('run_id') != c['run_id'] or x.get('episode') != episode for x in late):
@@ -827,11 +877,20 @@ def assess_row(c):
                 resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE, **extra)
 
 
-def link_flap_window(root, c, f, row):
-    """F3's attribution window (LinkFlapWindow), re-derived from M01 marks only: the controller's fault-pause and
-    fault-close of this row, each bound to this run, the admitted M01 boot and the episode, and in the controller's
-    own order pause <= dispatch (apply issued) <= ready (restore proven) <= close. Absent, foreign, malformed or out
-    of order: None, so every UNKNOWN is unattributed. The injector's M02 monotonic values never enter."""
+def num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def one(x):
+    """Exactly the integer 1 (a bool is not a count)."""
+    return isinstance(x, int) and not isinstance(x, bool) and x == 1
+
+
+def fault_marks(root, c, f):
+    """(pause_mono, end_mono) of the row's M01 marks: the controller's fault-pause and fault-close, each bound to this
+    run, the admitted M01 boot and the episode, in the controller's own order pause <= dispatch (apply issued) <= ready
+    (restore proven) <= close (r26 F5 plan v3 item 6: independently checked here). Absent, foreign, malformed or out of
+    order: None. The injector's M02 monotonic values never enter."""
     ep = f['episode']
     bind = dict(run_id=c['run_id'], boot_id=c['boot_id'], episode=ep)
     try:
@@ -839,16 +898,77 @@ def link_flap_window(root, c, f, row):
         q = read_bound(Path(root) / ('fault-close-%s.json' % ep), bind)
     except (ValueError, OSError):
         return None
-    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
     start, close = (p or {}).get('pause_mono'), (q or {}).get('end_mono')
     if not (num(start) and num(close) and start <= f['dispatch_mono'] <= f['ready_mono'] <= close):
         return None
+    return start, close
+
+
+def link_flap_window(root, c, f, row):
+    """F3's attribution window (LinkFlapWindow), re-derived from M01 marks only (fault_marks). Absent, foreign,
+    malformed or out of order: None, so every UNKNOWN is unattributed."""
+    marks = fault_marks(root, c, f)
     netdev, dev = row.get('netdev'), row.get('rdma_device')
-    if not (isinstance(netdev, str) and netdev and isinstance(dev, str) and dev):
+    if marks is None or not (isinstance(netdev, str) and netdev and isinstance(dev, str) and dev):
         return None
-    return LinkFlapWindow(start, close + row['recovery_s'], (
-        ('run_id', c['run_id']), ('boot_id', c['boot_id']), ('episode', ep), ('kind', 'link_flap'),
+    return LinkFlapWindow(marks[0], marks[1] + row['recovery_s'], (
+        ('run_id', c['run_id']), ('boot_id', c['boot_id']), ('episode', f['episode']), ('kind', 'link_flap'),
         ('netdev', netdev), ('rdma_device', dev)))
+
+
+def pressure_window(root, c, f, row):
+    """r26 F5: the memlock-pressure window (PressureWindow) on the same M01 marks: pause_mono to end_mono + the row's
+    recovery bound, bound to run, boot, episode and kind. None as link_flap_window."""
+    marks = fault_marks(root, c, f)
+    if marks is None:
+        return None
+    return PressureWindow(marks[0], marks[1] + row['recovery_s'], (
+        ('run_id', c['run_id']), ('boot_id', c['boot_id']), ('episode', f['episode']), ('kind', 'mr_pressure')))
+
+
+def pressure_identity(injection, samples, row):
+    """r26 F5 (plan v3 item 5): the volume the limit was lowered on held for the whole window. Apply and restore name
+    the same pid+starttime, the restore proved same_target, and every resource sample in the M02 span
+    [apply.before, restore.after + recovery_s] carries that identity (at least one). M02 clock only.
+    -> (identity, '') or (None, why)."""
+    a, r = injection.get('apply') or {}, injection.get('restore') or {}
+    ident = a.get('identity')
+    if not isinstance(ident, dict) or r.get('identity') != ident or (r.get('proof') or {}).get('same_target') is not True:
+        return None, 'apply/restore identity or same_target not proven'
+    lo, hi = (a.get('before') or {}).get('mono'), (r.get('after') or {}).get('mono')
+    if not (num(lo) and num(hi)):
+        return None, 'apply/restore marks missing'
+    span = [s for s in samples if lo <= s['mono'] <= hi + row['recovery_s']]
+    if not span or any(s.get('identity') != ident for s in span):
+        return None, 'the volume identity changed or was unsampled in the window'
+    return ident, ''
+
+
+def pressure_failures(root, c, f, row, ops, audits, own, workers):
+    """r26 F5 failure-mode checks (plan v3 items 3, 6; v5 C2; v6): the M01 marks in the controller's order, every
+    failed GET counted, and every child (the load workers and the audit worker) shown settled, final, joined and
+    OBSERVED gone (exit 0, never killed, nothing outstanding) BEFORE the fresh audit's first read."""
+    out = []
+    if fault_marks(root, c, f) is None:
+        out.append('pressure marks missing, foreign or out of order (pause<=dispatch<=ready<=close)')
+    uncounted = [e['op'] for e in ops if e.get('state') == 'failed' and not (one(e.get('failed_delta')) or e.get('unavailable') is True)]
+    if uncounted:
+        out.append('failed GETs not counted (connector_failed_ops.get +1): %s' % uncounted[:3])
+    td = [x for x in own if x.get('event') == 'teardown']
+    exits = {x.get('child'): x for x in own if x.get('event') == 'exit'}
+    if len(td) != 1 or td[0].get('gated') is not True or td[0].get('unproven') != []:
+        out.append('teardown not proven before the audit gate')
+    children = sorted(str(k) for k in workers) + ['audit']
+    for k in children:
+        x = exits.get(k)
+        if not x or x.get('final') is not True or x.get('exitcode') != 0 or x.get('killed') is not False \
+                or x.get('abandoned_outstanding') != [] or not num(x.get('observed')):
+            out.append('child %s not settled, final, and seen exit 0 unkilled' % k)
+    gone = [exits[str(k)]['observed'] for k in workers if str(k) in exits and num(exits[str(k)].get('observed'))]
+    first = [r['submitted'] for a in audits for r in a['reads'] if isinstance(r, dict) and num(r.get('submitted'))]
+    if first and (len(gone) != len(workers) or min(first) < max(gone)):
+        out.append('fresh audit read before every load worker exit was observed')
+    return out
 
 
 def receipt_identities(f):
@@ -1114,20 +1234,35 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         return nc('release count not observed') if rose is None else ('PASS', 'release count rose (TCP scope)') if rose \
             else nc('release count did not move')
     if kind == 'mr_pressure':
-        changed = ((apply_.get('after') or {}).get('limits') or {}).get('memlock', [None])[0] == (apply_.get('plan') or {}).get('memlock')
-        if not (ev['memlock_lowered'] and changed):
-            return nc('memlock not lowered in /proc/pid/limits')
+        # r26 F5 (plan v3 items 4b-5, v4 B): PASS only with the effect proven (memlock lowered to the plan, below the
+        # volume's own use), the volume identity held over the window, and at least one SETTLED op that failed in the M01
+        # pressure window and was COUNTED: its own future drained ok=false with the connector's generic per-op
+        # connector_failed_ops delta exactly +1. A count names that an op failed, never a refusal or a cause; an
+        # unresolved (raised, timed-out, abandoned) op never proves the effect. The registration counters (RC push-read
+        # only, mono rdma.rs) are reported for the reader and are no criterion on this DC row.
+        plan = apply_.get('plan') or {}
+        changed = ((apply_.get('after') or {}).get('limits') or {}).get('memlock', [None])[0] == plan.get('memlock')
+        if not (ev['memlock_lowered'] and changed and num(plan.get('use_bytes')) and num(plan.get('memlock'))
+                and plan['use_bytes'] > plan['memlock']):
+            return nc('pressure had no effect: memlock not lowered below the volume\'s use in /proc/pid/limits')
+        held, why = pressure_identity(injection, samples, row)
+        if held is None:
+            return nc('pressure had no effect on one volume: ' + why)
+        win = pressure_window(root, run or {}, f, row)
+        if win is None:
+            return nc('no pressure window: M01 marks missing, foreign or out of order')
+        puts = [r['op'] for r in ledger if r['state'] == 'UNKNOWN' and isinstance(r.get('reason'), dict)
+                and r['reason'].get('phase') == 'complete' and r['reason'].get('native_ok') is False
+                and one(r['reason'].get('failed_delta')) and win.contains(r['submitted'], r['completed'])]
+        gets = [e['op'] for e in ops if e['action'] == 'get' and e.get('state') == 'failed' and e['ok'] is False
+                and one(e.get('failed_delta')) and win.contains(e['submitted'], e['completed'])]
         t = (apply_.get('after') or {}).get('mono')
-        # registration_fallback is the product's SeaweedFS_rdma_range_registration_fallback_total (#1181: a range MR the
-        # lowered limit refuses is served from the cold pool), mapped by the row's profile; each counter is joined on the
-        # volume identity and must rise after the change, inside the row window.
-        keys = ('registration_refused', 'registration_fallback')
-        rose = [k for k in keys if counter_rose(samples, k, ident, t, span[1]) is True]
-        if rose:
-            return 'PASS', 'a registration after the change was refused or fell back: %s rose on the volume the limit was lowered on' % rose
-        put = refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span)
-        return ('PASS', 'PUT %s REFUSED after the change, on the volume the limit was lowered on' % put) if put else \
-            nc('no new registration attempted after the change')
+        info = [k for k in ('registration_refused', 'registration_fallback') if counter_rose(samples, k, ident, t, span[1]) is True]
+        if puts or gets:
+            return 'PASS', ('settled ops failed in the pressure window on the pressured volume, each counted +1 (a generic '
+                            'count, not a refusal or cause): PUT %s, GET %s; registration counters (informational) rose %s'
+                            % (puts[:3], gets[:3], info))
+        return nc('pressure had no effect: no settled, counted (+1) op failure in the window')
     if kind == 'disk_full':
         if not (ev['disk_low'] and ((apply_.get('after') or {}).get('free') or math.inf) < row['free_below_bytes']):
             return nc('statfs never below the threshold on the row mount')
@@ -1184,24 +1319,6 @@ def vf_flap_witness(apply_, restore, samples, ident, span):
             d_down, d_changes, downed, ignored[:6])
     return True, 'VF port ACTIVE -> DOWN -> ACTIVE in the window; carrier_down_count +%d, carrier_changes +%d; link_downed %s (not required)' % (
         d_down, d_changes, downed)
-
-
-def refused_put_after(apply_, row, f, samples, ident, ledger, lo, hi, span):
-    """F5's write-side witness (ruling 05:31Z): a PUT the ledger records REFUSED (a named definite refusal before
-    any mutation) that certainly ended after the limit change and inside the row window, while the volume was the
-    very pid/starttime whose limit was lowered (the row has one volume, so every PUT targets it). Needs the M01-M02
-    clock join; without it, or with any other volume identity sampled in the window, there is no witness."""
-    changed = (apply_.get('after') or {}).get('epoch')
-    if lo is None or changed is None or span is None:
-        return None
-    window = [s for s in samples if span[0] <= s['mono'] <= span[1]]
-    if not window or any(s.get('identity') != ident for s in window):
-        return None
-    end = f['ready_mono'] + row['recovery_s']
-    for r in ledger:
-        if r['state'] == 'REFUSED' and r['completed'] + lo > changed and r['completed'] <= end:
-            return r['op']
-    return None
 
 
 def fallback_rose(root, workers, row, window):

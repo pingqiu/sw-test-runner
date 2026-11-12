@@ -26,9 +26,11 @@ func TestTheAdmittedRowAssessorChain(t *testing.T) {
 	for name, c := range map[string]struct {
 		kind, edit, status, causal string
 	}{
-		"F3 witnessed":                  {KindLinkFlap, "None", "PASS", "PASS"},
-		"F5 without a new registration": {KindMRPressure, "t.no_registration", "NOT_COVERED", "NOT_COVERED"},
-		"R0 clean":                      {KindControl, "None", "PASS", "PASS"},
+		"F3 witnessed": {KindLinkFlap, "None", "PASS", "PASS"},
+		// r26: F5's witness is a settled, counted (+1) window failure; its verdict carries findings through Go
+		"F5 witnessed":                 {KindMRPressure, "None", "PASS", "PASS"},
+		"F5 without a counted failure": {KindMRPressure, "t.f5_drop(lambda e: e.get('state') == 'failed')", "NOT_COVERED", "NOT_COVERED"},
+		"R0 clean":                     {KindControl, "None", "PASS", "PASS"},
 	} {
 		root := t.TempDir()
 		write := exec.Command("python3", "-B", "-c", "import sys, test_soak_fault_row as t; t.write_row(sys.argv[1], sys.argv[2], "+c.edit+")", root, c.kind)
@@ -54,6 +56,9 @@ func TestTheAdmittedRowAssessorChain(t *testing.T) {
 		v, err := decodeVerdict(captured(raw), SoakBinding{SoakVerdictSchema, "run-1", boot, root}, x.criteria())
 		if err != nil || v.Status != c.status || v.Criteria["causal"].Outcome != c.causal || v.LayoutScope != rowLayoutScope {
 			t.Fatalf("%s: got %+v %v\n%s", name, v, err, raw)
+		}
+		if c.kind == KindMRPressure && (v.Findings == nil || v.LateCompletions == nil) {
+			t.Fatalf("%s: the F5 verdict lost its findings or late count through Go: %+v", name, v)
 		}
 	}
 }
@@ -231,5 +236,25 @@ func TestOnlyF3CarriesItsWindowToTheLoad(t *testing.T) {
 	}
 	if apply := b.Jobs["fault-apply-m02"].Argv[3]; strings.Contains(apply, "netdev_class") { // r16: F3 only
 		t.Fatalf("F4's injector config must carry no netdev_class: %s", apply)
+	}
+}
+
+// r26: F5's load carries its pressure window's recovery bound (M01 marks, as F3's), and no F3 target.
+func TestF5CarriesItsWindowBoundToTheLoad(t *testing.T) {
+	input := soakInput(t, 30*time.Minute, func(x *SoakPlan) {
+		row := rowPlan(KindMRPressure)
+		x.DurationS, x.Faults, x.Row, x.ClientKillAtS, x.ReadyAssign, x.Pattern = row.DurationS, row.Faults, row.Row, 0, nil, row.Pattern
+	}, withVolumeMetrics)
+	for _, name := range []string{"soak_fault.py", "soak_stats.py"} {
+		body, _ := workerFiles.ReadFile("worker/" + name)
+		input.Files["m02"]["/opt/profile/worker/"+name] = hash(body)
+	}
+	b, err := BuildProfile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := b.Jobs["soak-load-m01"].Argv[3]
+	if !strings.Contains(load, `"kind":"mr_pressure","recovery_s":30,"refused":`) || strings.Contains(load, `"netdev"`) {
+		t.Fatalf("F5's load row must carry exactly its recovery bound: %s", load)
 	}
 }

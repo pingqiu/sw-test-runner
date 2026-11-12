@@ -127,14 +127,16 @@ def injection(kind):
     if kind in ('conn_kill', 'control'):
         before['conns'], after['conns'] = ['198.51.100.2:18888>198.51.100.1:5000'], ([] if kind == 'conn_kill' else ['198.51.100.2:18888>198.51.100.1:5000'])
         end['conns'] = ['198.51.100.2:18888>198.51.100.1:5001'] if kind == 'conn_kill' else before['conns']
-    if kind == 'mr_pressure':
-        plan, after['limits'] = dict(memlock=1 << 20), dict(memlock=[1 << 20, -1], nofile=[1024, 1024])
+    if kind == 'mr_pressure':  # r26: the plan names the volume's own use the limit was lowered below
+        plan, after['limits'] = dict(memlock=1 << 20, use_bytes=4 << 20), dict(memlock=[1 << 20, -1], nofile=[1024, 1024])
     if kind == 'fd_exhaust':
         plan, after['limits'] = dict(nofile=60), dict(memlock=[-1, -1], nofile=[60, 1024])
     if kind == 'disk_full':
         before['free'], after['free'], plan = 1 << 30, 1000, dict(ballast_bytes=(1 << 30) - 1000)
-    return [dict(action='apply', kind=kind, identity=VOL, before=before, after=after, plan=plan),
-            dict(action='restore', kind=kind, identity=VOL, after=end, restored=True)]
+    restore = dict(action='restore', kind=kind, identity=VOL, after=end, restored=True)
+    if kind == 'mr_pressure':  # r26: the runner's restore record (f31ab93): its pre-undo before and same_target proof
+        restore.update(before=snap(1129.9), proof=dict(same_target=True))
+    return [dict(action='apply', kind=kind, identity=VOL, before=before, after=after, plan=plan), restore]
 
 
 def row_evidence(kind):
@@ -166,8 +168,18 @@ def row_evidence(kind):
         r.get('k2', 1104.0, done=1105.0, fault=True)
     if kind == 'disk_full':
         r.put('k9', 1105.0, state='REFUSED', error='No space left on device')
+    if kind == 'mr_pressure':  # r26: one settled GET failed in the pressure window, counted +1, its buffer untouched
+        r.events.append(dict(op=r.op(), worker=0, action='get', key='k1', dispatched=1109.99, submitted=1110.0, completed=1110.5,
+                             ok=False, error="RuntimeError('read_batch_into failed: rdma reg_mr failed: Cannot allocate memory')",
+                             results=[False], untouched=True, state='failed', failed_delta=1, pid=10,
+                             sequence=r.latest('k1')['sequence']))
     heal = 1101.0 if kind == 'client_kill_put' else r.fault['ready_mono']
     r.get('k2', heal + 2)
+    if kind == 'mr_pressure':  # r26: recovery after the restore: 8 RDMA GETs and 4 PUTs inside heal + 30
+        for n in range(6):
+            r.get('k1', heal + 3 + n, worker=n % 3)
+        for n in range(4):
+            r.put('r%d' % n, heal + 10 + n)
     for t in range(1150, 1300, 25):
         r.get('k1', float(t))
     r.put('k2', 1300.0)
@@ -179,6 +191,27 @@ def row_evidence(kind):
     return r
 
 
+F5_PAUSE, F5_CLOSE, F5_GONE, F5_AUDIT = 1099.9, 1130.0, 1320.0, 1340.0  # M01: pause <= dispatch 1100 <= ready 1130 <= close
+
+
+def f5_files(r, extra):
+    """r26 F5: the M01 pause/close marks, the parent's receipt stamp on every op, and the load's ownership record: every
+    child (4 load workers, the audit worker) final, exit 0, never killed, nothing outstanding, observed gone at 1320,
+    before the audit's first read at 1340; the teardown gated, nothing unproven."""
+    bind = dict(run_id='run-1', boot_id=boot_id(), episode='E1', role='volume')
+    extra['fault-pause-E1.json'] = dict(bind, pause_mono=F5_PAUSE)
+    extra['fault-close-E1.json'] = dict(bind, end_mono=F5_CLOSE)
+    for e in r.events:
+        e.setdefault('received', e['completed'] + 0.05)
+    for reads in r.audit.values():
+        for x in reads:
+            x.setdefault('submitted', F5_AUDIT)
+    exits = [dict(event='exit', child=c, pid=WID[int(c)]['pid'] if c != 'audit' else 900, starttime=1 if c != 'audit' else 50,
+                  final=True, poisoned=False, abandoned_outstanding=[], unsettled_buffers=0, final_mono=F5_GONE - 0.5,
+                  exitcode=0, observed=F5_GONE, killed=False, kill_mono=None) for c in ('0', '1', '2', '3', 'audit')]
+    extra['ownership.jsonl'] = exits + [dict(event='teardown', schedule={}, gated=True, audit='run', unproven=[], mono=F5_GONE + 30)]
+
+
 def files(r, kind):
     boot = boot_id()
     marks = r.marks + [dict(event='fault_window', phase='armed', episode='E1', mono=1100.0),
@@ -187,8 +220,10 @@ def files(r, kind):
                        dict(event='audit_done', mono=1365.0, keys=len(r.audit), complete=True, client=dict(pid=900, starttime=50)),
                        dict(event='quiescent', mono=1366.0, dispatched=r.n)]
     extra = {'fault-freeze-witness-E1.json': r.freeze} if getattr(r, 'freeze', None) else {}
-    if kind == 'link_flap':  # r12: the F3 load always writes it (empty when nothing completed late)
+    if kind in ('link_flap', 'mr_pressure'):  # r12: the F3 (r26: and F5) load always writes it (empty when nothing completed late)
         extra['late-completions.jsonl'] = getattr(r, 'late', [])
+    if kind == 'mr_pressure':
+        f5_files(r, extra)
     return dict(extra, **{
         'soak-load-start.json': dict(boot_id=boot, mono=1000.0),
         'faults.json': [r.fault],
@@ -220,11 +255,6 @@ def write_row(root, kind, edit=None):
     for name, body in ev.items():
         text = ''.join(json.dumps(x) + '\n' for x in body) if name.endswith('.jsonl') else json.dumps(body)
         (Path(root) / name).write_text(text)
-
-
-def no_registration(ev):
-    for s in ev['resource-samples.jsonl']:
-        s['metrics']['registration_refused'] = 0.0
 
 
 def verdict(test, kind, edit=None, fix=None):
@@ -478,58 +508,6 @@ class NotCovered(unittest.TestCase):
         self.assertEqual(verdict(self, 'link_flap')['layout_scope'], soak_assess.LAYOUT_SCOPE)
         v = verdict(self, 'link_flap', lambda ev: ev.pop('faults.json'))  # an error row carries it too
         self.assertEqual((v['status'], v['layout_scope']), ('FAIL', soak_assess.LAYOUT_SCOPE))
-
-    def f5_refused_put(self, ev, at, op='777', state='REFUSED'):
-        """The registration counters stay flat; one PUT ends `state` at M01 time `at`."""
-        for s in ev['resource-samples.jsonl']:
-            s['metrics']['registration_refused'] = 0.0
-        seed = 'f5-%s' % op
-        ev['write-ledger.jsonl'].append(dict(op=op, key='f5', state=state, seed=seed, length=64, digest=digest(seed), sequence=70,
-                                             worker=1, dispatched=at - 0.2, submitted=at - 0.1, completed=at,
-                                             error='write refused before commit; nothing was written: reg_mr failed: Cannot allocate memory',
-                                             attributed=None, worker_identity=WID[1]))
-        ev['op-events.jsonl'].insert(0, dict(op=op, worker=1, action='set', key='f5', dispatched=at - 0.2, submitted=at - 0.1,
-                                             completed=at, ok=False, error='refused', state=state))
-        next(m for m in ev['op-events.jsonl'] if m.get('event') == 'quiescent')['dispatched'] = int(op)
-        renumber(ev)
-
-    def test_f5_write_side_witness_is_a_refused_put_after_the_change(self):
-        """Ruling 05:31Z: the REFUSED PUT, after the limit change, in the window, on the same volume pid/starttime."""
-        v = verdict(self, 'mr_pressure', lambda ev: self.f5_refused_put(ev, 1115.0))
-        self.assertEqual(outcome(v, 'causal'), 'PASS', v['criteria']['causal'])
-        self.assertIn('REFUSED after the change', v['criteria']['causal']['reason'])
-
-    def test_f5_refused_put_that_does_not_witness(self):
-        def before(ev):  # ended before the limit was lowered
-            self.f5_refused_put(ev, 1099.0)
-        def after_window(ev):  # ended after the row window
-            self.f5_refused_put(ev, 1300.0)
-        def other_volume(ev):  # a volume restart inside the window: not the pid the limit was lowered on
-            self.f5_refused_put(ev, 1115.0)
-            for s in ev['resource-samples.jsonl']:
-                if 1110 <= s['mono'] - M02 <= 1120:
-                    s['identity'] = dict(REPL)
-        def no_clock(ev):
-            self.f5_refused_put(ev, 1115.0)
-            del ev['soak-clock-s1.json']
-        for edit in (before, after_window, other_volume, no_clock):
-            with self.subTest(edit=edit.__name__):
-                v = verdict(self, 'mr_pressure', edit)
-                self.assertNotIn('error', v, v.get('error'))
-                self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED', v['criteria']['causal'])
-
-    def test_f5_an_unknown_put_is_no_witness_and_still_fails(self):
-        v = verdict(self, 'mr_pressure', lambda ev: self.f5_refused_put(ev, 1115.0, state='UNKNOWN'))
-        self.assertEqual((outcome(v, 'causal'), outcome(v, 'write_contract')), ('NOT_COVERED', 'FAIL'))
-
-    def test_f5_without_a_new_registration(self):
-        def edit(ev):
-            for s in ev['resource-samples.jsonl']:
-                s['metrics']['registration_refused'] = 0.0
-        v = verdict(self, 'mr_pressure', edit)
-        self.assertEqual(outcome(v, 'causal'), 'NOT_COVERED')
-        self.assertIn('no new registration', v['criteria']['causal']['reason'])
-        self.assertEqual(v['status'], 'NOT_COVERED')
 
     def test_f1_op_that_ended_before_the_kill(self):
         def edit(ev):  # the PUT arm's op completed at 1100.1, before the kill was done (1100.3)
@@ -1310,47 +1288,6 @@ class F3ReasonCarriesTheVfWitness(unittest.TestCase):
         self.assertIn('carrier_down_count +1, carrier_changes +2', c['reason'])
 
 
-def f5_fallback(ev, rise_at=1110, identity=None):
-    """F5 on the new product counter only (registration_refused flat, no refused PUT): registration_fallback rises at
-    M01 time `rise_at` (None: flat), on the samples' own identity unless `identity` overrides the rising samples'."""
-    for s in ev['resource-samples.jsonl']:
-        t = s['mono'] - M02
-        s['metrics']['registration_refused'] = 0.0
-        s['metrics']['registration_fallback'] = float(rise_at is not None and t >= rise_at)
-        if identity is not None and rise_at is not None and t >= rise_at:
-            s['identity'] = dict(identity)
-
-
-class F5RegistrationFallback(unittest.TestCase):
-    """G5 (mono #1181): F5's causal witness on SeaweedFS_rdma_range_registration_fallback_total (the profile's
-    registration_fallback): it must rise after the memlock change, inside the row window, on the volume identity."""
-
-    def causal(self, **kw):
-        v = verdict(self, 'mr_pressure', lambda ev: f5_fallback(ev, **kw))
-        self.assertNotIn('error', v, v.get('error'))
-        return v['criteria']['causal']
-
-    def test_the_fallback_counter_rising_after_the_change_passes(self):
-        c = self.causal()
-        self.assertEqual(c['outcome'], 'PASS', c)
-        self.assertIn("['registration_fallback'] rose", c['reason'])
-
-    def test_a_flat_fallback_counter_is_not_covered(self):
-        c = self.causal(rise_at=None)
-        self.assertEqual(c['outcome'], 'NOT_COVERED', c)
-        self.assertIn('no new registration', c['reason'])
-
-    def test_a_rise_outside_the_window_is_not_credited(self):
-        for name, at in (('before the change', 1050), ('after the row window', 1250)):
-            with self.subTest(name=name):
-                c = self.causal(rise_at=at)
-                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
-
-    def test_a_rise_on_another_volume_identity_is_not_credited(self):
-        v = verdict(self, 'mr_pressure', lambda ev: f5_fallback(ev, identity=REPL))
-        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
-
-
 class LinkFlapAttribution(unittest.TestCase):
     def passes(self, v):
         self.assertNotIn('error', v, v.get('error'))
@@ -1476,6 +1413,220 @@ class LinkFlapAttribution(unittest.TestCase):
                 # even a receipt that names no target either
                 self.refused(flap_verdict(self, reason=flap_reason(1100.2, **{field: None}),
                                           fix=lambda c, field=field: c['fault_row'].pop(field)))
+
+
+# r26 F5 (plan v6): DC memlock pressure with reads and writes; the claim is 0 wrong bytes, every failed op named and
+# counted (a SETTLED op, its own per-op connector_failed_ops delta +1; never by its text, never an unresolved one),
+# every window-failed PUT an attributed UNKNOWN audited old-or-new (#1219 findings visible), recovery of GETs AND PUTs
+# within the frozen 30 s, resources released, and every child settled and observed gone before the fresh audit.
+
+def f5_reason(**kw):
+    return dict(dict(run_id='run-1', boot_id=boot_id(), episode='E1', kind='mr_pressure', start=F5_PAUSE, end=None,
+                     start_mark='fault-pause pause_mono', end_mark='fault-close end_mono + recovery_s',
+                     case='submitted in the pressure window'), **kw)
+
+
+def f5_ops(ev):
+    return [e for e in ev['op-events.jsonl'] if 'action' in e]
+
+
+def f5_put(ev, at=1115.0, phase='complete', native_ok=False, failed_delta=1, audit='old', not_written=None,
+           error="RuntimeError('put_cpu_many failed: write refused before commit; nothing was written')", reason=None, key='f5'):
+    """One window-failed PUT, quarantined as an attributed UNKNOWN with its receipt; the audit reads it 'old' (absent:
+    a miss) or 'new' (its own generation's digest)."""
+    op = str(max(int(e['op']) for e in f5_ops(ev)) + 1)
+    seed = 'f5-%s' % op
+    why = reason if reason is not None else f5_reason(phase=phase, native_ok=native_ok, failed_delta=failed_delta)
+    if not_written is not None:
+        why['not_written'] = not_written
+    ev['write-ledger.jsonl'].append(dict(op=op, key=key, state='UNKNOWN', seed=seed, length=64, digest=digest(seed), sequence=70,
+                                         worker=1, dispatched=at - 0.2, submitted=at - 0.1, completed=at, error=error,
+                                         attributed='E1', worker_identity=WID[1], reason=why))
+    ev['op-events.jsonl'].insert(0, dict(op=op, worker=1, action='set', key=key, dispatched=at - 0.2, submitted=at - 0.1,
+                                         completed=at, ok=False, error=error, state='UNKNOWN', received=at + 0.01,
+                                         **({} if phase == 'complete' else dict(phase=phase))))
+    read = dict(case='hit', sha256=digest(seed), length=64) if audit == 'new' else dict(case='miss')
+    ev['audit.jsonl'].append(dict(key=key, reads=[dict(read, submitted=F5_AUDIT)]))
+    next(m for m in ev['op-events.jsonl'] if m.get('event') == 'quiescent')['dispatched'] = int(op)
+    return op
+
+
+def f5_drop(pred):
+    def edit(ev):
+        ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if not ('action' in e and pred(e))]
+        renumber(ev)
+    return edit
+
+
+def f5_failed_get(ev):
+    return next(e for e in f5_ops(ev) if e.get('state') == 'failed')
+
+
+def f5_exit(ev, child):
+    return next(x for x in ev['ownership.jsonl'] if x.get('event') == 'exit' and x['child'] == child)
+
+
+def f5_teardown(ev):
+    return next(x for x in ev['ownership.jsonl'] if x.get('event') == 'teardown')
+
+
+class F5Pressure(unittest.TestCase):
+    def v(self, edit=None, fix=None):
+        v = verdict(self, 'mr_pressure', edit, fix)
+        self.assertNotIn('error', v, v.get('error'))
+        return v
+
+    def test_the_positive_row_passes_on_a_settled_counted_failure(self):
+        v = self.v()
+        self.assertEqual((v['status'], v['row']), ('PASS', 'F5'), v['criteria'])
+        self.assertIn('counted +1', v['criteria']['causal']['reason'])
+        self.assertEqual((v['findings'], v['late_completions']), ([], 0))
+
+    def test_causal_needs_a_settled_counted_window_failure(self):
+        no_get = f5_drop(lambda e: e.get('state') == 'failed')
+        cases = {
+            'only an unresolved (timed-out) PUT': lambda ev: (no_get(ev), f5_put(ev, phase='wait', native_ok=None, failed_delta=None)),
+            'only a submit-raised (poisoned) PUT': lambda ev: (no_get(ev), f5_put(ev, phase='submit', native_ok=None, failed_delta=None)),
+            'an ack-phase PUT (native ok)': lambda ev: (no_get(ev), f5_put(ev, phase='ack', native_ok=True, failed_delta=None)),
+            'an unresolved PUT carrying a stale +1': lambda ev: (no_get(ev), f5_put(ev, phase='wait', native_ok=False, failed_delta=1)),
+            'a settled PUT counted 0': lambda ev: (no_get(ev), f5_put(ev, failed_delta=0)),
+            'a settled PUT counted 2': lambda ev: (no_get(ev), f5_put(ev, failed_delta=2)),
+            'a settled PUT counted True (a bool)': lambda ev: (no_get(ev), f5_put(ev, failed_delta=True)),
+            'the failed GET counted 0': lambda ev: f5_failed_get(ev).update(failed_delta=0),
+            'the failed GET counted 2': lambda ev: f5_failed_get(ev).update(failed_delta=2),
+            'the failed GET outside the window': lambda ev: f5_failed_get(ev).update(submitted=1170.0, completed=1170.5, dispatched=1169.9),
+            'no failure at all': no_get,
+        }
+        for name, edit in cases.items():
+            with self.subTest(case=name):
+                c = self.v(edit)['criteria']['causal']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_a_settled_counted_put_alone_proves_the_effect(self):
+        v = self.v(lambda ev: (f5_drop(lambda e: e.get('state') == 'failed')(ev), f5_put(ev)))
+        self.assertEqual((v['criteria']['causal']['outcome'], v['criteria']['write_contract']['outcome'], v['unknown_attributed']),
+                         ('PASS', 'PASS', 1), v['criteria'])
+
+    def test_the_effect_must_be_non_vacuous_on_one_volume(self):
+        def use_below(ev):
+            ev['faults.json'][0]['injection'][0]['plan']['use_bytes'] = 1 << 20
+        def other_volume(ev):
+            for s in ev['resource-samples.jsonl']:
+                if 1115 <= s['mono'] - M02 <= 1125:
+                    s['identity'] = dict(REPL)
+        def not_same_target(ev):
+            ev['faults.json'][0]['injection'][1]['proof']['same_target'] = False
+        def marks_out_of_order(ev):
+            ev['fault-pause-E1.json']['pause_mono'] = 1100.5  # after the dispatch
+        for edit in (use_below, other_volume, not_same_target, marks_out_of_order):
+            with self.subTest(edit=edit.__name__):
+                c = self.v(edit)['criteria']['causal']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_write_contract_attributes_only_window_unknowns_on_the_held_volume(self):
+        self.assertEqual(self.v(lambda ev: f5_put(ev))['criteria']['write_contract']['outcome'], 'PASS')
+        def outside(ev):
+            f5_put(ev, at=1170.0)
+        def foreign(ev):
+            f5_put(ev, reason=f5_reason(kind='link_flap', phase='complete', native_ok=False, failed_delta=1))
+        def unheld(ev):
+            f5_put(ev)
+            for s in ev['resource-samples.jsonl']:
+                if 1115 <= s['mono'] - M02 <= 1125:
+                    s['identity'] = dict(REPL)
+        for edit in (outside, foreign, unheld):
+            with self.subTest(edit=edit.__name__):
+                c = self.v(edit)['criteria']['write_contract']
+                self.assertEqual(c['outcome'], 'FAIL', c)
+
+    def test_findings_name_every_new_read_and_only_a_typed_claim_contradicts(self):
+        v = self.v(lambda ev: f5_put(ev, audit='new'))
+        self.assertEqual([(x['issue'], x['kind']) for x in v['findings']], [(1219, 'generic_error_read_new')])
+        self.assertEqual((v['criteria']['write_contract']['outcome'], v['status']), ('PASS', 'PASS'), v['criteria'])
+        v = self.v(lambda ev: f5_put(ev, audit='new', not_written=True))
+        self.assertEqual([x['kind'] for x in v['findings']], ['typed_contradiction'])
+        self.assertEqual(v['criteria']['write_contract']['outcome'], 'FAIL')
+        self.assertEqual(self.v(lambda ev: f5_put(ev, audit='old'))['findings'], [])
+        raw = 'E' * 1000
+        f = self.v(lambda ev: f5_put(ev, audit='new', error=raw))['findings'][0]
+        self.assertEqual(f['error'], raw[:400])  # the raw worker text, truncated, never normalised
+
+    def test_findings_survive_a_failing_row(self):
+        def edit(ev):
+            f5_put(ev, audit='new')
+            f5_failed_get(ev)['untouched'] = False  # bytes FAIL
+        v = self.v(edit)
+        self.assertEqual((v['status'], len(v['findings'])), ('FAIL', 1))
+
+    def test_a_failed_get_must_be_counted_and_untouched(self):
+        c = self.v(lambda ev: f5_failed_get(ev).pop('failed_delta'))['criteria']
+        self.assertEqual(c['failure_mode']['outcome'], 'FAIL', c['failure_mode'])
+        self.assertIn('not counted', c['failure_mode']['reason'])
+        c = self.v(lambda ev: f5_failed_get(ev).update(failed_delta=None, unavailable=True))['criteria']
+        self.assertEqual(c['failure_mode']['outcome'], 'PASS', c['failure_mode'])
+        c = self.v(lambda ev: f5_failed_get(ev).update(untouched=False))['criteria']['bytes']
+        self.assertEqual(c['outcome'], 'FAIL', c)
+        self.assertIn('wrote into its buffer', c['reason'])
+
+    def test_every_child_settled_final_and_seen_gone_before_the_audit(self):
+        cases = {
+            'no final row': lambda ev: f5_exit(ev, '1').update(final=False),
+            'killed': lambda ev: f5_exit(ev, '2').update(killed=True, kill_mono=1319.0),
+            'exit -9': lambda ev: f5_exit(ev, '0').update(exitcode=-9),
+            'exit unobserved': lambda ev: f5_exit(ev, '3').update(exitcode=None, observed=None),
+            'a future outstanding': lambda ev: f5_exit(ev, '1').update(abandoned_outstanding=['7']),
+            'the audit child killed': lambda ev: f5_exit(ev, 'audit').update(killed=True, exitcode=-9),
+            'the audit child missing': lambda ev: ev['ownership.jsonl'].remove(f5_exit(ev, 'audit')),
+            'teardown unproven': lambda ev: f5_teardown(ev).update(unproven=['3']),
+            'teardown not gated': lambda ev: f5_teardown(ev).update(gated=False),
+            'no teardown': lambda ev: ev['ownership.jsonl'].remove(f5_teardown(ev)),
+            'audit read before a load worker exit': lambda ev: f5_exit(ev, '3').update(observed=F5_AUDIT + 1),
+        }
+        for name, edit in cases.items():
+            with self.subTest(case=name):
+                c = self.v(edit)['criteria']['failure_mode']
+                self.assertEqual(c['outcome'], 'FAIL', c)
+
+    def test_a_poisoned_worker_that_exits_clean_is_pass_eligible(self):
+        v = self.v(lambda ev: f5_exit(ev, '2').update(poisoned=True, unsettled_buffers=1))
+        self.assertEqual(v['status'], 'PASS', v['criteria'])
+
+    def test_marks_out_of_order_fail_the_failure_mode(self):
+        c = self.v(lambda ev: ev['fault-close-E1.json'].update(end_mono=1129.0))['criteria']['failure_mode']  # close before ready
+        self.assertEqual(c['outcome'], 'FAIL', c)
+        self.assertIn('out of order', c['reason'])
+
+    def test_recovery_needs_gets_and_puts_all_inside_the_frozen_bound(self):
+        heal, end = 1130.0, 1160.0
+        rec = lambda e: heal <= e['submitted'] <= end
+        def one_get_fewer(ev):
+            f5_drop(lambda e: e['action'] == 'get' and rec(e) and e['submitted'] == heal + 8)(ev)
+        def one_put_fewer(ev):
+            op = next(e for e in f5_ops(ev) if e['action'] == 'set' and rec(e))
+            ev['op-events.jsonl'].remove(op)
+            ev['write-ledger.jsonl'] = [x for x in ev['write-ledger.jsonl'] if x['op'] != op['op']]
+            ev['ack-journal.jsonl'] = [a for a in ev['ack-journal.jsonl'] if not (a['key'] == op['key'] and a['submitted'] == op['submitted'])]
+            ev['audit.jsonl'] = [a for a in ev['audit.jsonl'] if a['key'] != op['key']]
+            renumber(ev)
+        def late_get_and_short(ev):  # FAIL beats the count shortage: only 3 GETs, one completing past the bound
+            f5_drop(lambda e: e['action'] == 'get' and rec(e) and e['submitted'] >= heal + 5)(ev)
+            next(e for e in f5_ops(ev) if e['action'] == 'get' and rec(e)).update(completed=end + 0.5)
+        def put_received_late(ev):  # its native completion inside, the parent's receipt (post-metadata ACK) outside
+            e = next(e for e in f5_ops(ev) if e['action'] == 'set' and rec(e))
+            e.update(completed=end - 1, received=end + 1)
+        def put_without_receipt(ev):
+            next(e for e in f5_ops(ev) if e['action'] == 'set' and rec(e)).pop('received')
+        for edit, want in ((one_get_fewer, 'NOT_COVERED'), (one_put_fewer, 'NOT_COVERED'), (late_get_and_short, 'FAIL'),
+                           (put_received_late, 'FAIL'), (put_without_receipt, 'FAIL')):
+            with self.subTest(edit=edit.__name__):
+                c = self.v(edit)['criteria']['recovery']
+                self.assertEqual(c['outcome'], want, c)
+
+    def test_late_completions_are_reported(self):
+        late = dict(run_id='run-1', episode='E1', worker=1, worker_identity=WID[1], op='5', action='set', key='k1', fid=7,
+                    ok=False, error='late failure', results=None, worker_mono=1131.0, received_mono=1131.1, ledger_state=None,
+                    quarantined=False)
+        self.assertEqual(self.v(lambda ev: ev.__setitem__('late-completions.jsonl', [late]))['late_completions'], 1)
 
 
 if __name__ == '__main__':

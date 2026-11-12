@@ -178,6 +178,19 @@ class LinkFlapWindow:
                 and reason.get('start') == self.start and reason.get('end') in (None, self.end)
                 and self.contains(submitted, completed))
 
+PRESSURE_BINDING = ('run_id', 'boot_id', 'episode', 'kind')
+
+
+@dataclass(frozen=True)
+class PressureWindow(LinkFlapWindow):
+    """F5 (r26, plan v6): the memlock-pressure window, on the same M01 marks as LinkFlapWindow (fault-pause pause_mono to
+    fault-close end_mono + the row's recovery bound) and the same membership rule; only the receipt's case differs."""
+
+    def reason(self, submitted, completed):
+        return dict(super().reason(submitted, completed),
+                    case='in flight at the pause' if submitted < self.start else 'submitted in the pressure window')
+
+
 REQUIRED = {"rss_bytes", "fds", "VmPin_bytes", "VmLck_bytes", "disk_bytes", "volume_count",
             "SeaweedFS_rdma_range_pinned_bytes", "SeaweedFS_rdma_range_retained_bytes",
             "SeaweedFS_rdma_range_retained_sources"}

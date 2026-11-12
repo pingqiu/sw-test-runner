@@ -66,6 +66,9 @@ func SoakLoadArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]string
 		if f.kind() == KindLinkFlap { // F3: the window's recovery bound and the receipt's target VF; absent otherwise
 			row["recovery_s"], row["netdev"], row["rdma_device"] = r.RecoveryS, r.Netdev, r.RDMADevice
 		}
+		if f.kind() == KindMRPressure { // r26 F5: the pressure window's recovery bound (M01 marks, as F3's); absent otherwise
+			row["recovery_s"] = r.RecoveryS
+		}
 		config["fault_row"] = row
 	}
 	raw, err := json.Marshal(config)

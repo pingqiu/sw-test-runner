@@ -499,7 +499,10 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	v, err := decodeVerdict(e, want, p.Soak.criteria())
 	rows = filepath.Join(c.Output, "soak-verdict.json")
 	body, _ := json.MarshalIndent(v, "", " ")
-	if err = errors.Join(err, os.WriteFile(rows, body, 0600)); err == nil && v.Status != "PASS" {
+	if err = errors.Join(err, os.WriteFile(rows, body, 0600)); err == nil {
+		err = readBackVerdict(rows, v) // r26: what was published is exactly what was decoded (findings included)
+	}
+	if err == nil && v.Status != "PASS" {
 		err = errors.New("soak verdict " + v.Status)
 	}
 	return rows, err

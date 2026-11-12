@@ -364,6 +364,224 @@ class Rows(unittest.TestCase):
         self.assertEqual(summary['kills'], [])
 
 
+class PressureRows(unittest.TestCase):
+    """r26 F5 (plan v6) through the real soak_load.run() with the fake native child (spawned processes): window failures
+    named and counted, unresolved ops never settled, poison, the reuse barrier, and the one-deadline teardown BEFORE
+    the fresh audit and the terminal row. The reap gaps are shrunk (production: 20/3/2/2/3 s, test_soak_ownership)."""
+    setUp_rows = Rows.setUp
+    write, row, FLAP = Rows.write, Rows.row, Rows.FLAP
+    serve = test_soak_load.TopologyPoller.serve
+
+    def setUp(self):
+        self.setUp_rows()
+        saved = soak_load.REAP_GAPS_S
+        soak_load.REAP_GAPS_S = (2, 0.5, 0.3, 0.3, 0.3)
+        self.addCleanup(setattr, soak_load, 'REAP_GAPS_S', saved)
+        self.row('mr_pressure', recovery_s=1, audit_s=3)
+        self.config['pacing_s'] = 0.05
+        self.config['duration_s'] = 6
+
+    def controller(self, at=1.0, fail=0.6, files=('fake-fail',), then=(('fake-fail-set',), 0.6), before=None):
+        """pause at `at`, then `files` present for `fail` s after the ack (GETs failing: PUTs still ACK, so their
+        read-after-ACK GETs run), then `then` = (files, s) (None: nothing), then the close; before: (delay, files)
+        written before the pause instead."""
+        seen = {}
+
+        def wait(path):  # bounded: a run that stopped early never publishes what this waits for
+            end = time.monotonic() + 60
+            while not path.exists():
+                if time.monotonic() > end:
+                    raise OSError('gave up waiting for ' + path.name)
+                time.sleep(0.01)
+
+        def run():
+            try:
+                wait(self.root / 'soak-load-start.json')
+                if before:
+                    time.sleep(before[0])
+                    for f in before[1]:
+                        (self.root / f).write_text('')
+                time.sleep(at)
+                seen['pause'] = time.monotonic()
+                self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=seen['pause']))
+                wait(self.root / 'fault-ack-E1.json')
+                for f in files:
+                    (self.root / f).write_text('')
+                time.sleep(fail)
+                for f in files:
+                    (self.root / f).unlink()
+                for f in (then or ((), 0))[0]:
+                    (self.root / f).write_text('')
+                time.sleep((then or ((), 0))[1])
+                for f in (then or ((), 0))[0]:
+                    (self.root / f).unlink()
+                seen['close'] = time.monotonic()
+                self.write('fault-close-E1.json', dict(episode='E1', role='volume', end_mono=seen['close']))
+            except OSError:
+                pass
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t, seen
+
+    def own(self):
+        return jsonl(self.root / 'ownership.jsonl')
+
+    def exits(self):
+        return {x['child']: x for x in self.own() if x['event'] == 'exit'}
+
+    def assert_proven_teardown_before_the_audit(self, killed=()):
+        own = self.own()
+        td = [x for x in own if x['event'] == 'teardown']
+        self.assertEqual((len(td), td[0]['gated'], td[0]['unproven']), (1, True, []), own)
+        ex = self.exits()
+        self.assertEqual(sorted(ex), ['0', '1', '2', '3', 'audit'])
+        for k, x in ex.items():
+            self.assertIsNotNone(x['exitcode'], x)
+            self.assertEqual(x['killed'], k in killed, x)
+        events = jsonl(self.root / 'op-events.jsonl')
+        done = [e for e in events if e.get('event') == 'audit_done']
+        self.assertTrue(done and done[0]['mono'] > max(ex[str(i)]['observed'] for i in range(4)))
+        self.assertEqual(events[-1]['event'], 'quiescent')
+        return ex
+
+    def test_f5_window_failures_are_named_counted_and_the_teardown_precedes_the_audit(self):
+        t, seen = self.controller()
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        unknown = [r for r in jsonl(self.root / 'write-ledger.jsonl') if r['state'] == 'UNKNOWN']
+        self.assertTrue(unknown)
+        for u in unknown:  # settled, counted, attributed with the M01 window receipt; never REFUSED or retried
+            r = u['reason']
+            self.assertEqual((u['attributed'], r['kind'], r['phase'], r['native_ok'], r['failed_delta'], r['start']),
+                             ('E1', 'mr_pressure', 'complete', False, 1, seen['pause']))
+        failed = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('state') == 'failed']
+        self.assertTrue(failed)
+        self.assertTrue(all(e['failed_delta'] == 1 and e['untouched'] is True and 'received' in e for e in failed), failed)
+        self.assert_proven_teardown_before_the_audit()
+        self.assertEqual(len(list(self.root.glob('fake-own-flag-*'))), 5)  # 4 load workers + the audit worker
+        names = soak_load.evidence_names(self.config['fault_row'])  # what main() hashes into the summary
+        for n in ('ownership.jsonl', 'late-completions.jsonl', 'write-ledger.jsonl', 'audit.jsonl'):
+            self.assertIn(n, names)
+            self.assertTrue((self.root / n).exists())
+
+    def test_f5_a_timed_out_put_is_unresolved_the_worker_blocked_then_unblocked(self):
+        t, _ = self.controller(fail=0.6, files=('fake-deadline-set',), then=None)
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        unknown = [r for r in jsonl(self.root / 'write-ledger.jsonl') if r['state'] == 'UNKNOWN']
+        self.assertTrue(unknown and all(u['reason']['phase'] == 'wait' and u['reason']['failed_delta'] is None for u in unknown), unknown)
+        self.assertTrue([x for x in self.own() if x['event'] == 'unblocked'])
+        self.assertTrue(jsonl(self.root / 'late-completions.jsonl'))
+        ops = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('phase') == 'wait']
+        self.assertTrue(ops and all(e['state'] == 'UNKNOWN' and e['ok'] is False for e in ops))
+        self.assert_proven_teardown_before_the_audit()
+
+    def test_f5_a_raised_submit_poisons_its_worker_for_good(self):
+        t, _ = self.controller(fail=0.4, files=('fake-submit-raise', 'fake-orphan'), then=None)
+        summary = soak_load.run(self.config)  # a 'refused' (an op sent to a poisoned worker) would raise
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        unknown = [r for r in jsonl(self.root / 'write-ledger.jsonl') if r['state'] == 'UNKNOWN']
+        self.assertTrue(unknown and all(u['reason']['phase'] == 'submit' for u in unknown), unknown)
+        poisoned = {str(u['worker']) for u in unknown}
+        ex = self.assert_proven_teardown_before_the_audit()
+        self.assertEqual({k for k, x in ex.items() if x['poisoned']}, poisoned)
+        self.assertTrue([x for x in self.own() if x['event'] == 'orphan'])
+        later = [e for e in jsonl(self.root / 'op-events.jsonl') if 'action' in e and str(e['worker']) in poisoned
+                 and e['dispatched'] > max(u['dispatched'] for u in unknown if str(u['worker']) == str(e['worker']))]
+        self.assertEqual(later, [])  # no op after the poison
+
+    def test_f5_a_failure_before_the_window_still_stops(self):
+        t, _ = self.controller(at=2.0, files=(), then=None, before=(0.3, ('fake-fail-set',)))
+        with self.assertRaisesRegex(OracleError, 'UNKNOWN_WRITE'):
+            soak_load.run(self.config)
+        (self.root / 'fault-ack-E1.json').write_text('{}')  # release the controller: the run stopped before any ack
+        t.join(10)
+
+    def test_f5_a_destructor_hang_is_killed_seen_gone_and_recorded(self):
+        (self.root / 'fake-final-hang').write_text('')
+        t, _ = self.controller(fail=0.3)
+        began = time.monotonic()
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        ex = self.assert_proven_teardown_before_the_audit(killed=('0', '1', '2', '3', 'audit'))
+        self.assertTrue(all(x['final'] and x['exitcode'] == -9 for x in ex.values()), ex)  # the final row was no exit proof
+        self.assertLess(time.monotonic() - began, self.config['duration_s'] + self.config['quiescence_s'] + 3 + 30)
+
+    def test_f5_children_never_seen_gone_leave_the_teardown_unproven_and_no_terminal_row(self):
+        real = soak_load.reap
+
+        def stuck(children, ids, kill_at, until, exits, kills, stopped, drain, **kw):
+            live = real(children, ids, kill_at, until, exits, kills, stopped, drain, **kw)
+            if '3' not in [str(k) for k in ids] and 3 not in ids:
+                return live
+            exits.pop(3, None)  # as if child 3 survived its kill: never observed gone
+            return sorted(set(live) | {3}, key=str)
+        soak_load.reap = stuck
+        self.addCleanup(setattr, soak_load, 'reap', real)
+        t, _ = self.controller(fail=0.3)
+        with self.assertRaisesRegex(RuntimeError, 'teardown'):
+            soak_load.run(self.config)
+        t.join()
+        events = jsonl(self.root / 'op-events.jsonl')
+        self.assertNotIn('quiescent', [e.get('event') for e in events])  # no terminal claim on unproven state
+        self.assertNotIn('audit_done', [e.get('event') for e in events])  # and no fresh audit
+        td = [x for x in self.own() if x['event'] == 'teardown'][0]
+        self.assertEqual((td['gated'], td['unproven']), (False, ['3']))
+
+    def test_f5_a_final_after_six_seconds_is_not_killed(self):
+        soak_load.REAP_GAPS_S = (9, 0.5, 0.3, 0.3, 0.3)
+        (self.root / 'fake-final-delay').write_text('6')
+        t, _ = self.controller(fail=0.3)
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        # every load worker's exit clean and none killed (the legacy join(5) would have); the audit child, stopped on
+        # the shrunk test gaps (0.3 s) with the same 6 s delay, is the one killed
+        self.assert_proven_teardown_before_the_audit(killed=('audit',))
+
+    def bound(self):
+        """The whole run's wall bound: the load, its quiescence, the reap schedule and a start-up margin; an audit wait
+        not clamped to A (45 s ready, 35 s per GET) overruns it."""
+        return self.config['duration_s'] + self.config['quiescence_s'] + sum(soak_load.REAP_GAPS_S) + 3 + 12
+
+    def test_f5_an_audit_child_never_ready_is_clamped_killed_and_seen_gone(self):
+        (self.root / 'fake-audit-hang').write_text('')
+        t, _ = self.controller(fail=0.3)
+        began = time.monotonic()
+        summary = soak_load.run(self.config)
+        self.assertLess(time.monotonic() - began, self.bound())
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        ex = self.assert_proven_teardown_before_the_audit(killed=('audit',))
+        self.assertEqual(ex['audit']['exitcode'], -9)
+        done = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('event') == 'audit_done']
+        self.assertIs(done[0]['complete'], False)  # stopped at the clamped deadline A, never ready
+
+    def test_f5_an_audit_get_that_never_answers_is_clamped_and_the_child_killed(self):
+        (self.root / 'fake-audit-get-hang').write_text('')
+        t, _ = self.controller(fail=0.3)
+        began = time.monotonic()
+        summary = soak_load.run(self.config)
+        self.assertLess(time.monotonic() - began, self.bound())
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        ex = self.assert_proven_teardown_before_the_audit(killed=('audit',))
+        self.assertEqual(ex['audit']['exitcode'], -9)
+        done = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('event') == 'audit_done']
+        self.assertIs(done[0]['complete'], False)
+
+    def test_only_f5_children_get_the_ownership_flag(self):
+        Rows.flap_row(self)
+        t, _ = Rows.flap_controller(self, fail=0.3)
+        soak_load.run(self.config)
+        t.join()
+        self.assertEqual(list(self.root.glob('fake-own-flag-*')), [])
+
+
 class OracleStates(unittest.TestCase):
     def test_quarantine_refuses_retry_and_read_and_refusal_keeps_the_survivor(self):
         o = Oracle()

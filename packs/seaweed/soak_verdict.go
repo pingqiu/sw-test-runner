@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -135,9 +137,25 @@ type SoakVerdict struct {
 	UnknownAttributed *int              `json:"unknown_attributed,omitempty"`
 	ResourceClasses   map[string]string `json:"resource_classes,omitempty"`
 	LayoutScope       string            `json:"layout_scope,omitempty"`
-	// F3 only (r12): late completions of futures abandoned at their deadline, reported for the reader; no criterion.
+	// F3 and F5 (r12; r26): late completions of futures abandoned at their deadline, reported for the reader; no criterion.
 	LateCompletions *int `json:"late_completions,omitempty"`
+	// F5 only (r26): every quarantined PUT the fresh audit read as NEW, a visible #1219 finding whatever the status.
+	// A pointer, so an F5 row's empty list survives the publish (present and empty is not absent).
+	Findings *[]SoakFinding `json:"findings,omitempty"`
 }
+
+// SoakFinding is one #1219 finding: exactly these members, each required.
+type SoakFinding struct {
+	Issue int    `json:"issue"`
+	Kind  string `json:"kind"`
+	Op    string `json:"op"`
+	Key   string `json:"key"`
+	Error string `json:"error"`
+}
+
+// findingKinds: generic_error_read_new (a generic error, then an audit read of NEW: ambiguous, the row may pass) and
+// typed_contradiction (a TYPED nothing-written claim, then NEW: the write contract fails).
+var findingKinds = []string{"generic_error_read_new", "typed_contradiction"}
 
 // rowLayoutScope is the layout every stage-3 row result is limited to (soak_assess.LAYOUT_SCOPE): one volume
 // process, on M02, which F1's PUT attribution needs. A row verdict without exactly this scope does not decode.
@@ -158,7 +176,8 @@ var verdictFields = []string{"status", "criteria", "k7", "resources", "binding",
 	"misses_qualification", "method", "limit",
 	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s",
 	"file", "bytes", "sha256", // the M02 evidence reference row (#1002)
-	"row", "claims", "unknown_attributed", "resource_classes", "layout_scope"} // stage 3 rows
+	"row", "claims", "unknown_attributed", "resource_classes", "layout_scope", // stage 3 rows
+	"late_completions", "findings", "issue", "kind", "key"} // F3/F5 late completions; r26 F5 #1219 findings
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -224,7 +243,7 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if row {
 		return v, decodeRowVerdict(v, want, criteria)
 	}
-	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil {
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil || v.Findings != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -287,8 +306,61 @@ func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error 
 	if v.Status == "PASS" && (len(v.Criteria) != len(criteria) || v.UnknownAttributed == nil || len(v.ResourceClasses) == 0 || v.Row == "") {
 		return errors.New("soak row verdict PASS without every criterion, its UNKNOWN count and resource classes")
 	}
-	if v.LateCompletions != nil && (*v.LateCompletions < 0 || v.Row != "F3") || v.Status == "PASS" && v.Row == "F3" && v.LateCompletions == nil {
-		return errors.New("soak row verdict late-completion count missing, negative or outside F3")
+	late := v.Row == "F3" || v.Row == "F5"
+	if v.LateCompletions != nil && (*v.LateCompletions < 0 || !late) || v.Status == "PASS" && late && v.LateCompletions == nil {
+		return errors.New("soak row verdict late-completion count missing, negative or outside F3/F5")
+	}
+	return checkFindings(v)
+}
+
+// checkFindings (r26): findings only on an F5 row, present on every F5 row the assessor judged (empty included, any
+// status), each one well formed; a typed contradiction is never on a row whose write contract passed.
+func checkFindings(v SoakVerdict) error {
+	if v.Findings == nil {
+		if v.Row == "F5" && v.Error == "" {
+			return errors.New("soak row verdict F5 without its findings")
+		}
+		return nil
+	}
+	if v.Row != "F5" {
+		return errors.New("soak row verdict findings outside F5")
+	}
+	for _, f := range *v.Findings {
+		if f.Issue != 1219 || !slices.Contains(findingKinds, f.Kind) || f.Op == "" || f.Key == "" || len(f.Error) > 400 {
+			return errors.New("soak row verdict finding malformed")
+		}
+		if f.Kind == "typed_contradiction" && v.Criteria["write_contract"].Outcome != "FAIL" {
+			return errors.New("soak row verdict typed contradiction on a passing write contract")
+		}
+	}
+	return nil
+}
+
+// readBackVerdict (r26) re-reads the published soak-verdict.json: exactly the bytes of the decoded verdict, one strict
+// value (no duplicate key, no case-folded alias), a strict decode with no unknown field whose own publish is those same
+// bytes, and the findings and late count equal to the decoded verdict's. A field the publish dropped or changed (an F5
+// row's findings, empty or not) fails instead of passing silently.
+func readBackVerdict(path string, v SoakVerdict) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("soak verdict readback: %w", err)
+	}
+	want, _ := json.MarshalIndent(v, "", " ")
+	if !bytes.Equal(raw, want) {
+		return errors.New("soak verdict readback is not the verdict that was decoded")
+	}
+	if err = oneStrictValue(raw); err != nil {
+		return fmt.Errorf("soak verdict readback is not one strict value: %w", err)
+	}
+	var back SoakVerdict
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err = dec.Decode(&back); err != nil {
+		return fmt.Errorf("soak verdict readback malformed: %w", err)
+	}
+	again, _ := json.MarshalIndent(back, "", " ")
+	if !bytes.Equal(again, raw) || !reflect.DeepEqual(back.Findings, v.Findings) || !reflect.DeepEqual(back.LateCompletions, v.LateCompletions) {
+		return errors.New("soak verdict readback differs from the decoded verdict")
 	}
 	return nil
 }
