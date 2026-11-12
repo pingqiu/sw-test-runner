@@ -486,10 +486,15 @@ def run(config):
         if not parent.poll(wait) or parent.recv().get('event') != 'ready':
             raise RuntimeError('worker %s not ready' % i)
 
-    def send(i, action, key, length, seed=None, verification=False, purpose=None):
+    def send(i, action, key, length, seed=None, verification=False, purpose=None, before=None):
+        """Dispatch one op; False (nothing dispatched) when `before` is given and the clock read here, immediately
+        before the dispatch, is at or past it (r27b F5: a fresh recovery PUT's cutoff)."""
+        clock = time.monotonic()
+        if before is not None and clock >= before:
+            return False
         seq[0] += 1
         cmd = dict(action=action, key=key, seed=seed or seeds.get(key), length=length, operation_id=str(seq[0]),
-                   dispatched=time.monotonic())
+                   dispatched=clock)
         if purpose:
             cmd['recovery'] = purpose  # r27 F5: 'fresh' or 'old', carried onto the op-event
         if pressure_row:
@@ -503,6 +508,7 @@ def run(config):
         if window.get('armed'):
             armed_ops.add(cmd['operation_id'])
         workers[i]['pipe'].send(cmd)
+        return True
 
     def ledger_row(i, cmd, state, digest, submitted, completed, error=None, attributed=None, ident=None, reason=None):
         """Stage 3 write contract: one terminal row per PUT (ACKED, REFUSED or UNKNOWN), frozen as it happens."""
@@ -836,8 +842,10 @@ def run(config):
         restore proved restored=true; its end_mono is on this host's clock, never compared with M02's) was read. First,
         once: one read of a key ACKed before the pressure window and never touched since (old data still reads), or a
         recorded skip when the load has none. Then RECOVERY_KEYS fresh keys, written through the normal oracle, ledger
-        and ACK journal while writing is allowed and within half the recovery bound; each ACK is read back exactly by the
-        read-after-ACK verification. Quarantine is unchanged: a fresh PUT that fails stays an UNKNOWN. True: dispatched."""
+        and ACK journal while writing is allowed and dispatched strictly before heal + recovery_s/2, judged on the clock
+        read at the dispatch itself (r27b: never the loop's earlier `now`, which pumps and the old-key decision age); each
+        ACK is read back exactly by the read-after-ACK verification. Quarantine is unchanged: a fresh PUT that fails stays
+        an UNKNOWN. True: dispatched."""
         heal = recovery['heal']
         if not recovery['old_done']:
             recovery['old_done'] = True
@@ -847,13 +855,15 @@ def run(config):
             if key is not None:
                 send(i, 'get', key, oracle.latest[key].length, purpose='old')
                 return True
-        if len(recovery['keys']) < RECOVERY_KEYS and writing and now <= heal + row_cfg['recovery_s'] / 2:
-            n = len(recovery['keys']) + 1
+        if len(recovery['keys']) < RECOVERY_KEYS and writing:
+            n, cutoff = len(recovery['keys']) + 1, heal + row_cfg['recovery_s'] / 2
             key = recovery_key(config['key_prefix'], n)
             if key in ledger or key in oracle.latest or key in oracle.pending or key in busy:
                 raise OracleError('r27 recovery key not fresh')
+            size = pat['object_bytes'] if pat else 1 << 20
+            if not send(i, 'set', key, size, seed='f5-recovery-generation-%d' % n, purpose='fresh', before=cutoff):
+                return False  # r27b: at or past the cutoff on the dispatch clock: refused
             recovery['keys'].append(key)
-            send(i, 'set', key, pat['object_bytes'] if pat else 1 << 20, seed='f5-recovery-generation-%d' % n, purpose='fresh')
             return True
         return False
 

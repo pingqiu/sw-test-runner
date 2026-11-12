@@ -766,9 +766,27 @@ class PressureRows(unittest.TestCase):
         seen, events, ops = self.recovery_run()  # recovery_s 1: fresh PUTs only until the close + 0.5 s
         puts = [e for e in ops if e.get('recovery') == 'fresh' and e['action'] == 'set']
         self.assertTrue(puts)
-        self.assertTrue(all(seen['close'] <= e['dispatched'] <= seen['close'] + 0.5 for e in puts), puts)
+        self.assertTrue(all(seen['close'] <= e['dispatched'] < seen['close'] + 0.5 for e in puts), puts)
         self.assertLess(len(puts), soak_load.RECOVERY_KEYS)
         self.assert_old_read(seen, events, ops)
+
+    def test_f5_a_stale_loop_clock_never_dispatches_a_fresh_put_past_the_cutoff(self):
+        """r27b red control (the source review's probe): the loop reads `now` before its pumps and the old-key decision;
+        here that decision is slow (0.7 s, no old key), so the loop's `now` is past heal + recovery_s/2 (recovery_s 1:
+        0.5 s) by the time the first fresh PUT is due. A dispatch judged on that stale clock went out late (op44 at
+        heal + 0.937 s); judged on the clock read at the dispatch, it is refused."""
+        self.addCleanup(setattr, soak_load, 'old_key', soak_load.old_key)
+        probe = {}
+
+        def slow(*args):
+            time.sleep(0.7)
+            probe['done'] = time.monotonic()
+            return None
+        soak_load.old_key = slow
+        seen, events, ops = self.recovery_run()
+        self.assertGreater(probe['done'], seen['close'] + 0.5)  # the probe really aged the loop's clock past the cutoff
+        puts = [e for e in ops if e.get('recovery') == 'fresh' and e['action'] == 'set']
+        self.assertEqual([e['op'] for e in puts if e['dispatched'] >= seen['close'] + 0.5], [], puts)
 
     def test_f5_without_an_old_key_the_skip_is_recorded_and_fresh_keys_still_run(self):
         """r26's case: no key ACKed before the window is left untouched (old_key finds none): the load records the skip,
