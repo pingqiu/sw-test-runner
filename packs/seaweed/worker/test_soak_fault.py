@@ -281,6 +281,29 @@ class Limits(Host):
         self.assertTrue(self.cli(c, 'restore')['restored'])
         self.assertEqual(self.limits(p.pid)['memlock'], before)
 
+    def test_the_restore_record_stamps_before_ahead_of_the_prlimit(self):
+        """The F5 proof's restore mark: restore records `before`, stamped before its prlimit runs. A prlimit wrapper on
+        PATH logs CLOCK_MONOTONIC (system-wide, so comparable across processes) at its call, then runs the real one:
+        before.mono < prlimit call < after.mono, and before still reads the LOWERED limit, after the restored one."""
+        real = shutil.which('prlimit')
+        self.assertTrue(real)
+        p = self.dummy(lock_bytes=4 << 20)
+        orig = self.limits(p.pid)['memlock']
+        c = self.config('mr_pressure')
+        self.cli(c, 'apply')
+        (self.bin / 'prlimit').write_text('#!%s\nimport os, sys, time\nopen(os.path.join(os.environ["FAKE_STATE"], "prlimit-mono"), "a")'
+                                          '.write("%%r\\n" %% time.monotonic())\nos.execv(%r, [%r] + sys.argv[1:])\n' % (sys.executable, real, real))
+        (self.bin / 'prlimit').chmod(0o755)
+        row = self.cli(c, 'restore')
+        calls = [float(x) for x in (self.state / 'prlimit-mono').read_text().split()]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(row['restored'])
+        self.assertEqual((row['before']['identity'], row['after']['identity']), (row['identity'], row['identity']))
+        self.assertLess(row['before']['mono'], calls[0])
+        self.assertLess(calls[0], row['after']['mono'])
+        self.assertEqual(row['before']['limits']['memlock'], [1 << 20, orig[1]])
+        self.assertEqual(row['after']['limits']['memlock'], orig)
+
     def test_mr_pressure_refuses_a_target_not_below_current_use(self):
         self.dummy(lock_bytes=0)
         row = self.cli(self.config('mr_pressure'), 'apply', expect=3)

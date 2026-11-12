@@ -248,6 +248,9 @@ def restore(c):
     unproven restore leaves the dead-man armed as the backstop and reports restored False (CLEANUP_UNKNOWN)."""
     kind, arm = c['kind'], armed(c)
     ident = target(c)
+    # Stamped BEFORE any undo (the prlimit, the link up, the unlink): the restore cannot take effect before
+    # before.mono, a proven bound that needs no step timeout (snapshot() stamps mono first and only reads).
+    before = snapshot(c, ident)
     proof, restored = {}, arm is None  # nothing was armed, so nothing was changed
     if arm is not None:
         same = ident == arm['identity']
@@ -286,7 +289,7 @@ def restore(c):
             restored = state == 'fired_or_gone' and stop.returncode in (0, 5)
         else:
             proof['deadman'] = 'left_armed'  # unproven: the dead-man stays the backstop
-    row = dict(action='restore', kind=kind, identity=ident, after=after, restored=restored, proof=proof)
+    row = dict(action='restore', kind=kind, identity=ident, before=before, after=after, restored=restored, proof=proof)
     record(c, row)
     return row
 
