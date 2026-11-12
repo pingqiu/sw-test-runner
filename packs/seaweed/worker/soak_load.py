@@ -40,6 +40,12 @@ AUDIT_OP_S = 35  # one audit GET: the 30 s op limit plus margin; past it the aud
 
 
 REAP_GAPS_S = (20, 3, 2, 2, 3)  # T0->K1, K1->G, A->K2, K2->D, D->E (tests may shrink them; production is these)
+TEARDOWN_EXIT = 78  # r26 F5: the load's exit status when its teardown is unproven (or proven only after the gate)
+
+
+class TeardownUnproven(RuntimeError):
+    """r26 F5: a child not observed gone by D (or the audit gate missed): no fresh audit verdict, no terminal row, and
+    the process must leave without multiprocessing's exit-time join of its still-live children (main())."""
 
 
 def reap_schedule(t0, audit_s):
@@ -61,9 +67,11 @@ def reap_schedule(t0, audit_s):
 def reap(children, ids, kill_at, until, exits, kills_sent, stopped, drain, clock=time.monotonic, sleep=time.sleep):
     """r26 F5 (plan v6): stop each child once, then observe exits against absolute instants only. At kill_at each
     still-live child gets kill() on its own Process object (never a pattern). An exit counts only when OBSERVED
-    (exitcode is not None) by `until`: a kill sent, a timed join that returned or a final row is no exit proof.
-    children: id -> dict(process=, pipe=); exits/kills_sent/stopped are the caller's records, updated in place;
-    drain(id) reads that child's pipe. Returns the children still live at `until`."""
+    (exitcode is not None) by `until`, stamped with the clock read at that observation (r26 correction: never a time
+    taken before a drain); an exit first seen after `until` is no proof. A kill sent, a timed join that returned or a
+    final row is no exit proof. children: id -> dict(process=, pipe=); exits/kills_sent/stopped are the caller's
+    records, updated in place; drain(id) reads that child's pipe (only before `until`). Returns the children still
+    live at `until`."""
     for k in ids:
         if k not in stopped and k not in exits:
             stopped.add(k)
@@ -72,14 +80,17 @@ def reap(children, ids, kill_at, until, exits, kills_sent, stopped, drain, clock
             except (OSError, ValueError):
                 pass  # already gone: its exit is observed below
     while True:
-        now = clock()
         for k in ids:
-            try:
-                drain(k)
-            except (EOFError, OSError):
-                pass  # its pipe closed: the child is exiting or gone
-            if k not in exits and children[k]['process'].exitcode is not None:
-                exits[k] = dict(exitcode=children[k]['process'].exitcode, mono=now)
+            if clock() < until:  # pipe work only inside the schedule; a drain that runs past it proves nothing
+                try:
+                    drain(k)
+                except (EOFError, OSError):
+                    pass  # its pipe closed: the child is exiting or gone
+            code = children[k]['process'].exitcode
+            seen = clock()  # the clock AT the observation, after it: never a stale loop time
+            if k not in exits and code is not None and seen <= until:
+                exits[k] = dict(exitcode=code, mono=seen)
+        now = clock()
         live = [k for k in ids if k not in exits]
         if not live or now >= until:
             return live
@@ -500,7 +511,9 @@ def run(config):
         the link flap's window (LinkFlapWindow, M01 marks) quarantines with its receipt; any other UNKNOWN stops the
         run as today."""
         error, key = str(row.get('error')), cmd['key']
-        if any(s in error for s in row_cfg['refused']):
+        # r26 F5: generic text never certifies nothing-written (#1219): the row's textual REFUSED classes are not
+        # consulted under memlock pressure; a matching PUT stays UNKNOWN and reaches the audit
+        if not pressure_row and any(s in error for s in row_cfg['refused']):
             digest = oracle.pending[key].digest
             oracle.refuse_write(key)
             ledger_row(i, cmd, 'REFUSED', digest, row['submitted'], row['completed'], error)
@@ -565,7 +578,8 @@ def run(config):
             event.update(sequence=v.sequence, length=row.get('length'), sha256=row.get('sha256'))
             credited = cmd['operation_id'] in window['allowed'] or cmd['operation_id'] in armed_ops
             case = classify_get(row, credited and not pressure_row)  # r26 F5: no credit by error text
-            if case == 'unexpected' and row_cfg and credited and any(s in str(row.get('error')) for s in row_cfg['refused']):
+            if (case == 'unexpected' and row_cfg and credited and not pressure_row
+                    and any(s in str(row.get('error')) for s in row_cfg['refused'])):
                 case = 'fault'  # a named definite refusal inside the armed window
             if case == 'unexpected' and pressure_row and not row['ok'] and 'window' in flap \
                     and flap['window'].contains(row['submitted'], row['completed']):
@@ -829,7 +843,7 @@ def run(config):
         log('ownership.jsonl', dict(event='teardown', schedule=dict(sched), gated=gated, audit='run' if gated else 'skipped',
                                     unproven=unproven, mono=time.monotonic()))
         if unproven or not gated:
-            raise RuntimeError('r26 F5 teardown %s: no fresh audit verdict and no terminal row' % (
+            raise TeardownUnproven('r26 F5 teardown %s: no fresh audit verdict and no terminal row' % (
                 'UNPROVEN, children still live at D: %s' % unproven if unproven else 'proven only after the audit gate G'))
 
     poller = threading.Thread(target=poll_topology, args=(config, stop, files['topology-polls.jsonl']), daemon=True)
@@ -928,7 +942,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     config = json.loads(parser.parse_args().config)
-    summary = run(config)
+    try:
+        summary = run(config)
+    except TeardownUnproven as error:
+        # r26 correction: run() has already closed its evidence and bounded every join by E. A normal interpreter exit
+        # would now join each still-live multiprocessing child without any bound; leave the process at once instead.
+        sys.stderr.write('soak_load: %s\n' % error)
+        sys.stderr.flush()
+        sys.stdout.flush()
+        os._exit(TEARDOWN_EXIT)
     root = Path(config['root'])
     summary['evidence'] = {n: dict(sha256=hashlib.sha256((root / n).read_bytes()).hexdigest(), bytes=(root / n).stat().st_size)
                            for n in evidence_names(config.get('fault_row'))

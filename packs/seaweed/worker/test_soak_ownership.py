@@ -364,6 +364,38 @@ class Reap(unittest.TestCase):
         live, exits, kills, _ = self.reap({0: p}, 20, 47)
         self.assertEqual((live, exits[0]['exitcode'], kills, p.kills), ([], 0, {}, 0))
 
+    # ---- r26 correction (source review of c0a826ae): the exit proof is stamped at the observation
+    def test_an_exit_first_seen_after_a_drain_that_crossed_the_deadline_is_no_proof(self):
+        p = FakeProcess(self.clock)
+        children = {0: dict(process=p, pipe=FakePipe())}
+
+        def drain(k):  # the drain runs past `until`, and only then does the exit become observable
+            self.clock.now = 2.0
+            p.exit_at, p.code = 2.0, 0
+        exits = {}
+        live = soak_load.reap(children, [0], 20, 1.0, exits, {}, set(), drain, clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual((live, exits), ([0], {}))  # UNPROVEN: never backdated to the loop's stale clock
+
+    def test_an_exit_seen_inside_the_deadline_is_stamped_at_its_observation(self):
+        p = FakeProcess(self.clock)
+        children = {0: dict(process=p, pipe=FakePipe())}
+
+        def drain(k):
+            self.clock.now = 0.5
+            p.exit_at, p.code = 0.5, 0
+        exits = {}
+        live = soak_load.reap(children, [0], 20, 1.0, exits, {}, set(), drain, clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual((live, exits[0]['exitcode']), ([], 0))
+        self.assertGreaterEqual(exits[0]['mono'], 0.5)  # the clock read at the observation, not before the drain
+
+    def test_no_pipe_work_once_the_deadline_has_passed(self):
+        drained = []
+        p = FakeProcess(self.clock, exit_at=0.0)
+        self.clock.now = 5.0  # already past `until`
+        live = soak_load.reap({0: dict(process=p, pipe=FakePipe())}, [0], 20, 1.0, {}, {}, set(), drained.append,
+                              clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual((live, drained), ([0], []))  # no drain and no late proof
+
     def test_a_dead_pipe_does_not_stop_the_observation(self):
         p = FakeProcess(self.clock, exit_at=1.0)
         children = {0: dict(process=p, pipe=FakePipe())}

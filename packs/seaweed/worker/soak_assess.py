@@ -637,6 +637,7 @@ def assess_row(c):
     injection = {r.get('action'): r for r in f.get('injection') or [] if isinstance(r, dict)}
     # r26 F5: the load's ownership record (each child's final row and observed exit, the teardown) is mandatory
     own = [typed(x, event=str) for x in lines(root, 'ownership.jsonl')] if kind == 'mr_pressure' else []
+    raw = settled_rows(root) if kind == 'mr_pressure' else {}  # r26 correction: the raw settled rows
 
     # 1. Bytes: every ACK re-derived from its seed; every hit the latest ACK when it completed (oracle replay).
     wrong, oracle = [], Oracle()
@@ -650,8 +651,10 @@ def assess_row(c):
         elif get_case(r) == 'hit' and not (r['key'] in oracle.latest and oracle.latest[r['key']].matches(r['length'], r['sha256'])):
             wrong.append('get ' + r['op'])
     wrong += ['ledger ' + r['op'] for r in ledger if r['digest'] != hashlib_sha(payload(r['seed'], r['length']))]
-    if kind == 'mr_pressure':  # r26 F5 (plan v3 item 7, a NEW gate): a failed GET never wrote into its buffer
-        wrong += ['failed GET %s wrote into its buffer' % e['op'] for e in gets if e.get('state') == 'failed' and e.get('untouched') is not True]
+    if kind == 'mr_pressure':  # r26 F5 (plan v3 item 7, a NEW gate): a failed GET never wrote into its buffer, judged
+        # on EVERY settled GET whose raw row is ok=false, whatever op-events labelled it (failed, miss, ...)
+        wrong += ['failed GET %s wrote into its buffer' % op for op, r in sorted(raw.items(), key=lambda x: str(x[0]))
+                  if r['action'] == 'get' and r['ok'] is False and r.get('untouched') is not True]
     mark('bytes', 'FAIL' if wrong else 'PASS', '%d wrong %s' % (len(wrong), wrong[:5]))
 
     # 2. Write contract: one terminal state per PUT, ACKED exactly the journal, UNKNOWN never retried or ACKed,
@@ -786,7 +789,7 @@ def assess_row(c):
         if len({json.dumps(s['watch'].get(label), sort_keys=True) for s in samples}) != 1:
             crash.append('watched %s changed' % label)
     if kind == 'mr_pressure':
-        crash += pressure_failures(root, c, f, row, ops, audits, own, workers)
+        crash += pressure_failures(root, c, f, row, ops, audits, own, workers, raw)
         open_ = [e['op'] for e in ops if e.get('state') == 'unresolved' or e.get('phase') in ('submit', 'wait', 'ack')]
     outcome = 'FAIL' if late or not terminal or crash else 'NOT_COVERED' if not samples else 'PASS'
     mark('failure_mode', outcome, 'late %s, terminal %s, %s%s' % (
@@ -944,16 +947,44 @@ def pressure_identity(injection, samples, row):
     return ident, ''
 
 
-def pressure_failures(root, c, f, row, ops, audits, own, workers):
+def settled_rows(root):
+    """r26 F5 correction: op -> the worker's RAW row of a SETTLED own-future completion, as the load logged it BEFORE
+    judging (completions.jsonl), joined with its worker index and action. An op that raised (submit, wait, ack) logged
+    an error event instead and has no settled row. The judgement rests on these raw rows, never on a presentation
+    label (state, phase, miss) of op-events."""
+    out = {}
+    for x in lines(root, 'completions.jsonl'):
+        r = x.get('row') if isinstance(x, dict) else None
+        if isinstance(r, dict) and 'event' not in r and isinstance(r.get('ok'), bool) and x.get('action') in ('get', 'set'):
+            out[str(x.get('op'))] = dict(r, worker=x.get('worker'), action=x.get('action'))
+    return out
+
+
+def own_pid(r, workers):
+    """The settled row's per-op pid is exactly its worker's admitted pid (workers.json): missing or contradictory
+    identity is never credited."""
+    w = workers.get(str(r.get('worker'))) if isinstance(workers, dict) else None
+    pid = r.get('pid')
+    return isinstance(w, dict) and isinstance(pid, int) and not isinstance(pid, bool) and w.get('pid') == pid
+
+
+def counted(r, workers):
+    """A settled failed op is named and counted: its own per-op connector_failed_ops delta exactly +1 (or, a GET,
+    #1187's volume-unavailable flag), on its own worker's pid."""
+    return own_pid(r, workers) and (one(r.get('failed_delta')) or r['action'] == 'get' and r.get('unavailable') is True)
+
+
+def pressure_failures(root, c, f, row, ops, audits, own, workers, raw=None):
     """r26 F5 failure-mode checks (plan v3 items 3, 6; v5 C2; v6): the M01 marks in the controller's order, every
     failed GET counted, and every child (the load workers and the audit worker) shown settled, final, joined and
     OBSERVED gone (exit 0, never killed, nothing outstanding) BEFORE the fresh audit's first read."""
     out = []
     if fault_marks(root, c, f) is None:
         out.append('pressure marks missing, foreign or out of order (pause<=dispatch<=ready<=close)')
-    uncounted = [e['op'] for e in ops if e.get('state') == 'failed' and not (one(e.get('failed_delta')) or e.get('unavailable') is True)]
+    # r26 correction: EVERY settled failed op, GET or PUT, from its raw row (an unrelated counted op hides nothing)
+    uncounted = sorted((op for op, r in (raw or {}).items() if r['ok'] is False and not counted(r, workers)), key=str)
     if uncounted:
-        out.append('failed GETs not counted (connector_failed_ops.get +1): %s' % uncounted[:3])
+        out.append('settled failed ops not counted on their own worker (connector_failed_ops +1): %s' % uncounted[:3])
     td = [x for x in own if x.get('event') == 'teardown']
     exits = {x.get('child'): x for x in own if x.get('event') == 'exit'}
     if len(td) != 1 or td[0].get('gated') is not True or td[0].get('unproven') != []:
@@ -1251,11 +1282,19 @@ def effect(kind, row, f, samples, injection, kills, ledger, ops, workers, root, 
         win = pressure_window(root, run or {}, f, row)
         if win is None:
             return nc('no pressure window: M01 marks missing, foreign or out of order')
+        # r26 correction: every credit rests on the op's RAW settled row (its own future completed ok=false, counted
+        # exactly +1, on its worker's admitted pid) joined to a label that agrees: a PUT's receipt phase 'complete', a
+        # GET's event with no unresolved phase. A raised, timed-out or abandoned op has no settled row and no credit.
+        raw = settled_rows(root)
+        ok_raw = lambda op, action: (op in raw and raw[op]['action'] == action and raw[op]['ok'] is False
+                                     and one(raw[op].get('failed_delta')) and own_pid(raw[op], workers))
         puts = [r['op'] for r in ledger if r['state'] == 'UNKNOWN' and isinstance(r.get('reason'), dict)
                 and r['reason'].get('phase') == 'complete' and r['reason'].get('native_ok') is False
-                and one(r['reason'].get('failed_delta')) and win.contains(r['submitted'], r['completed'])]
-        gets = [e['op'] for e in ops if e['action'] == 'get' and e.get('state') == 'failed' and e['ok'] is False
-                and one(e.get('failed_delta')) and win.contains(e['submitted'], e['completed'])]
+                and one(r['reason'].get('failed_delta')) and ok_raw(r['op'], 'set') and win.contains(r['submitted'], r['completed'])
+                and r['worker_identity'].get('pid') == raw[r['op']].get('pid')]  # no contradiction with the ledger's worker
+        gets = [e['op'] for e in ops if e['action'] == 'get' and e.get('state') == 'failed' and e['ok'] is False and 'phase' not in e
+                and one(e.get('failed_delta')) and ok_raw(e['op'], 'get') and win.contains(e['submitted'], e['completed'])
+                and e.get('pid') == raw[e['op']].get('pid')]  # no contradiction with the op-event's own pid
         t = (apply_.get('after') or {}).get('mono')
         info = [k for k in ('registration_refused', 'registration_fallback') if counter_rose(samples, k, ident, t, span[1]) is True]
         if puts or gets:

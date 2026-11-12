@@ -210,6 +210,18 @@ def f5_files(r, extra):
                   final=True, poisoned=False, abandoned_outstanding=[], unsettled_buffers=0, final_mono=F5_GONE - 0.5,
                   exitcode=0, observed=F5_GONE, killed=False, kill_mono=None) for c in ('0', '1', '2', '3', 'audit')]
     extra['ownership.jsonl'] = exits + [dict(event='teardown', schedule={}, gated=True, audit='run', unproven=[], mono=F5_GONE + 30)]
+    extra['completions.jsonl'] = [f5_raw_of(e) for e in r.events]
+
+
+def f5_raw_of(e):
+    """The worker's raw settled row of one op (the load's completions.jsonl entry): ownership mode adds its pid and
+    its per-op connector_failed_ops delta; a GET carries its buffer verdict."""
+    row = dict(operation_id=e['op'], action=e['action'], key=e['key'], submitted=e['submitted'], completed=e['completed'],
+               ok=e['ok'], error=e.get('error'), results=e.get('results'), pid=e.get('pid', WID[e['worker']]['pid']),
+               failed_delta=e.get('failed_delta', 0))
+    if e['action'] == 'get':
+        row['untouched'] = e.get('untouched', False) if not e['ok'] else e.get('untouched', True)
+    return dict(worker=e['worker'], op=e['op'], action=e['action'], row=row)
 
 
 def files(r, kind):
@@ -1445,6 +1457,13 @@ def f5_put(ev, at=1115.0, phase='complete', native_ok=False, failed_delta=1, aud
     ev['op-events.jsonl'].insert(0, dict(op=op, worker=1, action='set', key=key, dispatched=at - 0.2, submitted=at - 0.1,
                                          completed=at, ok=False, error=error, state='UNKNOWN', received=at + 0.01,
                                          **({} if phase == 'complete' else dict(phase=phase))))
+    if phase == 'complete':
+        ev['completions.jsonl'].append(dict(worker=1, op=op, action='set', row=dict(
+            operation_id=op, action='set', key=key, submitted=at - 0.1, completed=at, ok=False, error=error, results=[False],
+            pid=WID[1]['pid'], **({} if failed_delta is None else dict(failed_delta=failed_delta)))))
+    else:
+        ev['completions.jsonl'].append(dict(worker=1, op=op, action='set', row=dict(
+            event='error', operation_id=op, action='set', error=error, phase=phase)))
     read = dict(case='hit', sha256=digest(seed), length=64) if audit == 'new' else dict(case='miss')
     ev['audit.jsonl'].append(dict(key=key, reads=[dict(read, submitted=F5_AUDIT)]))
     next(m for m in ev['op-events.jsonl'] if m.get('event') == 'quiescent')['dispatched'] = int(op)
@@ -1460,6 +1479,23 @@ def f5_drop(pred):
 
 def f5_failed_get(ev):
     return next(e for e in f5_ops(ev) if e.get('state') == 'failed')
+
+
+def f5_raw(ev, op):
+    return next(x['row'] for x in ev['completions.jsonl'] if x['op'] == op)
+
+
+def f5_get_both(**kw):
+    """Edit the counted failed GET's op-event AND its raw settled row the same way (a value None removes the key)."""
+    def edit(ev):
+        e = f5_failed_get(ev)
+        for target in (e, f5_raw(ev, e['op'])):
+            for k, v in kw.items():
+                if v is None:
+                    target.pop(k, None)
+                else:
+                    target[k] = v
+    return edit
 
 
 def f5_exit(ev, child):
@@ -1492,9 +1528,9 @@ class F5Pressure(unittest.TestCase):
             'a settled PUT counted 0': lambda ev: (no_get(ev), f5_put(ev, failed_delta=0)),
             'a settled PUT counted 2': lambda ev: (no_get(ev), f5_put(ev, failed_delta=2)),
             'a settled PUT counted True (a bool)': lambda ev: (no_get(ev), f5_put(ev, failed_delta=True)),
-            'the failed GET counted 0': lambda ev: f5_failed_get(ev).update(failed_delta=0),
-            'the failed GET counted 2': lambda ev: f5_failed_get(ev).update(failed_delta=2),
-            'the failed GET outside the window': lambda ev: f5_failed_get(ev).update(submitted=1170.0, completed=1170.5, dispatched=1169.9),
+            'the failed GET counted 0': f5_get_both(failed_delta=0),
+            'the failed GET counted 2': f5_get_both(failed_delta=2),
+            'the failed GET outside the window': f5_get_both(submitted=1170.0, completed=1170.5),
             'no failure at all': no_get,
         }
         for name, edit in cases.items():
@@ -1554,17 +1590,17 @@ class F5Pressure(unittest.TestCase):
     def test_findings_survive_a_failing_row(self):
         def edit(ev):
             f5_put(ev, audit='new')
-            f5_failed_get(ev)['untouched'] = False  # bytes FAIL
+            f5_get_both(untouched=False)(ev)  # bytes FAIL
         v = self.v(edit)
         self.assertEqual((v['status'], len(v['findings'])), ('FAIL', 1))
 
     def test_a_failed_get_must_be_counted_and_untouched(self):
-        c = self.v(lambda ev: f5_failed_get(ev).pop('failed_delta'))['criteria']
+        c = self.v(f5_get_both(failed_delta=None))['criteria']
         self.assertEqual(c['failure_mode']['outcome'], 'FAIL', c['failure_mode'])
         self.assertIn('not counted', c['failure_mode']['reason'])
-        c = self.v(lambda ev: f5_failed_get(ev).update(failed_delta=None, unavailable=True))['criteria']
+        c = self.v(f5_get_both(failed_delta=None, unavailable=True))['criteria']
         self.assertEqual(c['failure_mode']['outcome'], 'PASS', c['failure_mode'])
-        c = self.v(lambda ev: f5_failed_get(ev).update(untouched=False))['criteria']['bytes']
+        c = self.v(f5_get_both(untouched=False))['criteria']['bytes']
         self.assertEqual(c['outcome'], 'FAIL', c)
         self.assertIn('wrote into its buffer', c['reason'])
 
@@ -1621,6 +1657,63 @@ class F5Pressure(unittest.TestCase):
             with self.subTest(edit=edit.__name__):
                 c = self.v(edit)['criteria']['recovery']
                 self.assertEqual(c['outcome'], want, c)
+
+    # ---- r26 correction (source review of c0a826ae): each was a whole-row false PASS through this CLI
+    def test_an_uncounted_settled_put_is_not_hidden_by_a_counted_get(self):
+        v = self.v(lambda ev: f5_put(ev, failed_delta=None, audit='old'))
+        self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+        self.assertIn('not counted', v['criteria']['failure_mode']['reason'])
+        self.assertEqual(v['status'], 'FAIL')
+
+    def test_a_counted_settled_put_alongside_the_get_still_passes(self):
+        self.assertEqual(self.v(lambda ev: f5_put(ev, failed_delta=1, audit='old'))['status'], 'PASS')
+
+    def test_a_touched_failed_get_relabelled_miss_still_fails_bytes(self):
+        def edit(ev):
+            f5_put(ev)  # a counted causal PUT keeps the causal PASS
+            e = f5_failed_get(ev)
+            e.update(state='miss', untouched=False)
+            f5_raw(ev, e['op'])['untouched'] = False
+        v = self.v(edit)
+        self.assertEqual(v['criteria']['bytes']['outcome'], 'FAIL', v['criteria'])
+        self.assertIn('wrote into its buffer', v['criteria']['bytes']['reason'])
+
+    def test_a_wait_phase_get_with_a_stale_count_is_never_causal(self):
+        v = self.v(lambda ev: f5_failed_get(ev).update(phase='wait'))
+        self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertNotEqual(v['status'], 'PASS')
+
+    def test_a_foreign_or_contradictory_pid_is_never_credited(self):
+        cases = {'event and raw pid foreign': f5_get_both(pid=999999),
+                 'event pid contradicts the raw row': lambda ev: f5_failed_get(ev).update(pid=999999),
+                 'raw pid missing': lambda ev: f5_raw(ev, f5_failed_get(ev)['op']).pop('pid')}
+        for name, edit in cases.items():
+            with self.subTest(case=name):
+                v = self.v(edit)
+                self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+                self.assertNotEqual(v['status'], 'PASS')
+
+    def test_a_label_contradicting_its_settled_raw_row_is_never_credited(self):
+        """The raw row says settled, failed, counted +1 on its own pid; the label says otherwise: no credit."""
+        no_get = f5_drop(lambda e: e.get('state') == 'failed')
+
+        def put_label(**reason):
+            def edit(ev):
+                no_get(ev)
+                op = f5_put(ev)  # a settled, counted PUT: receipt and raw row agree
+                next(x for x in ev['write-ledger.jsonl'] if x['op'] == op)['reason'].update(reason)
+            return edit
+        cases = {'PUT receipt says unresolved (wait)': put_label(phase='wait'),
+                 'PUT receipt counts 2': put_label(failed_delta=2),
+                 'GET event counts 0': lambda ev: f5_failed_get(ev).update(failed_delta=0)}
+        for name, edit in cases.items():
+            with self.subTest(case=name):
+                c = self.v(edit)['criteria']['causal']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_the_own_pid_on_both_records_passes(self):
+        v = self.v(f5_get_both(pid=WID[0]['pid']))
+        self.assertEqual(v['status'], 'PASS', v['criteria'])
 
     def test_late_completions_are_reported(self):
         late = dict(run_id='run-1', episode='E1', worker=1, worker_identity=WID[1], op='5', action='set', key='k1', fid=7,

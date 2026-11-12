@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import unittest
+from pathlib import Path
 
 import soak_load
 import test_soak_load
@@ -381,7 +382,7 @@ class PressureRows(unittest.TestCase):
         self.config['pacing_s'] = 0.05
         self.config['duration_s'] = 6
 
-    def controller(self, at=1.0, fail=0.6, files=('fake-fail',), then=(('fake-fail-set',), 0.6), before=None):
+    def controller(self, at=1.0, fail=0.6, files=('fake-fail',), then=(('fake-fail-set',), 0.6), before=None, text=''):
         """pause at `at`, then `files` present for `fail` s after the ack (GETs failing: PUTs still ACK, so their
         read-after-ACK GETs run), then `then` = (files, s) (None: nothing), then the close; before: (delay, files)
         written before the pause instead."""
@@ -406,12 +407,12 @@ class PressureRows(unittest.TestCase):
                 self.write('fault-pause-E1.json', dict(episode='E1', role='volume', pause_mono=seen['pause']))
                 wait(self.root / 'fault-ack-E1.json')
                 for f in files:
-                    (self.root / f).write_text('')
+                    (self.root / f).write_text(text)  # the fake child's error text ('' = its default)
                 time.sleep(fail)
                 for f in files:
                     (self.root / f).unlink()
                 for f in (then or ((), 0))[0]:
-                    (self.root / f).write_text('')
+                    (self.root / f).write_text(text)
                 time.sleep((then or ((), 0))[1])
                 for f in (then or ((), 0))[0]:
                     (self.root / f).unlink()
@@ -573,6 +574,70 @@ class PressureRows(unittest.TestCase):
         self.assertEqual(ex['audit']['exitcode'], -9)
         done = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('event') == 'audit_done']
         self.assertIs(done[0]['complete'], False)
+
+    # ---- r26 correction (source review of c0a826ae), through the shipping load
+    def test_f5_a_pressure_error_matching_a_refused_class_is_never_refused(self):
+        self.assertIn('No space left on device', self.config['fault_row']['refused'])  # the admitted literal
+        t, _ = self.controller(fail=0.6, files=('fake-fail',), then=(('fake-fail-set',), 0.6), text='No space left on device')
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        ledger = jsonl(self.root / 'write-ledger.jsonl')
+        self.assertEqual([r['op'] for r in ledger if r['state'] == 'REFUSED'], [])  # generic text certifies nothing
+        unknown = [r for r in ledger if r['state'] == 'UNKNOWN']
+        self.assertTrue(unknown and all('No space left on device' in (r['error'] or '') for r in unknown), unknown)
+        gets = [e for e in jsonl(self.root / 'op-events.jsonl') if e.get('action') == 'get' and e['ok'] is False]
+        self.assertTrue(gets and all(e.get('state') == 'failed' and not e.get('fault_error') for e in gets), gets)
+
+    def test_f5_an_unproven_teardown_leaves_the_process_by_its_bound(self):
+        """The shipping CLI (soak_load.main) in its own process: a child survives its kill (modelled: kill() on child 3
+        is a no-op, so the real child stays live), the teardown is UNPROVEN, and the process exits non-zero at once
+        instead of multiprocessing's unbounded exit-time join of that live child."""
+        import os
+        import subprocess
+        import sys
+        (self.root / 'fake-stop-ignore').write_text('')
+        code = ("import json, sys, soak_load, test_soak_fake_child as f\n"
+                "soak_load.child = f.child\n"
+                "soak_load.REAP_GAPS_S = (2, 0.5, 0.3, 0.3, 0.3)\n"
+                "real = soak_load.reap\n"
+                "def reap(children, ids, *a, **kw):\n"
+                "    if 3 in ids:\n"
+                "        children[3]['process'].kill = lambda: None  # survives its kill (modelled)\n"
+                "    return real(children, ids, *a, **kw)\n"
+                "soak_load.reap = reap\n"
+                "sys.argv = ['soak_load.py', '--config', sys.argv[1]]\n"
+                "soak_load.main()\n")
+        t, _ = self.controller(fail=0.3)
+        began = time.monotonic()
+        # the PROCESS exit is what is bounded: its output goes to files, since the live child it leaves behind still
+        # holds inherited descriptors (a pipe would never reach EOF)
+        with open(self.root / 'cli.out', 'w') as so, open(self.root / 'cli.err', 'w') as se:
+            p = subprocess.Popen([sys.executable, '-c', code, json.dumps(self.config)], cwd=str(Path(soak_load.__file__).parent),
+                                 stdout=so, stderr=se, stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            try:
+                rc = p.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                rc = p.wait()
+        elapsed = time.monotonic() - began
+        err = (self.root / 'cli.err').read_text()
+        t.join(10)
+        try:
+            self.assertEqual(rc, soak_load.TEARDOWN_EXIT, err[-2000:])
+            self.assertIn('UNPROVEN', err)
+            self.assertLess(elapsed, self.config['duration_s'] + self.config['quiescence_s'] + sum(soak_load.REAP_GAPS_S) + 3 + 15)
+            events = jsonl(self.root / 'op-events.jsonl')
+            self.assertNotIn('quiescent', [e.get('event') for e in events])
+            self.assertNotIn('audit_done', [e.get('event') for e in events])
+        finally:  # the live child the CLI left behind is this test's to stop: by its recorded pid, checked first
+            pid = json.loads((self.root / 'workers.json').read_text())['3']['pid']
+            try:
+                cmdline = Path('/proc/%d/cmdline' % pid).read_bytes()
+            except OSError:
+                cmdline = b''
+            if b'python' in cmdline:
+                os.kill(pid, 9)
 
     def test_only_f5_children_get_the_ownership_flag(self):
         Rows.flap_row(self)

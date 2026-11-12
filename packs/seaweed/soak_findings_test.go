@@ -87,6 +87,37 @@ func TestF5FindingsDecodeRules(t *testing.T) {
 	}
 }
 
+// r26 correction (source review of c0a826ae): the error cap is 400 characters, as the assessor truncates the
+// raw text, not 400 UTF-8 bytes; and a findings member is refused by its raw shape, null included, before decoding
+// (a null decodes to an absent pointer that publication would drop).
+func TestF5FindingErrorCapIsCharactersAndNullFindingsAreRefused(t *testing.T) {
+	withError := func(s string) string {
+		return f5Row("PASS", nil, strings.Replace(oneFinding, `"error":"RuntimeError('put_cpu_many failed')"`, `"error":"`+s+`"`, 1))
+	}
+	for name, c := range map[string]struct {
+		row string
+		ok  bool
+	}{
+		"400 multibyte characters (800 bytes)": {withError(strings.Repeat("é", 400)), true},
+		"201 multibyte characters (402 bytes)": {withError(strings.Repeat("é", 201)), true},
+		"401 multibyte characters":             {withError(strings.Repeat("é", 401)), false},
+		"F5 findings null":                     {f5Row("PASS", nil, `"findings":null,`), false},
+		"F3 findings null":                     {rowVerdict("PASS", nil, `"findings":null,`), false},
+		"F5 findings an object":                {f5Row("PASS", nil, `"findings":{},`), false},
+	} {
+		_, err := decodeVerdict(captured([]byte(c.row)), f5Want, rowCriteria)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err=%v, want ok=%v", name, err, c.ok)
+		}
+	}
+	for name, v := range map[string]any{"null": nil, "array": []any{}} {
+		row := passRow(t, func(r map[string]any) { r["findings"] = v })
+		if _, err := decodeVerdict(captured([]byte(row)), testBinding, soakCriteria); err == nil {
+			t.Errorf("findings %s on a non-row (soak) verdict must not decode", name)
+		}
+	}
+}
+
 func TestReadBackVerdictRefusesWhatWasNotPublished(t *testing.T) {
 	v, err := decodeVerdict(captured([]byte(f5Row("PASS", nil, oneFinding))), f5Want, rowCriteria)
 	if err != nil {

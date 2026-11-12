@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -234,16 +235,19 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if err = oneStrictValue(out); err != nil {
 		return v, fmt.Errorf("soak verdict is not one strict row: %w", err)
 	}
+	row := slices.Equal(criteria, rowCriteria)
+	if err = findingsShape(out, row); err != nil {
+		return v, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(out))
 	dec.DisallowUnknownFields()
-	row := slices.Equal(criteria, rowCriteria)
 	if err = dec.Decode(&v); err != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if row {
 		return v, decodeRowVerdict(v, want, criteria)
 	}
-	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil || v.Findings != nil {
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -313,6 +317,27 @@ func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error 
 	return checkFindings(v)
 }
 
+// findingsShape (r26 correction) checks the RAW verdict before decoding can erase a shape: a present "findings" member
+// is refused on a non-row verdict whatever its value, and on a row it must be a JSON array, so a `null` (which decodes
+// to an absent pointer and would be dropped on publication) is refused instead of passing silently.
+func findingsShape(raw []byte, row bool) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return errors.New("soak verdict malformed")
+	}
+	f, present := top["findings"]
+	if !present {
+		return nil
+	}
+	if !row {
+		return errors.New("soak verdict findings on a non-row verdict")
+	}
+	if t := bytes.TrimSpace(f); len(t) == 0 || t[0] != '[' {
+		return errors.New("soak row verdict findings not an array")
+	}
+	return nil
+}
+
 // checkFindings (r26): findings only on an F5 row, present on every F5 row the assessor judged (empty included, any
 // status), each one well formed; a typed contradiction is never on a row whose write contract passed.
 func checkFindings(v SoakVerdict) error {
@@ -326,7 +351,8 @@ func checkFindings(v SoakVerdict) error {
 		return errors.New("soak row verdict findings outside F5")
 	}
 	for _, f := range *v.Findings {
-		if f.Issue != 1219 || !slices.Contains(findingKinds, f.Kind) || f.Op == "" || f.Key == "" || len(f.Error) > 400 {
+		// r26 correction: the cap is 400 CHARACTERS, as the assessor truncates the raw text (not 400 UTF-8 bytes)
+		if f.Issue != 1219 || !slices.Contains(findingKinds, f.Kind) || f.Op == "" || f.Key == "" || utf8.RuneCountInString(f.Error) > 400 {
 			return errors.New("soak row verdict finding malformed")
 		}
 		if f.Kind == "typed_contradiction" && v.Criteria["write_contract"].Outcome != "FAIL" {
