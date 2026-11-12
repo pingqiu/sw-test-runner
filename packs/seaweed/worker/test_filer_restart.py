@@ -6,6 +6,10 @@ from test_lab_profile import LaunchContract
 
 @unittest.skipUnless(sys.platform=='linux','Linux private socket/process seam')
 class FilerReplacement(unittest.TestCase):
+ def setUp(self):
+  # lab_profile refuses group/other-writable replacement filer state; the state these tests create must not
+  # inherit the caller's umask (under 0002 the CLI checks failed before reaching their own path).
+  old=os.umask(0o022);self.addCleanup(os.umask,old)
  @unittest.skipUnless(shutil.which('cc'), 'ELF product fixture')
  def test_actual_deploy_kill_replacement_with_worker_umask(self):
   for writable in (False,True):
