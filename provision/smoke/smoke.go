@@ -35,6 +35,10 @@ type Config struct {
 	Cloud           seaweed.CloudConfig `json:"cloud"`
 	EstimatedUSD    float64             `json:"estimated_usd"`
 	PriorUSD        float64             `json:"prior_estimated_usd"`
+	// Budget (BUDGET-POLICY.md): no project = today's $3/run, $10 cumulative.
+	Project  string                   `json:"project,omitempty"`
+	Budgets  map[string]ProjectBudget `json:"budgets,omitempty"`
+	Override json.RawMessage          `json:"budget_override,omitempty"`
 }
 type Result struct {
 	Schema            string         `json:"schema"`
@@ -191,8 +195,11 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 		}
 	}
 	uuid := regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
-	if c.PriorUSD < 0 || c.PriorUSD+c.EstimatedUSD > 10 || !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Budget <= 0 || d.Run.Budget > 3 || d.Run.Abort <= 0 || d.Run.Abort > d.Run.Budget || c.EstimatedUSD <= 0 || c.EstimatedUSD > d.Run.Abort || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
-		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG, <=$3 and minute-aligned cleanup envelope")
+	if _, err = budgetGate(c, d); err != nil {
+		return nil, nil, d, err
+	}
+	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
+		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG and minute-aligned cleanup envelope")
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
 		if !filepath.IsAbs(p) {
@@ -508,6 +515,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Error = err.Error()
 		return
 	}
+	budget, _ := budgetGate(c, d) // already admitted by inputs
 	if mode != "plan" && mode != "run" && mode != "destroy" && mode != "verify" {
 		out.Code = "USAGE"
 		return
@@ -536,7 +544,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		if d.Cluster {
 			count = 10
 		}
-		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
+		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "budget": budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
 	if ctl.Command == nil {
@@ -682,6 +690,12 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			}
 		}
 		if err = os.WriteFile(filepath.Join(root, "run.auto.tfvars.json"), vars, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
+		// Admitted caps and the override's raw bytes, for the reviewer.
+		admitted, _ := marshalVerbatim(budget)
+		if err = os.WriteFile(filepath.Join(c.Output, "budget.json"), admitted, 0600); err != nil {
 			out.Error = err.Error()
 			return
 		}
