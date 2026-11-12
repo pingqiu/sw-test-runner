@@ -158,6 +158,14 @@ class LaunchContract(unittest.TestCase):
         self.assertEqual(argv[argv.index('--master') + 1], '10.0.2.3:19755')
         self.assertEqual(argv[argv.index('--ip') + 1], '10.0.2.2')
 
+    def test_a_declared_volume_metrics_port_is_served_and_none_otherwise(self):
+        c = dict(self.config(), device='mlx5_0', gid_index=3)
+        argv, _ = profile.product_command(c, 'volume')
+        self.assertNotIn('--metricsPort', argv)  # undeclared: unchanged argv
+        c['services'] = dict(c['services'], volume_metrics=18530)
+        argv, _ = profile.product_command(c, 'volume')
+        self.assertEqual((argv[argv.index('--metricsPort') + 1], argv[argv.index('--metricsIp') + 1]), ('18530', c['address']))
+
     def test_dc_volume_uses_declared_ports_and_device(self):
         c = dict(self.config(), device='mlx5_0', gid_index=3)
         argv, env = profile.product_command(c, 'volume')

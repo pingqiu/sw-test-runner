@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,12 +93,18 @@ func (s *directSoak) command(label string) (tr.JobPin, string, error) {
 
 // step runs one bounded job and returns its receipt as the approved path would.
 func (s *directSoak) step(ctx context.Context, label string, seconds int) (tr.ExitInfo, error) {
+	return s.stepAs(ctx, label, seconds, "")
+}
+
+// stepAs is step with a command prefix: "sudo -n " for the stage-3 injector, which changes a link, a
+// limit or a mount on M02 and arms its systemd-run dead-man.
+func (s *directSoak) stepAs(ctx context.Context, label string, seconds int, prefix string) (tr.ExitInfo, error) {
 	pin, cmd, err := s.command(label)
 	if err != nil {
 		return tr.ExitInfo{}, err
 	}
 	start := time.Now()
-	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-"+label+".json", label, seconds, cmd)
+	out, err := cloudStep(ctx, s.nodes[pin.Node], s.c.Output, "soak-"+label+".json", label, seconds, prefix+cmd)
 	e := exitInfo(out, 0, start)
 	if err != nil { // a failed or unreachable step has no known end
 		e.Code, e.Settled, e.Output.Complete = 1, false, false
@@ -189,23 +196,42 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 		return tr.JobHandle{}, r, fmt.Errorf("soak: no replace plan for %s", episode)
 	}
 	old, err := s.identity(ctx, victim.Node, plan.Victim)
+	f1 := s.b.Plan.Soak != nil && slices.ContainsFunc(s.b.Plan.Soak.Faults, func(f SoakFault) bool { return f.Episode == episode && f.kind() == KindVolumeKillIO })
+	stopSent := false
+	if err == nil && f1 {
+		stopSent = true // from the stop attempt on, every exit kills the exact victim or reports CLEANUP_UNKNOWN
+		err = s.freeze(ctx, episode, victim.Node, plan.Victim, old)
+	}
 	var pre float64
 	if err == nil {
-		pre, err = controllerMono()
+		if err = freezeStage("pre"); err == nil {
+			pre, err = controllerMono() // F1: after the freeze and its in-flight answer, right before the kill
+		}
 	}
+	if err != nil && stopSent {
+		return tr.JobHandle{}, r, errors.Join(err, s.ownedKill(episode, victim.Node, plan.Victim, old))
+	}
+	var post float64
 	if u := cloudQuote(s.unit(plan.Victim)); err == nil {
 
 		command := "sudo systemctl kill -s KILL " + u + "; while systemctl is-active -q " + u + "; do sleep 0.1; done"
-		if s.c.ReadCase != "" {
+		if s.c.ReadCase != "" || f1 { // F1: the exact victim pid/starttime, and its starttime gone before return
 			prefix := mainPID(s.unit(plan.Victim))
 			command = prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosKillScript(s.unit(plan.Victim)), prefix)
 		}
-		_, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20, command)
+		var out string
+		out, err = cloudStep(ctx, s.nodes[victim.Node], s.c.Output, "soak-kill-"+episode+".json", "kill-"+episode, 20, command)
+		if f1 && (err != nil || !strings.Contains(out, "GONE")) {
+			return tr.JobHandle{}, r, fmt.Errorf("soak: CLEANUP_UNKNOWN: the frozen victim %d:%d was not proven killed: %v", old.PID, old.StartTime, err)
+		}
+		if err == nil && f1 {
+			post, err = controllerMono() // an op still pending now was pending across the whole kill
+		}
 	}
 	if err != nil {
 		return tr.JobHandle{}, r, err
 	}
-	r.Kill = tr.KillWitness{Identity: old, AliveBefore: true, Signal: "SIGKILL", AppliedAt: time.Now(), PreKillMono: pre}
+	r.Kill = tr.KillWitness{Identity: old, AliveBefore: true, Signal: "SIGKILL", AppliedAt: time.Now(), PreKillMono: pre, PostKillMono: post}
 	if err = s.start(ctx, plan.Replacement); err != nil {
 		return tr.JobHandle{}, r, err
 	}
@@ -214,8 +240,133 @@ func (s *directSoak) Restart(ctx context.Context, episode string, _ tr.JobHandle
 	return tr.JobHandle{}, r, err
 }
 
+// freeze is F1's freeze-then-kill (ruling 2026-11-10 19:30Z): SIGSTOP the exact victim (pid/starttime checked,
+// every thread seen stopped), read the controller clock, tell the load, and wait at most FreezeWait for it to name a
+// PUT and a GET dispatched after that clock. A stopped volume serves nothing, so those ops are pending across the
+// kill by construction. No answer within the bound records none (the assessor reads NOT_COVERED); the volume is
+// never continued (no SIGCONT): the kill follows either way. Only a failed stop step is an error.
+func (s *directSoak) freeze(ctx context.Context, episode, node, victim string, old tr.ProcessIdentity) error {
+	prefix := mainPID(s.unit(victim))
+	stop := prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosStopScript(s.unit(victim)), prefix)
+	out, err := cloudStep(ctx, s.nodes[node], s.c.Output, "soak-freeze-"+episode+".json", "freeze-"+episode, FreezeStepBound, stop)
+	if err == nil && !strings.Contains(out, "STOPPED") {
+		err = errors.New("soak: F1 freeze step did not confirm the stop")
+	}
+	if err != nil {
+		return err
+	}
+	w := FreezeWitness{RunID: s.d.RunID, Episode: episode, StoppedPID: old.PID, StoppedAt: old.StartTime, WaitS: FreezeWait.Seconds()}
+	if err = freezeStage("clock"); err == nil {
+		w.FreezeMono, err = controllerMono()
+	}
+	if err == nil {
+		if err = freezeStage("marker"); err == nil {
+			err = s.Freeze(episode, w.FreezeMono, old)
+		}
+	}
+	if err != nil {
+		return err // the caller kills the exact stopped victim
+	}
+	wctx, cancel := context.WithTimeout(ctx, FreezeWait)
+	in, werr := s.Inflight(wctx, episode)
+	cancel()
+	now, _ := controllerMono()
+	switch {
+	case werr != nil:
+		w.Reason = fmt.Sprintf("no in-flight PUT and GET named within %s: %v", FreezeWait, werr)
+	case !validInflight(in, w.FreezeMono, now, old):
+		w.Reason = "the load's in-flight answer is not exact (needs a PUT and a GET, each dispatched after the freeze, and the stopped pid/starttime echoed)"
+	default:
+		w.Inflight = &in
+	}
+	if err = freezeStage("witness"); err != nil {
+		return err
+	}
+	return publishFile(filepath.Join(s.root, "fault-freeze-witness-"+episode+".json"), w)
+}
+
+// freezeStage is a test seam on F1's post-STOP stages (clock, marker, witness, pre): production never fails it.
+var freezeStage = func(string) error { return nil }
+
+// ownedKill is the bounded SIGKILL of the exact stopped victim (pid/starttime checked) on every F1 exit after the
+// stop attempt, on its own context so a cancelled run still kills what it froze. Not proven gone: CLEANUP_UNKNOWN.
+func (s *directSoak) ownedKill(episode, node, victim string, old tr.ProcessIdentity) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	prefix := mainPID(s.unit(victim))
+	cmd := prefix + fmt.Sprintf("test \"$pid:$start\" = '%d:%d'; ", old.PID, old.StartTime) + strings.TrimPrefix(chaosKillScript(s.unit(victim)), prefix)
+	out, err := cloudStep(ctx, s.nodes[node], s.c.Output, "soak-owned-kill-"+episode+".json", "owned-kill-"+episode, 20, cmd)
+	if err != nil || !strings.Contains(out, "GONE") {
+		return fmt.Errorf("soak: CLEANUP_UNKNOWN: the frozen victim %d:%d was not proven killed: %v", old.PID, old.StartTime, err)
+	}
+	return nil
+}
+
+// validInflight: the answer echoes the freeze clock and the stopped pid/starttime, came after the freeze, and names
+// at least one PUT and one GET, each with a unique id, dispatched after the freeze and no later than the answer.
+func validInflight(in SoakInflight, freezeMono, now float64, old tr.ProcessIdentity) bool {
+	ok := in.FreezeMono == freezeMono && freezeMono < in.AckMono && in.AckMono <= now && len(in.PendingSets) > 0 && len(in.PendingGETs) > 0 &&
+		in.StoppedPID == old.PID && in.StoppedStartTime == old.StartTime
+	seen := map[string]bool{}
+	for _, o := range append(append([]SoakOp{}, in.PendingSets...), in.PendingGETs...) {
+		ok = ok && o.Op != "" && !seen[o.Op] && o.Submitted > freezeMono && o.Submitted <= in.AckMono
+		seen[o.Op] = true
+	}
+	return ok
+}
+
 func (s *directSoak) RunJob(ctx context.Context, label string) (tr.ExitInfo, error) {
 	return s.step(ctx, label, 60)
+}
+
+// Inject runs one stage-3 soak_fault.py action on M02 as root and returns its witness row. A refused or
+// failed action still returns the row it printed, with its error.
+func (s *directSoak) Inject(ctx context.Context, action string) (json.RawMessage, error) {
+	e, err := s.stepAs(ctx, "fault-"+action+"-m02", int(InjectBound/time.Second), "sudo -n ")
+	out, _, derr := e.Output.Decode()
+	if raw := bytes.TrimSpace(out); derr == nil && json.Valid(raw) && len(raw) > 0 {
+		return json.RawMessage(raw), err
+	}
+	return nil, errors.Join(err, derr, fmt.Errorf("soak: fault %s printed no witness row", action))
+}
+
+// rowSampler starts the stage-3 resource sampler on M02 and, before the load phase is marked, waits for its
+// first pre-load sample to exist: the request to start the unit is not a baseline. No sample, no load.
+func (s *directSoak) rowSampler(ctx context.Context) error {
+	if err := s.start(ctx, "fault-sample-m02"); err != nil {
+		return err
+	}
+	samples := path.Join(s.hosts["m02"].RunRoot, "resource-samples.jsonl")
+	if _, err := cloudStep(ctx, s.nodes["m02"], s.c.Output, "soak-sample-preload.json", "sample-preload", 40, preloadWitnessScript(samples, 60)); err != nil {
+		return fmt.Errorf("soak: no pre-load resource sample before the load: %w", err)
+	}
+	_, err := s.step(ctx, "fault-mark-load-m02", 30)
+	return err
+}
+
+// preloadWitnessScript exits 0 once the sampler file holds a pre-load row (a line of the sampler's sort_keys
+// JSON with phase pre_load, ending in its closing brace), and 1 after tries half-second polls without one.
+func preloadWitnessScript(file string, tries int) string {
+	return "for i in $(seq " + strconv.Itoa(tries) + "); do if grep -q '\"phase\": \"pre_load\".*}$' " + cloudQuote(file) + " 2>/dev/null; then exit 0; fi; sleep 0.5; done; exit 1"
+}
+
+// rowResources marks quiescence, waits (bounded) for the sampler to end its 120 s, and publishes its
+// samples into the M01 run root for the assessor, through the bounded evidence fetch.
+func (s *directSoak) rowResources(ctx context.Context) error {
+	if _, err := s.step(ctx, "fault-mark-quiescence-m02", 30); err != nil {
+		return err
+	}
+	u := cloudQuote(s.unit("fault-sample-m02"))
+	r := s.b.Plan.Soak.Row
+	if _, err := cloudStep(ctx, s.nodes["m02"], s.c.Output, "soak-sample-wait.json", "sample-wait", r.QuiescenceS+30,
+		"while systemctl is-active -q "+u+"; do sleep 1; done"); err != nil {
+		return err
+	}
+	body, err := fetchM02Evidence(ctx, s.nodes["m02"], s.c.Output, s.hosts["m02"].RunRoot, "resource-samples.jsonl")
+	if err != nil {
+		return err
+	}
+	return publishEvidence(filepath.Join(s.root, "resource-samples.jsonl"), []byte(body))
 }
 func (s *directSoak) Mono() (float64, error)                 { return controllerMono() }
 func (s *directSoak) Now() time.Time                         { return time.Now() }
@@ -313,12 +464,23 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	if err := s.clocked(ctx, p.Soak.Setup.Job, s.root, "soak-clock-s1.json", ""); err != nil {
 		return "", err
 	}
+	row := p.Soak.rowMode()
+	if row { // stage 3: the pre-load resource baseline is sampled before the load starts
+		if err := s.rowSampler(ctx); err != nil {
+			return "", err
+		}
+	}
 	records, exit, err := runSoak(ctx, s, p, tr.PackInputs{Jobs: s.b.Jobs, Restarts: s.b.Restarts, Files: s.in.Files}, map[string]tr.JobHandle{})
 	if err == nil && (!exit.Settled || exit.Code != 0) { // the load's receipt is part of the result
 		err = fmt.Errorf("soak: load ended unsettled or with status %d", exit.Code)
 	}
 	if err = errors.Join(err, publishFile(filepath.Join(s.root, "faults.json"), records)); err != nil {
 		return "", err
+	}
+	if row {
+		if err = s.rowResources(ctx); err != nil {
+			return "", err
+		}
 	}
 	if err = steps(p.Collect); err != nil {
 		return "", err
@@ -337,8 +499,11 @@ func (s *directSoak) run(ctx context.Context) (rows string, failure error) {
 	v, err := decodeVerdict(e, want, p.Soak.criteria())
 	rows = filepath.Join(c.Output, "soak-verdict.json")
 	body, _ := json.MarshalIndent(v, "", " ")
-	if err = errors.Join(err, os.WriteFile(rows, body, 0600)); err == nil && v.Status != "PASS" {
-		err = errors.New("soak verdict FAIL")
+	if err = errors.Join(err, os.WriteFile(rows, body, 0600)); err == nil {
+		err = readBackVerdict(rows, v) // r26: what was published is exactly what was decoded (findings included)
+	}
+	if err == nil && v.Status != "PASS" {
+		err = errors.New("soak verdict " + v.Status)
 	}
 	return rows, err
 }

@@ -26,9 +26,12 @@ type bindingFixture struct {
 	err          error
 }
 
-func soakInput(t *testing.T, hardIn time.Duration, pre func(*SoakPlan)) ProfileInput {
+func soakInput(t *testing.T, hardIn time.Duration, pre func(*SoakPlan), docs ...func(*inventory.Document)) ProfileInput {
 	t.Helper()
 	d := profileFixture(t)
+	for _, f := range docs {
+		f(d)
+	}
 	d.Deadlines = inventory.Deadlines{Work: time.Now().Add(hardIn - 3*time.Minute).UTC().Format(time.RFC3339Nano), Hard: time.Now().Add(hardIn).UTC().Format(time.RFC3339Nano), CleanupReserveMS: 60000}
 	req := *d
 	req.State = "requested"

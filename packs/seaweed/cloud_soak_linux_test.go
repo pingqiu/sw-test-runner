@@ -5,6 +5,7 @@ package seaweed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ type soakHost struct {
 	failStep string
 	dirty    bool
 	killMono float64 // the controller clock when the kill reached this host
+	stopMono float64 // F1: the controller clock when the SIGSTOP was confirmed on this host
 	wait     string  // the answer to the load wait: status line, then stdout
 }
 
@@ -46,6 +48,17 @@ func (h *soakHost) exec(cmd string, c ssh.Channel) uint32 {
 		h.mu.Lock()
 		h.killMono, _ = controllerMono()
 		h.mu.Unlock()
+	case strings.Contains(cmd, "kill -STOP"): // F1 freeze: the stop is confirmed (every thread in state T)
+		h.mu.Lock()
+		h.stopMono, _ = controllerMono()
+		h.mu.Unlock()
+		fmt.Fprintln(c, "PID 4242 66\nSTOPPED")
+	case strings.Contains(cmd, "kill -KILL"): // F1 kill of the exact (frozen) victim
+		time.Sleep(20 * time.Millisecond)
+		h.mu.Lock()
+		h.killMono, _ = controllerMono()
+		h.mu.Unlock()
+		fmt.Fprintln(c, "OLD 4242 66\nGONE")
 	case strings.Contains(cmd, "ExecMainStatus"):
 		fmt.Fprint(c, h.wait)
 	case strings.Contains(cmd, "MainPID") && strings.Contains(cmd, "volume-gen2"):
@@ -156,6 +169,172 @@ func TestDirectSoakRestartStampsPreKillMono(t *testing.T) {
 	if !(id >= 0 && id < kill && kill < start && start < newID) || m02.index("systemctl kill", repl) >= 0 || m01.index("systemctl kill") >= 0 || m01.index("systemd-run") >= 0 {
 		t.Fatalf("order identity=%d kill=%d start=%d new=%d; m01 saw %v", id, kill, start, newID, m01.commands)
 	}
+}
+
+// f1Fixture is the direct soak with E1 as the F1 row (freeze-then-kill).
+func f1Fixture(t *testing.T, m01, m02 *soakHost) *directSoak {
+	s := directSoakFixture(t, m01, m02)
+	s.b.Plan.Soak.Faults = []SoakFault{{AtS: 60, Role: "volume", Episode: "E1", Kind: KindVolumeKillIO}}
+	if err := s.open(soakCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// playLoad answers the freeze the way soak_load.py does: once fault-freeze-E1.json appears, it names one PUT and one
+// GET dispatched `after` seconds after the freeze clock (negative: before it), echoing the stopped pid (or `pid`, if
+// non-zero: an answer bound to another stopped process).
+func playLoad(t *testing.T, s *directSoak, after float64, pid ...int) {
+	go func() {
+		path := filepath.Join(s.root, "fault-freeze-E1.json")
+		for i := 0; i < 1000; i++ {
+			var f map[string]any
+			if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &f) == nil {
+				fm := f["freeze_mono"].(float64)
+				ack, _ := controllerMono()
+				b := s.binding("E1")
+				b["freeze_mono"], b["ack_mono"] = fm, ack
+				b["stopped_pid"], b["stopped_starttime"] = f["stopped_pid"], f["stopped_starttime"] // the load's echo
+				if len(pid) > 0 {
+					b["stopped_pid"] = pid[0]
+				}
+				b["pending_sets"] = []SoakOp{{Op: "7", Submitted: fm + after}}
+				b["pending_gets"] = []SoakOp{{Op: "8", Submitted: fm + after}}
+				publishFile(filepath.Join(s.root, "fault-inflight-E1.json"), b)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+}
+
+func freezeWitness(t *testing.T, s *directSoak) FreezeWitness {
+	var w FreezeWitness
+	b, err := os.ReadFile(filepath.Join(s.root, "fault-freeze-witness-E1.json"))
+	if err != nil || json.Unmarshal(b, &w) != nil {
+		t.Fatalf("no freeze witness: %v", err)
+	}
+	return w
+}
+
+// F1 is freeze-then-kill, through the real Restart: the exact victim is SIGSTOPped first, the load's answer (ops
+// dispatched after the freeze) is recorded, then PreKillMono, the SIGKILL and PostKillMono. The volume is never
+// continued.
+func TestF1RestartFreezesThenKillsWithTheNamedOps(t *testing.T) {
+	m01, m02 := &soakHost{}, &soakHost{}
+	s := f1Fixture(t, m01, m02)
+	playLoad(t, s, 0.001)
+	_, r, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := freezeWitness(t, s)
+	stop, kill := m02.index("kill -STOP", "4242:66"), m02.index("kill -KILL", "4242:66")
+	if stop < 0 || kill < 0 || stop > kill {
+		t.Fatalf("stop=%d kill=%d: the exact victim must be stopped before the kill (%v)", stop, kill, m02.commands)
+	}
+	if m02.index("CONT") >= 0 || m02.index("kill -18") >= 0 {
+		t.Fatalf("the frozen volume was continued: %v", m02.commands)
+	}
+	if w.Inflight == nil || len(w.Inflight.PendingSets) != 1 || w.Inflight.PendingSets[0].Op != "7" || w.Inflight.PendingGETs[0].Op != "8" ||
+		w.StoppedPID != 4242 || w.StoppedAt != 66 || w.WaitS != FreezeWait.Seconds() {
+		t.Fatalf("witness %+v", w)
+	}
+	if !(m02.stopMono <= w.FreezeMono && w.FreezeMono < w.Inflight.AckMono && w.Inflight.AckMono <= r.Kill.PreKillMono &&
+		r.Kill.PreKillMono < m02.killMono && m02.killMono <= r.Kill.PostKillMono) {
+		t.Fatalf("order: stop %f freeze %f answer %f pre %f kill %f post %f", m02.stopMono, w.FreezeMono, w.Inflight.AckMono,
+			r.Kill.PreKillMono, m02.killMono, r.Kill.PostKillMono)
+	}
+}
+
+// Without a valid answer within FreezeWait (none at all, or ops dispatched before the freeze, which the volume may
+// have served before it stopped), the restart still kills the frozen volume, at the bound, and names none; it
+// never continues it.
+func TestF1RestartWithoutAnAnswerKillsAtTheBoundAndNamesNone(t *testing.T) {
+	saved := FreezeWait
+	FreezeWait = 400 * time.Millisecond
+	t.Cleanup(func() { FreezeWait = saved })
+	for name, tc := range map[string]struct {
+		after float64
+		pid   []int
+	}{"no answer": {}, "ops from before the freeze": {after: -0.5}, "answer for another stopped pid": {after: 0.001, pid: []int{4243}}} {
+		t.Run(name, func(t *testing.T) {
+			m02 := &soakHost{}
+			s := f1Fixture(t, &soakHost{}, m02)
+			if tc.after != 0 {
+				playLoad(t, s, tc.after, tc.pid...)
+			}
+			start := time.Now()
+			_, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := freezeWitness(t, s)
+			if w.Inflight != nil || w.Reason == "" {
+				t.Fatalf("an invalid or missing answer was recorded as in-flight ops: %+v", w)
+			}
+			if m02.index("kill -KILL", "4242:66") < 0 || m02.index("CONT") >= 0 || time.Since(start) > 5*time.Second {
+				t.Fatalf("kill=%d cont=%d after %s", m02.index("kill -KILL"), m02.index("CONT"), time.Since(start))
+			}
+		})
+	}
+}
+
+// Once the stop has been attempted, every exit kills the exact frozen victim (pid/starttime checked) or reports
+// CLEANUP_UNKNOWN: a failure at each post-STOP stage, a real freeze-marker write failure, and a failed stop step.
+func TestF1EveryExitAfterTheStopKillsTheFrozenVictim(t *testing.T) {
+	boom := errors.New("injected")
+	cases := map[string]struct {
+		stage, fail string
+		setup       func(s *directSoak)
+	}{
+		"clock fails":               {stage: "clock"},
+		"marker fails":              {stage: "marker"},
+		"witness fails":             {stage: "witness"},
+		"pre-kill clock fails":      {stage: "pre"},
+		"marker write really fails": {setup: func(s *directSoak) { os.RemoveAll(s.root) }},
+		"stop step fails":           {fail: "kill -STOP"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			saved := freezeStage
+			t.Cleanup(func() { freezeStage = saved })
+			freezeStage = func(stage string) error {
+				if stage == tc.stage {
+					return boom
+				}
+				return nil
+			}
+			m02 := &soakHost{failStep: tc.fail}
+			s := f1Fixture(t, &soakHost{}, m02)
+			if tc.setup != nil {
+				tc.setup(s)
+			}
+			_, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{})
+			if err == nil {
+				t.Fatal("a failure after the stop must fail the restart")
+			}
+			kill := m02.index("kill -KILL", "4242:66")
+			if kill < 0 || kill < m02.index("kill -STOP", "4242:66") || m02.index("CONT") >= 0 {
+				t.Fatalf("%v: the frozen victim was not killed after the stop attempt (kill=%d) or was continued: %v", err, kill, m02.commands)
+			}
+		})
+	}
+	t.Run("the owned kill cannot be proven", func(t *testing.T) {
+		saved := freezeStage
+		t.Cleanup(func() { freezeStage = saved })
+		freezeStage = func(stage string) error {
+			if stage == "marker" {
+				return boom
+			}
+			return nil
+		}
+		m02 := &soakHost{failStep: "kill -KILL"}
+		s := f1Fixture(t, &soakHost{}, m02)
+		if _, _, err := s.Restart(soakCtx(t), "E1", tr.JobHandle{}); err == nil || !strings.Contains(err.Error(), "CLEANUP_UNKNOWN") {
+			t.Fatalf("an unproven kill of a frozen victim must report CLEANUP_UNKNOWN: %v", err)
+		}
+	})
 }
 
 // No kill goes out without a replace plan or without the victim's identity.

@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path"
+	"reflect"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/inventory"
@@ -28,8 +32,15 @@ var soakCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "termi
 var kvLoadCriteria = []string{"wrong_reads", "failed_sets", "get_outcomes", "terminal", "fault_errors", "misses", "write_once",
 	"body", "client_kill", "load_as_declared", "routes"}
 
+// rowCriteria is a stage-3 row's set (soak_assess.ROW_CRITERIA): the plan's five acceptance items, with the
+// write contract and its mandatory audit apart from bytes.
+var rowCriteria = []string{"bytes", "write_contract", "audit", "failure_mode", "recovery", "resources", "causal"}
+
 // criteria is the mandatory set the plan's assessor must return.
 func (x *SoakPlan) criteria() []string {
+	if x.rowMode() {
+		return rowCriteria
+	}
 	if x != nil && x.Pattern != nil {
 		return kvLoadCriteria
 	}
@@ -80,6 +91,16 @@ func SoakAssessArgs(d *inventory.Document, s SmokeSettings, x *SoakPlan) ([]stri
 	if x.Pattern != nil {
 		config["pattern"], config["faults"] = x.Pattern, x.Faults // kv_load: judged by its own rows; absent for the soak
 	}
+	if x.rowMode() { // stage 3: the row's frozen values; absent otherwise
+		f, r := x.Faults[0], x.Row
+		row := map[string]any{"kind": f.kind(), "episode": f.Episode, "recovery_s": r.RecoveryS,
+			"pin_ranges_bytes": r.PinBound.bytes(), "pin_pool_bytes": r.PinBound.PoolBytes, "pin_cache_bytes": r.PinBound.CacheBytes, "retained_budget_bytes": r.RetainedBudgetBytes, "free_below_bytes": r.FreeBelowBytes,
+			"client_fallback_counters": append([]string{}, r.ClientFallbackCounters...)}
+		if f.kind() == KindLinkFlap { // F3: the attribution receipt's target VF; absent otherwise
+			row["netdev"], row["rdma_device"], row["netdev_class"] = r.Netdev, r.RDMADevice, r.NetdevClass
+		}
+		config["fault_row"] = row
+	}
 	if x.rc() {
 		config["read_transport"] = "rc" // the RC soak's routes and client kill; absent is DC
 	}
@@ -110,7 +131,36 @@ type SoakVerdict struct {
 	} `json:"misses_qualification"`
 	// Rule A (Ping, 2026-11-04): misses inside the clock bracket around B, reported per op; they do not fail the row.
 	MissesUndecidable []MissUndecidable `json:"misses_undecidable,omitempty"`
+	// Stage 3 rows only: the row id, scoped claims (F4's QP claim), the attributed UNKNOWN count and each
+	// resource view's quiescence class.
+	Row               string            `json:"row,omitempty"`
+	Claims            map[string]string `json:"claims,omitempty"`
+	UnknownAttributed *int              `json:"unknown_attributed,omitempty"`
+	ResourceClasses   map[string]string `json:"resource_classes,omitempty"`
+	LayoutScope       string            `json:"layout_scope,omitempty"`
+	// F3 and F5 (r12; r26): late completions of futures abandoned at their deadline, reported for the reader; no criterion.
+	LateCompletions *int `json:"late_completions,omitempty"`
+	// F5 only (r26): every quarantined PUT the fresh audit read as NEW, a visible #1219 finding whatever the status.
+	// A pointer, so an F5 row's empty list survives the publish (present and empty is not absent).
+	Findings *[]SoakFinding `json:"findings,omitempty"`
 }
+
+// SoakFinding is one #1219 finding: exactly these members, each required.
+type SoakFinding struct {
+	Issue int    `json:"issue"`
+	Kind  string `json:"kind"`
+	Op    string `json:"op"`
+	Key   string `json:"key"`
+	Error string `json:"error"`
+}
+
+// findingKinds: generic_error_read_new (a generic error, then an audit read of NEW: ambiguous, the row may pass) and
+// typed_contradiction (a TYPED nothing-written claim, then NEW: the write contract fails).
+var findingKinds = []string{"generic_error_read_new", "typed_contradiction"}
+
+// rowLayoutScope is the layout every stage-3 row result is limited to (soak_assess.LAYOUT_SCOPE): one volume
+// process, on M02, which F1's PUT attribution needs. A row verdict without exactly this scope does not decode.
+const rowLayoutScope = "single volume process, on M02: multi-volume layouts are not covered"
 
 // MissUndecidable is one rule-A miss: exactly these four members, each required and typed.
 type MissUndecidable struct {
@@ -126,7 +176,9 @@ var verdictFields = []string{"status", "criteria", "k7", "resources", "binding",
 	"clock", "entry_epoch", "exit_epoch", "entry_mono", "exit_mono", // the clock row is decoded by encoding/json too
 	"misses_qualification", "method", "limit",
 	"misses_undecidable", "op", "vid", "submit_minus_early_b_s", "submit_minus_late_b_s",
-	"file", "bytes", "sha256"} // the M02 evidence reference row (#1002)
+	"file", "bytes", "sha256", // the M02 evidence reference row (#1002)
+	"row", "claims", "unknown_attributed", "resource_classes", "layout_scope", // stage 3 rows
+	"late_completions", "findings", "issue", "kind", "key"} // F3/F5 late completions; r26 F5 #1219 findings
 
 // oneStrictValue admits exactly one JSON value with no duplicate object keys
 // and no case-folded alias of a decoded field.
@@ -183,9 +235,19 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 	if err = oneStrictValue(out); err != nil {
 		return v, fmt.Errorf("soak verdict is not one strict row: %w", err)
 	}
+	row := slices.Equal(criteria, rowCriteria)
+	if err = findingsShape(out, row); err != nil {
+		return v, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(out))
 	dec.DisallowUnknownFields()
-	if err = dec.Decode(&v); err != nil || (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" {
+	if err = dec.Decode(&v); err != nil {
+		return v, errors.New("soak verdict malformed")
+	}
+	if row {
+		return v, decodeRowVerdict(v, want, criteria)
+	}
+	if (v.Status != "PASS" && v.Status != "FAIL") || v.Resources != "NOT_OBSERVED" || v.Row != "" || v.Claims != nil || v.UnknownAttributed != nil || v.ResourceClasses != nil || v.LayoutScope != "" || v.LateCompletions != nil {
 		return v, errors.New("soak verdict malformed")
 	}
 	if q := v.MissesQualification; q.Method == "" || q.Clock == "" || q.Limit == "" {
@@ -215,4 +277,116 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 		return v, errors.New("soak verdict PASS without every mandatory criterion")
 	}
 	return v, nil
+}
+
+// decodeRowVerdict integrates a stage-3 row verdict: PASS, FAIL or NOT_COVERED, each criterion one of those,
+// and the row's status exactly the worst of them (FAIL over NOT_COVERED over PASS), so a missing witness can
+// never be read as PASS. A PASS also carries every criterion, the attributed UNKNOWN count and the classes.
+func decodeRowVerdict(v SoakVerdict, want SoakBinding, criteria []string) error {
+	outcomes := []string{"PASS", "FAIL", "NOT_COVERED"}
+	if !slices.Contains(outcomes, v.Status) || v.Resources != "ACCOUNTED" || v.LayoutScope != rowLayoutScope || v.MissesQualification.Method != "" || len(v.MissesUndecidable) != 0 {
+		return errors.New("soak row verdict malformed")
+	}
+	if v.Binding != want {
+		return fmt.Errorf("soak verdict is bound to %+v, not this run", v.Binding)
+	}
+	worst := "PASS"
+	for name, c := range v.Criteria {
+		if !contains(criteria, name) || !slices.Contains(outcomes, c.Outcome) {
+			return fmt.Errorf("soak row criterion %q unknown or malformed", name)
+		}
+		if c.Outcome == "FAIL" || c.Outcome == "NOT_COVERED" && worst == "PASS" {
+			worst = c.Outcome
+		}
+	}
+	if v.Error != "" && v.Status != "FAIL" || v.Error == "" && v.Status != worst {
+		return errors.New("soak row verdict status is not the worst of its criteria")
+	}
+	for k, c := range v.Claims {
+		if k != "qp" || c != "NOT_COVERED" {
+			return errors.New("soak row verdict claim unknown")
+		}
+	}
+	if v.Status == "PASS" && (len(v.Criteria) != len(criteria) || v.UnknownAttributed == nil || len(v.ResourceClasses) == 0 || v.Row == "") {
+		return errors.New("soak row verdict PASS without every criterion, its UNKNOWN count and resource classes")
+	}
+	late := v.Row == "F3" || v.Row == "F5"
+	if v.LateCompletions != nil && (*v.LateCompletions < 0 || !late) || v.Status == "PASS" && late && v.LateCompletions == nil {
+		return errors.New("soak row verdict late-completion count missing, negative or outside F3/F5")
+	}
+	return checkFindings(v)
+}
+
+// findingsShape (r26 correction) checks the RAW verdict before decoding can erase a shape: a present "findings" member
+// is refused on a non-row verdict whatever its value, and on a row it must be a JSON array, so a `null` (which decodes
+// to an absent pointer and would be dropped on publication) is refused instead of passing silently.
+func findingsShape(raw []byte, row bool) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return errors.New("soak verdict malformed")
+	}
+	f, present := top["findings"]
+	if !present {
+		return nil
+	}
+	if !row {
+		return errors.New("soak verdict findings on a non-row verdict")
+	}
+	if t := bytes.TrimSpace(f); len(t) == 0 || t[0] != '[' {
+		return errors.New("soak row verdict findings not an array")
+	}
+	return nil
+}
+
+// checkFindings (r26): findings only on an F5 row, present on every F5 row the assessor judged (empty included, any
+// status), each one well formed; a typed contradiction is never on a row whose write contract passed.
+func checkFindings(v SoakVerdict) error {
+	if v.Findings == nil {
+		if v.Row == "F5" && v.Error == "" {
+			return errors.New("soak row verdict F5 without its findings")
+		}
+		return nil
+	}
+	if v.Row != "F5" {
+		return errors.New("soak row verdict findings outside F5")
+	}
+	for _, f := range *v.Findings {
+		// r26 correction: the cap is 400 CHARACTERS, as the assessor truncates the raw text (not 400 UTF-8 bytes)
+		if f.Issue != 1219 || !slices.Contains(findingKinds, f.Kind) || f.Op == "" || f.Key == "" || utf8.RuneCountInString(f.Error) > 400 {
+			return errors.New("soak row verdict finding malformed")
+		}
+		if f.Kind == "typed_contradiction" && v.Criteria["write_contract"].Outcome != "FAIL" {
+			return errors.New("soak row verdict typed contradiction on a passing write contract")
+		}
+	}
+	return nil
+}
+
+// readBackVerdict (r26) re-reads the published soak-verdict.json: exactly the bytes of the decoded verdict, one strict
+// value (no duplicate key, no case-folded alias), a strict decode with no unknown field whose own publish is those same
+// bytes, and the findings and late count equal to the decoded verdict's. A field the publish dropped or changed (an F5
+// row's findings, empty or not) fails instead of passing silently.
+func readBackVerdict(path string, v SoakVerdict) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("soak verdict readback: %w", err)
+	}
+	want, _ := json.MarshalIndent(v, "", " ")
+	if !bytes.Equal(raw, want) {
+		return errors.New("soak verdict readback is not the verdict that was decoded")
+	}
+	if err = oneStrictValue(raw); err != nil {
+		return fmt.Errorf("soak verdict readback is not one strict value: %w", err)
+	}
+	var back SoakVerdict
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err = dec.Decode(&back); err != nil {
+		return fmt.Errorf("soak verdict readback malformed: %w", err)
+	}
+	again, _ := json.MarshalIndent(back, "", " ")
+	if !bytes.Equal(again, raw) || !reflect.DeepEqual(back.Findings, v.Findings) || !reflect.DeepEqual(back.LateCompletions, v.LateCompletions) {
+		return errors.New("soak verdict readback differs from the decoded verdict")
+	}
+	return nil
 }
