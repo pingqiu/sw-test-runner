@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
@@ -106,6 +107,27 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	if e != nil {
 		return "", e
 	}
+	var maintenance *maintenanceRuntime
+	phaseCtx := ctx
+	setupCancel := func() {}
+	workCancel := func() {}
+	if c.MaintenanceTask != "" {
+		maintenance = newMaintenanceRuntime(ctx, d, c)
+		if e = maintenance.extend(&view, docs, physical); e != nil {
+			return "", e
+		}
+		ctx, workCancel = context.WithDeadline(ctx, maintenance.budget.work)
+		defer workCancel()
+		phaseCtx, setupCancel, e = maintenance.phase(ctx, 240*time.Second)
+		if e != nil {
+			return "", e
+		}
+		defer setupCancel()
+		for id, doc := range docs {
+			doc.Deadlines.Hard = maintenance.budget.hard.Format(time.RFC3339Nano)
+			docs[id] = doc
+		}
+	}
 	pins := processPins(view, c)
 	if e = os.WriteFile(filepath.Join(c.Output, "process-placement.json"), processJSON(map[string]any{"physical_inventory": d, "roles": view.Hosts, "physical_host": physical, "host_tolerance": "NOT_CLAIMED"}), 0600); e != nil {
 		return "", e
@@ -115,20 +137,75 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		hc.HostKey = pins[h.ID]
 		hc.Output = filepath.Join(c.Output, label, h.ID)
 		hc.ChaosSet = "process" // upload the existing mixed-load leaf
+		if maintenance != nil {
+			hc.maintenanceRoot = maintenance.recordRoot
+			hc.maintenanceRunID = d.RunID
+		}
 		if e := os.MkdirAll(hc.Output, 0700); e != nil {
 			return e
 		}
 		rd := docs[h.ID]
 		rd.Hosts = view.Hosts
-		_, e := runCloudNode(ctx, rd, h, hc, label)
+		_, e := runCloudNode(phaseCtx, rd, h, hc, label)
 		return e
 	}
-	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: pins}, append([]string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6"}, chaosClients...))
+	ids := []string{}
+	for _, h := range view.Hosts {
+		ids = append(ids, h.ID)
+	}
+	hosts, nodes, release, e := chaosConnect(ctx, view, CloudConfig{SSHKey: c.SSHKey, HostKeys: pins}, ids)
 	if e != nil {
 		return "", e
 	}
 	defer release()
 	r := &chaosRun{dir: c.Output, rep: "001", nodes: nodes, docs: docs, gens: &chaosGens{gens: map[string]int{}, witness: map[string]string{}}}
+	maintenanceRow := map[string]any{}
+	if maintenance != nil {
+		maintenance.bind(r, hosts)
+		result = filepath.Join(c.Output, "maintenance-result.json")
+		maintenanceRow = map[string]any{"task": c.MaintenanceTask, "case": name, "classification": "OBSERVED", "status": "UNKNOWN", "data": "UNKNOWN", "task_recovery": "UNKNOWN", "coverage": "NOT_COVERED", "cleanup": "UNKNOWN", "refusals": 0, "host_tolerance": "NOT_CLAIMED"}
+		defer func() {
+			result = filepath.Join(c.Output, "maintenance-result.json")
+			workCancel()
+			cleanupErr := maintenance.cleanup()
+			if cleanupErr == nil {
+				maintenanceRow["cleanup"] = "PASS"
+			} else {
+				maintenanceRow["cleanup"] = "UNKNOWN"
+				if maintenanceRow["data"] != "FAIL" {
+					maintenanceRow["status"] = "UNKNOWN"
+				}
+			}
+			failure = errors.Join(failure, cleanupErr)
+			var environment *MaintenanceEnvironmentError
+			if errors.As(failure, &environment) {
+				if cleanupErr == nil {
+					maintenanceRow["classification"] = "ENVIRONMENT"
+					maintenanceRow["status"] = "NOT_RUN"
+					maintenanceRow["reason"] = environment.Reason
+				} else {
+					failure = fmt.Errorf("unresolved cleanup after environment refusal: %v", failure)
+				}
+			}
+			var outcome *MaintenanceOutcomeError
+			noCandidate := errors.As(failure, &outcome) && outcome.Status == "NOT_COVERED" && outcome.Data == "PASS" && !maintenance.retain
+			if noCandidate && cleanupErr == nil {
+				maintenanceRow["status"] = "NOT_COVERED"
+				maintenanceRow["reason"] = "NO_EC_CANDIDATES"
+				maintenanceRow["candidate_count"] = 0
+			}
+			if failure != nil && maintenanceRow["data"] != "FAIL" && !noCandidate && !(environment != nil && cleanupErr == nil) {
+				maintenanceRow["status"] = "UNKNOWN"
+			}
+			failure = errors.Join(failure, os.WriteFile(result, processJSON(maintenanceRow), 0600))
+			if maintenanceRow["status"] != "PASS" && maintenanceRow["data"] != "FAIL" {
+				failure = &MaintenanceOutcomeError{Status: fmt.Sprint(maintenanceRow["status"]), Cause: failure}
+			}
+		}()
+		if e = maintenance.arm(phaseCtx); e != nil {
+			return result, e
+		}
+	}
 	for _, h := range view.Hosts {
 		if _, e = r.step(ctx, h.ID, "fresh-"+h.ID, 10, "test ! -e "+cloudQuote(h.RunRoot)); e != nil {
 			return "", e
@@ -136,6 +213,9 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 	}
 	// Register teardown for every role before the first possible service start.
 	defer func() {
+		if maintenance != nil {
+			return
+		}
 		for _, h := range view.Hosts {
 			hc := c
 			hc.HostKey = pins[h.ID]
@@ -143,6 +223,9 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 			failure = errors.Join(failure, os.MkdirAll(hc.Output, 0700), directCleanup(hc, docs[h.ID], h))
 		}
 	}()
+	if maintenance != nil {
+		maintenance.effects = true
+	}
 	for _, h := range view.Hosts {
 		if e = phase("prepare", h); e != nil {
 			return "", e
@@ -172,6 +255,67 @@ func runDirectProcess(ctx context.Context, d inventory.Document, c CloudConfig) 
 		return "", e
 	}
 	r.seedCheck = func(ctx context.Context, seeds map[string]string) error { return processCopies(ctx, r, hosts, seeds) }
+	if maintenance != nil {
+		if e = maintenance.setup(phaseCtx, phase); e != nil {
+			var outcome *MaintenanceOutcomeError
+			if errors.As(e, &outcome) && outcome.Data != "" {
+				maintenanceRow["data"] = outcome.Data
+				maintenanceRow["status"] = outcome.Status
+			}
+			return result, e
+		}
+		setupCancel()
+		run := func(caseCtx context.Context) error {
+			if mixed == nil {
+				return errors.New("maintenance requires existing mixed-load process case")
+			}
+			caseErr := runChaos2Case(caseCtx, view, *mixed, hosts, r.gens, r)
+			if caseErr != nil {
+				return caseErr
+			}
+			journals, err := r.each(caseCtx, "actual-journal", 30, func(id string) string { return "cat " + cloudQuote(hosts[id].RunRoot+"/chaos-"+name+".journal") })
+			if err != nil {
+				return err
+			}
+			return processCopies(caseCtx, r, hosts, journals)
+		}
+		caseErr := maintenance.concurrent(ctx, run)
+		readCtx, readCancel, grantErr := maintenance.phase(ctx, 240*time.Second)
+		if grantErr != nil {
+			return result, errors.Join(caseErr, grantErr)
+		}
+		defer readCancel()
+		verdict, readErr := maintenance.collect(readCtx, caseErr == nil)
+		maintenanceRow["data"], maintenanceRow["task_recovery"], maintenanceRow["coverage"] = verdict.Data, verdict.Task, verdict.Coverage
+		maintenanceRow["covered_faults"], maintenanceRow["total_faults"] = verdict.CoveredFaults, verdict.TotalFaults
+		if verdict.Refusal != "" {
+			maintenanceRow["refusals"] = 1
+			maintenanceRow["refusal"] = verdict.Refusal
+		}
+		status := "NOT_COVERED"
+		if verdict.Data == "FAIL" {
+			status = "FAIL"
+		} else if caseErr != nil || readErr != nil {
+			status = "UNKNOWN"
+		} else if verdict.Task == "CLEAN_REFUSAL" {
+			status = "CLEAN_REFUSAL"
+		} else if verdict.Coverage == "COVERED" && verdict.Task == "RECOVERED" {
+			status = "PASS"
+		}
+		maintenanceRow["status"] = status
+		maintenanceRow["mixed_data"] = "PASS"
+		if caseErr != nil {
+			maintenanceRow["mixed_data"] = "UNKNOWN"
+		}
+		if maintenance.mixedDataFailed() {
+			maintenanceRow["primary_data"] = verdict.Data
+			maintenanceRow["data"] = "FAIL"
+			maintenanceRow["mixed_data"] = "FAIL"
+			maintenanceRow["status"] = "FAIL"
+			caseErr = errors.Join(caseErr, errors.New("mixed workload returned WRONG bytes"))
+		}
+		return result, errors.Join(caseErr, readErr)
+	}
 	if selected != nil {
 		e = runChaosCase(ctx, view, *selected, hosts, map[string]int{"volume": 1, "filer": 1}, r)
 	} else {
@@ -211,6 +355,11 @@ func processPins(d inventory.Document, c CloudConfig) map[string]string {
 // Join MainPID/starttime to executable, argv/root and owned TCP listeners;
 // recheck that unit generation after the status read.
 func processOwner(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, id string) (string, error) {
+	_, body, err := processOwnerReceipt(ctx, r, hosts, id)
+	return body, err
+}
+
+func processOwnerReceipt(ctx context.Context, r *chaosRun, hosts map[string]inventory.Host, id string) (string, string, error) {
 	h := hosts[id]
 	unit := r.gens.unit(r.docs[id], id, "volume")
 	cmd := mainPID(unit) + `test "$(sudo -n readlink /proc/$pid/exe)" = ` + cloudQuote(h.RunRoot+"/weed-volume") + `; test "$(sudo -n readlink /proc/$pid/cwd)" = ` + cloudQuote(h.RunRoot) + `; ` +
@@ -222,9 +371,9 @@ func processOwner(ctx context.Context, r *chaosRun, hosts map[string]inventory.H
 	f := strings.Fields(receipt)
 	var st struct{ DiskStatuses []struct{ Dir string } }
 	if e != nil || !ok || len(f) != 5 || f[0] != "OWNER" || f[3] != endpoint(h, "volume_http") || f[4] != h.RunRoot || json.Unmarshal([]byte(body), &st) != nil || len(st.DiskStatuses) != 1 || st.DiskStatuses[0].Dir != h.RunRoot+"/volume" {
-		return "", errors.Join(e, errors.New("volume role identity/endpoint/root not bound: "+id))
+		return "", "", errors.Join(e, errors.New("volume role identity/endpoint/root not bound: "+id))
 	}
-	return body, nil
+	return receipt, body, nil
 }
 
 // Join every actual ACK VID to two distinct observed volume-process owners
@@ -252,8 +401,11 @@ func processCopies(ctx context.Context, r *chaosRun, hosts map[string]inventory.
 			return errors.New("no writable owner on " + id)
 		}
 	}
-	for _, urls := range owners {
+	for vid, urls := range owners {
 		sort.Strings(urls)
+		if r.maintenance != nil && r.maintenance.fixtureVIDs[vid] {
+			continue
+		} // Only the separately-oracled task fixture may be deliberately deficient.
 		if len(urls) != 2 || urls[0] == urls[1] {
 			return errors.New("observed volume copies differ from two")
 		}

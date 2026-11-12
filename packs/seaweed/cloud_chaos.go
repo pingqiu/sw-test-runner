@@ -64,6 +64,7 @@ func chaosContScript(pid, start string) string {
 }
 
 type chaosRun struct {
+	maintenance     *maintenanceRuntime
 	docs            map[string]inventory.Document
 	gens            *chaosGens
 	seedCheck       func(context.Context, map[string]string) error
@@ -84,11 +85,20 @@ func (r *chaosRun) document(d inventory.Document, id string) inventory.Document 
 }
 
 func (r *chaosRun) step(ctx context.Context, id, name string, seconds int, cmd string) (string, error) {
+	if r.maintenance != nil {
+		if d, ok := ctx.Deadline(); !ok || time.Until(d) < time.Duration(seconds+5)*time.Second {
+			return "", fmt.Errorf("maintenance step %s cannot fit maximum %ds", name, seconds)
+		}
+	}
 	r.mu.Lock()
 	r.seq++
 	file := fmt.Sprintf("cloud-step-%03d.json", r.seq)
 	r.mu.Unlock()
-	return cloudStep(ctx, r.nodes[id], r.dir, file, name, seconds, cmd)
+	out, err := cloudStep(ctx, r.nodes[id], r.dir, file, name, seconds, cmd)
+	if r.maintenance != nil && (name == "load" || name == "readback") {
+		r.maintenance.observeMixed(out)
+	}
+	return out, err
 }
 
 // each runs one step per client concurrently and returns every stdout.
@@ -171,6 +181,9 @@ func (r *chaosRun) startLoad(ctx context.Context, seconds int, cmd func(id strin
 	go func() {
 		defer close(loaded)
 		loads, loadErr = r.each(loadCtx, "load", seconds, cmd)
+		if loadErr != nil && r.maintenance != nil {
+			r.maintenance.loadFailed()
+		}
 	}()
 	return cancel, func() (map[string]string, error) {
 		<-loaded
@@ -406,6 +419,15 @@ func chaosStart(ctx context.Context, r *chaosRun, d inventory.Document, hosts ma
 	d = r.document(d, victim)
 	h, root := hosts[victim], hosts[victim].RunRoot
 	command := cloudServices(h, hosts["meta"], root, true, r.rep)[role]
+	if r.maintenance != nil && r.maintenance.ec() && role == "master" {
+		command += " -deletionRetention=-1s"
+	}
+	if r.maintenance != nil && role == "volume" && strings.HasPrefix(victim, "ec") {
+		command += " --disk=ssd"
+	}
+	if r.maintenance != nil {
+		command = "--property=TimeoutStopSec=5 --property=KillMode=control-group " + command
+	}
 	if r.docs != nil && role == "filer" {
 		command += " -localSocket=" + cloudQuote(root+"/filer.sock")
 	}

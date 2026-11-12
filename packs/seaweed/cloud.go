@@ -20,6 +20,9 @@ import (
 // CloudConfig is controller-local configuration for a newly created HTTP VM.
 // It is independent of the on-prem ApprovedRun entry and carries no GO/policy.
 type CloudConfig struct {
+	maintenanceRoot   func(inventory.Host, string) error
+	maintenanceRunID  string
+	MaintenanceTask   string       `json:"maintenance_task,omitempty"`
 	SWCtl             *SWCtlConfig `json:"swctl,omitempty"`
 	swctlNodes        func(inventory.Host) swctlSmokeNode
 	ClusterChaosCases []string             `json:"cluster_chaos_cases,omitempty"`
@@ -99,6 +102,11 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 	d, e := inventory.Decode(raw)
 	if e != nil {
 		return "", e
+	}
+	if c.MaintenanceTask != "" {
+		if e := maintenanceAdmission(ctx, *d, c); e != nil {
+			return "", e
+		}
 	}
 	if c.SWCtl != nil {
 		return runSWCtlSmoke(ctx, *d, c)
@@ -196,6 +204,10 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return "", fmt.Errorf("cloud step connect: %w", e)
 	}
 	defer n.Close()
+	if c.maintenanceRoot != nil {
+		stop := context.AfterFunc(ctx, func() { n.Close() })
+		defer stop()
+	}
 	sequence := 0
 	run := func(name, cmd string) (string, error) {
 		if phase != "" && !cloudStepEnabled(h, phase, name) {
@@ -212,6 +224,12 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		if strings.HasPrefix(name, "ec-metrics-") {
 			seconds = 30
 		}
+		if c.maintenanceRoot != nil {
+			seconds = 30
+			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) < time.Duration(seconds+5)*time.Second {
+				return "", fmt.Errorf("maintenance setup step %s cannot fit maximum", name)
+			}
+		}
 		if phase == "load" {
 			seconds = 32*27 + 30 // Batch pacing plus completion margin; setup keeps its short bound.
 			if deadline, ok := ctx.Deadline(); ok {
@@ -224,8 +242,14 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 		return cloudStep(ctx, n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, seconds, cmd)
 	}
 	upload := func(name, local, remote string) error {
-		if phase != "" && (phase != "prepare" || !cloudArtifact(h, name)) {
+		maintenanceHelper := c.MaintenanceTask != "" && name == "maintenance.py"
+		if phase != "" && (phase != "prepare" || (!cloudArtifact(h, name) && !maintenanceHelper)) {
 			return nil
+		}
+		if c.maintenanceRoot != nil {
+			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) < 35*time.Second {
+				return errors.New("maintenance upload cannot fit maximum")
+			}
 		}
 		sequence++
 		return cloudUpload(n, c.Output, fmt.Sprintf("cloud-step-%03d.json", sequence), name, local, remote)
@@ -264,8 +288,22 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	if c.ECStage1 {
 		prepare = "sudo install -d -o " + q(h.Management.User) + " " + q(root) + "; mkdir -p " + q(root+"/worker")
 	}
-	if _, e = run("prepare", prepare); e != nil {
+	if c.maintenanceRoot != nil {
+		owned, err := maintenanceLifecycleCommand(map[string]any{"stage": "prepare", "root": root, "run_id": c.maintenanceRunID, "role_run_id": d.RunID})
+		if err != nil {
+			return "", err
+		}
+		prepare += "; " + owned
+	}
+	prepared, prepareErr := run("prepare", prepare)
+	if prepareErr != nil {
+		e = prepareErr
 		return "", e
+	}
+	if c.maintenanceRoot != nil && cloudStepEnabled(h, phase, "prepare") {
+		if e = c.maintenanceRoot(h, prepared); e != nil {
+			return "", e
+		}
 	}
 	for _, name := range c.artifactNames() {
 		if e = upload(name, c.Files[name].Path, root+"/"+name); e != nil {
@@ -281,6 +319,9 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	defer os.RemoveAll(scratch)
 	helpers := cloudHelpers(phase, c.ChaosSet)
+	if c.MaintenanceTask != "" {
+		helpers = append(helpers, "maintenance.py")
+	}
 	if c.ECStage1 {
 		helpers = []string{"ec_service.py", "ec_setup.py", "ec_capture.py", "ec_chaos.py", "chaos_load.py"}
 	}
@@ -323,6 +364,17 @@ func runCloudNode(ctx context.Context, d inventory.Document, h inventory.Host, c
 	}
 	master := endpoint(meta, "master_http")
 	commands := cloudServices(h, meta, root, phase != "", c.Replication)
+	if strings.HasPrefix(c.MaintenanceTask, "ec_") {
+		commands["master"] += " -deletionRetention=-1s"
+	}
+	if c.MaintenanceTask != "" && strings.HasPrefix(h.ID, "ec") {
+		commands["volume"] += " --disk=ssd"
+	}
+	if c.maintenanceRoot != nil {
+		for role, command := range commands {
+			commands[role] = "--property=TimeoutStopSec=5 --property=KillMode=control-group " + command
+		}
+	}
 	if len(c.ClusterChaosCases) > 0 {
 		commands["filer"] += " -localSocket=" + q(root+"/filer.sock")
 	}

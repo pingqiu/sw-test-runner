@@ -199,6 +199,15 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 	defer cancelLoad()
 	f := &chaos2Fault{r: r, d: d, x: x, hosts: hosts, g: g, witness: map[string]string{}}
 	faultErr := f.run(ctx)
+	noAdmission := errors.Is(faultErr, errMaintenanceNoAdmission)
+	if noAdmission {
+		// No fault was dispatched. Still finish the load and its independent
+		// readback, then the maintenance ACK oracle and partial-effect checks.
+		if e := r.save("maintenance-no-admission.json", map[string]string{"coverage": "NOT_COVERED", "reason": faultErr.Error()}); e != nil {
+			return e
+		}
+		faultErr = nil
+	}
 	if faultErr != nil {
 		cancelLoad()
 	}
@@ -249,7 +258,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 				w.Unavailable[a.Key] = unavailable
 			}
 		}
-		if e := checkChaosOps(out.Outcomes, w); e != nil {
+		check := checkChaosOps
+		if noAdmission {
+			check = checkMaintenanceUnfaultedOps
+		}
+		if e := check(out.Outcomes, w); e != nil {
 			return fmt.Errorf("%s: %w", id, e)
 		}
 		for _, eligible := range w.Unavailable {
@@ -268,7 +281,11 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		}
 		results[id] = map[string]int{"ops": len(out.Outcomes), "failed": failed}
 	}
-	back, e := r.each(ctx, "readback", 300, func(id string) string { return cmds[id]["readback"] })
+	readBound := 300
+	if r.maintenance != nil {
+		readBound = 120
+	}
+	back, e := r.each(ctx, "readback", readBound, func(id string) string { return cmds[id]["readback"] })
 	if e != nil {
 		return e
 	}
@@ -322,12 +339,32 @@ func (f *chaos2Fault) each(ids []string, act func(id string) error) error {
 }
 
 func (f *chaos2Fault) kill(ctx context.Context, id, role string) error {
+	if m := f.r.maintenance; m != nil && m.ec() && m.injecting && id == "vol1" && role == "volume" {
+		id = m.ecVictim
+	}
+	var sampled *maintenanceFaultSample
+	var e error
+	if f.r.maintenance != nil {
+		sampled, e = f.r.maintenance.beforeFault(ctx, id, role)
+		if e != nil {
+			return e
+		}
+	}
 	old, e := chaosKill(ctx, f.r, id, role, f.g.unit(f.r.document(f.d, id), id, role))
 	f.g.note("kill-"+id+"-"+role, old)
+	if f.r.maintenance != nil {
+		if sampled != nil {
+			sampled.GoneWitness = old
+		}
+		e = errors.Join(e, f.r.maintenance.afterFault(ctx, sampled, e == nil))
+	}
 	return e
 }
 
 func (f *chaos2Fault) start(ctx context.Context, id, role string) error {
+	if m := f.r.maintenance; m != nil && m.ec() && m.injecting && id == "vol1" && role == "volume" {
+		id = m.ecVictim
+	}
 	identity, e := chaosStart(ctx, f.r, f.d, f.hosts, id, role, f.g.next(id, role), f.g.noted("kill-"+id+"-"+role))
 	f.g.note("start-"+id+"-"+role, identity)
 	if e == nil {
@@ -379,6 +416,11 @@ func (f *chaos2Fault) run(ctx context.Context) error {
 	wait := func(t time.Duration) func() error { return func() error { return f.wait(ctx, t) } }
 	if e := f.wait(ctx, chaos2Settle); e != nil {
 		return e
+	}
+	if m := f.r.maintenance; m != nil && m.admitFirstFault != nil {
+		if e := m.admitFirstFault(ctx); e != nil {
+			return e
+		}
 	}
 	switch f.x.Kind {
 	case "kill-hold":
