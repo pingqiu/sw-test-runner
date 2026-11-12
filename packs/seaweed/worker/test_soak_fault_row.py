@@ -1807,5 +1807,122 @@ class F5Pressure(unittest.TestCase):
         self.assertEqual(self.v(lambda ev: ev.__setitem__('late-completions.jsonl', [late]))['late_completions'], 1)
 
 
+F5_SKIP = 'none available (every ACKed key quarantined, busy or touched since the window opened)'
+
+
+def f5_recovery(fresh=8, reads=None, old=None, wrong_fresh=False, mark=True):
+    """r27 F5 (ruling option b): replace the fixture's after-restore ops with the load's recovery shape. fresh: fresh-key
+    PUTs (ACKED, journaled, ledgered, audited); reads: their read-backs (default one each, on RDMA workers 0-2); old:
+    None (the load had no old key: its recorded skip), 'hit' or 'wrong' (one read of q, ACKed before the window, untouched since); mark:
+    False drops the load's recovery mark (r26's evidence has none). fresh=0, mark=False is r26's shape: every key
+    quarantined in the window, nothing left to run after the restore."""
+    def edit(ev):
+        heal = F5_CLOSE  # the fixture's ready_mono == the close mark
+        win = lambda e: heal <= e['submitted'] <= heal + 30
+        gone = {e['op'] for e in f5_ops(ev) if win(e)}
+        keys = {e['key'] for e in f5_ops(ev) if win(e) and e['action'] == 'set'}
+        ev['completions.jsonl'] = [x for x in ev['completions.jsonl'] if x['op'] not in gone]
+        ev['write-ledger.jsonl'] = [r for r in ev['write-ledger.jsonl'] if r['key'] not in keys]
+        ev['ack-journal.jsonl'] = [a for a in ev['ack-journal.jsonl'] if a['key'] not in keys]
+        ev['audit.jsonl'] = [a for a in ev['audit.jsonl'] if a['key'] not in keys]
+        ops = [e for e in f5_ops(ev) if e['op'] not in gone]
+        marks = [m for m in ev['op-events.jsonl'] if 'action' not in m]
+        n = [max(int(e['op']) for e in ops) + 1000]
+
+        def op():
+            n[0] += 1
+            return str(n[0])
+        new = []
+        if old:
+            a = [x for x in ev['ack-journal.jsonl'] if x['key'] == 'q'][-1]
+            new.append(dict(op=op(), worker=0, action='get', key='q', dispatched=heal + 0.9, submitted=heal + 1, completed=heal + 1.01,
+                            ok=True, length=64, sha256=a['digest'] if old == 'hit' else digest('not-q'), sequence=a['sequence'],
+                            received=heal + 1.05, recovery='old'))
+        for j in range(fresh):
+            key, seed, t = 'rf%d' % j, 'f5-recovery-generation-%d' % (j + 1), heal + 2 + j * 0.5
+            e = dict(op=op(), worker=j % 4, action='set', key=key, dispatched=t - 0.01, submitted=t, completed=t + 0.05, ok=True,
+                     error=None, state='ACKED', received=t + 0.1, recovery='fresh')
+            row = dict(op=e['op'], key=key, state='ACKED', seed=seed, length=64, digest=digest(seed), sequence=900 + j,
+                       worker=e['worker'], dispatched=t - 0.01, submitted=t, completed=t + 0.05, error=None, attributed=None,
+                       worker_identity=WID[e['worker']])
+            ev['write-ledger.jsonl'].append(row)
+            ev['ack-journal.jsonl'].append(dict(key=key, writer=e['worker'], seed=seed, submitted=t, completed=t + 0.05,
+                                                sequence=900 + j, length=64, digest=row['digest'], fids=['3,ab']))
+            ev['audit.jsonl'].append(dict(key=key, reads=[dict(case='hit', sha256=row['digest'], length=64, submitted=F5_AUDIT)]))
+            new.append(e)
+        for j in range(fresh if reads is None else reads):
+            t = heal + 2 + j * 0.5 + 0.2
+            sha = digest('f5-recovery-generation-%d' % (j + 1)) if not (wrong_fresh and j == 0) else digest('not-rf0')
+            new.append(dict(op=op(), worker=j % 3, action='get', key='rf%d' % j, dispatched=t - 0.01, submitted=t, completed=t + 0.01,
+                            ok=True, length=64, sha256=sha, sequence=900 + j, received=t + 0.05, recovery='fresh'))
+        ev['completions.jsonl'] += [f5_raw_of(e) for e in new]
+        if mark:
+            marks.insert(0, dict(event='recovery', heal=heal, mono=heal + 0.5, old_key='q' if old else None,
+                                 why=None if old else F5_SKIP))
+        ev['op-events.jsonl'] = sorted(ops + new, key=lambda e: e['completed']) + marks
+        renumber(ev)
+    return edit
+
+
+class F5Recovery(unittest.TestCase):
+    """r27 F5 (ruling option b): after the restore the load writes fresh keys and reads each back, so the 8 GET / 4 PUT
+    floors are met by post-restore ops; quarantine is unchanged; one old-data read is reported (or its skip)."""
+    v = F5Pressure.v
+
+    def rec(self, **kw):
+        return self.v(f5_recovery(**kw))
+
+    def test_r26_shape_no_op_after_the_restore_is_not_covered(self):
+        """The red control: every key quarantined in the window, nothing after the restore (r26's evidence)."""
+        for name, kw in (('r26 (no recovery mark)', dict(fresh=0, mark=False)), ('skip recorded', dict(fresh=0))):
+            with self.subTest(case=name):
+                v = self.rec(**kw)
+                c = v['criteria']['recovery']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+                self.assertIn('0 RDMA GETs and 0 PUTs', c['reason'])
+                self.assertEqual(v['status'], 'NOT_COVERED', v['criteria'])
+
+    def test_fresh_keys_written_and_read_back_after_the_restore_pass(self):
+        v = self.rec(fresh=8)
+        c = v['criteria']['recovery']
+        self.assertEqual((v['status'], c['outcome']), ('PASS', 'PASS'), v['criteria'])
+        self.assertIn('8 RDMA GETs and 8 PUTs', c['reason'])
+        self.assertIn('fresh keys: 8 PUTs, 8 read-backs, 8 exact', c['reason'])
+        self.assertEqual(v['criteria']['audit']['outcome'], 'PASS', v['criteria']['audit'])  # fresh keys audited too
+
+    def test_floors_short_are_not_covered(self):
+        for name, kw in (('3 PUTs', dict(fresh=3, reads=3)), ('8 PUTs, 7 read-backs', dict(fresh=8, reads=7)),
+                         ('4 PUTs, 4 read-backs', dict(fresh=4, reads=4))):
+            with self.subTest(case=name):
+                c = self.rec(**kw)['criteria']['recovery']
+                self.assertEqual(c['outcome'], 'NOT_COVERED', c)
+
+    def test_a_fresh_key_read_back_with_a_wrong_byte_fails(self):
+        v = self.rec(fresh=8, wrong_fresh=True)
+        self.assertEqual(v['criteria']['bytes']['outcome'], 'FAIL', v['criteria']['bytes'])
+        self.assertEqual(v['criteria']['recovery']['outcome'], 'FAIL', v['criteria']['recovery'])
+        self.assertEqual(v['status'], 'FAIL')
+
+    def test_the_old_data_read_is_reported_present_or_skipped(self):
+        c = self.rec(fresh=8, old='hit')['criteria']['recovery']
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertRegex(c['reason'], r'old-data read hit exact \(op \d+\)')
+        c = self.rec(fresh=8)['criteria']['recovery']
+        self.assertEqual(c['outcome'], 'PASS', c)
+        self.assertIn('old-data read skipped: ' + F5_SKIP, c['reason'])
+        c = self.rec(fresh=8, mark=False)['criteria']['recovery']
+        self.assertIn('old-data read not recorded', c['reason'])
+
+    def test_an_old_data_read_of_wrong_bytes_fails_bytes(self):
+        v = self.rec(fresh=8, old='wrong')
+        self.assertEqual(v['criteria']['bytes']['outcome'], 'FAIL', v['criteria']['bytes'])
+        self.assertIn('old-data read hit with WRONG BYTES', v['criteria']['recovery']['reason'])
+        self.assertEqual(v['status'], 'FAIL')
+
+    def test_an_unknown_mark_kind_is_still_refused(self):
+        v = verdict(self, 'mr_pressure', lambda ev: ev['op-events.jsonl'].insert(-1, dict(event='recovery_extra', mono=1.0)))
+        self.assertIn('unknown op-event kind', v.get('error', ''))
+
+
 if __name__ == '__main__':
     unittest.main()

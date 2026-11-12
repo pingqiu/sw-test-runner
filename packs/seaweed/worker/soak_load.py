@@ -39,6 +39,20 @@ OWN_EVIDENCE = ('ownership.jsonl',)  # F5 only (r26): unblock/orphan events, eve
 AUDIT_OP_S = 35  # one audit GET: the 30 s op limit plus margin; past it the audit stops incomplete
 
 
+RECOVERY_KEYS = 12  # r27 F5: fresh keys written, then read back, after the restore (floors: 4 PUTs, 8 RDMA GETs)
+
+
+def recovery_key(prefix, n):
+    """r27 F5: the n-th fresh recovery key, in its own namespace: never a kv_load, soak, F2 or earlier key."""
+    return prefix + hashlib.sha256(('f5-recovery-key-%d' % n).encode()).hexdigest()
+
+
+def old_key(latest, quarantined, busy, touched, start):
+    """r27 F5: a key ACKed before the pressure window and never touched at or after its start (no op dispatched or
+    settled since `start`, M01 clock), not quarantined and idle: the first in sorted order, or None (none available)."""
+    return next((k for k in sorted(latest) if k not in quarantined and k not in busy and touched.get(k, math.inf) < start), None)
+
+
 REAP_GAPS_S = (20, 3, 2, 2, 3)  # T0->K1, K1->G, A->K2, K2->D, D->E (tests may shrink them; production is these)
 TEARDOWN_EXIT = 78  # r26 F5: the load's exit status when its teardown is unproven (or proven only after the gate)
 
@@ -353,6 +367,8 @@ def run(config):
     timed_out = {}  # F3/F5: (worker, op) -> (action, key) for ops that hit the native deadline; consumed by one late row
     blocked, poisoned = set(), set()  # r26 F5: workers that take no op (an abandoned future outstanding; a raised submit)
     finals, exits, kills_sent, sched = {}, {}, {}, {}  # r26 F5: each child's final row, observed exit and kill; schedule
+    # r27 F5: the restore instant (the close's end_mono), the fresh keys issued, the old-key decision; each key's last op
+    recovery, touched = dict(heal=None, keys=[], old_done=False), {}
 
     def fault_window():
         """Pause: stop all dispatch, drain SETs (a GET error now is fatal: no
@@ -446,6 +462,8 @@ def run(config):
                         raise ValueError('fault close dated after its observation')
                     w = flap['window']
                     flap['window'] = type(w)(w.start, end + row_cfg['recovery_s'], w.binding)
+                    if pressure_row:
+                        recovery['heal'] = end  # r27 F5: recovery ops start only now, after this M01 mark
                 if window.get('armed'):
                     log('op-events.jsonl', dict(event='fault_window', phase='closed', episode=ep, mono=time.monotonic()))
                 window.update(episode=None, armed=False)
@@ -468,10 +486,14 @@ def run(config):
         if not parent.poll(wait) or parent.recv().get('event') != 'ready':
             raise RuntimeError('worker %s not ready' % i)
 
-    def send(i, action, key, length, seed=None, verification=False):
+    def send(i, action, key, length, seed=None, verification=False, purpose=None):
         seq[0] += 1
         cmd = dict(action=action, key=key, seed=seed or seeds.get(key), length=length, operation_id=str(seq[0]),
                    dispatched=time.monotonic())
+        if purpose:
+            cmd['recovery'] = purpose  # r27 F5: 'fresh' or 'old', carried onto the op-event
+        if pressure_row:
+            touched[key] = cmd['dispatched']
         if action == 'set':
             cmd['sequence'] = oracle.begin_write(key, payload(cmd['seed'], length)).sequence
         else:
@@ -556,8 +578,10 @@ def run(config):
         if pressure_row:
             # r26 F5: the parent's receipt stamp (a SET's complete row is sent only after its ACK metadata check, so this
             # is the ACK instant recovery judges), and the worker's strict per-op counter delta and pid when present
-            event['received'] = time.monotonic()
+            event['received'] = touched[key] = time.monotonic()
             event.update({k: row[k] for k in ('failed_delta', 'pid') if k in row})
+            if 'recovery' in cmd:
+                event['recovery'] = cmd['recovery']
         if cmd['action'] == 'set':
             if not row['ok'] or row['results'] not in (None, [True]):
                 if row_cfg:
@@ -634,7 +658,8 @@ def run(config):
         error = str(row.get('error'))
         event = dict(worker=i, op=cmd['operation_id'], action=cmd['action'], key=cmd['key'], dispatched=cmd['dispatched'],
                      submitted=submitted, completed=completed, ok=False, error=error, state='unresolved', phase=phase,
-                     received=received)
+                     received=received, **({'recovery': cmd['recovery']} if 'recovery' in cmd else {}))
+        touched[cmd['key']] = received
         inside = 'window' in flap and flap['window'].contains(submitted, completed)
         if cmd['action'] == 'set':
             if not inside:
@@ -674,6 +699,8 @@ def run(config):
                 # F3: the native completion of an op this worker abandoned at its deadline. Evidence only: the op
                 # keeps its terminal state (a PUT stays UNKNOWN and quarantined; the audit decides old or new).
                 action, key = timed_out.pop((i, row['operation_id']))
+                if pressure_row:
+                    touched[key] = time.monotonic()  # r27: a late completion touches its key too
                 entry = ledger.get(key) or {}
                 log('late-completions.jsonl', dict(
                     run_id=bind['run_id'], episode=row_cfg['episode'], worker=i, worker_identity=workers[i]['identity'],
@@ -804,6 +831,32 @@ def run(config):
         log('op-events.jsonl', dict(event='audit_done', mono=time.monotonic(), keys=len(ledger), complete=complete_,
                                     client=dict(pid=w['identity']['pid'], starttime=w['identity']['starttime'])))
 
+    def recovery_op(i, now, writing):
+        """r27 F5 (ruling, option b): only after the restore, i.e. once the controller's close (published only after the
+        restore proved restored=true; its end_mono is on this host's clock, never compared with M02's) was read. First,
+        once: one read of a key ACKed before the pressure window and never touched since (old data still reads), or a
+        recorded skip when the load has none. Then RECOVERY_KEYS fresh keys, written through the normal oracle, ledger
+        and ACK journal while writing is allowed and within half the recovery bound; each ACK is read back exactly by the
+        read-after-ACK verification. Quarantine is unchanged: a fresh PUT that fails stays an UNKNOWN. True: dispatched."""
+        heal = recovery['heal']
+        if not recovery['old_done']:
+            recovery['old_done'] = True
+            key = old_key(oracle.latest, {k for k, e in ledger.items() if e['quarantined']}, busy, touched, flap['window'].start)
+            log('op-events.jsonl', dict(event='recovery', heal=heal, mono=now, old_key=key, why=None if key else (
+                'none available (every ACKed key quarantined, busy or touched since the window opened)')))
+            if key is not None:
+                send(i, 'get', key, oracle.latest[key].length, purpose='old')
+                return True
+        if len(recovery['keys']) < RECOVERY_KEYS and writing and now <= heal + row_cfg['recovery_s'] / 2:
+            n = len(recovery['keys']) + 1
+            key = recovery_key(config['key_prefix'], n)
+            if key in ledger or key in oracle.latest or key in oracle.pending or key in busy:
+                raise OracleError('r27 recovery key not fresh')
+            recovery['keys'].append(key)
+            send(i, 'set', key, pat['object_bytes'] if pat else 1 << 20, seed='f5-recovery-generation-%d' % n, purpose='fresh')
+            return True
+        return False
+
     stopped = set()
 
     def drain_child(k):
@@ -882,7 +935,11 @@ def run(config):
                 key = None if pattern and pattern.phase == 0 else next((k for k in verify if k not in busy), None)
                 if key is not None:
                     verify.remove(key)
-                    send(i, 'get', key, oracle.latest[key].length, verification=True)
+                    send(i, 'get', key, oracle.latest[key].length, verification=True,
+                         purpose='fresh' if key in recovery['keys'] else None)
+                elif recovery['heal'] is not None and not (pattern and pattern.phase == 0) \
+                        and recovery_op(i, now, now < end - config['write_stop_s']):
+                    pass  # r27 F5: an after-restore recovery op (the old-key read, or a fresh key's PUT)
                 elif pattern:
                     op = pattern.next(now, now < end - config['write_stop_s'], oracle.pending, oracle.latest, busy)
                     if op and op[0] == 'set':

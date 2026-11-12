@@ -613,7 +613,7 @@ def assess_row(c):
     ops = [typed(e, op=str, action=str, key=str, worker=int, dispatched=float, submitted=float, completed=float, ok=bool)
            for e in events if 'action' in e]
     marks = [typed(e, event=str) for e in events if 'action' not in e]
-    if any(m['event'] not in ('client_kill', 'body_end', 'quiescent', 'fault_window', 'audit_done') for m in marks):
+    if any(m['event'] not in ('client_kill', 'body_end', 'quiescent', 'fault_window', 'audit_done', 'recovery') for m in marks):
         raise ValueError('unknown op-event kind')
     ledger = [typed(r, op=str, key=str, state=str, seed=str, length=int, digest=str, sequence=int, worker=int,
                     dispatched=float, submitted=float, completed=float, worker_identity=dict) for r in lines(root, 'write-ledger.jsonl')]
@@ -814,8 +814,8 @@ def assess_row(c):
         bad_g = [e['op'] for e in after if e['op'] not in ok_g]
         bad_p = [e['op'] for e in puts if not (e.get('state') == 'ACKED' and num(e.get('received')) and e['received'] <= end)]
         mark('recovery', 'FAIL' if bad_g or bad_p else 'NOT_COVERED' if len(after) < 8 or len(puts) < 4 else 'PASS',
-             '%d RDMA GETs and %d PUTs in the %d s after the restore (floors 8/4); not served %s, not ACKED by the bound %s' % (
-                 len(after), len(puts), row['recovery_s'], bad_g[:3], bad_p[:3]))
+             '%d RDMA GETs and %d PUTs in the %d s after the restore (floors 8/4); %s; not served %s, not ACKED by the bound %s' % (
+                 len(after), len(puts), row['recovery_s'], recovery_note(marks, gets, after, puts, ok_g, exact), bad_g[:3], bad_p[:3]))
     else:
         mark('recovery', 'PASS' if served else 'FAIL' if after else 'NOT_COVERED',
              '%d RDMA GETs in the %d s after the heal, %d served' % (len(after), row['recovery_s'], len(served)))
@@ -881,6 +881,26 @@ def assess_row(c):
     status = rank([v['outcome'] for v in crit.values()])
     return dict(status=status, row=ROW_KINDS[kind], criteria=crit, claims=claims, unknown_attributed=attributed,
                 resources='ACCOUNTED', resource_classes=classes, layout_scope=LAYOUT_SCOPE, **extra)
+
+
+def recovery_note(marks, gets, after, puts, ok_g, wrong):
+    """r27 F5: reported in the recovery reason, never a criterion of its own. The after-restore fresh-key ops (already
+    counted in the floors like every op in the bound), and the old-data read: one read of a key ACKed before the pressure
+    window and untouched in it, 'hit exact', its other outcome, or the load's recorded skip when it had none. Its wrong
+    bytes are the bytes criterion's FAIL; inside the bound it is an RDMA GET like any other (served, or the FAIL above)."""
+    fresh = 'fresh keys: %d PUTs, %d read-backs, %d exact' % (
+        sum(e.get('recovery') == 'fresh' for e in puts), sum(e.get('recovery') == 'fresh' for e in after),
+        sum(e.get('recovery') == 'fresh' and e['op'] in ok_g for e in after))
+    old, rec = [e for e in gets if e.get('recovery') == 'old'], [m for m in marks if m['event'] == 'recovery']
+    if len(old) == 1 and len(rec) == 1 and rec[0].get('old_key') == old[0]['key']:
+        e = old[0]
+        how = get_case(e) if get_case(e) != 'hit' else 'hit with WRONG BYTES' if e['op'] in wrong else 'hit exact'
+        note = 'old-data read %s (op %s)' % (how, e['op'])
+    elif not old and len(rec) == 1 and rec[0].get('old_key') is None:
+        note = 'old-data read skipped: %s' % str(rec[0].get('why'))[:100]
+    else:
+        note = 'old-data read not recorded (%d reads, %d marks)' % (len(old), len(rec))
+    return '%s; %s' % (fresh, note)
 
 
 def num(x):

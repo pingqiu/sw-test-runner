@@ -710,12 +710,135 @@ class PressureRows(unittest.TestCase):
         rc, _ = self.cli_unproven('file')
         self.assertEqual(rc, soak_load.TEARDOWN_EXIT)
 
+    # ---- r27 (ruling option b): after the restore, fresh keys written and read back; one old-data read or its skip
+    def recovery_run(self):
+        t, seen = self.controller()
+        summary = soak_load.run(self.config)
+        t.join()
+        self.assertEqual(summary['status'], 'LOAD_DONE')
+        events = jsonl(self.root / 'op-events.jsonl')
+        return seen, events, [e for e in events if 'action' in e]
+
+    def test_f5_after_the_restore_fresh_keys_are_written_and_read_back(self):
+        self.config['fault_row']['recovery_s'] = 4  # room for every fresh key: half the bound, 2 s
+        seen, events, ops = self.recovery_run()
+        fresh = [e for e in ops if e.get('recovery') == 'fresh']
+        puts, gets = [e for e in fresh if e['action'] == 'set'], [e for e in fresh if e['action'] == 'get']
+        keys = [soak_load.recovery_key(self.config['key_prefix'], n) for n in range(1, soak_load.RECOVERY_KEYS + 1)]
+        self.assertEqual([e['key'] for e in sorted(puts, key=lambda e: int(e['op']))], keys)  # each once, in order
+        self.assertEqual(sorted(e['key'] for e in gets), sorted(keys))  # each read back once
+        closed = next(m for m in events if m.get('event') == 'fault_window' and m['phase'] == 'closed')
+        for e in fresh:  # only after the restore: the close's end_mono (M01) and the load's own closed mark
+            self.assertGreaterEqual(e['dispatched'], seen['close'], e)
+            self.assertGreaterEqual(e['dispatched'], closed['mono'], e)
+        self.assertTrue(all(e['state'] == 'ACKED' for e in puts), puts)
+        acks = {a['key']: a for a in jsonl(self.root / 'ack-journal.jsonl')}
+        for g in gets:  # exact: the ACKed generation's digest (the load's oracle raises on anything else)
+            self.assertTrue(g['ok'] and g['sha256'] == acks[g['key']]['digest'] and g['submitted'] >= acks[g['key']]['completed'], g)
+        # fresh: no op touched these keys before the restore; they go through the ledger and the fresh audit
+        self.assertFalse({e['key'] for e in ops if e['dispatched'] < seen['close']} & set(keys))
+        ledger = [r for r in jsonl(self.root / 'write-ledger.jsonl') if r['key'] in keys]
+        self.assertEqual(sorted((r['key'], r['state']) for r in ledger), sorted((k, 'ACKED') for k in keys))
+        self.assertTrue(set(keys) <= {a['key'] for a in jsonl(self.root / 'audit.jsonl')})
+        self.assert_old_read(seen, events, ops)
+
+    def assert_old_read(self, seen, events, ops):
+        """The one recovery mark: the heal it used, and either one old-data read (a key ACKed before the pause, no op on
+        it since, read once after the restore) or the recorded skip with no old read at all."""
+        mark = [m for m in events if m.get('event') == 'recovery']
+        self.assertEqual(len(mark), 1, mark)
+        self.assertEqual(mark[0]['heal'], seen['close'])
+        old = [e for e in ops if e.get('recovery') == 'old']
+        if mark[0]['old_key'] is None:
+            self.assertIn('none available', mark[0]['why'])
+            self.assertEqual(old, [])
+            return
+        key = mark[0]['old_key']
+        self.assertEqual([(e['action'], e['key']) for e in old], [('get', key)])
+        self.assertGreaterEqual(old[0]['dispatched'], seen['close'])
+        acked = [a for a in jsonl(self.root / 'ack-journal.jsonl') if a['key'] == key]
+        self.assertTrue(acked and acked[0]['completed'] < seen['pause'])
+        for e in ops:  # untouched since the pause until the old read
+            if e['key'] == key and e is not old[0] and e['dispatched'] < old[0]['dispatched']:
+                self.assertLess(e['received'], seen['pause'], e)
+
+    def test_f5_fresh_puts_stop_at_half_the_recovery_bound(self):
+        seen, events, ops = self.recovery_run()  # recovery_s 1: fresh PUTs only until the close + 0.5 s
+        puts = [e for e in ops if e.get('recovery') == 'fresh' and e['action'] == 'set']
+        self.assertTrue(puts)
+        self.assertTrue(all(seen['close'] <= e['dispatched'] <= seen['close'] + 0.5 for e in puts), puts)
+        self.assertLess(len(puts), soak_load.RECOVERY_KEYS)
+        self.assert_old_read(seen, events, ops)
+
+    def test_f5_without_an_old_key_the_skip_is_recorded_and_fresh_keys_still_run(self):
+        """r26's case: no key ACKed before the window is left untouched (old_key finds none): the load records the skip,
+        reads no old key, and the fresh keys still meet the floors on their own."""
+        self.config['fault_row']['recovery_s'] = 4
+        self.addCleanup(setattr, soak_load, 'old_key', soak_load.old_key)
+        soak_load.old_key = lambda *a: None
+        seen, events, ops = self.recovery_run()
+        self.assert_old_read(seen, events, ops)
+        mark = next(m for m in events if m.get('event') == 'recovery')
+        self.assertEqual((mark['old_key'], mark['why']),
+                         (None, 'none available (every ACKed key quarantined, busy or touched since the window opened)'))
+        fresh = [e for e in ops if e.get('recovery') == 'fresh']
+        self.assertEqual(sum(e['action'] == 'set' for e in fresh), soak_load.RECOVERY_KEYS)
+        self.assertEqual(sum(e['action'] == 'get' for e in fresh), soak_load.RECOVERY_KEYS)
+
+    def test_f5_a_recovery_key_already_written_stops_the_run(self):
+        """The freshness guard: a recovery key that names a key the load already wrote (here the soak's own slots) is
+        never written over or read as fresh; the run stops."""
+        self.config['fault_row']['recovery_s'] = 4
+        self.addCleanup(setattr, soak_load, 'recovery_key', soak_load.recovery_key)
+        soak_load.recovery_key = lambda prefix, n: prefix + soak_load.hashlib.sha256(('soak-key-%d' % (n - 1)).encode()).hexdigest()
+        t, _ = self.controller()
+        with self.assertRaisesRegex(OracleError, 'recovery key not fresh'):
+            soak_load.run(self.config)
+        t.join()
+
+    def test_only_f5_issues_recovery_ops(self):
+        Rows.flap_row(self)  # F3: the same M01 close mark and window bound, no recovery ops
+        t, _ = Rows.flap_controller(self, fail=0.3)
+        soak_load.run(self.config)
+        t.join()
+        events = jsonl(self.root / 'op-events.jsonl')
+        self.assertFalse([e for e in events if 'recovery' in e or e.get('event') == 'recovery'])
+        fresh = {soak_load.recovery_key(self.config['key_prefix'], n) for n in range(1, soak_load.RECOVERY_KEYS + 1)}
+        self.assertFalse(fresh & {r['key'] for r in jsonl(self.root / 'write-ledger.jsonl')})
+
     def test_only_f5_children_get_the_ownership_flag(self):
         Rows.flap_row(self)
         t, _ = Rows.flap_controller(self, fail=0.3)
         soak_load.run(self.config)
         t.join()
         self.assertEqual(list(self.root.glob('fake-own-flag-*')), [])
+
+
+class OldKey(unittest.TestCase):
+    """r27 F5: the old-data key is ACKed (in latest), not quarantined, idle, and last touched strictly before the pressure
+    window's start; a key with no recorded op is never assumed untouched."""
+
+    def test_the_old_key_rules(self):
+        latest, start = dict.fromkeys('abcde', 1), 10.0
+        touched = dict(a=5.0, b=9.0, c=10.0, d=4.0, x=1.0)  # e: no recorded op; x: not ACKed
+        self.assertEqual(soak_load.old_key(latest, {'a'}, {'d'}, touched, start), 'b')
+        for name, kw, want in (('quarantined', dict(quarantined={'a', 'b', 'd'}), None),
+                               ('busy', dict(busy={'a', 'b', 'd'}), None),
+                               ('touched at the start', dict(touched=dict(touched, a=10.0, b=10.0, d=12.0)), None),
+                               ('touched after the start', dict(touched=dict(touched, a=11.0, b=10.5)), 'd'),
+                               ('the first in sorted order', dict(), 'a')):
+            with self.subTest(case=name):
+                args = dict(latest=latest, quarantined=set(), busy=set(), touched=touched, start=start)
+                args.update(kw)
+                self.assertEqual(soak_load.old_key(**args), want)
+
+    def test_the_fresh_namespace_is_its_own(self):
+        keys = [soak_load.recovery_key('k@', n) for n in range(1, soak_load.RECOVERY_KEYS + 1)]
+        self.assertEqual(len(set(keys)), soak_load.RECOVERY_KEYS)
+        p = soak_load.Pattern(dict(keys=512, distribution='uniform', phases=[]), None, 'k@')
+        others = {p.key(i) for i in range(512)} | {'k@' + soak_load.hashlib.sha256(('%s-%d' % (s, i)).encode()).hexdigest()
+                                                  for s in ('soak-key', 'f2-key') for i in range(4096)}
+        self.assertFalse(set(keys) & others)
 
 
 class OracleStates(unittest.TestCase):
