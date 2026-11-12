@@ -625,7 +625,8 @@ class PressureRows(unittest.TestCase):
         t.join(10)
         try:
             self.assertEqual(rc, soak_load.TEARDOWN_EXIT, err[-2000:])
-            self.assertIn('UNPROVEN', err)
+            td = [x for x in jsonl(self.root / 'ownership.jsonl') if x['event'] == 'teardown']
+            self.assertEqual(td[0]['unproven'], ['3'])  # the record is the evidence file, written before the exit
             self.assertLess(elapsed, self.config['duration_s'] + self.config['quiescence_s'] + sum(soak_load.REAP_GAPS_S) + 3 + 15)
             events = jsonl(self.root / 'op-events.jsonl')
             self.assertNotIn('quiescent', [e.get('event') for e in events])
@@ -638,6 +639,76 @@ class PressureRows(unittest.TestCase):
                 cmdline = b''
             if b'python' in cmdline:
                 os.kill(pid, 9)
+
+    def cli_unproven(self, sink):
+        """The shipping CLI main() in its own process, child 3 surviving its kill (modelled: kill() a no-op, so a real
+        child stays live), with stdout/stderr bound to `sink` ('file', or a pipe nobody reads that is already FULL).
+        -> (rc or None if it never exited within 60 s, elapsed). Always stops what it started, by recorded pids."""
+        import fcntl
+        import os
+        import subprocess
+        import sys
+        (self.root / 'fake-stop-ignore').write_text('')
+        code = ("import json, sys, soak_load, test_soak_fake_child as f\n"
+                "soak_load.child = f.child\n"
+                "soak_load.REAP_GAPS_S = (2, 0.5, 0.3, 0.3, 0.3)\n"
+                "real = soak_load.reap\n"
+                "def reap(children, ids, *a, **kw):\n"
+                "    if 3 in ids:\n"
+                "        children[3]['process'].kill = lambda: None  # survives its kill (modelled)\n"
+                "    return real(children, ids, *a, **kw)\n"
+                "soak_load.reap = reap\n"
+                "sys.argv = ['soak_load.py', '--config', sys.argv[1]]\n"
+                "soak_load.main()\n")
+        fds = []
+        if sink == 'file':
+            out = err = open(self.root / 'cli.err', 'w')
+            fds.append(out)
+        else:  # a pipe nobody reads, filled to capacity before the CLI starts
+            r, w = os.pipe()
+            fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+            try:
+                while True:
+                    os.write(w, b'x' * 65536)
+            except BlockingIOError:
+                pass
+            fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+            out = err = w
+            fds += [r, w]
+        t, _ = self.controller(fail=0.3)
+        began = time.monotonic()
+        p = subprocess.Popen([sys.executable, '-c', code, json.dumps(self.config)], cwd=str(Path(soak_load.__file__).parent),
+                             stdout=out, stderr=err, stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        try:
+            rc = p.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            rc = None
+        elapsed = time.monotonic() - began
+        if rc is None:  # blocked: stop it, by its own handle
+            p.kill()
+            p.wait()
+        for f in fds:
+            f.close() if hasattr(f, 'close') else os.close(f)
+        t.join(10)
+        try:  # the live child the CLI left behind: by its recorded pid, checked first
+            pid = json.loads((self.root / 'workers.json').read_text())['3']['pid']
+            if b'python' in Path('/proc/%d/cmdline' % pid).read_bytes():
+                os.kill(pid, 9)
+        except (OSError, KeyError, ValueError):
+            pass
+        return rc, elapsed
+
+    def test_f5_a_full_stderr_or_stdout_pipe_never_blocks_the_hard_exit(self):
+        rc, elapsed = self.cli_unproven('full-pipe')
+        self.assertEqual(rc, soak_load.TEARDOWN_EXIT)  # None: blocked writing to the full pipe
+        self.assertLess(elapsed, self.config['duration_s'] + self.config['quiescence_s'] + sum(soak_load.REAP_GAPS_S) + 3 + 15)
+        td = [x for x in jsonl(self.root / 'ownership.jsonl') if x['event'] == 'teardown']
+        self.assertEqual(td[0]['unproven'], ['3'])
+        self.assertNotIn('quiescent', [e.get('event') for e in jsonl(self.root / 'op-events.jsonl')])
+
+    def test_f5_the_hard_exit_with_an_empty_file_sink_still_exits_78(self):
+        rc, _ = self.cli_unproven('file')
+        self.assertEqual(rc, soak_load.TEARDOWN_EXIT)
 
     def test_only_f5_children_get_the_ownership_flag(self):
         Rows.flap_row(self)

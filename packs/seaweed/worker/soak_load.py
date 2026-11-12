@@ -944,12 +944,11 @@ def main():
     config = json.loads(parser.parse_args().config)
     try:
         summary = run(config)
-    except TeardownUnproven as error:
-        # r26 correction: run() has already closed its evidence and bounded every join by E. A normal interpreter exit
-        # would now join each still-live multiprocessing child without any bound; leave the process at once instead.
-        sys.stderr.write('soak_load: %s\n' % error)
-        sys.stderr.flush()
-        sys.stdout.flush()
+    except TeardownUnproven:
+        # r26 correction: run() has already closed its evidence (the teardown record, unproven children included, is in
+        # ownership.jsonl) and bounded every join by E. A normal interpreter exit would now join each still-live
+        # multiprocessing child without any bound, and any stdout/stderr write or flush can block on a full pipe: leave
+        # the process at once, with no I/O at all on this path.
         os._exit(TEARDOWN_EXIT)
     root = Path(config['root'])
     summary['evidence'] = {n: dict(sha256=hashlib.sha256((root / n).read_bytes()).hexdigest(), bytes=(root / n).stat().st_size)

@@ -605,6 +605,9 @@ def renumber(ev):
     new = {old: str(i + 1) for i, old in enumerate(keep)}
     for e in ops + ev['write-ledger.jsonl']:
         e['op'] = new[e['op']]
+    for x in ev.get('completions.jsonl', []):  # r26: the raw completions keep joining their ops
+        if x['op'] in new:
+            x['op'] = x['row']['operation_id'] = new[x['op']]
     for m in ev['op-events.jsonl']:
         if m.get('event') == 'client_kill':
             m['witness']['operation_id'] = new[str(m['witness']['operation_id'])]
@@ -1472,7 +1475,9 @@ def f5_put(ev, at=1115.0, phase='complete', native_ok=False, failed_delta=1, aud
 
 def f5_drop(pred):
     def edit(ev):
-        ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if not ('action' in e and pred(e))]
+        gone = {e['op'] for e in ev['op-events.jsonl'] if 'action' in e and pred(e)}
+        ev['op-events.jsonl'] = [e for e in ev['op-events.jsonl'] if not ('action' in e and e['op'] in gone)]
+        ev['completions.jsonl'] = [x for x in ev['completions.jsonl'] if x['op'] not in gone]  # its raw record goes too
         renumber(ev)
     return edit
 
@@ -1681,6 +1686,7 @@ class F5Pressure(unittest.TestCase):
     def test_a_wait_phase_get_with_a_stale_count_is_never_causal(self):
         v = self.v(lambda ev: f5_failed_get(ev).update(phase='wait'))
         self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+        self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])  # a phase on a settled op contradicts
         self.assertNotEqual(v['status'], 'PASS')
 
     def test_a_foreign_or_contradictory_pid_is_never_credited(self):
@@ -1713,6 +1719,71 @@ class F5Pressure(unittest.TestCase):
 
     def test_the_own_pid_on_both_records_passes(self):
         v = self.v(f5_get_both(pid=WID[0]['pid']))
+        self.assertEqual(v['status'], 'PASS', v['criteria'])
+
+    # ---- r26 correction 2 (source review of 3e9a7c1d): every op exactly one agreeing raw record; the RAW interval
+    def uncounted_put(self, ev):
+        return f5_put(ev, failed_delta=None, audit='old')  # beside the counted GET
+
+    def test_an_uncounted_put_whose_raw_record_is_dropped_never_passes(self):
+        def edit(ev):
+            op = self.uncounted_put(ev)
+            ev['completions.jsonl'] = [x for x in ev['completions.jsonl'] if x['op'] != op]
+        v = self.v(edit)
+        self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+        self.assertIn('missing', v['criteria']['failure_mode']['reason'])
+        self.assertEqual(v['status'], 'FAIL')
+
+    def test_a_duplicate_ok_raw_record_never_overwrites_a_failed_one(self):
+        def edit(ev):
+            op = self.uncounted_put(ev)
+            first = next(x for x in ev['completions.jsonl'] if x['op'] == op)
+            ev['completions.jsonl'].append(dict(first, row=dict(first['row'], ok=True, failed_delta=0)))
+        v = self.v(edit)
+        self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+        self.assertIn('duplicated', v['criteria']['failure_mode']['reason'])
+        self.assertEqual(v['status'], 'FAIL')
+
+    def test_a_raw_record_without_its_op_never_passes(self):
+        def edit(ev):
+            x = ev['completions.jsonl'][0]
+            ev['completions.jsonl'].append(dict(x, op='9999', row=dict(x['row'], operation_id='9999')))
+        v = self.v(edit)
+        self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+        self.assertIn('without an op', v['criteria']['failure_mode']['reason'])
+
+    def test_a_counted_get_whose_raw_interval_is_outside_the_window_is_never_credited(self):
+        cases = {'raw before the pressure (1001/1002)': (1001.0, 1002.0),
+                 'raw after the window': (1170.0, 1170.5),
+                 'raw straddling a different instant': (1110.0, 1111.5)}
+        for name, (s, c) in cases.items():
+            with self.subTest(case=name):
+                def edit(ev, s=s, c=c):
+                    raw = f5_raw(ev, f5_failed_get(ev)['op'])
+                    raw.update(submitted=s, completed=c)  # the op-event keeps its in-window times
+                v = self.v(edit)
+                self.assertEqual(v['criteria']['causal']['outcome'], 'NOT_COVERED', v['criteria']['causal'])
+                self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+                self.assertIn('contradicting', v['criteria']['failure_mode']['reason'])
+
+    def test_a_raw_record_contradicting_its_op_identity_never_passes(self):
+        cases = {'another key': lambda r, x: r.update(key='k@other'),
+                 'another worker': lambda r, x: x.update(worker=2),
+                 'another action': lambda r, x: x.update(action='set'),
+                 'another operation id': lambda r, x: r.update(operation_id='4242'),
+                 'ok disagrees': lambda r, x: r.update(ok=True)}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                def edit(ev, change=change):
+                    op = f5_failed_get(ev)['op']
+                    x = next(x for x in ev['completions.jsonl'] if x['op'] == op)
+                    change(x['row'], x)
+                v = self.v(edit)
+                self.assertEqual(v['criteria']['failure_mode']['outcome'], 'FAIL', v['criteria'])
+                self.assertNotEqual(v['status'], 'PASS')
+
+    def test_the_agreeing_raw_records_still_pass(self):
+        v = self.v(lambda ev: f5_put(ev, failed_delta=1, audit='old'))
         self.assertEqual(v['status'], 'PASS', v['criteria'])
 
     def test_late_completions_are_reported(self):
