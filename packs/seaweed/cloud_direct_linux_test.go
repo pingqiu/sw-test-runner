@@ -292,6 +292,58 @@ func TestDirectPostflightShellSemantics(t *testing.T) {
 	}
 }
 
+// The 11-09 smoke: in a mount case the client host starts no run unit, and
+// journalctl -u answers a glob that matches none with rc 1. That capture must
+// not fail the run; a host with services still captures its journal; both are
+// still stopped and postflighted.
+func TestMountCaseClientWithoutUnitsCollectsCleanly(t *testing.T) {
+	for _, services := range []bool{false, true} {
+		t.Run(fmt.Sprint("services-", services), func(t *testing.T) {
+			h := &directHost{}
+			execute := func(command string, channel ssh.Channel) uint32 {
+				if !strings.Contains(command, "journalctl") {
+					return h.exec(command, channel)
+				}
+				h.mu.Lock()
+				h.commands = append(h.commands, command)
+				h.mu.Unlock()
+				if !services {
+					fmt.Fprintln(channel.Stderr(), "Failed to add filter for units: No data available")
+					return 1
+				}
+				fmt.Fprintln(channel, "JOURNAL-MARKER")
+				return 0
+			}
+			address, pin, key, _ := cloudSSH(t, "", execute)
+			var d inventory.Document
+			if err := json.Unmarshal(directInput(t, address), &d); err != nil {
+				t.Fatal(err)
+			}
+			host := d.Hosts[0]
+			if len(host.Services) == 0 {
+				t.Fatal("fixture host has no services")
+			}
+			if !services {
+				host.Services = nil
+			}
+			out := t.TempDir()
+			if err := directCleanup(CloudConfig{ReadCase: MountSoakSmokeCase, SSHKey: key, HostKey: pin, Output: out}, d, host); err != nil {
+				t.Fatal(err)
+			}
+			journal, stop, post := h.index("journalctl"), h.index("systemctl stop"), h.index("systemctl list-units")
+			if stop < 0 || post <= stop {
+				t.Fatalf("teardown lost: stop %d, postflight %d", stop, post)
+			}
+			if services != (journal >= 0) || services && journal > stop {
+				t.Fatalf("services=%v: journal capture at %d, stop at %d", services, journal, stop)
+			}
+			if b, err := os.ReadFile(filepath.Join(out, "cloud-services.log")); err != nil || services != strings.Contains(string(b), "JOURNAL-MARKER") {
+				t.Fatalf("services=%v: service log %q, %v", services, b, err)
+			}
+		})
+	}
+}
+
 // Run the exact capture shell with real find: a failed cat must fail capture,
 // while the independent SSH teardown still stops units and checks all ports.
 func TestDirectECJournalReadFailureStillTearsDown(t *testing.T) {

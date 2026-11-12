@@ -113,7 +113,7 @@ func RunCloudHTTP(ctx context.Context, raw []byte, c CloudConfig) (bundle string
 		return "", errors.New("ec_volume_impl requires EC stage1; Rust under-quorum is not qualified")
 	}
 	if c.ReadCase != "" {
-		if c.ReadCase != "volume-restart" && c.ReadCase != "filer-restart" && c.ReadCase != "volume-freeze" || c.KVSoak || c.KVLoad {
+		if c.ReadCase != "volume-restart" && c.ReadCase != "filer-restart" && c.ReadCase != "volume-freeze" && !isMountCase(c.ReadCase) || c.KVSoak || c.KVLoad {
 			return "", errors.New("read_case requires one supported case without kv_soak or kv_load")
 		}
 	}
@@ -440,6 +440,12 @@ func directCleanup(c CloudConfig, d inventory.Document, h inventory.Host) error 
 		}
 		defer n.Close()
 		command := "sudo journalctl --no-pager -u " + units + " -n 300"
+		if isMountCase(c.ReadCase) && len(h.Services) == 0 {
+			// The mount worker runs as a step, never a unit, so a client host has
+			// no run unit and journalctl -u refuses a glob that matches none.
+			// The worker's logs are in its run root.
+			command = ":"
+		}
 		if c.ECStage1 || c.MasterWrites {
 			command += "; find " + cloudQuote(h.RunRoot) + " -maxdepth 1 -name '*.jsonl' -type f -print -exec cat {} +"
 		}
