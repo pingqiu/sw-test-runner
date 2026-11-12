@@ -1,0 +1,61 @@
+{
+  "scope": "Selected real receipt subset from FAILED v3A run; fixture success does not change its verdict or qualify native transport",
+  "run": "kv-candidate-20261029T195756Z",
+  "source": "a9ad629a",
+  "module": "b0e5cb99",
+  "parent_final_manifest": "0d5f12a4644a180702f1d5474c329ba92d40483943f52441a54c0fc6cb6c2852",
+  "archive_sha256": "b2f9799097b62011ec7d9ee6d2a0cf78fed7fc0c2b757d383015a75335c6a5f7",
+  "fixture_sha256": "b0dc764412cb127e0720d897896261c1ac17b5b636c976f13133089aa0f5a52f",
+  "selected_rows": [
+    {
+      "source": "operation-events.jsonl",
+      "line": 27,
+      "sha256": "54344b8cc2dc06c81ddfd2ff9a954778132495400eaf8f023f6b2ad3ce18b43d"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 33,
+      "sha256": "05d0c4906dd3a812e009c144bfcbd644b718edd05d0f76469607059d54e642c4"
+    },
+    {
+      "source": "ack-journal.jsonl",
+      "line": 1,
+      "sha256": "cbeed94cd413300e4257955b2133aaa064c2452d83bf6495e23972336043347d"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 34,
+      "sha256": "d08b495de0cb97371124c5bf8588ced902ccec44a52a306aaa4e5718ea94ccc1"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 36,
+      "sha256": "c3614799e9486989c8795aae61c5e81539dc3eb71f93d7728a7b883f2345504a"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 51,
+      "sha256": "d64a0f767c4040893ec96cad9be0942088db6c00a41a15303a7e1e51af82b82c"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 54,
+      "sha256": "5aca575e070727a9ed96b78a941deee4d5f637fa84db1cc88108a87013c7754c"
+    },
+    {
+      "source": "ack-journal.jsonl",
+      "line": 2,
+      "sha256": "134e527e19cdf64e644a1dd2f749f42e06b7d4f3dc55ca75862411b7f6c6a8f7"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 55,
+      "sha256": "ef625ae51faa9efaeb758f204e347670d8579e95879aa3069162503d4bbd8b5f"
+    },
+    {
+      "source": "operation-events.jsonl",
+      "line": 60,
+      "sha256": "63f835429f83adc0e2132e7bcdd8d777ecc4b268bc68c85164162aeca297dc8f"
+    }
+  ]
+}
