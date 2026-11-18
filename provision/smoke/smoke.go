@@ -84,6 +84,68 @@ type Pack func(context.Context, []byte, seaweed.CloudConfig) (string, error)
 type Controller struct {
 	Command Runner
 	Pack    Pack
+	// Exit ends the process when the hard-deadline watchdog fires (default
+	// os.Exit); tests inject it. WatchdogGrace is how long past the hard
+	// deadline (destroy: past its 15-minute cleanup bound) Execute may still be
+	// running before the watchdog fires (default 60 s).
+	Exit          func(int)
+	WatchdogGrace time.Duration
+	dogAfter      time.Duration // tests only: fire the watchdog after this, not at end+grace
+}
+
+// cleanRun is what a run's outcome.json must show for a new run to start:
+// the remaining resources were observed, none remain and no create is
+// unresolved (the run's code itself may be a failure: a failed pack whose
+// destroy succeeded is clean).
+type runOutcome struct {
+	Schema            string   `json:"schema"`
+	Mode              string   `json:"mode"`
+	Code              string   `json:"code"`
+	RemainingObserved bool     `json:"remaining_observed"`
+	Remaining         []string `json:"remaining_resource_ids"`
+	CreateUnresolved  bool     `json:"create_unresolved"`
+	At                string   `json:"at"`
+}
+
+func (o runOutcome) clean() bool {
+	return o.RemainingObserved && len(o.Remaining) == 0 && !o.CreateUnresolved
+}
+
+// unfinishedRuns lists sibling run directories (same parent as output) that
+// were launched under the token guard (launch.json), started an apply, and have
+// no outcome.json proving them clean: the next session must destroy them first.
+// Directories from before the guard (no launch.json) are not judged.
+func unfinishedRuns(output string) ([]string, error) {
+	parent := filepath.Dir(output)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var open []string
+	for _, e := range entries {
+		dir := filepath.Join(parent, e.Name())
+		if !e.IsDir() || dir == filepath.Clean(output) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "launch.json")); err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "apply-started")); err != nil {
+			continue
+		}
+		var o runOutcome
+		b, err := os.ReadFile(filepath.Join(dir, "outcome.json"))
+		if err == nil {
+			err = StrictJSON(b, &o)
+		}
+		if err != nil || !o.clean() {
+			open = append(open, dir)
+		}
+	}
+	return open, nil
 }
 
 func StrictJSON(raw []byte, dst any) error {
@@ -602,6 +664,55 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			out.Remedy = "fix hourly_usd / budget_usd / abort_estimate_usd / hard_deadline; no cloud operation was performed"
 			return
 		}
+		// The next session destroys first: an earlier guarded run that started an
+		// apply and has no clean outcome.json blocks a new run.
+		open, e := unfinishedRuns(c.Output)
+		if e != nil || len(open) > 0 {
+			out.Code = "RECOVERY_REQUIRED"
+			out.Error = fmt.Sprint(open, e)
+			out.Remedy = "run `seaweed-cloud destroy --config <run>/recovery.json` (or cleanup --run ID) for each listed run until its outcome is clean; no cloud operation was performed"
+			return
+		}
+	}
+	// The hard-deadline watchdog (armed once a mutating mode is admitted, see
+	// armDog's callers) and the terminal record.
+	var stopDog func()
+	created := false // this run made its output dir (only then does it write outcome.json)
+	defer func() {
+		if stopDog != nil {
+			stopDog()
+		}
+	}()
+	armDog := func(end time.Time) {
+		grace := ctl.WatchdogGrace
+		if grace <= 0 {
+			grace = 60 * time.Second
+		}
+		exit := ctl.Exit
+		if exit == nil {
+			exit = os.Exit
+		}
+		after := time.Until(end.Add(grace))
+		if ctl.dogAfter > 0 {
+			after = ctl.dogAfter
+		}
+		dog := time.AfterFunc(after, func() {
+			rec, _ := json.Marshal(map[string]string{"schema": "seaweed.cloud-watchdog/v1", "mode": mode, "fired_at": time.Now().UTC().Format(time.RFC3339), "deadline": end.UTC().Format(time.RFC3339), "remedy": "the controller was still running past its deadline; run destroy before any new run"})
+			_ = os.WriteFile(filepath.Join(c.Output, "watchdog.json"), rec, 0600)
+			exit(3)
+		})
+		stopDog = func() { dog.Stop() }
+	}
+	if mode == "run" || mode == "destroy" {
+		// Registered before the cleanup defer, so it runs after cleanup: it sees
+		// the final remaining/unresolved state.
+		defer func() {
+			if !(mode == "destroy" || created) {
+				return // a refused run must not overwrite an earlier run's record
+			}
+			rec, _ := json.Marshal(runOutcome{Schema: "seaweed.cloud-outcome/v1", Mode: mode, Code: out.Code, RemainingObserved: out.RemainingObserved, Remaining: out.Remaining, CreateUnresolved: out.CreateUnresolved, At: time.Now().UTC().Format(time.RFC3339)})
+			_ = os.WriteFile(filepath.Join(c.Output, "outcome.json"), rec, 0600)
+		}()
 	}
 	if ctl.Command == nil {
 		ctl.Command = Native
@@ -735,6 +846,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			out.Error = err.Error()
 			return
 		}
+		created = true
+		armDog(d.Run.Hard) // admitted: the hard deadline is ahead by more than the reserve
 		for name, b := range files {
 			p := filepath.Join(terraformRoot, filepath.FromSlash(name))
 			if err = os.MkdirAll(filepath.Dir(p), 0700); err == nil {
@@ -863,6 +976,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 	}
 	if mode == "destroy" {
+		armDog(time.Now().Add(15 * time.Minute)) // the cleanup bound of a recovery destroy
 		cleanup()
 		return
 	}
@@ -991,6 +1105,7 @@ func clusterHostKeys(root string) (map[string]string, error) {
 // stderr is included in private evidence without corrupting JSON stdout.
 func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, tool, args...)
+	killGroup(cmd)
 	cmd.Dir = dir
 	for _, e := range os.Environ() {
 		key := strings.SplitN(e, "=", 2)[0]
