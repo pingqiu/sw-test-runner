@@ -126,6 +126,7 @@ func TestUnfinishedRunBlocksNewRun(t *testing.T) {
 	clean := `{"schema":"seaweed.cloud-outcome/v1","mode":"run","code":"PACK_FAILED","remaining_observed":true,"remaining_resource_ids":[],"create_unresolved":false,"at":"x"}`
 	left := `{"schema":"seaweed.cloud-outcome/v1","mode":"run","code":"CLEANUP_INCOMPLETE","remaining_observed":true,"remaining_resource_ids":["/subscriptions/x/vm"],"create_unresolved":false,"at":"x"}`
 	unobserved := `{"schema":"seaweed.cloud-outcome/v1","mode":"run","code":"CLEANUP_INCOMPLETE","remaining_observed":false,"remaining_resource_ids":[],"create_unresolved":false,"at":"x"}`
+	failedDestroy := `{"schema":"seaweed.cloud-outcome/v1","mode":"destroy","code":"CLEANUP_INCOMPLETE","remaining_observed":true,"remaining_resource_ids":[],"create_unresolved":false,"at":"x"}`
 	unresolved := `{"schema":"seaweed.cloud-outcome/v1","mode":"run","code":"CREATE_UNRESOLVED","remaining_observed":true,"remaining_resource_ids":[],"create_unresolved":true,"at":"x"}`
 	for _, tc := range []struct {
 		name          string
@@ -137,6 +138,7 @@ func TestUnfinishedRunBlocksNewRun(t *testing.T) {
 		{"resources remain", true, true, left, true},
 		{"remaining not observed", true, true, unobserved, true},
 		{"create unresolved", true, true, unresolved, true},
+		{"failed destroy, empty list", true, true, failedDestroy, true},
 		{"malformed outcome", true, true, `{"code":`, true},
 		{"clean (failed pack, empty RG)", true, true, clean, false},
 		{"refused before apply", true, false, "", false},

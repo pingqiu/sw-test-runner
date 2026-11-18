@@ -128,3 +128,105 @@ func TestExecPackRefusesChangedExecutable(t *testing.T) {
 		t.Fatalf("changed executable ran: %v", err)
 	}
 }
+
+// childDead waits (bounded) until pid is gone or a zombie.
+func childDead(t *testing.T, pid int) bool {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			return true
+		}
+		if s, e := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); e == nil && strings.Contains(string(s), ") Z ") {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Kill(pid, syscall.SIGKILL)
+	return false
+}
+
+// readPid reads the child pid a script wrote.
+func readPid(t *testing.T, path string) int {
+	t.Helper()
+	b, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatalf("the script did not record its child: %v", e)
+	}
+	pid, e := strconv.Atoi(strings.TrimSpace(string(b)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	return pid
+}
+
+// The leader exits first, leaving a child behind: the pack's group is retired on
+// a normal and on a failed exit, so no child outlives the pack (codex01 P1:
+// CommandContext stops watching once the leader is reaped).
+func TestExecPackLeaderExitsFirstRetiresChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name, exit, want string
+	}{{"exit 0", "0", "COMPLETE"}, {"exit 4", "4", "PACK_FAILED"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			pidfile := filepath.Join(t.TempDir(), "child.pid")
+			c := execFixture(t, "sleep 600 >/dev/null 2>&1 & echo $! > "+pidfile+"; exit "+tc.exit+"\n")
+			f := &fake{}
+			ctl := controller(f)
+			ctl.Pack = nil
+			start := time.Now()
+			r := ctl.Execute(context.Background(), "run", c)
+			if r.Code != tc.want {
+				t.Fatalf("code %s (%s), want %s", r.Code, r.Error, tc.want)
+			}
+			if el := time.Since(start); el > 30*time.Second {
+				t.Fatalf("the run took %v", el)
+			}
+			if pid := readPid(t, pidfile); !childDead(t, pid) {
+				t.Fatalf("the pack's child %d outlived the pack (leader exited %s)", pid, tc.exit)
+			}
+		})
+	}
+}
+
+// Native (terraform/az) gets the same retirement: a tool that exits leaving a
+// child behind must not leave it running.
+func TestNativeRetiresGroupAfterLeaderExit(t *testing.T) {
+	for _, exit := range []string{"0", "5"} {
+		pidfile := filepath.Join(t.TempDir(), "child.pid")
+		_, _ = Native(context.Background(), t.TempDir(), "sh", "-c", "sleep 600 >/dev/null 2>&1 & echo $! > "+pidfile+"; exit "+exit)
+		if pid := readPid(t, pidfile); !childDead(t, pid) {
+			t.Fatalf("a child of the tool outlived it (leader exit %s)", exit)
+		}
+	}
+}
+
+// A pinned file that cannot be executed is refused at admission, before any call.
+func TestExecPackNotExecutableRefused(t *testing.T) {
+	c := execFixture(t, "exit 0\n")
+	if e := os.Chmod(c.PackExec.Path, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	calls := 0
+	r := (Controller{Command: func(context.Context, string, string, ...string) ([]byte, error) { calls++; return nil, nil }}).Execute(context.Background(), "run", c)
+	if r.Code != "INPUT_REFUSED" || !strings.Contains(r.Error, "not executable") || calls != 0 {
+		t.Fatalf("code %s error %q calls %d, want INPUT_REFUSED (not executable) with 0 calls", r.Code, r.Error, calls)
+	}
+}
+
+// An earlier run whose markers cannot be observed (permission denied) blocks a
+// new run as unknown, never counts as absent.
+func TestUnobservableSiblingBlocksNewRun(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode-000 directories")
+	}
+	c := fixture(t)
+	d := filepath.Join(filepath.Dir(c.Output), "earlier-run")
+	os.MkdirAll(d, 0700)
+	os.WriteFile(filepath.Join(d, "launch.json"), []byte(`{}`), 0600)
+	os.Chmod(d, 0)
+	defer os.Chmod(d, 0700)
+	calls := 0
+	r := (Controller{Command: func(context.Context, string, string, ...string) ([]byte, error) { calls++; return nil, nil }}).Execute(context.Background(), "run", c)
+	if r.Code != "RECOVERY_REQUIRED" || calls != 0 || !strings.Contains(r.Error, "earlier-run") {
+		t.Fatalf("code %s error %q calls %d, want RECOVERY_REQUIRED naming earlier-run", r.Code, r.Error, calls)
+	}
+}

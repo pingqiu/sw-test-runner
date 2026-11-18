@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/pingqiu/sw-test-runner/packs/seaweed"
@@ -64,6 +65,14 @@ func checkPack(c Config) error {
 		}
 		if got != p.SHA256 {
 			return fmt.Errorf("pack_exec.path digest %s != pinned %s", got, p.SHA256)
+		}
+		// locally detectable before any cloud call: a regular file the controller can execute
+		fi, err := os.Stat(p.Path)
+		if err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("pack_exec.path is not a regular file (%v)", err)
+		}
+		if runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("pack_exec.path %s is not executable (mode %v)", p.Path, fi.Mode().Perm())
 		}
 		return nil
 	}
@@ -128,7 +137,9 @@ func execPack(spec ExecPack) Pack {
 		cmd.Env = append(os.Environ(), "SEAWEED_CLOUD_PACK_CONTEXT="+pcPath)
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 		cmd.WaitDelay = 3 * time.Second
-		if err = cmd.Run(); err != nil {
+		err = cmd.Run()
+		retireGroup(cmd) // keep group ownership through exit: no child of the pack outlives its leader
+		if err != nil {
 			return dir, fmt.Errorf("pack %s: %w", filepath.Base(spec.Path), err)
 		}
 		return dir, nil

@@ -113,10 +113,13 @@ type runOutcome struct {
 }
 
 func (o runOutcome) clean() bool {
-	return o.RemainingObserved && len(o.Remaining) == 0 && !o.CreateUnresolved
+	// CLEANUP_INCOMPLETE means the destroy itself (or the sweep) failed, even if
+	// the list then came back empty: not clean (README: a destroy failure stays non-clean).
+	return o.RemainingObserved && len(o.Remaining) == 0 && !o.CreateUnresolved && o.Code != "CLEANUP_INCOMPLETE"
 }
 
-// unfinishedRuns lists sibling run directories (same parent as output) that
+// unfinishedRuns lists sibling run directories (same parent as output: keep every
+// run of a controller under one runs/ parent; other parents are not scanned) that
 // were launched under the token guard (launch.json), started an apply, and have
 // no outcome.json proving them clean: the next session must destroy them first.
 // Directories from before the guard (no launch.json) are not judged.
@@ -135,10 +138,18 @@ func unfinishedRuns(output string) ([]string, error) {
 		if !e.IsDir() || dir == filepath.Clean(output) {
 			continue
 		}
+		// Only "does not exist" means absent; any other observation error keeps the
+		// directory as unknown (blocking), never as absent.
 		if _, err := os.Stat(filepath.Join(dir, "launch.json")); err != nil {
+			if !os.IsNotExist(err) {
+				open = append(open, dir+" (launch.json: "+err.Error()+")")
+			}
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, "apply-started")); err != nil {
+			if !os.IsNotExist(err) {
+				open = append(open, dir+" (apply-started: "+err.Error()+")")
+			}
 			continue
 		}
 		var o runOutcome
@@ -1124,6 +1135,7 @@ func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, erro
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = 3 * time.Second
 	b, e := cmd.Output()
+	retireGroup(cmd) // the leader is gone: no child of the tool may outlive it
 	if e != nil {
 		return append(b, stderr.Bytes()...), &toolError{fmt.Errorf("%s: %w", tool, e), stderr.Bytes()}
 	}
