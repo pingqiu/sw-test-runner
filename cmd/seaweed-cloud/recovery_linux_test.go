@@ -26,6 +26,7 @@ func TestKilledControllerSavedStateCleanup(t *testing.T) {
 		if e != nil || smoke.StrictJSON(b, &c) != nil {
 			os.Exit(2)
 		}
+		c.LaunchToken = testLaunchToken // the child stands for a launched run
 		r := (smoke.Controller{Command: smoke.Native, Pack: func(context.Context, []byte, seaweed.CloudConfig) (string, error) { return "", nil }}).Execute(context.Background(), "run", c)
 		_ = json.NewEncoder(os.Stdout).Encode(r)
 		os.Exit(0)

@@ -116,10 +116,13 @@ func TestVerifyAndClusterDryRunHaveNoNativeEffects(t *testing.T) {
 	}
 }
 
+// testLaunchToken is a well-formed LAUNCH token for the CLI tests (run refuses without one).
+const testLaunchToken = "0123456789abcdef01234567"
+
 func TestOrdinaryRunRetainsIntentionalApplyPath(t *testing.T) {
 	cp, log := dryRunFixture(t)
 	var output bytes.Buffer
-	if run([]string{"run", "--config", cp}, &output) == 0 {
+	if run([]string{"run", "--config", cp, "--launch-token", testLaunchToken}, &output) == 0 {
 		t.Fatal("fake invalid inventory must fail")
 	}
 	b, _ := os.ReadFile(log)

@@ -37,8 +37,11 @@ func fixture(t *testing.T) Config {
 		os.WriteFile(p, []byte(name), 0600)
 		cloud.Files[name] = seaweed.CloudFile{Path: p, SHA256: digest([]byte(name))}
 	}
-	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Cloud: cloud, EstimatedUSD: .12}
+	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Cloud: cloud, EstimatedUSD: .12, LaunchToken: testLaunchToken}
 }
+
+// testLaunchToken is a well-formed LAUNCH token for the fake-command tests.
+const testLaunchToken = "0123456789abcdef01234567"
 
 type fake struct {
 	events       []string

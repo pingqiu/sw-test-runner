@@ -39,7 +39,16 @@ type Config struct {
 	Project  string                   `json:"project,omitempty"`
 	Budgets  map[string]ProjectBudget `json:"budgets,omitempty"`
 	Override json.RawMessage          `json:"budget_override,omitempty"`
+	// LaunchToken is the manager's LAUNCH message id (24 lowercase hex, a hub
+	// id) for this run. `run` refuses before any terraform/az call without it;
+	// plan, destroy and verify never need it (recovery is never blocked). The
+	// CLI sets it from --launch-token; it is recorded in the run's launch.json.
+	LaunchToken string `json:"launch_token,omitempty"`
 }
+
+// launchTokenRE is the shape of a manager LAUNCH token: a hub message id.
+var launchTokenRE = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
 type Result struct {
 	Schema            string         `json:"schema"`
 	Code              string         `json:"code"`
@@ -547,6 +556,14 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "budget": budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
+	// The LAUNCH-token guard (2026-11-18: a packet build reached the real az without
+	// a launch). A run creates cloud resources, so it needs the manager's token
+	// before anything else: no output dir, no terraform, no az.
+	if mode == "run" && !launchTokenRE.MatchString(c.LaunchToken) {
+		out.Code = "LAUNCH_REFUSED"
+		out.Remedy = "pass --launch-token <the manager's LAUNCH hub id, 24 lowercase hex>; no cloud operation was performed"
+		return
+	}
 	if ctl.Command == nil {
 		ctl.Command = Native
 	}
@@ -696,6 +713,11 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		// Admitted caps and the override's raw bytes, for the reviewer.
 		admitted, _ := marshalVerbatim(budget)
 		if err = os.WriteFile(filepath.Join(c.Output, "budget.json"), admitted, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
+		launch, _ := json.Marshal(map[string]string{"schema": "seaweed.cloud-launch/v1", "launch_token": c.LaunchToken, "admitted_at": time.Now().UTC().Format(time.RFC3339)})
+		if err = os.WriteFile(filepath.Join(c.Output, "launch.json"), launch, 0600); err != nil {
 			out.Error = err.Error()
 			return
 		}
