@@ -273,6 +273,19 @@ type declaration struct {
 	} `json:"run_declaration"`
 }
 
+// sizeAllowed is the explicit VM size allowlist: Standard_D2s_v5 for the one-node
+// smoke and the ten-node cluster, and Standard_L16s_v3 (local NVMe; the ublk
+// density pack) for one node only. Anything else is refused before any cloud call.
+func sizeAllowed(d declaration) bool {
+	switch d.Size {
+	case "Standard_D2s_v5":
+		return true
+	case "Standard_L16s_v3":
+		return !d.Cluster
+	}
+	return false
+}
+
 func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	files, hash, err := Sources(c.Source)
 	var d declaration
@@ -299,8 +312,8 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	if _, err = budgetGate(c, d); err != nil {
 		return nil, nil, d, err
 	}
-	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || d.Size != "Standard_D2s_v5" || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
-		return nil, nil, d, errors.New("require one westus2 D2s_v5, explicit subscription/RG and minute-aligned cleanup envelope")
+	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || !sizeAllowed(d) || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
+		return nil, nil, d, errors.New("require westus2 Standard_D2s_v5 (one node or the ten-node cluster) or one Standard_L16s_v3 node, explicit subscription/RG and minute-aligned cleanup envelope")
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
 		if !filepath.IsAbs(p) {
