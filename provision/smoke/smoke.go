@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,34 @@ type Config struct {
 	Project  string                   `json:"project,omitempty"`
 	Budgets  map[string]ProjectBudget `json:"budgets,omitempty"`
 	Override json.RawMessage          `json:"budget_override,omitempty"`
+	// LaunchToken is the manager's LAUNCH message id (24 lowercase hex, a hub
+	// id) for this run. `run` refuses before any terraform/az call without it;
+	// plan, destroy and verify never need it (recovery is never blocked). The
+	// CLI sets it from --launch-token; it is recorded in the run's launch.json.
+	LaunchToken string `json:"launch_token,omitempty"`
+	// HourlyUSD is the billed rate of everything the run creates, USD per hour
+	// (from the reviewed estimate). `run` refuses without it, refuses if the hard
+	// deadline would let spend pass budget_usd, and cuts the work at the cost
+	// deadline: admission + abort_estimate_usd / HourlyUSD, minus the cleanup
+	// reserve (which is billed too). Destroy then runs as for any failure.
+	HourlyUSD float64 `json:"hourly_usd,omitempty"`
+	// PackName selects what runs between inventory and destroy: "" or "seaweed"
+	// (the built-in pack) or "exec" (PackExec, a pinned external executable).
+	// The CLI sets it from --pack.
+	PackName string    `json:"pack,omitempty"`
+	PackExec *ExecPack `json:"pack_exec,omitempty"`
 }
+
+// errWorkDeadline and errCostCap are the causes of the work context's end:
+// the declared work deadline, or the earlier cost deadline.
+var (
+	errWorkDeadline = errors.New("work deadline reached")
+	errCostCap      = errors.New("cost deadline reached: abort_estimate_usd at hourly_usd")
+)
+
+// launchTokenRE is the shape of a manager LAUNCH token: a hub message id.
+var launchTokenRE = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
 type Result struct {
 	Schema            string         `json:"schema"`
 	Code              string         `json:"code"`
@@ -61,6 +89,79 @@ type Pack func(context.Context, []byte, seaweed.CloudConfig) (string, error)
 type Controller struct {
 	Command Runner
 	Pack    Pack
+	// Exit ends the process when the hard-deadline watchdog fires (default
+	// os.Exit); tests inject it. WatchdogGrace is how long past the hard
+	// deadline (destroy: past its 15-minute cleanup bound) Execute may still be
+	// running before the watchdog fires (default 60 s).
+	Exit          func(int)
+	WatchdogGrace time.Duration
+	dogAfter      time.Duration // tests only: fire the watchdog after this, not at end+grace
+}
+
+// cleanRun is what a run's outcome.json must show for a new run to start:
+// the remaining resources were observed, none remain and no create is
+// unresolved (the run's code itself may be a failure: a failed pack whose
+// destroy succeeded is clean).
+type runOutcome struct {
+	Schema            string   `json:"schema"`
+	Mode              string   `json:"mode"`
+	Code              string   `json:"code"`
+	RemainingObserved bool     `json:"remaining_observed"`
+	Remaining         []string `json:"remaining_resource_ids"`
+	CreateUnresolved  bool     `json:"create_unresolved"`
+	At                string   `json:"at"`
+}
+
+func (o runOutcome) clean() bool {
+	// CLEANUP_INCOMPLETE means the destroy itself (or the sweep) failed, even if
+	// the list then came back empty: not clean (README: a destroy failure stays non-clean).
+	return o.RemainingObserved && len(o.Remaining) == 0 && !o.CreateUnresolved && o.Code != "CLEANUP_INCOMPLETE"
+}
+
+// unfinishedRuns lists sibling run directories (same parent as output: keep every
+// run of a controller under one runs/ parent; other parents are not scanned) that
+// were launched under the token guard (launch.json), started an apply, and have
+// no outcome.json proving them clean: the next session must destroy them first.
+// Directories from before the guard (no launch.json) are not judged.
+func unfinishedRuns(output string) ([]string, error) {
+	parent := filepath.Dir(output)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var open []string
+	for _, e := range entries {
+		dir := filepath.Join(parent, e.Name())
+		if !e.IsDir() || dir == filepath.Clean(output) {
+			continue
+		}
+		// Only "does not exist" means absent; any other observation error keeps the
+		// directory as unknown (blocking), never as absent.
+		if _, err := os.Stat(filepath.Join(dir, "launch.json")); err != nil {
+			if !os.IsNotExist(err) {
+				open = append(open, dir+" (launch.json: "+err.Error()+")")
+			}
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "apply-started")); err != nil {
+			if !os.IsNotExist(err) {
+				open = append(open, dir+" (apply-started: "+err.Error()+")")
+			}
+			continue
+		}
+		var o runOutcome
+		b, err := os.ReadFile(filepath.Join(dir, "outcome.json"))
+		if err == nil {
+			err = StrictJSON(b, &o)
+		}
+		if err != nil || !o.clean() {
+			open = append(open, dir)
+		}
+	}
+	return open, nil
 }
 
 func StrictJSON(raw []byte, dst any) error {
@@ -521,7 +622,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		return
 	}
 	if ctl.Pack == nil && (mode == "run" || mode == "plan") {
-		if err = c.Cloud.CheckFiles(); err != nil {
+		// the configured pack (seaweed: its artifacts; exec: its pinned digest), before any cloud call
+		if err = checkPack(c); err != nil {
 			out.Error = err.Error()
 			return
 		}
@@ -547,11 +649,93 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "budget": budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
 	}
+	// The LAUNCH-token guard (2026-11-18: a packet build reached the real az without
+	// a launch). A run creates cloud resources, so it needs the manager's token
+	// before anything else: no output dir, no terraform, no az.
+	if mode == "run" && !launchTokenRE.MatchString(c.LaunchToken) {
+		out.Code = "LAUNCH_REFUSED"
+		out.Remedy = "pass --launch-token <the manager's LAUNCH hub id, 24 lowercase hex>; no cloud operation was performed"
+		return
+	}
+	// The runtime cost cap, admitted before any cloud call. costDeadline is when
+	// spend at hourly_usd, plus the cleanup reserve still to come, reaches
+	// abort_estimate_usd; the work context ends there if it is earlier than the
+	// work deadline.
+	var costDeadline time.Time
+	if mode == "run" {
+		now := time.Now()
+		reserve := time.Duration(d.Run.Reserve) * time.Second
+		worst := c.HourlyUSD * time.Until(d.Run.Hard).Hours()
+		if c.HourlyUSD > 0 && !math.IsInf(c.HourlyUSD, 0) {
+			costDeadline = now.Add(time.Duration(d.Run.Abort/c.HourlyUSD*float64(time.Hour)) - reserve)
+		}
+		switch {
+		case !(c.HourlyUSD > 0) || math.IsInf(c.HourlyUSD, 0):
+			out.Code, out.Error = "COST_REFUSED", "hourly_usd must be a positive number (the billed rate of everything the run creates)"
+		case worst > d.Run.Budget:
+			out.Code, out.Error = "COST_REFUSED", fmt.Sprintf("hourly_usd %.4f until the hard deadline is %.2f USD, above budget_usd %.2f", c.HourlyUSD, worst, d.Run.Budget)
+		case !costDeadline.After(now):
+			out.Code, out.Error = "COST_REFUSED", fmt.Sprintf("abort_estimate_usd %.2f at hourly_usd %.4f does not cover the cleanup reserve", d.Run.Abort, c.HourlyUSD)
+		}
+		if out.Code == "COST_REFUSED" {
+			out.Remedy = "fix hourly_usd / budget_usd / abort_estimate_usd / hard_deadline; no cloud operation was performed"
+			return
+		}
+		// The next session destroys first: an earlier guarded run that started an
+		// apply and has no clean outcome.json blocks a new run.
+		open, e := unfinishedRuns(c.Output)
+		if e != nil || len(open) > 0 {
+			out.Code = "RECOVERY_REQUIRED"
+			out.Error = fmt.Sprint(open, e)
+			out.Remedy = "run `seaweed-cloud destroy --config <run>/recovery.json` (or cleanup --run ID) for each listed run until its outcome is clean; no cloud operation was performed"
+			return
+		}
+	}
+	// The hard-deadline watchdog (armed once a mutating mode is admitted, see
+	// armDog's callers) and the terminal record.
+	var stopDog func()
+	created := false // this run made its output dir (only then does it write outcome.json)
+	defer func() {
+		if stopDog != nil {
+			stopDog()
+		}
+	}()
+	armDog := func(end time.Time) {
+		grace := ctl.WatchdogGrace
+		if grace <= 0 {
+			grace = 60 * time.Second
+		}
+		exit := ctl.Exit
+		if exit == nil {
+			exit = os.Exit
+		}
+		after := time.Until(end.Add(grace))
+		if ctl.dogAfter > 0 {
+			after = ctl.dogAfter
+		}
+		dog := time.AfterFunc(after, func() {
+			rec, _ := json.Marshal(map[string]string{"schema": "seaweed.cloud-watchdog/v1", "mode": mode, "fired_at": time.Now().UTC().Format(time.RFC3339), "deadline": end.UTC().Format(time.RFC3339), "remedy": "the controller was still running past its deadline; run destroy before any new run"})
+			_ = os.WriteFile(filepath.Join(c.Output, "watchdog.json"), rec, 0600)
+			exit(3)
+		})
+		stopDog = func() { dog.Stop() }
+	}
+	if mode == "run" || mode == "destroy" {
+		// Registered before the cleanup defer, so it runs after cleanup: it sees
+		// the final remaining/unresolved state.
+		defer func() {
+			if !(mode == "destroy" || created) {
+				return // a refused run must not overwrite an earlier run's record
+			}
+			rec, _ := json.Marshal(runOutcome{Schema: "seaweed.cloud-outcome/v1", Mode: mode, Code: out.Code, RemainingObserved: out.RemainingObserved, Remaining: out.Remaining, CreateUnresolved: out.CreateUnresolved, At: time.Now().UTC().Format(time.RFC3339)})
+			_ = os.WriteFile(filepath.Join(c.Output, "outcome.json"), rec, 0600)
+		}()
+	}
 	if ctl.Command == nil {
 		ctl.Command = Native
 	}
 	if ctl.Pack == nil {
-		ctl.Pack = seaweed.RunCloudHTTP
+		ctl.Pack = packFor(c)
 	}
 	terraformRoot := filepath.Join(c.Output, "provision", "terraform")
 	root := filepath.Join(terraformRoot, "azure-validation")
@@ -679,6 +863,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			out.Error = err.Error()
 			return
 		}
+		created = true
+		armDog(d.Run.Hard) // admitted: the hard deadline is ahead by more than the reserve
 		for name, b := range files {
 			p := filepath.Join(terraformRoot, filepath.FromSlash(name))
 			if err = os.MkdirAll(filepath.Dir(p), 0700); err == nil {
@@ -696,6 +882,16 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		// Admitted caps and the override's raw bytes, for the reviewer.
 		admitted, _ := marshalVerbatim(budget)
 		if err = os.WriteFile(filepath.Join(c.Output, "budget.json"), admitted, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
+		launch, _ := json.Marshal(map[string]string{"schema": "seaweed.cloud-launch/v1", "launch_token": c.LaunchToken, "admitted_at": time.Now().UTC().Format(time.RFC3339)})
+		if err = os.WriteFile(filepath.Join(c.Output, "launch.json"), launch, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
+		cost, _ := json.Marshal(map[string]any{"schema": "seaweed.cloud-cost/v1", "hourly_usd": c.HourlyUSD, "abort_estimate_usd": d.Run.Abort, "budget_usd": d.Run.Budget, "cleanup_reserve_seconds": d.Run.Reserve, "cost_deadline": costDeadline.UTC().Format(time.RFC3339), "work_deadline": d.Run.Work.UTC().Format(time.RFC3339)})
+		if err = os.WriteFile(filepath.Join(c.Output, "cost.json"), cost, 0600); err != nil {
 			out.Error = err.Error()
 			return
 		}
@@ -797,10 +993,15 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 	}
 	if mode == "destroy" {
+		armDog(time.Now().Add(15 * time.Minute)) // the cleanup bound of a recovery destroy
 		cleanup()
 		return
 	}
-	work, cancel := context.WithDeadline(ctx, d.Run.Work)
+	deadline, cause := d.Run.Work, errWorkDeadline
+	if costDeadline.Before(deadline) {
+		deadline, cause = costDeadline, errCostCap
+	}
+	work, cancel := context.WithDeadlineCause(ctx, deadline, cause)
 	defer cancel()
 	out.Remedy = "inspect retained command/pack evidence; notify the run owner and recover with destroy if resources remain"
 	ids, e := list(work)
@@ -827,6 +1028,14 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	out.Effects = append(out.Effects, "terraform apply")
 	defer cleanup()
+	// Registered after cleanup, so it runs first: a phase cut by the cost deadline
+	// is COST_ABORTED (cleanup may still turn it into CLEANUP_INCOMPLETE).
+	defer func() {
+		if out.Code != "OK" && errors.Is(context.Cause(work), errCostCap) {
+			out.Code = "COST_ABORTED"
+			out.Remedy = "the cost deadline (abort_estimate_usd at hourly_usd) cut the work; destroy ran; see cost.json"
+		}
+	}()
 	if _, e = call(work, "terraform", "apply", "-parallelism=3", "-input=false", "-lock-timeout=0s", "-no-color", "smoke.tfplan"); e != nil {
 		out.Code = "APPLY_FAILED_OR_UNKNOWN"
 		out.Error = e.Error()
@@ -913,6 +1122,7 @@ func clusterHostKeys(root string) (map[string]string, error) {
 // stderr is included in private evidence without corrupting JSON stdout.
 func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, tool, args...)
+	killGroup(cmd)
 	cmd.Dir = dir
 	for _, e := range os.Environ() {
 		key := strings.SplitN(e, "=", 2)[0]
@@ -925,6 +1135,7 @@ func Native(ctx context.Context, dir, tool string, args ...string) ([]byte, erro
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = 3 * time.Second
 	b, e := cmd.Output()
+	retireGroup(cmd) // the leader is gone: no child of the tool may outlive it
 	if e != nil {
 		return append(b, stderr.Bytes()...), &toolError{fmt.Errorf("%s: %w", tool, e), stderr.Bytes()}
 	}

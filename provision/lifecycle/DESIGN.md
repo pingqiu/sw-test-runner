@@ -22,6 +22,6 @@ No Automation, MI, custom role, copied tokens, new lease implementation or
 self-signed GO. Normal S0b observations, protected artifact installation and
 claimed request/GO remain prerequisites; Terraform output cannot mint them.
 
-See [the recipe](../smoke/README.md). Code/tests are local/fake only; no account
+See [the recipe](../smoke/README.md) and the [destroy/recovery procedure](RECOVERY.md). Code/tests are local/fake only; no account
 API, cloud plan/apply, lab or spend is qualified or authorized by them. Runtime
 still needs manager's launch token.

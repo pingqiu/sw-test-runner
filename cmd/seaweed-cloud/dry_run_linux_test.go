@@ -46,7 +46,7 @@ func dryRunFixture(t *testing.T) (string, string) {
 	vars, _ := json.Marshal(map[string]any{"subscription_id": "11111111-1111-1111-1111-111111111111", "resource_group_name": "test", "location": "westus2", "vm_size": "Standard_D2s_v5", "run_declaration": map[string]any{"work_deadline": hard.Add(-20 * time.Minute), "hard_deadline": hard, "cloud_cleanup_reserve_seconds": 1200, "budget_usd": 3, "abort_estimate_usd": 2.5}})
 	vp := filepath.Join(root, "vars.json")
 	write(vp, string(vars), 0600)
-	c := smoke.Config{Source: source, ModuleSHA256: pin, Variables: vp, VariablesSHA256: fmt.Sprintf("%x", sha256.Sum256(vars)), Output: filepath.Join(root, "output"), EstimatedUSD: .12, Cloud: seaweed.CloudConfig{SSHKey: filepath.Join(root, "key"), Files: map[string]seaweed.CloudFile{}}}
+	c := smoke.Config{Source: source, ModuleSHA256: pin, Variables: vp, VariablesSHA256: fmt.Sprintf("%x", sha256.Sum256(vars)), Output: filepath.Join(root, "output"), EstimatedUSD: .12, HourlyUSD: 0.1, Cloud: seaweed.CloudConfig{SSHKey: filepath.Join(root, "key"), Files: map[string]seaweed.CloudFile{}}}
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
 		p := filepath.Join(root, name)
 		write(p, name, 0600)
@@ -116,10 +116,13 @@ func TestVerifyAndClusterDryRunHaveNoNativeEffects(t *testing.T) {
 	}
 }
 
+// testLaunchToken is a well-formed LAUNCH token for the CLI tests (run refuses without one).
+const testLaunchToken = "0123456789abcdef01234567"
+
 func TestOrdinaryRunRetainsIntentionalApplyPath(t *testing.T) {
 	cp, log := dryRunFixture(t)
 	var output bytes.Buffer
-	if run([]string{"run", "--config", cp}, &output) == 0 {
+	if run([]string{"run", "--config", cp, "--launch-token", testLaunchToken}, &output) == 0 {
 		t.Fatal("fake invalid inventory must fail")
 	}
 	b, _ := os.ReadFile(log)
