@@ -37,9 +37,9 @@ The controller generates a fresh **server** ed25519 key before Terraform plan/ap
 go build -o /private/bin/seaweed-cloud ./cmd/seaweed-cloud
 seaweed-cloud pins --source /private/repo --variables /private/run.tfvars.json --json
 seaweed-cloud plan --config /private/config.json --json # local checks, effects=[]
-# Manager token required:
-seaweed-cloud run --config /private/config.json --json
-# Recovery, including after controller/session death:
+# Manager token required (the LAUNCH hub id; run refuses without it):
+seaweed-cloud run --config /private/config.json --launch-token <24-hex hub id> --json
+# Recovery, including after controller/session death (procedure: ../lifecycle/RECOVERY.md):
 seaweed-cloud destroy --config /private/config.json --json
 seaweed-cloud verify --config /private/config.json --json
 ```
