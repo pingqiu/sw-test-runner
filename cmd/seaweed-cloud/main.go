@@ -30,6 +30,7 @@ func run(args []string, w io.Writer) int {
 	source := fs.String("source", "", "source root for local pins command")
 	variables := fs.String("variables", "", "tfvars JSON for local pins command")
 	launchToken := fs.String("launch-token", "", "the manager's LAUNCH hub id (24 lowercase hex); run refuses without it")
+	pack := fs.String("pack", "", "what runs between inventory and destroy: seaweed (default) or exec (config pack_exec)")
 	fs.Bool("json", false, "JSON output (always enabled)")
 	if len(args) > 0 && args[0] == "direct" {
 		return runDirect(args[1:], w)
@@ -75,6 +76,9 @@ func run(args []string, w io.Writer) int {
 		}
 		if *launchToken != "" {
 			c.LaunchToken = *launchToken // per run from the manager; the config file is the pinned part
+		}
+		if *pack != "" {
+			c.PackName = *pack
 		}
 		if e != nil {
 			out.Code = "INPUT_REFUSED"

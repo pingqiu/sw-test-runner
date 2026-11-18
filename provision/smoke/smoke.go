@@ -51,6 +51,11 @@ type Config struct {
 	// deadline: admission + abort_estimate_usd / HourlyUSD, minus the cleanup
 	// reserve (which is billed too). Destroy then runs as for any failure.
 	HourlyUSD float64 `json:"hourly_usd,omitempty"`
+	// PackName selects what runs between inventory and destroy: "" or "seaweed"
+	// (the built-in pack) or "exec" (PackExec, a pinned external executable).
+	// The CLI sets it from --pack.
+	PackName string    `json:"pack,omitempty"`
+	PackExec *ExecPack `json:"pack_exec,omitempty"`
 }
 
 // errWorkDeadline and errCostCap are the causes of the work context's end:
@@ -606,7 +611,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		return
 	}
 	if ctl.Pack == nil && (mode == "run" || mode == "plan") {
-		if err = c.Cloud.CheckFiles(); err != nil {
+		// the configured pack (seaweed: its artifacts; exec: its pinned digest), before any cloud call
+		if err = checkPack(c); err != nil {
 			out.Error = err.Error()
 			return
 		}
@@ -718,7 +724,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		ctl.Command = Native
 	}
 	if ctl.Pack == nil {
-		ctl.Pack = seaweed.RunCloudHTTP
+		ctl.Pack = packFor(c)
 	}
 	terraformRoot := filepath.Join(c.Output, "provision", "terraform")
 	root := filepath.Join(terraformRoot, "azure-validation")
