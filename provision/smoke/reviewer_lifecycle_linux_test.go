@@ -19,9 +19,13 @@ func TestReviewerRecoveryMustNotDeclareUnknownCreateClean(t *testing.T) {
 	}
 	release, created := filepath.Join(bin, "release"), filepath.Join(bin, "created")
 	// A local fake asynchronous provider accepts a create, loses its CLI reply,
-	// and completes only after the independent recovery-empty observation.
+	// and completes only after the independent recovery-empty observation. It runs
+	// under setsid: it stands for a provider-side operation, not a child of the
+	// terraform CLI (the controller retires the CLI's own process group on exit);
+	// the CLI waits until it has left the group before exiting.
+	started := filepath.Join(bin, "started")
 	scripts := map[string]string{
-		"terraform": "#!/bin/sh\ncase \"$1\" in\ninit|plan|destroy) exit 0;;\napply) (while [ ! -f '" + release + "' ]; do sleep 0.01; done; touch '" + created + "') </dev/null >/dev/null 2>&1 &\nexit 9;;\n*) exit 2;;\nesac\n",
+		"terraform": "#!/bin/sh\ncase \"$1\" in\ninit|plan|destroy) exit 0;;\napply) setsid sh -c \"touch '" + started + "'; while [ ! -f '" + release + "' ]; do sleep 0.01; done; touch '" + created + "'\" </dev/null >/dev/null 2>&1 &\nwhile [ ! -f '" + started + "' ]; do sleep 0.01; done\nexit 9;;\n*) exit 2;;\nesac\n",
 		"az":        "#!/bin/sh\nif [ -f '" + created + "' ]; then printf '[{\"id\":\"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/virtualMachines/late\",\"type\":\"Microsoft.Compute/virtualMachines\"}]'; else printf '[]'; fi\n",
 	}
 	for name, body := range scripts {
