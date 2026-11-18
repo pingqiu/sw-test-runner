@@ -37,11 +37,14 @@ func fixture(t *testing.T) Config {
 		os.WriteFile(p, []byte(name), 0600)
 		cloud.Files[name] = seaweed.CloudFile{Path: p, SHA256: digest([]byte(name))}
 	}
-	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Cloud: cloud, EstimatedUSD: .12, LaunchToken: testLaunchToken}
+	return Config{Source: source, ModuleSHA256: pin, Variables: p, VariablesSHA256: digest(vars), Output: filepath.Join(root, "output"), Cloud: cloud, EstimatedUSD: .12, LaunchToken: testLaunchToken, HourlyUSD: testHourlyUSD}
 }
 
 // testLaunchToken is a well-formed LAUNCH token for the fake-command tests.
 const testLaunchToken = "0123456789abcdef01234567"
+
+// testHourlyUSD is the fixture's billed rate: 0.1 USD/h stays far under budget_usd 3.
+const testHourlyUSD = 0.1
 
 type fake struct {
 	events       []string

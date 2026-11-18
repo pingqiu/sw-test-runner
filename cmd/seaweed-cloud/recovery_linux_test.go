@@ -71,7 +71,7 @@ if test -e "$FAKE_CLOUD_HOME/live"; then printf '[{"id":"/subscriptions/test/liv
 	vars, _ := json.Marshal(map[string]any{"cluster": true, "subscription_id": "11111111-1111-1111-1111-111111111111", "resource_group_name": "test", "location": "westus2", "vm_size": "Standard_D2s_v5", "run_declaration": map[string]any{"work_deadline": hard.Add(-20 * time.Minute), "hard_deadline": hard, "cloud_cleanup_reserve_seconds": 1200, "budget_usd": 3, "abort_estimate_usd": 2.5}})
 	vp := filepath.Join(home, "vars.json")
 	write(vp, string(vars), 0600)
-	cfg := smoke.Config{Source: source, ModuleSHA256: pin, Variables: vp, VariablesSHA256: fmt.Sprintf("%x", sha256.Sum256(vars)), Output: filepath.Join(root, "kill-control"), EstimatedUSD: .12, Cloud: seaweed.CloudConfig{SSHKey: filepath.Join(home, "client-key"), Files: map[string]seaweed.CloudFile{}}}
+	cfg := smoke.Config{Source: source, ModuleSHA256: pin, Variables: vp, VariablesSHA256: fmt.Sprintf("%x", sha256.Sum256(vars)), Output: filepath.Join(root, "kill-control"), EstimatedUSD: .12, HourlyUSD: 0.1, Cloud: seaweed.CloudConfig{SSHKey: filepath.Join(home, "client-key"), Files: map[string]seaweed.CloudFile{}}}
 	for _, name := range []string{"weed", "weed-volume", "native.tar"} {
 		p := filepath.Join(home, name)
 		write(p, name, 0600)

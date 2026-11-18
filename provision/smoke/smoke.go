@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,7 +45,20 @@ type Config struct {
 	// plan, destroy and verify never need it (recovery is never blocked). The
 	// CLI sets it from --launch-token; it is recorded in the run's launch.json.
 	LaunchToken string `json:"launch_token,omitempty"`
+	// HourlyUSD is the billed rate of everything the run creates, USD per hour
+	// (from the reviewed estimate). `run` refuses without it, refuses if the hard
+	// deadline would let spend pass budget_usd, and cuts the work at the cost
+	// deadline: admission + abort_estimate_usd / HourlyUSD, minus the cleanup
+	// reserve (which is billed too). Destroy then runs as for any failure.
+	HourlyUSD float64 `json:"hourly_usd,omitempty"`
 }
+
+// errWorkDeadline and errCostCap are the causes of the work context's end:
+// the declared work deadline, or the earlier cost deadline.
+var (
+	errWorkDeadline = errors.New("work deadline reached")
+	errCostCap      = errors.New("cost deadline reached: abort_estimate_usd at hourly_usd")
+)
 
 // launchTokenRE is the shape of a manager LAUNCH token: a hub message id.
 var launchTokenRE = regexp.MustCompile(`^[0-9a-f]{24}$`)
@@ -564,6 +578,31 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Remedy = "pass --launch-token <the manager's LAUNCH hub id, 24 lowercase hex>; no cloud operation was performed"
 		return
 	}
+	// The runtime cost cap, admitted before any cloud call. costDeadline is when
+	// spend at hourly_usd, plus the cleanup reserve still to come, reaches
+	// abort_estimate_usd; the work context ends there if it is earlier than the
+	// work deadline.
+	var costDeadline time.Time
+	if mode == "run" {
+		now := time.Now()
+		reserve := time.Duration(d.Run.Reserve) * time.Second
+		worst := c.HourlyUSD * time.Until(d.Run.Hard).Hours()
+		if c.HourlyUSD > 0 && !math.IsInf(c.HourlyUSD, 0) {
+			costDeadline = now.Add(time.Duration(d.Run.Abort/c.HourlyUSD*float64(time.Hour)) - reserve)
+		}
+		switch {
+		case !(c.HourlyUSD > 0) || math.IsInf(c.HourlyUSD, 0):
+			out.Code, out.Error = "COST_REFUSED", "hourly_usd must be a positive number (the billed rate of everything the run creates)"
+		case worst > d.Run.Budget:
+			out.Code, out.Error = "COST_REFUSED", fmt.Sprintf("hourly_usd %.4f until the hard deadline is %.2f USD, above budget_usd %.2f", c.HourlyUSD, worst, d.Run.Budget)
+		case !costDeadline.After(now):
+			out.Code, out.Error = "COST_REFUSED", fmt.Sprintf("abort_estimate_usd %.2f at hourly_usd %.4f does not cover the cleanup reserve", d.Run.Abort, c.HourlyUSD)
+		}
+		if out.Code == "COST_REFUSED" {
+			out.Remedy = "fix hourly_usd / budget_usd / abort_estimate_usd / hard_deadline; no cloud operation was performed"
+			return
+		}
+	}
 	if ctl.Command == nil {
 		ctl.Command = Native
 	}
@@ -721,6 +760,11 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			out.Error = err.Error()
 			return
 		}
+		cost, _ := json.Marshal(map[string]any{"schema": "seaweed.cloud-cost/v1", "hourly_usd": c.HourlyUSD, "abort_estimate_usd": d.Run.Abort, "budget_usd": d.Run.Budget, "cleanup_reserve_seconds": d.Run.Reserve, "cost_deadline": costDeadline.UTC().Format(time.RFC3339), "work_deadline": d.Run.Work.UTC().Format(time.RFC3339)})
+		if err = os.WriteFile(filepath.Join(c.Output, "cost.json"), cost, 0600); err != nil {
+			out.Error = err.Error()
+			return
+		}
 		if d.Cluster {
 			if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`).MatchString(filepath.Base(c.Output)) {
 				out.Error = "cluster output basename must be a safe unique run ID"
@@ -822,7 +866,11 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		cleanup()
 		return
 	}
-	work, cancel := context.WithDeadline(ctx, d.Run.Work)
+	deadline, cause := d.Run.Work, errWorkDeadline
+	if costDeadline.Before(deadline) {
+		deadline, cause = costDeadline, errCostCap
+	}
+	work, cancel := context.WithDeadlineCause(ctx, deadline, cause)
 	defer cancel()
 	out.Remedy = "inspect retained command/pack evidence; notify the run owner and recover with destroy if resources remain"
 	ids, e := list(work)
@@ -849,6 +897,14 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	out.Effects = append(out.Effects, "terraform apply")
 	defer cleanup()
+	// Registered after cleanup, so it runs first: a phase cut by the cost deadline
+	// is COST_ABORTED (cleanup may still turn it into CLEANUP_INCOMPLETE).
+	defer func() {
+		if out.Code != "OK" && errors.Is(context.Cause(work), errCostCap) {
+			out.Code = "COST_ABORTED"
+			out.Remedy = "the cost deadline (abort_estimate_usd at hourly_usd) cut the work; destroy ran; see cost.json"
+		}
+	}()
 	if _, e = call(work, "terraform", "apply", "-parallelism=3", "-input=false", "-lock-timeout=0s", "-no-color", "smoke.tfplan"); e != nil {
 		out.Code = "APPLY_FAILED_OR_UNKNOWN"
 		out.Error = e.Error()
