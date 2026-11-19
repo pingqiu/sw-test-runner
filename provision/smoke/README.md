@@ -163,9 +163,12 @@ tagged using exact Terraform-exported IDs before deploy. Untaggable subnets,
 NIC IP configurations and associations/attachments are covered by full-RG absence.
 
 The finally path always destroys through the saved private state, then checks
-both the whole test RG and the subscription. The latter reports every resource
-tagged for this run plus every VM, managed disk and public IP regardless of tag.
-Unrelated resources are reported, never deleted. A failed/malformed list or
+both the whole test RG and the subscription. From the subscription, every
+resource tagged for this run (any RG) and every VM, managed disk and public IP
+in the run's own RG count. Untagged VMs, disks and public IPs in OTHER resource
+groups (another run's) neither block the pre-create check nor count as residue;
+they are listed in `subscription_other_billable`, report-only, and never
+deleted. A failed/malformed list or
 any matching ID prevents clean completion. The JSON `billable_resources` field
 includes the check time or UNKNOWN; an empty snapshot never settles UNKNOWN apply.
 `estimated_usd` and `cumulative_estimated_usd` use the frozen per-run estimate
@@ -190,6 +193,24 @@ Standalone destroy/verify/recovery do not need this probe. Ordinary `run` has no
 default and intentionally applies. Saved-state `cleanup --run` requires an
 absolute, resolvable controller HOME; unset/relative HOME refuses before reading
 any recovery file. It never searches the current directory for state.
+
+## Resource-group claims (concurrent runs, #140)
+
+A run claims its subscription + resource group before it creates its output
+directory: `~/.local/state/seaweed-cloud/claims/<subscription>__<rg>.json`
+(lower case, O_EXCL), recording run, output path, controller host, pid, process
+start time and launch token. Runs on different RGs proceed concurrently; a run
+on a claimed RG is refused `RG_CLAIMED` before any cloud call, wherever its
+output directory is (the sibling-directory `RECOVERY_REQUIRED` gate stays as
+well). The claim is released only when the run, or a later `destroy`/`cleanup`
+of it, records a clean outcome, or when the run never started an apply (it
+cannot own anything in the RG). A failed cleanup, an UNKNOWN apply or a killed
+controller keep the claim: recover with `cleanup --run <id>` (outputs under
+`runs/`) or `destroy --config <output>/recovery.json` until the outcome is
+clean. `seaweed-cloud claims` lists every claim with `live` (same host, pid
+alive with the same start time) and `output_settled`; it never releases one.
+A claim whose holder is dead on this host and whose output is settled is
+replaced by the next run on that RG; any other held claim refuses.
 
 This reads `recovery.json`, the exact module/vars snapshot and Terraform state;
 the original checkout, input config, artifacts and guest client key are not

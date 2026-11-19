@@ -101,6 +101,10 @@ type Result struct {
 	CumulativeUSD     float64        `json:"cumulative_estimated_usd"`
 	ActualCostUSD     *float64       `json:"actual_cost_usd"`
 	Plan              map[string]any `json:"plan,omitempty"`
+	// Cluster runs: VMs, managed disks and public IPs in other resource groups
+	// that are not tagged for this run. Reported only: they neither block nor
+	// count as this run's residue, and are never deleted (#140).
+	OtherBillable []string `json:"subscription_other_billable,omitempty"`
 }
 type Runner func(context.Context, string, string, ...string) ([]byte, error)
 type Pack func(context.Context, []byte, seaweed.CloudConfig) (string, error)
@@ -113,7 +117,10 @@ type Controller struct {
 	// running before the watchdog fires (default 60 s).
 	Exit          func(int)
 	WatchdogGrace time.Duration
-	dogAfter      time.Duration // tests only: fire the watchdog after this, not at end+grace
+	// ClaimsDir holds the resource-group claims (#140, claims.go); the CLI sets
+	// it to DefaultClaimsDir. Empty takes no claims (library use, unit tests).
+	ClaimsDir string
+	dogAfter  time.Duration // tests only: fire the watchdog after this, not at end+grace
 }
 
 // cleanRun is what a run's outcome.json must show for a new run to start:
@@ -405,6 +412,57 @@ func resourceIDs(raw []byte, run string, all bool) ([]string, error) {
 	}
 	return ids, nil
 }
+
+// subscriptionScope splits a subscription-wide list for a cluster run: own =
+// anything tagged for this run (any RG) plus VMs, managed disks and public
+// IPs in the run's own RG (or with no RG in their ID); other = VMs, disks and
+// public IPs not tagged for this run in other RGs (report-only, #140: another
+// seat's run must not block this one).
+func subscriptionScope(raw []byte, run, group string) (own, other []string, err error) {
+	var rows []json.RawMessage
+	if e := json.Unmarshal(raw, &rows); e != nil || rows == nil {
+		return nil, nil, errors.New("resource list must be an object array")
+	}
+	own, other = []string{}, []string{}
+	for _, rawRow := range rows {
+		if e := resourceDecisionKeys(rawRow, false); e != nil {
+			return nil, nil, e
+		}
+		var r struct {
+			ID, Type string
+			Tags     map[string]string
+		}
+		if e := json.Unmarshal(rawRow, &r); e != nil {
+			return nil, nil, e
+		}
+		if r.ID == "" || r.Type == "" {
+			return nil, nil, errors.New("resource missing id/type")
+		}
+		typ := strings.ToLower(r.Type)
+		billable := typ == "microsoft.compute/virtualmachines" || typ == "microsoft.compute/disks" || typ == "microsoft.network/publicipaddresses"
+		switch {
+		case r.Tags["seaweed_run"] == run:
+			own = append(own, r.ID)
+		case billable && (idGroup(r.ID) == "" || strings.EqualFold(idGroup(r.ID), group)):
+			own = append(own, r.ID) // the own RG, or no RG to attribute it to (fail closed)
+		case billable:
+			other = append(other, r.ID)
+		}
+	}
+	return own, other, nil
+}
+
+// idGroup is the resource group segment of an ARM ID ("" if none).
+func idGroup(id string) string {
+	p := strings.Split(id, "/")
+	for i := 0; i+1 < len(p); i++ {
+		if strings.EqualFold(p[i], "resourceGroups") {
+			return p[i+1]
+		}
+	}
+	return ""
+}
+
 func result(code, remedy string) Result {
 	return Result{Schema: "seaweed.cloud-smoke/v1", Code: code, Remedy: remedy, Effects: []string{}, Remaining: []string{}, RemainingSummary: "billable resources remaining: UNKNOWN (not checked)"}
 }
@@ -759,7 +817,9 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 				return // a refused run must not overwrite an earlier run's record
 			}
 			rec, _ := json.Marshal(runOutcome{Schema: "seaweed.cloud-outcome/v1", Mode: mode, Code: out.Code, RemainingObserved: out.RemainingObserved, Remaining: out.Remaining, CreateUnresolved: out.CreateUnresolved, At: time.Now().UTC().Format(time.RFC3339)})
-			_ = os.WriteFile(filepath.Join(c.Output, "outcome.json"), rec, 0600)
+			if e := os.WriteFile(filepath.Join(c.Output, "outcome.json"), rec, 0600); e == nil && ctl.ClaimsDir != "" && outputSettled(c.Output) {
+				_ = releaseClaim(ctl.ClaimsDir, d.Subscription, d.Group, c.Output) // clean, or never applied: it owns nothing in the RG
+			}
 		}()
 	}
 	if ctl.Command == nil {
@@ -868,11 +928,12 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 		if d.Cluster {
 			b, se := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--output", "json", "--only-show-errors")
-			var subscription []string
+			var own, other []string
 			if se == nil {
-				subscription, se = resourceIDs(b, filepath.Base(c.Output), false)
+				own, other, se = subscriptionScope(b, filepath.Base(c.Output), d.Group)
 			}
-			ids, e = append(ids, subscription...), errors.Join(e, se)
+			ids, e = append(ids, own...), errors.Join(e, se)
+			out.OtherBillable = other
 		}
 		out.RemainingSummary = "billable resources remaining: UNKNOWN (list failed)"
 		if e == nil {
@@ -894,7 +955,20 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			}
 			return
 		}
+		if ctl.ClaimsDir != "" {
+			if _, e := takeClaim(ctl.ClaimsDir, d.Subscription, d.Group, c.Output, c.LaunchToken); e != nil {
+				out.Code, out.Error = "CLAIM_FAILED", e.Error()
+				if strings.Contains(e.Error(), " is claimed by run ") {
+					out.Code = "RG_CLAIMED"
+				}
+				out.Remedy = "another run owns this resource group (seaweed-cloud claims): use another RG, or recover that run with destroy/cleanup until its outcome is clean; no cloud operation was performed"
+				return
+			}
+		}
 		if err = os.Mkdir(c.Output, 0700); err != nil {
+			if ctl.ClaimsDir != "" {
+				_ = releaseClaim(ctl.ClaimsDir, d.Subscription, d.Group, c.Output)
+			}
 			out.Error = err.Error()
 			return
 		}
