@@ -38,6 +38,9 @@ func run(args []string, w io.Writer) int {
 	if len(args) > 0 && args[0] == "direct-status" {
 		return directStatus(args[1:], w)
 	}
+	if len(args) > 0 && args[0] == "claims" {
+		return listClaims(w)
+	}
 	if len(args) > 0 && args[0] == "pins" && fs.Parse(args[1:]) == nil && fs.NArg() == 0 {
 		_, pin, e := smoke.Sources(*source)
 		b, ve := os.ReadFile(*variables)
@@ -91,7 +94,12 @@ func run(args []string, w io.Writer) int {
 		} else {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			out = (smoke.Controller{}).Execute(ctx, args[0], c)
+			dir, err := smoke.DefaultClaimsDir()
+			if err != nil || !filepath.IsAbs(dir) {
+				out.Code, out.Error, out.Remedy = "INPUT_REFUSED", fmt.Sprint(err), "resolve an absolute controller HOME (resource-group claims live under it)"
+			} else {
+				out = (smoke.Controller{ClaimsDir: dir}).Execute(ctx, args[0], c)
+			}
 		}
 	}
 	if e := smoke.EncodeVerbatim(w, out); e != nil {
@@ -102,4 +110,24 @@ func run(args []string, w io.Writer) int {
 		return 0
 	}
 	return 1
+}
+
+// listClaims prints every resource-group claim (#140) with its controller's
+// liveness and whether its run's output is settled. It never releases one:
+// a claim goes only when its run (or cleanup of it) records a clean outcome.
+func listClaims(w io.Writer) int {
+	dir, err := smoke.DefaultClaimsDir()
+	var claims []smoke.ClaimStatus
+	if err == nil {
+		claims, err = smoke.Claims(dir)
+	}
+	rec := map[string]any{"schema": "seaweed.cloud-claims/v1", "claims_dir": dir, "claims": claims}
+	if err != nil {
+		rec["error"] = err.Error()
+	}
+	_ = json.NewEncoder(w).Encode(rec)
+	if err != nil {
+		return 1
+	}
+	return 0
 }
