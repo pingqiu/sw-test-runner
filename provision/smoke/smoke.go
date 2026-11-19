@@ -56,6 +56,24 @@ type Config struct {
 	// The CLI sets it from --pack.
 	PackName string    `json:"pack,omitempty"`
 	PackExec *ExecPack `json:"pack_exec,omitempty"`
+	// MaxHardMinutes raises how far ahead `run` admits the hard deadline. Unset
+	// keeps the default 75 min (60 work + 15 cleanup reserve; Claude01, run 7).
+	// A value is honoured only for the exec pack and only up to 360; the cost cap
+	// (hourly_usd until the hard deadline <= budget_usd) and the watchdog still apply.
+	MaxHardMinutes int `json:"max_hard_minutes,omitempty"`
+}
+
+// maxHard is how far ahead `run` admits the hard deadline (see MaxHardMinutes).
+func maxHard(c Config) (time.Duration, error) {
+	switch {
+	case c.MaxHardMinutes == 0:
+		return 75 * time.Minute, nil
+	case packName(c) != "exec":
+		return 0, errors.New("max_hard_minutes is only allowed with --pack exec")
+	case c.MaxHardMinutes < 1 || c.MaxHardMinutes > 360:
+		return 0, fmt.Errorf("max_hard_minutes %d is outside 1..360", c.MaxHardMinutes)
+	}
+	return time.Duration(c.MaxHardMinutes) * time.Minute, nil
 }
 
 // errWorkDeadline and errCostCap are the causes of the work context's end:
@@ -867,9 +885,13 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	if mode == "run" {
 		remaining := time.Until(d.Run.Hard)
-		// At most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7).
-		if remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > 75*time.Minute || !time.Now().Before(d.Run.Work) {
+		// Default: at most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7).
+		limit, e := maxHard(c)
+		if e != nil || remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > limit || !time.Now().Before(d.Run.Work) {
 			out.Code = "DEADLINE_REFUSED"
+			if e != nil {
+				out.Error = e.Error()
+			}
 			return
 		}
 		if err = os.Mkdir(c.Output, 0700); err != nil {

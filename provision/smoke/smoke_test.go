@@ -285,6 +285,43 @@ func TestHardDeadlineUpTo75Minutes(t *testing.T) {
 	}
 }
 
+// max_hard_minutes: unset keeps 75; set, it is honoured only for the exec pack,
+// up to 360, and the cost cap still holds (0.1 USD/h x 5.5 h fits budget 3; 1 USD/h does not).
+func TestMaxHardMinutesOnlyForExec(t *testing.T) {
+	for _, tc := range []struct {
+		pack   string
+		max    int
+		hourly float64
+		code   string // "" = admitted
+	}{
+		{"", 0, testHourlyUSD, "DEADLINE_REFUSED"},          // default still refuses > 75
+		{"exec", 0, testHourlyUSD, "DEADLINE_REFUSED"},      // exec alone does not raise it
+		{"exec", 330, testHourlyUSD, ""},                    // exec + field admits 330
+		{"", 330, testHourlyUSD, "DEADLINE_REFUSED"},        // non-exec + field refuses
+		{"seaweed", 330, testHourlyUSD, "DEADLINE_REFUSED"}, // likewise named
+		{"exec", 361, testHourlyUSD, "DEADLINE_REFUSED"},    // above 360 refuses
+		{"exec", 330, 1, "COST_REFUSED"},                    // the cost cap still applies
+	} {
+		c := fixture(t)
+		c.PackName, c.MaxHardMinutes, c.HourlyUSD = tc.pack, tc.max, tc.hourly
+		b, _ := os.ReadFile(c.Variables)
+		var v map[string]any
+		_ = json.Unmarshal(b, &v)
+		r := v["run_declaration"].(map[string]any)
+		hard := time.Now().Add(330 * time.Minute).UTC().Truncate(time.Minute)
+		r["hard_deadline"], r["work_deadline"] = hard, hard.Add(-20*time.Minute)
+		b, _ = json.Marshal(v)
+		_ = os.WriteFile(c.Variables, b, 0600)
+		c.VariablesSHA256 = digest(b)
+		f := &fake{}
+		out := controller(f).Execute(context.Background(), "run", c)
+		if tc.code == "" && (out.Code == "DEADLINE_REFUSED" || out.Code == "COST_REFUSED" || len(f.events) == 0) ||
+			tc.code != "" && (out.Code != tc.code || len(f.events) != 0) {
+			t.Fatalf("%+v: %+v %v", tc, out, f.events)
+		}
+	}
+}
+
 func TestRecoveryUsesSameSnapshotAndDoesNotCreate(t *testing.T) {
 	c := fixture(t)
 	f := &fake{fail: "destroy"}
