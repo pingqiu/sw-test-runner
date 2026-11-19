@@ -22,6 +22,7 @@ func TestClusterSubscriptionScanScopedToRun(t *testing.T) {
 		{"untagged disk in another RG", sub + "someone-else/providers/Microsoft.Compute/disks/d1", "Microsoft.Compute/disks", "", true},
 		{"other run's tagged VM in another RG", sub + "someone-else/providers/Microsoft.Compute/virtualMachines/vm2", "Microsoft.Compute/virtualMachines", "another-run", true},
 		{"untagged VM in the run's own RG", sub + "Dedicated-Test/providers/Microsoft.Compute/virtualMachines/vm3", "Microsoft.Compute/virtualMachines", "", false},
+		{"untagged VM with no RG in its ID (fail closed)", "/subscriptions/11111111-1111-1111-1111-111111111111/providers/Microsoft.Compute/virtualMachines/odd", "Microsoft.Compute/virtualMachines", "", false},
 		{"this run's tagged NIC in another RG", sub + "someone-else/providers/Microsoft.Network/networkInterfaces/n1", "Microsoft.Network/networkInterfaces", "output", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -415,8 +415,9 @@ func resourceIDs(raw []byte, run string, all bool) ([]string, error) {
 
 // subscriptionScope splits a subscription-wide list for a cluster run: own =
 // anything tagged for this run (any RG) plus VMs, managed disks and public
-// IPs in the run's own RG; other = untagged VMs, disks and public IPs in other
-// RGs (report-only, #140: another seat's run must not block this one).
+// IPs in the run's own RG (or with no RG in their ID); other = VMs, disks and
+// public IPs not tagged for this run in other RGs (report-only, #140: another
+// seat's run must not block this one).
 func subscriptionScope(raw []byte, run, group string) (own, other []string, err error) {
 	var rows []json.RawMessage
 	if e := json.Unmarshal(raw, &rows); e != nil || rows == nil {
@@ -442,8 +443,8 @@ func subscriptionScope(raw []byte, run, group string) (own, other []string, err 
 		switch {
 		case r.Tags["seaweed_run"] == run:
 			own = append(own, r.ID)
-		case billable && strings.EqualFold(idGroup(r.ID), group):
-			own = append(own, r.ID)
+		case billable && (idGroup(r.ID) == "" || strings.EqualFold(idGroup(r.ID), group)):
+			own = append(own, r.ID) // the own RG, or no RG to attribute it to (fail closed)
 		case billable:
 			other = append(other, r.ID)
 		}
