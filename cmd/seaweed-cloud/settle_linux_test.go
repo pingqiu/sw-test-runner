@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -129,7 +130,10 @@ func TestSettleQueryFailureNeverInfersCleanOrReleasesClaim(t *testing.T) {
 		t.Run(query, func(t *testing.T) {
 			dir := settleFake(t, "[]", "[]", "[]")
 			t.Setenv("HOME", dir)
-			claim := filepath.Join(dir, "claim.json")
+			claim := filepath.Join(dir, ".local", "state", "seaweed-cloud", "claims", "11111111-1111-1111-1111-111111111111__rg-test.json")
+			if err := os.MkdirAll(filepath.Dir(claim), 0700); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(claim, []byte("unresolved-create"), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -148,6 +152,15 @@ func TestSettleQueryFailureNeverInfersCleanOrReleasesClaim(t *testing.T) {
 				t.Fatalf("queries=%q err=%v", calls, err)
 			}
 		})
+	}
+}
+
+func TestSettleReportsExactSortedResidue(t *testing.T) {
+	diskID := strings.Replace(settleVMID, "virtualMachines/vm-test", "disks/os-disk", 1)
+	settleFake(t, "[]", fmt.Sprintf(`[{"id":%q},{"id":%q}]`, settleVMID, diskID), fmt.Sprintf(`[{"id":%q}]`, diskID))
+	result, rc := invokeSettle(t)
+	if rc != 1 || result["code"] != "SETTLED-EXISTS" || !reflect.DeepEqual(result["resources"], []any{diskID, settleVMID}) {
+		t.Fatalf("rc=%d result=%v", rc, result)
 	}
 }
 

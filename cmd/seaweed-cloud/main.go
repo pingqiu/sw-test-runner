@@ -24,7 +24,7 @@ func run(args []string, w io.Writer) int {
 	if len(args) > 0 && args[0] == "settle" {
 		return runSettle(args[1:], w)
 	}
-	out := smoke.Result{Schema: "seaweed.cloud-smoke/v1", Code: "USAGE", Remedy: "use plan|run|destroy|verify --config PRIVATE.json or cleanup --run ID [--dry-run]; plan is local-only", Effects: []string{}, Remaining: []string{}, RemainingSummary: "billable resources remaining: UNKNOWN (not checked)"}
+	out := smoke.Result{Schema: "seaweed.cloud-smoke/v1", Code: "USAGE", Remedy: "use plan|run|destroy|verify --config PRIVATE.json, cleanup --run ID [--dry-run], or settle --resource-group RG --vm VM; plan is local-only", Effects: []string{}, Remaining: []string{}, RemainingSummary: "billable resources remaining: UNKNOWN (not checked)"}
 	fs := flag.NewFlagSet("seaweed-cloud", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	config := fs.String("config", "", "pinned controller config")
