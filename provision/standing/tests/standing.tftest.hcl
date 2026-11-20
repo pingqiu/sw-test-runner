@@ -9,6 +9,7 @@ mock_provider "azurerm" {
   mock_resource "azurerm_linux_virtual_machine" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Compute/virtualMachines/box", os_disk = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Compute/disks/os" } } }
 }
 variables {
+  subscription_id     = "00000000-0000-0000-0000-000000000000"
   resource_group_name = "rg-claude04-standing-20261120"
   name                = "c04-standing"
   operator_cidr       = "192.0.2.1/32"
@@ -30,16 +31,24 @@ run "spot_box_shape" {
     error_message = "the box must hold no Azure identity (plan r0: no managed identity)"
   }
   assert {
-    condition     = one([for r in azurerm_network_security_group.box.security_rule : r if r.access == "Allow"]).source_address_prefix == "192.0.2.1/32"
-    error_message = "exactly one inbound allow rule, SSH from the operator /32 only"
+    condition = alltrue([for r in [one([for r in azurerm_network_security_group.box.security_rule : r if r.access == "Allow"])] :
+      r.direction == "Inbound" && r.protocol == "Tcp" && r.destination_port_range == "22" && length(coalesce(r.destination_port_ranges, [])) == 0 &&
+    r.source_address_prefix == "192.0.2.1/32" && r.priority == 100])
+    error_message = "exactly one allow rule: inbound TCP 22 only, from the operator /32 only"
+  }
+  assert {
+    condition = length([for r in azurerm_network_security_group.box.security_rule : r if r.access == "Deny" && r.direction == "Inbound" &&
+      r.protocol == "*" && r.destination_port_range == "*" && r.source_address_prefix == "*" && r.destination_address_prefix == "*" &&
+    r.priority > 100]) == 1 && length(azurerm_network_security_group.box.security_rule) == 2
+    error_message = "a deny-all inbound rule after the SSH allow, and no other rule"
   }
   assert {
     condition     = output.box.public_ip == "192.0.2.20" && output.box.resource_group_name == "rg-claude04-standing-20261120"
     error_message = "output carries the address and RG"
   }
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.box.custom_data), "-ge $(( 60 * 60 ))")
-    error_message = "idle guard threshold rendered from idle_minutes"
+    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.box.custom_data), "-ge $(( 60 * 60 ))") && strcontains(base64decode(azurerm_linux_virtual_machine.box.custom_data), "run=$${STANDING_RUN_DIR:-/run/standing}")
+    error_message = "idle guard threshold rendered from idle_minutes; per-boot clock under /run"
   }
 }
 run "existing_rg" {

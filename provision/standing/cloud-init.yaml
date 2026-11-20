@@ -20,16 +20,20 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Active = an established SSH connection or a job marker /run/standing/job-*.
-      # Idle for ${idle_minutes} min -> stop. A CI job (use 2) must write a job marker while it runs.
+      # Active = an established SSH connection or a job marker <run>/job-* (a CI job must write one while it runs).
+      # The idle clock lives in /run, so it restarts at every boot. Idle for ${idle_minutes} min -> stop.
+      # Fail closed: if activity cannot be inspected, never stop (log UNKNOWN).
       set -u
-      st=/var/lib/standing/last-active; mkdir -p /var/lib/standing /run/standing
-      [ -e $st ] || touch $st
-      ssh_n=$(ss -Htn state established '( sport = :22 )' | wc -l)
-      job_n=$(find /run/standing -maxdepth 1 -name 'job-*' | wc -l)
-      if [ "$ssh_n" -gt 0 ] || [ "$job_n" -gt 0 ]; then touch $st; exit 0; fi
-      idle=$(( $(date +%s) - $(stat -c %Y $st) ))
-      [ $idle -ge $(( ${idle_minutes} * 60 )) ] || exit 0
+      run=$${STANDING_RUN_DIR:-/run/standing}
+      st=$run/last-active
+      mkdir -p "$run" || { logger -t standing-idle-guard "UNKNOWN: cannot create $run, not stopping"; exit 0; }
+      [ -e "$st" ] || { touch "$st"; exit 0; }
+      if ! ssh_out=$(ss -Htn state established '( sport = :22 )'); then logger -t standing-idle-guard "UNKNOWN: ss failed, not stopping"; exit 0; fi
+      if ! job_out=$(find "$run" -maxdepth 1 -name 'job-*'); then logger -t standing-idle-guard "UNKNOWN: marker scan failed, not stopping"; exit 0; fi
+      if [ -n "$ssh_out" ] || [ -n "$job_out" ]; then touch "$st"; exit 0; fi
+      last=$(stat -c %Y "$st") || { logger -t standing-idle-guard "UNKNOWN: idle clock unreadable, not stopping"; exit 0; }
+      idle=$(( $(date +%s) - last ))
+      [ "$idle" -ge $(( ${idle_minutes} * 60 )) ] || exit 0
       logger -t standing-idle-guard "idle $idle s (no SSH, no job marker): stopping"
       systemctl poweroff
   - path: /etc/systemd/system/standing-idle-guard.service
@@ -49,7 +53,5 @@ write_files:
       [Install]
       WantedBy=timers.target
 runcmd:
-  - [mkdir, -p, /var/lib/standing]
-  - [touch, /var/lib/standing/last-active]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, standing-idle-guard.timer]

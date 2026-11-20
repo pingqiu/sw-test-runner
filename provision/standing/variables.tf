@@ -1,3 +1,11 @@
+variable "subscription_id" {
+  description = "Subscription UUID the box lives in; the controller pins it and scopes every Azure call to it."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.subscription_id))
+    error_message = "subscription_id must be a UUID."
+  }
+}
 variable "resource_group_name" {
   description = "The standing box's own RG (rg-<seat>-standing-<date>); created here when create_resource_group = true."
   type        = string

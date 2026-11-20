@@ -14,7 +14,7 @@ handed over by the owner, never fetched here).
 - Premium SSD OS disk 256 GiB.
 
 ## Idle guard
-A systemd timer (every 5 min) treats the box as active while an SSH connection is established or a job marker
+A systemd timer (every 5 min; the idle clock lives in `/run`, so it restarts at each boot; any inspection failure means "do not stop") treats the box as active while an SSH connection is established or a job marker
 `/run/standing/job-*` exists (a CI job must write one while it runs). After `idle_minutes` (default 60) of neither, it
 powers the OS off.
 
@@ -29,7 +29,11 @@ seaweed-cloud standing apply   --name N --resource-group RG --launch-token ID   
 seaweed-cloud standing start|stop|status --name N --resource-group RG          # stop = deallocate
 seaweed-cloud standing destroy --name N --resource-group RG --launch-token ID   # then RG listed empty / gone
 ```
-State and the plan live under `~/.local/state/seaweed-cloud/standing/<name>/`.
+State, the plan, the pinned inputs (`box.tfvars.json`), the pinned identity (`identity.json`: subscription, RG, name)
+and the apply receipt (`apply.json`) live under `~/.local/state/seaweed-cloud/standing/<name>/`. The tfvars must carry
+`subscription_id` and name the same RG and box as the command. Every later action must name the pinned box and RG;
+every `az` call is scoped to the pinned subscription; `destroy` reuses the pinned inputs. A failed or killed apply
+stays `UNRESOLVED` across restarts: apply and plan refuse, and destroy + an empty RG reports `UNRESOLVED`, never clean.
 
 ## Tests (no account calls)
 ```

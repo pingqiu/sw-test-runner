@@ -1,3 +1,9 @@
+# Real provider configuration (features is required): pinned subscription, no implicit provider registration.
+provider "azurerm" {
+  features {}
+  subscription_id                 = var.subscription_id
+  resource_provider_registrations = "none"
+}
 locals {
   rg   = var.create_resource_group ? azurerm_resource_group.box[0].name : var.resource_group_name
   tags = { standing_box = var.name, managed_by = "sw-test-runner", purpose = "standing-test-box" }
