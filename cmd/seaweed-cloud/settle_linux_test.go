@@ -81,3 +81,85 @@ func TestSettleCleanUsesOnlyThreeReadOnlyAzureQueries(t *testing.T) {
 		t.Fatal("activity log window is not one hour")
 	}
 }
+
+func TestSettleClassifiesAzureEvidenceConservatively(t *testing.T) {
+	deleted := settleEvent("Microsoft.Compute/virtualMachines/delete", "Succeeded", "delete-1", "2026-11-20T18:10:00Z")
+	started := settleEvent("Microsoft.Compute/virtualMachines/delete", "Started", "delete-1", "2026-11-20T18:09:00Z")
+	write := settleEvent("Microsoft.Compute/virtualMachines/write", "Succeeded", "create-2", "2026-11-20T18:11:00Z")
+	diskID := strings.Replace(settleVMID, "virtualMachines/vm-test", "disks/os-disk", 1)
+	resources := fmt.Sprintf(`[{"id":%q}]`, settleVMID)
+	disks := fmt.Sprintf(`[{"id":%q}]`, diskID)
+	for _, tc := range []struct {
+		name, activity, resources, disks, want string
+		rc, count                              int
+	}{
+		{"unordered-terminal", "[" + deleted + "," + started + "]", "[]", "[]", "SETTLED-CLEAN", 0, 0},
+		{"remaining-vm", "[" + write + "]", resources, "[]", "SETTLED-EXISTS", 1, 1},
+		{"disk-only", "[" + deleted + "]", "[]", disks, "SETTLED-EXISTS", 1, 1},
+		{"deduplicated", "[" + write + "]", resources, resources, "SETTLED-EXISTS", 1, 1},
+		{"empty-is-not-proof", "[]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"pending-delete", "[" + started + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"pending-with-resource", "[" + started + "]", resources, "[]", "UNKNOWN", 2, 0},
+		{"new-write-after-delete", "[" + deleted + "," + write + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"unmatched-operation", "[" + deleted + "," + strings.Replace(started, "delete-1", "delete-2", 1) + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"wrong-vm-delete", "[" + strings.ReplaceAll(deleted, "vm-test", "other-vm") + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"null-resource-list", "[" + deleted + "]", "null", "[]", "UNKNOWN", 2, 0},
+		{"missing-disk-id", "[" + deleted + "]", "[]", "[{}]", "UNKNOWN", 2, 0},
+		{"invalid-activity", "not-json", "[]", "[]", "UNKNOWN", 2, 0},
+		{"null-activity", "null", "[]", "[]", "UNKNOWN", 2, 0},
+		{"unknown-status", "[" + strings.Replace(deleted, "Succeeded", "Maybe", 1) + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"missing-operation-id", "[" + strings.Replace(deleted, `"operationId":"delete-1"`, `"operationId":""`, 1) + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"foreign-resource", "[" + deleted + "]", strings.ReplaceAll(resources, "rg-test", "foreign"), "[]", "UNKNOWN", 2, 0},
+		{"foreign-activity", "[" + strings.ReplaceAll(deleted, "rg-test", "foreign") + "]", "[]", "[]", "UNKNOWN", 2, 0},
+		{"truncated-log", "[" + strings.Repeat(deleted+",", 999) + deleted + "]", "[]", "[]", "UNKNOWN", 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settleFake(t, tc.activity, tc.resources, tc.disks)
+			result, rc := invokeSettle(t)
+			ids, ok := result["resources"].([]any)
+			if rc != tc.rc || result["code"] != tc.want || !ok || len(ids) != tc.count {
+				t.Fatalf("rc=%d result=%v", rc, result)
+			}
+		})
+	}
+}
+
+func TestSettleQueryFailureNeverInfersCleanOrReleasesClaim(t *testing.T) {
+	for _, query := range []string{"activity", "resources", "disks"} {
+		t.Run(query, func(t *testing.T) {
+			dir := settleFake(t, "[]", "[]", "[]")
+			t.Setenv("HOME", dir)
+			claim := filepath.Join(dir, "claim.json")
+			if err := os.WriteFile(claim, []byte("unresolved-create"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "fail-"+query), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, rc := invokeSettle(t)
+			if rc != 2 || result["code"] != "UNKNOWN" {
+				t.Fatalf("rc=%d result=%v", rc, result)
+			}
+			if b, err := os.ReadFile(claim); err != nil || string(b) != "unresolved-create" {
+				t.Fatal("read-only settle modified the claim")
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil || strings.Count(string(calls), "\n") != 3 {
+				t.Fatalf("queries=%q err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestSettleRefusesInvalidScopeBeforeAzure(t *testing.T) {
+	dir := settleFake(t, "[]", "[]", "[]")
+	for _, args := range [][]string{nil, {"--resource-group", "rg-test"}, {"--resource-group", "--other", "--vm", "vm-test"}, {"--resource-group", "rg-test", "--vm", "a/b"}, {"--resource-group", "rg-test", "--vm", "vm-test", "--subscription", "wrong"}} {
+		var out bytes.Buffer
+		if run(append([]string{"settle"}, args...), &out) != 2 {
+			t.Fatalf("accepted args=%v", args)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "calls")); !os.IsNotExist(err) {
+		t.Fatal("invalid scope contacted Azure")
+	}
+}
