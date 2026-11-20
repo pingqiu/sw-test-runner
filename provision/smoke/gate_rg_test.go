@@ -2,6 +2,7 @@ package smoke
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,15 +23,42 @@ func TestUnfinishedSiblingBlocksOnlyItsOwnRG(t *testing.T) {
 		{"another subscription, same RG name", `{"subscription_id":"22222222-2222-2222-2222-222222222222","resource_group_name":"dedicated-test"}`, false},
 		{"malformed target", `{"subscription_id":`, true},
 		{"target without an RG", `{"subscription_id":"11111111-1111-1111-1111-111111111111"}`, true},
+		// codex01 #143 review: only canonical unique keys and identities admission accepts
+		{"duplicate RG key (same, then another)", `{"subscription_id":"11111111-1111-1111-1111-111111111111","resource_group_name":"dedicated-test","resource_group_name":"another-rg"}`, true},
+		{"case-aliased RG key", `{"subscription_id":"11111111-1111-1111-1111-111111111111","resource_group_name":"dedicated-test","RESOURCE_GROUP_NAME":"another-rg"}`, true},
+		{"garbage subscription", `{"subscription_id":"not-a-uuid","resource_group_name":"another-rg"}`, true},
+		{"garbage RG", `{"subscription_id":"11111111-1111-1111-1111-111111111111","resource_group_name":"../another"}`, true},
+		{"full tfvars, another RG", "FULL:another-rg", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fixture(t)
 			d := filepath.Join(filepath.Dir(c.Output), "earlier-run")
 			tv := filepath.Join(d, "provision", "terraform", "azure-validation")
-			os.MkdirAll(tv, 0700)
-			os.WriteFile(filepath.Join(d, "launch.json"), []byte(`{}`), 0600)
-			os.WriteFile(filepath.Join(d, "apply-started"), []byte("x"), 0600)
-			os.WriteFile(filepath.Join(tv, "run.auto.tfvars.json"), []byte(tc.tfvars), 0600)
+			body := []byte(tc.tfvars)
+			if rg, full := strings.CutPrefix(tc.tfvars, "FULL:"); full { // the fixture's real tfvars, extra fields kept
+				var v map[string]any
+				b, err := os.ReadFile(c.Variables)
+				if err == nil {
+					err = json.Unmarshal(b, &v)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				v["resource_group_name"] = rg
+				if body, err = json.Marshal(v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, e := range []error{
+				os.MkdirAll(tv, 0700),
+				os.WriteFile(filepath.Join(d, "launch.json"), []byte(`{}`), 0600),
+				os.WriteFile(filepath.Join(d, "apply-started"), []byte("x"), 0600),
+				os.WriteFile(filepath.Join(tv, "run.auto.tfvars.json"), body, 0600),
+			} {
+				if e != nil {
+					t.Fatal(e)
+				}
+			}
 			calls := 0
 			ctl := controller(&fake{})
 			inner := ctl.Command

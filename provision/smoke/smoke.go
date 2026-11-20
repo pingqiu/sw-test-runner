@@ -194,22 +194,29 @@ func unfinishedRuns(output, subscription, group string) ([]string, error) {
 	return open, nil
 }
 
-// otherTarget reports whether the run in dir provably targeted another
-// subscription or resource group (its saved run.auto.tfvars.json). Anything it
-// cannot read or parse is "not provably other": that sibling keeps blocking.
+// The identities admission accepts (inputs); otherTarget holds a sibling to the same.
+var (
+	subscriptionIDRE = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+	groupNameRE      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`)
+)
+
+// otherTarget reports whether the run in dir PROVABLY targeted another
+// subscription or resource group: its saved run.auto.tfvars.json parses with
+// canonical unique keys (StrictJSON: no duplicate or case-aliased key) and names
+// a subscription and RG that admission would accept. Any doubt is "not provably
+// other": that sibling keeps blocking.
 func otherTarget(dir, subscription, group string) bool {
 	b, err := os.ReadFile(filepath.Join(dir, "provision", "terraform", "azure-validation", "run.auto.tfvars.json"))
 	if err != nil {
 		return false
 	}
-	var v struct {
-		Subscription string `json:"subscription_id"`
-		Group        string `json:"resource_group_name"`
-	}
-	if json.Unmarshal(b, &v) != nil || v.Subscription == "" || v.Group == "" {
+	var v map[string]json.RawMessage // StrictJSON over the whole document; the full tfvars has more keys
+	var sub, rg string
+	if StrictJSON(b, &v) != nil || json.Unmarshal(v["subscription_id"], &sub) != nil || json.Unmarshal(v["resource_group_name"], &rg) != nil ||
+		!subscriptionIDRE.MatchString(sub) || !groupNameRE.MatchString(rg) {
 		return false
 	}
-	return !strings.EqualFold(v.Subscription, subscription) || !strings.EqualFold(v.Group, group)
+	return !strings.EqualFold(sub, subscription) || !strings.EqualFold(rg, group)
 }
 
 func StrictJSON(raw []byte, dst any) error {
@@ -356,11 +363,11 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 			return nil, nil, d, fmt.Errorf("%s is reserved for controller-generated host keys", key)
 		}
 	}
-	uuid := regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+	uuid := subscriptionIDRE
 	if _, err = budgetGate(c, d); err != nil {
 		return nil, nil, d, err
 	}
-	if !uuid.MatchString(d.Subscription) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,90}$`).MatchString(d.Group) || d.Location != "westus2" || !sizeAllowed(d) || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
+	if !uuid.MatchString(d.Subscription) || !groupNameRE.MatchString(d.Group) || d.Location != "westus2" || !sizeAllowed(d) || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
 		return nil, nil, d, errors.New("require westus2 Standard_D2s_v5 (one node or the ten-node cluster) or one Standard_L16s_v3 node, explicit subscription/RG and minute-aligned cleanup envelope")
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
