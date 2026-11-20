@@ -58,9 +58,10 @@ var (
 	standingGen   = regexp.MustCompile(`^g[0-9]{4}$`)
 
 	// test seams: the external command boundary, the OS gate and the state root
-	standingTool = smoke.Native
-	standingGOOS = runtime.GOOS
-	standingHome = os.UserHomeDir
+	standingTool  = smoke.Native
+	standingGOOS  = runtime.GOOS
+	standingHome  = os.UserHomeDir
+	standingLstat = os.Lstat
 )
 
 // Layout under ~/.local/state/seaweed-cloud/standing/<name>/:
@@ -164,8 +165,15 @@ func standingDo(ctx context.Context, r *standingResult, rg, module, vars string)
 		}
 		cur, err := os.ReadFile(filepath.Join(box, standingCurrentFile))
 		gen = strings.TrimSpace(string(cur))
-		if err != nil || !standingGen.MatchString(gen) || !exists(filepath.Join(box, gen, standingReadyFile)) {
+		if err != nil || !standingGen.MatchString(gen) {
 			r.Code, r.Reason = "REFUSED", "no apply-eligible plan (no completed CURRENT generation): run plan"
+			return
+		}
+		if ready, err := present(filepath.Join(box, gen, standingReadyFile)); err != nil {
+			r.Code, r.Reason = "UNKNOWN", "cannot read generation "+gen+" evidence: "+err.Error()
+			return
+		} else if !ready {
+			r.Code, r.Reason = "REFUSED", "CURRENT generation "+gen+" has no completed plan: run plan"
 			return
 		}
 	} else if gen == "" {
@@ -269,7 +277,10 @@ func standingPlan(ctx context.Context, r *standingResult, box, rg, module, vars 
 		return
 	}
 	if n := len(gens); n > 0 {
-		if p := filepath.Join(box, gens[n-1], standingIdentFile); exists(p) {
+		if has, err := present(filepath.Join(box, gens[n-1], standingIdentFile)); err != nil {
+			r.Code, r.Reason = "UNKNOWN", "cannot read generation "+gens[n-1]+" evidence: "+err.Error()
+			return
+		} else if has {
 			if _, err := readIdentity(filepath.Join(box, gens[n-1])); err != nil {
 				r.Code, r.Reason = "REFUSED", "generation "+gens[n-1]+" identity is unreadable: "+err.Error()
 				return
@@ -352,7 +363,15 @@ func standingLive(box string) (string, string, error) {
 	live, state := "", ""
 	for _, g := range gens {
 		work := filepath.Join(box, g)
-		if !exists(filepath.Join(work, standingAttemptFile)) && !exists(filepath.Join(work, standingApplyFile)) && !exists(filepath.Join(work, "terraform.tfstate")) {
+		used := false
+		for _, f := range []string{standingAttemptFile, standingApplyFile, "terraform.tfstate"} {
+			has, err := present(filepath.Join(work, f))
+			if err != nil {
+				return "", "", fmt.Errorf("cannot read generation %s evidence: %v", g, err)
+			}
+			used = used || has
+		}
+		if !used {
 			continue
 		}
 		s := "unknown"
@@ -458,9 +477,17 @@ func writeFileSync(path string, b []byte) error {
 	return os.Rename(tmp, path)
 }
 
-func exists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
+// present reports whether generation evidence exists; any error other than "does not exist" is returned so the
+// caller fails closed (UNKNOWN) instead of reading it as absent.
+func present(path string) (bool, error) {
+	_, err := standingLstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // classifyPower maps the instance view to a power state and whether compute is billing: an OS-level shutdown

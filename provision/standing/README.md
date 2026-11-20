@@ -38,6 +38,12 @@ State lives under `~/.local/state/seaweed-cloud/standing/<name>/` in plan genera
   not verified destroyed) binds start/stop/status/destroy: its pinned inputs (sha256-checked) and its subscription/RG.
 - A failed, killed or receipt-less attempt stays `UNRESOLVED` across restarts: apply and plan refuse, and destroy + an
   empty RG reports `UNRESOLVED`, never clean. A plan is refused while any generation is applied or unresolved.
+- Any read error on generation evidence other than "does not exist" is `UNKNOWN` (fail closed), never "absent".
+- A request rejected by input validation (vars, target, token) is not a re-plan: `CURRENT` and the eligible plan stay.
+
+**Crash scope:** the files are written atomically (temp, fsync, rename) and survive a controller **process** restart.
+A **machine** crash is out of scope (no directory fsync): afterwards run `seaweed-cloud standing status`, and if
+anything is unclear, tear down at the RG level (the box's own RG holds every resource) as the backstop.
 
 ## Tests (no account calls)
 ```

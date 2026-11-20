@@ -273,6 +273,44 @@ func TestStandingFailedReplanRevokesTheOldPlan(t *testing.T) {
 	}
 }
 
+func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
+
+// claude05 disposition (2): an unknown Lstat error on generation evidence is UNKNOWN (fail closed), never "absent".
+func TestStandingEvidenceReadErrorIsUnknown(t *testing.T) {
+	old := standingLstat
+	t.Cleanup(func() { standingLstat = old })
+	status := append([]string{"status"}, target(tRG)...)
+	for _, c := range []struct {
+		evidence string
+		actions  [][]string // each must answer UNKNOWN with zero tool calls and no write
+	}{
+		{standingAttemptFile, [][]string{planArgs(""), tokArgs("apply"), tokArgs("destroy"), status}}, // the live-generation scan
+		{standingIdentFile, [][]string{planArgs("")}},                                                 // plan's previous-identity check
+		{standingReadyFile, [][]string{tokArgs("apply")}},                                             // apply eligibility
+	} {
+		standingLstat = old
+		f, vars := setupStanding(t)
+		standingRun(t, planArgs(vars)...)
+		standingLstat = func(p string) (os.FileInfo, error) {
+			if filepath.Base(p) == c.evidence {
+				return nil, fs.ErrPermission
+			}
+			return os.Lstat(p)
+		}
+		before := snapshot(t, standingBox())
+		n := len(f.calls)
+		for _, a := range c.actions {
+			if a[0] == "plan" {
+				a = planArgs(vars)
+			}
+			if r := standingRun(t, a...); r.Code != "UNKNOWN" || len(f.calls) != n {
+				t.Fatalf("%s read error: %s -> %+v, calls %d->%d", c.evidence, a[0], r, n, len(f.calls))
+			}
+		}
+		sameSnapshot(t, c.evidence+" read error", before, snapshot(t, standingBox()))
+	}
+}
+
 // CURRENT may only ever name a completed plan: a CURRENT naming a generation without READY is not eligible.
 func TestStandingCurrentWithoutReadyIsNotEligible(t *testing.T) {
 	f, vars := setupStanding(t)
