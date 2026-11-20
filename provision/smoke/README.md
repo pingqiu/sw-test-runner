@@ -201,8 +201,10 @@ directory: `~/.local/state/seaweed-cloud/claims/<subscription>__<rg>.json`
 (lower case, O_EXCL), recording run, output path, controller host, pid, process
 start time and launch token. Runs on different RGs proceed concurrently; a run
 on a claimed RG is refused `RG_CLAIMED` before any cloud call, wherever its
-output directory is (the sibling-directory `RECOVERY_REQUIRED` gate stays as
-well). The claim is released only when the run, or a later `destroy`/`cleanup`
+output directory is. The sibling-directory `RECOVERY_REQUIRED` gate stays, but
+blocks only on an unfinished sibling that targeted the same subscription + RG (read
+from its saved `run.auto.tfvars.json`; unreadable = still blocks), so one seat can run
+in two RGs under one `runs/` parent. The claim is released only when the run, or a later `destroy`/`cleanup`
 of it, records a clean outcome, or when the run never started an apply (it
 cannot own anything in the RG). A failed cleanup, an UNKNOWN apply or a killed
 controller keep the claim: recover with `cleanup --run <id>` (outputs under

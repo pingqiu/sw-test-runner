@@ -147,8 +147,10 @@ func (o runOutcome) clean() bool {
 // run of a controller under one runs/ parent; other parents are not scanned) that
 // were launched under the token guard (launch.json), started an apply, and have
 // no outcome.json proving them clean: the next session must destroy them first.
-// Directories from before the guard (no launch.json) are not judged.
-func unfinishedRuns(output string) ([]string, error) {
+// Directories from before the guard (no launch.json) are not judged. Since RG
+// claims, an unfinished sibling that provably targeted another subscription or
+// RG (its saved run.auto.tfvars.json) does not block: its own claim covers it.
+func unfinishedRuns(output, subscription, group string) ([]string, error) {
 	parent := filepath.Dir(output)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
@@ -183,10 +185,31 @@ func unfinishedRuns(output string) ([]string, error) {
 			err = StrictJSON(b, &o)
 		}
 		if err != nil || !o.clean() {
+			if otherTarget(dir, subscription, group) {
+				continue // its own RG claim (#141) covers it; not this run's RG
+			}
 			open = append(open, dir)
 		}
 	}
 	return open, nil
+}
+
+// otherTarget reports whether the run in dir provably targeted another
+// subscription or resource group (its saved run.auto.tfvars.json). Anything it
+// cannot read or parse is "not provably other": that sibling keeps blocking.
+func otherTarget(dir, subscription, group string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "provision", "terraform", "azure-validation", "run.auto.tfvars.json"))
+	if err != nil {
+		return false
+	}
+	var v struct {
+		Subscription string `json:"subscription_id"`
+		Group        string `json:"resource_group_name"`
+	}
+	if json.Unmarshal(b, &v) != nil || v.Subscription == "" || v.Group == "" {
+		return false
+	}
+	return !strings.EqualFold(v.Subscription, subscription) || !strings.EqualFold(v.Group, group)
 }
 
 func StrictJSON(raw []byte, dst any) error {
@@ -795,7 +818,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		}
 		// The next session destroys first: an earlier guarded run that started an
 		// apply and has no clean outcome.json blocks a new run.
-		open, e := unfinishedRuns(c.Output)
+		open, e := unfinishedRuns(c.Output, d.Subscription, d.Group)
 		if e != nil || len(open) > 0 {
 			out.Code = "RECOVERY_REQUIRED"
 			out.Error = fmt.Sprint(open, e)
