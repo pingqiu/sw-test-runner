@@ -665,6 +665,29 @@ func deleteResets(raw []byte, subscription, group string) []string {
 	return ids
 }
 
+// detachResets is the data disk detach form of a lost response (S2-az r12): the
+// detach is a CreateOrUpdate PUT on the VM. Only this exact text, naming a VM in
+// this subscription/RG, qualifies; the VM is re-read like a lost Delete, and a known
+// answer lets the same-state destroy retry the detach.
+func detachResets(raw []byte, subscription, group string) []string {
+	uuid := `[a-f0-9-]{36}`
+	name := `[A-Za-z0-9._-]+`
+	block := `Error: removing Data Disk: \(Name "` + name + `" / Virtual Machine Name "` + name + `" / Resource Group "` + name + `"\) from Virtual Machine "` + name + `" : performing CreateOrUpdate: Put "https://management\.azure\.com(/subscriptions/` + uuid + `/resourceGroups/` + name + `/providers/Microsoft\.Compute/virtualMachines/` + name + `)\?api-version=[0-9]{4}-[0-9]{2}-[0-9]{2}": HTTP response was nil; connection may have been reset`
+	text := strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n"))
+	if !regexp.MustCompile(`\A` + block + `(?:\s+` + block + `)*\z`).MatchString(text) {
+		return nil
+	}
+	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
+	var ids []string
+	for _, m := range regexp.MustCompile(block).FindAllStringSubmatch(text, -1) {
+		if len(m[1]) <= len(scope) || !strings.EqualFold(m[1][:len(scope)], scope) {
+			return nil
+		}
+		ids = append(ids, m[1])
+	}
+	return ids
+}
+
 // reread shows one exact ARM ID. One JSON object is present; az's exact
 // ResourceNotFound for this same type, name and RG is absent; anything else errors.
 func reread(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), id string) (bool, []byte, error) {
@@ -889,6 +912,9 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 				ids := []string(nil)
 				if tool == "terraform" && args[0] == "destroy" {
 					ids = deleteResets(diagnostics, d.Subscription, d.Group)
+					if len(ids) == 0 {
+						ids = detachResets(diagnostics, d.Subscription, d.Group)
+					}
 				}
 				if len(ids) == 0 {
 					return b, e
