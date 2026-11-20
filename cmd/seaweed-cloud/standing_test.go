@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,7 +28,8 @@ type toolCall struct {
 	args      []string
 }
 
-// fakeStanding replaces the external command boundary; failApply makes terraform apply fail.
+// fakeStanding replaces the external command boundary. failApply fails terraform apply; a plan whose -var-file
+// contains FAILPLAN fails.
 type fakeStanding struct {
 	calls     []toolCall
 	failApply bool
@@ -40,6 +42,14 @@ func (f *fakeStanding) native(_ context.Context, dir, tool string, args ...strin
 	switch {
 	case tool == "terraform" && args[0] == "apply" && f.failApply:
 		return []byte("Error: timeout while waiting for create"), errors.New("exit 1")
+	case tool == "terraform" && args[0] == "plan":
+		for _, a := range args {
+			if p, ok := strings.CutPrefix(a, "-var-file="); ok {
+				if b, _ := os.ReadFile(p); bytes.Contains(b, []byte("FAILPLAN")) {
+					return []byte("Error: No value for required variable"), errors.New("exit 1")
+				}
+			}
+		}
 	case tool == "terraform" && args[0] == "show":
 		return []byte(`{"resource_changes":[{"address":"azurerm_linux_virtual_machine.box","change":{"actions":["create"]}}]}`), nil
 	case tool == "az" && strings.HasPrefix(j, "group exists"):
@@ -52,6 +62,15 @@ func (f *fakeStanding) native(_ context.Context, dir, tool string, args ...strin
 	return nil, nil
 }
 
+func writeVars(t *testing.T, extra string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "box.json")
+	if err := os.WriteFile(p, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"`+tRG+`","name":"`+tBox+`"`+extra+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func setupStanding(t *testing.T) (*fakeStanding, string) {
 	t.Helper()
 	f := &fakeStanding{rgExists: "false"}
@@ -59,11 +78,7 @@ func setupStanding(t *testing.T) (*fakeStanding, string) {
 	oldTool, oldOS, oldHome := standingTool, standingGOOS, standingHome
 	standingTool, standingGOOS, standingHome = f.native, "linux", func() (string, error) { return home, nil }
 	t.Cleanup(func() { standingTool, standingGOOS, standingHome = oldTool, oldOS, oldHome })
-	vars := filepath.Join(t.TempDir(), "box.json")
-	if err := os.WriteFile(vars, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"`+tRG+`","name":"`+tBox+`"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return f, vars
+	return f, writeVars(t, "")
 }
 
 func standingRun(t *testing.T, args ...string) standingResult {
@@ -77,7 +92,48 @@ func standingRun(t *testing.T, args ...string) standingResult {
 	return r
 }
 
+var tModule = filepath.Join("..", "..", "provision", "standing")
+
 func target(rg string) []string { return []string{"--name", tBox, "--resource-group", rg} }
+func planArgs(vars string) []string {
+	return append(append([]string{"plan"}, target(tRG)...), "--module", tModule, "--vars", vars)
+}
+func tokArgs(action string) []string {
+	return append(append([]string{action}, target(tRG)...), "--launch-token", tTok)
+}
+
+func standingBox() string {
+	home, _ := standingHome()
+	return filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", tBox)
+}
+
+// snapshot maps every regular file under dir (recursively) to its content.
+func snapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			b, _ := os.ReadFile(p)
+			out[p] = string(b)
+		}
+		return nil
+	})
+	return out
+}
+
+func sameSnapshot(t *testing.T, what string, before, after map[string]string) {
+	t.Helper()
+	for k, v := range before {
+		if after[k] != v {
+			t.Fatalf("%s changed %s", what, k)
+		}
+	}
+	for k := range after {
+		if _, ok := before[k]; !ok {
+			t.Fatalf("%s created %s", what, k)
+		}
+	}
+}
 
 func TestClassifyPowerBillingOnlyWhenNotDeallocated(t *testing.T) {
 	view := func(code string) []byte {
@@ -101,7 +157,7 @@ func TestClassifyPowerBillingOnlyWhenNotDeallocated(t *testing.T) {
 
 // Every refusal happens before the command boundary: zero tool calls.
 func TestStandingRefusalsMakeNoToolCall(t *testing.T) {
-	f, vars := setupStanding(t)
+	f, _ := setupStanding(t)
 	other := filepath.Join(t.TempDir(), "other.json")
 	_ = os.WriteFile(other, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
 	for _, c := range []struct {
@@ -114,8 +170,10 @@ func TestStandingRefusalsMakeNoToolCall(t *testing.T) {
 		{append([]string{"plan"}, target(tRG)...), "USAGE"},
 		{append([]string{"apply"}, target(tRG)...), "REFUSED"},
 		{append(append([]string{"destroy"}, target(tRG)...), "--launch-token", "xyz"), "REFUSED"},
-		{append([]string{"status"}, target(tRG)...), "REFUSED"},                                         // no pinned identity yet
-		{append(append([]string{"plan"}, target(tRG)...), "--module", "x", "--vars", other), "REFUSED"}, // vars name another RG
+		{append([]string{"status"}, target(tRG)...), "REFUSED"}, // nothing applied
+		{tokArgs("apply"), "REFUSED"},                           // no eligible plan
+		{tokArgs("destroy"), "REFUSED"},                         // nothing applied
+		{planArgs(other), "REFUSED"},                            // vars name another RG
 	} {
 		if r := standingRun(t, c.args...); r.Code != c.code {
 			t.Fatalf("%v: code %s (%s), want %s", c.args, r.Code, r.Reason, c.code)
@@ -124,17 +182,15 @@ func TestStandingRefusalsMakeNoToolCall(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Fatalf("refusals reached the command boundary: %+v", f.calls)
 	}
-	_ = vars
 }
 
 func TestStandingLifecycleArgvAndPinnedScope(t *testing.T) {
 	f, vars := setupStanding(t)
-	module := filepath.Join("..", "..", "provision", "standing")
-	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...); r.Code != "OK" {
+	if r := standingRun(t, planArgs(vars)...); r.Code != "OK" || r.Generation != "g0001" {
 		t.Fatalf("plan: %+v", r)
 	}
-	home, _ := standingHome()
-	work := filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", tBox)
+	box := standingBox()
+	work := filepath.Join(box, "g0001")
 	pinned := "-var-file=" + filepath.Join(work, standingVarsFile)
 	want := [][]string{
 		{"init", "-input=false", "-no-color", "-backend=false"},
@@ -149,21 +205,21 @@ func TestStandingLifecycleArgvAndPinnedScope(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(work, "main.tf")); err != nil || !bytes.Contains(b, []byte("features {}")) {
 		t.Fatalf("module not copied with its provider block: %v", err)
 	}
-	// a different RG for the pinned box is refused before any tool call
+	if b, _ := os.ReadFile(filepath.Join(box, standingCurrentFile)); string(b) != "g0001" || !exists(filepath.Join(work, standingReadyFile)) {
+		t.Fatalf("CURRENT %q / READY after a completed plan", b)
+	}
 	n := len(f.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "OK" || r.Generation != "g0001" {
+		t.Fatalf("apply: %+v", r)
+	}
+	if got := strings.Join(f.calls[n].args, " "); got != "apply -input=false -no-color standing.tfplan" || f.calls[n].dir != work {
+		t.Fatalf("apply argv %q in %s: options must precede the saved plan", got, f.calls[n].dir)
+	}
+	// a different RG for the applied box is refused before any tool call
+	n = len(f.calls)
 	if r := standingRun(t, append([]string{"status"}, target("rg-claude04-standing-20261121")...)...); r.Code != "REFUSED" || len(f.calls) != n {
 		t.Fatalf("wrong-RG status: %+v calls %d->%d", r, n, len(f.calls))
 	}
-	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
-		t.Fatalf("apply: %+v", r)
-	}
-	if got := strings.Join(f.calls[n].args, " "); got != "apply -input=false -no-color standing.tfplan" {
-		t.Fatalf("apply argv %q: options must precede the saved plan", got)
-	}
-	if a, _ := readApply(work); a.State != "applied" {
-		t.Fatalf("apply receipt %+v", a)
-	}
-	n = len(f.calls)
 	if r := standingRun(t, append([]string{"stop"}, target(tRG)...)...); r.Code != "OK" || r.Billing != "no" {
 		t.Fatalf("stop: %+v", r)
 	}
@@ -171,137 +227,191 @@ func TestStandingLifecycleArgvAndPinnedScope(t *testing.T) {
 		t.Fatalf("stop argv %q", got)
 	}
 	n = len(f.calls)
-	if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
+	if r := standingRun(t, tokArgs("destroy")...); r.Code != "OK" {
 		t.Fatalf("destroy: %+v", r)
 	}
-	if got := strings.Join(f.calls[n].args, " "); got != "destroy -input=false -no-color "+pinned+" -auto-approve" {
-		t.Fatalf("destroy argv %q: must reuse the pinned inputs", got)
+	if got := strings.Join(f.calls[n].args, " "); got != "destroy -input=false -no-color "+pinned+" -auto-approve" || f.calls[n].dir != work {
+		t.Fatalf("destroy argv %q: must reuse the applied generation's pinned inputs", got)
 	}
 	if got := strings.Join(f.calls[n+1].args, " "); got != "group exists --name "+tRG+" --subscription "+tSub+" --output json --only-show-errors" {
 		t.Fatalf("verify argv %q: must check the pinned RG in the pinned subscription", got)
+	}
+	if r := standingRun(t, planArgs(vars)...); r.Code != "OK" || r.Generation != "g0002" {
+		t.Fatalf("plan after a verified destroy: %+v", r)
+	}
+}
+
+// Invariant 1: apply binds exactly one successful plan generation; starting any re-plan, even one that fails,
+// revokes the previous plan's eligibility; teardown is bound to the generation actually applied.
+func TestStandingFailedReplanRevokesTheOldPlan(t *testing.T) {
+	f, vars := setupStanding(t)
+	standingRun(t, planArgs(vars)...) // A = g0001, eligible
+	box := standingBox()
+	genA := snapshot(t, filepath.Join(box, "g0001"))
+	if r := standingRun(t, planArgs(writeVars(t, `,"vm_size":"FAILPLAN"`))...); r.Code != "FAILED" || r.Generation != "g0002" {
+		t.Fatalf("failing re-plan B: %+v", r)
+	}
+	sameSnapshot(t, "failed re-plan B (generation A)", genA, snapshot(t, filepath.Join(box, "g0001")))
+	if exists(filepath.Join(box, standingCurrentFile)) {
+		t.Fatal("a failed re-plan must leave no CURRENT generation")
+	}
+	n := len(f.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("apply after a failed re-plan must create nothing: %+v calls %d->%d", r, n, len(f.calls))
+	}
+	if r := standingRun(t, planArgs(vars)...); r.Code != "OK" || r.Generation != "g0003" {
+		t.Fatalf("re-plan C: %+v", r)
+	}
+	n = len(f.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "OK" || r.Generation != "g0003" || f.calls[n].dir != filepath.Join(box, "g0003") {
+		t.Fatalf("apply must use generation C: %+v in %s", r, f.calls[n].dir)
+	}
+	n = len(f.calls)
+	if r := standingRun(t, tokArgs("destroy")...); r.Code != "OK" || f.calls[n].dir != filepath.Join(box, "g0003") ||
+		strings.Join(f.calls[n].args, " ") != "destroy -input=false -no-color -var-file="+filepath.Join(box, "g0003", standingVarsFile)+" -auto-approve" {
+		t.Fatalf("teardown must be bound to the applied generation C: %+v %+v", r, f.calls[n])
+	}
+}
+
+// CURRENT may only ever name a completed plan: a CURRENT naming a generation without READY is not eligible.
+func TestStandingCurrentWithoutReadyIsNotEligible(t *testing.T) {
+	f, vars := setupStanding(t)
+	standingRun(t, planArgs(vars)...)
+	box := standingBox()
+	_ = os.Remove(filepath.Join(box, "g0001", standingReadyFile))
+	n := len(f.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("apply of a generation without READY: %+v calls %d->%d", r, n, len(f.calls))
+	}
+}
+
+// Invariant 2: a missing receipt in a possibly-used generation is UNKNOWN: no create, no re-plan, no clean listing.
+func TestStandingMissingReceiptAfterAttemptIsUnknown(t *testing.T) {
+	f, vars := setupStanding(t)
+	standingRun(t, planArgs(vars)...)
+	f.failApply = true
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" {
+		t.Fatalf("failed apply: %+v", r)
+	}
+	f.failApply = false
+	work := filepath.Join(standingBox(), "g0001")
+	if err := os.Remove(filepath.Join(work, standingApplyFile)); err != nil {
+		t.Fatal(err)
+	}
+	n := len(f.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+		t.Fatalf("apply after a lost receipt: %+v calls %d->%d", r, n, len(f.calls))
+	}
+	if r := standingRun(t, planArgs(vars)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+		t.Fatalf("plan after a lost receipt: %+v", r)
+	}
+	if r := standingRun(t, tokArgs("destroy")...); r.Code != "UNRESOLVED" {
+		t.Fatalf("destroy + empty RG after a lost receipt must stay non-clean: %+v", r)
+	}
+	// Terraform state without any marker also counts as a used generation
+	f2, vars2 := setupStanding(t)
+	standingRun(t, planArgs(vars2)...)
+	w2 := filepath.Join(standingBox(), "g0001")
+	_ = os.WriteFile(filepath.Join(w2, "terraform.tfstate"), []byte(`{}`), 0o600)
+	n = len(f2.calls)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" || len(f2.calls) != n {
+		t.Fatalf("apply over leftover state: %+v", r)
 	}
 }
 
 func TestStandingUnresolvedCreateIsNeverClosedByAnEmptyObservation(t *testing.T) {
 	f, vars := setupStanding(t)
-	module := filepath.Join("..", "..", "provision", "standing")
-	standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...)
+	standingRun(t, planArgs(vars)...)
 	f.failApply = true
-	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" {
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" {
 		t.Fatalf("failed apply: %+v", r)
 	}
-	// a later controller (fresh process: only the files remain) destroys and sees an empty RG
 	f.failApply = false
-	if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" {
+	if r := standingRun(t, tokArgs("destroy")...); r.Code != "UNRESOLVED" {
 		t.Fatalf("destroy after unresolved create must stay non-clean: %+v", r)
 	}
 	n := len(f.calls)
-	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" || len(f.calls) != n {
 		t.Fatalf("apply after unresolved must refuse without a tool call (no blind retry): %+v", r)
 	}
-	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...); r.Code != "UNRESOLVED" {
+	if r := standingRun(t, planArgs(vars)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
 		t.Fatalf("plan after unresolved: %+v", r)
 	}
 }
 
-func workFiles(t *testing.T, work string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	entries, _ := os.ReadDir(work)
-	for _, e := range entries {
-		if !e.IsDir() {
-			b, _ := os.ReadFile(filepath.Join(work, e.Name()))
-			out[e.Name()] = string(b)
-		}
-	}
-	return out
-}
-
-func standingWork(t *testing.T) string {
-	home, _ := standingHome()
-	return filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", tBox)
-}
-
-// A second plan against an applied box must not touch what its teardown needs, and the box stays destroyable.
+// A second plan against an applied box must not touch anything, and the box stays destroyable.
 func TestStandingReplanNeverOverwritesAnAppliedBox(t *testing.T) {
 	f, vars := setupStanding(t)
-	module := filepath.Join("..", "..", "provision", "standing")
-	plan := append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)
-	standingRun(t, plan...)
-	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
+	standingRun(t, planArgs(vars)...)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "OK" {
 		t.Fatalf("apply: %+v", r)
 	}
-	work := standingWork(t)
-	before := workFiles(t, work)
-	changed := filepath.Join(t.TempDir(), "b.json")
-	_ = os.WriteFile(changed, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"`+tRG+`","name":"`+tBox+`","vm_size":"Standard_D2s_v5"}`), 0o600)
+	box := standingBox()
+	before := snapshot(t, box)
 	n := len(f.calls)
-	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", changed)...); r.Code != "REFUSED" || len(f.calls) != n {
+	if r := standingRun(t, planArgs(writeVars(t, `,"vm_size":"Standard_D2s_v5"`))...); r.Code != "REFUSED" || len(f.calls) != n {
 		t.Fatalf("re-plan of an applied box: %+v, calls %d->%d", r, n, len(f.calls))
 	}
-	after := workFiles(t, work)
-	for k, v := range before {
-		if after[k] != v {
-			t.Fatalf("re-plan changed %s of the applied box", k)
-		}
-	}
-	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "REFUSED" || len(f.calls) != n {
+	sameSnapshot(t, "re-plan of an applied box", before, snapshot(t, box))
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "REFUSED" || len(f.calls) != n {
 		t.Fatalf("second apply of an applied box: %+v", r)
 	}
-	if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
+	if r := standingRun(t, tokArgs("destroy")...); r.Code != "OK" {
 		t.Fatalf("applied box must stay destroyable: %+v", r)
-	}
-	if got := strings.Join(f.calls[n].args, " "); got != "destroy -input=false -no-color -var-file="+filepath.Join(work, standingVarsFile)+" -auto-approve" {
-		t.Fatalf("destroy argv %q", got)
-	}
-	if r := standingRun(t, plan...); r.Code != "OK" {
-		t.Fatalf("plan after destroy: %+v", r)
 	}
 }
 
-// An unreadable or unknown receipt, or an unreadable identity, fails closed: never retry, never clean.
-func TestStandingUnreadableStateFailsClosed(t *testing.T) {
+// An unreadable or unknown receipt fails closed: never retry, never clean.
+func TestStandingUnreadableReceiptFailsClosed(t *testing.T) {
 	for _, receipt := range []string{"not json", `{"state":"weird"}`} {
 		f, vars := setupStanding(t)
-		module := filepath.Join("..", "..", "provision", "standing")
-		standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...)
-		work := standingWork(t)
-		_ = os.WriteFile(filepath.Join(work, standingApplyFile), []byte(receipt), 0o600)
+		standingRun(t, planArgs(vars)...)
+		_ = os.WriteFile(filepath.Join(standingBox(), "g0001", standingApplyFile), []byte(receipt), 0o600)
 		n := len(f.calls)
-		if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+		if r := standingRun(t, tokArgs("apply")...); r.Code != "UNRESOLVED" || len(f.calls) != n {
 			t.Fatalf("%q: apply %+v calls %d->%d", receipt, r, n, len(f.calls))
 		}
-		if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+		if r := standingRun(t, planArgs(vars)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
 			t.Fatalf("%q: plan %+v", receipt, r)
 		}
-		if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" {
+		if r := standingRun(t, tokArgs("destroy")...); r.Code != "UNRESOLVED" {
 			t.Fatalf("%q: destroy + empty RG must stay non-clean: %+v", receipt, r)
 		}
 	}
+}
+
+// codex01 P2 fixture: a viable module and a real read error on the newest generation's identity: the guard alone
+// refuses, with zero tool calls and nothing written.
+func TestStandingUnreadableIdentityRefusesAViablePlan(t *testing.T) {
 	f, vars := setupStanding(t)
-	work := standingWork(t)
-	_ = os.MkdirAll(work, 0o700)
-	_ = os.WriteFile(filepath.Join(work, standingIdentFile), []byte("garbage"), 0o600)
-	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", "x", "--vars", vars)...); r.Code != "REFUSED" || len(f.calls) != 0 {
-		t.Fatalf("unreadable identity: plan %+v calls %d", r, len(f.calls))
+	standingRun(t, planArgs(vars)...)
+	box := standingBox()
+	ident := filepath.Join(box, "g0001", standingIdentFile)
+	_ = os.Remove(ident)
+	if err := os.Mkdir(ident, 0o700); err != nil { // reading a directory fails: a real read error
+		t.Fatal(err)
 	}
+	before := snapshot(t, box)
+	n := len(f.calls)
+	if r := standingRun(t, planArgs(vars)...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("plan over an unreadable identity: %+v calls %d->%d", r, n, len(f.calls))
+	}
+	sameSnapshot(t, "plan over an unreadable identity", before, snapshot(t, box))
 }
 
 // The pinned tfvars must be the reviewed bytes naming the pinned identity before any mutation.
 func TestStandingPinnedVarsDriftRefused(t *testing.T) {
 	f, vars := setupStanding(t)
-	module := filepath.Join("..", "..", "provision", "standing")
-	standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...)
-	work := standingWork(t)
-	_ = os.WriteFile(filepath.Join(work, standingVarsFile), []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
-	n := len(f.calls)
-	for _, a := range []string{"apply", "destroy"} {
-		if r := standingRun(t, append(append([]string{a}, target(tRG)...), "--launch-token", tTok)...); r.Code != "REFUSED" || len(f.calls) != n {
-			t.Fatalf("%s with drifted pinned vars: %+v calls %d->%d", a, r, n, len(f.calls))
-		}
+	standingRun(t, planArgs(vars)...)
+	if r := standingRun(t, tokArgs("apply")...); r.Code != "OK" {
+		t.Fatalf("apply: %+v", r)
 	}
-	if r := standingRun(t, append([]string{"status"}, target(tRG)...)...); r.Code != "REFUSED" || len(f.calls) != n {
-		t.Fatalf("status with drifted pinned vars: %+v", r)
+	_ = os.WriteFile(filepath.Join(standingBox(), "g0001", standingVarsFile), []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
+	n := len(f.calls)
+	for _, a := range [][]string{tokArgs("destroy"), append([]string{"status"}, target(tRG)...)} {
+		if r := standingRun(t, a...); r.Code != "REFUSED" || len(f.calls) != n {
+			t.Fatalf("%v with drifted pinned vars: %+v calls %d->%d", a, r, n, len(f.calls))
+		}
 	}
 }
 

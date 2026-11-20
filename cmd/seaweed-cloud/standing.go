@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -26,14 +27,15 @@ type standingResult struct {
 	Action     string   `json:"action"`
 	Code       string   `json:"code"`
 	Name       string   `json:"name"`
+	Generation string   `json:"generation,omitempty"`
 	PowerState string   `json:"power_state,omitempty"`
 	Billing    string   `json:"compute_billing,omitempty"`
 	Resources  []string `json:"resources,omitempty"`
 	Reason     string   `json:"reason"`
 }
 
-// standingIdentity is pinned at plan time: every later action must name the same box, RG and subscription, and
-// every Azure call is scoped to them.
+// standingIdentity is pinned in each plan generation: every later action must name the same box, RG and
+// subscription, and every Azure call is scoped to them.
 type standingIdentity struct {
 	Name           string `json:"name"`
 	ResourceGroup  string `json:"resource_group_name"`
@@ -41,8 +43,8 @@ type standingIdentity struct {
 	VarsSHA256     string `json:"vars_sha256"`
 }
 
-// standingApply is the durable apply receipt: "started" is written before terraform apply runs and is replaced by
-// "applied" only on success, so a failed, killed or timed-out create stays UNRESOLVED across controller restarts.
+// standingApply is a generation's durable apply receipt: "started" before terraform apply runs, "applied" only on
+// success, "unresolved" on failure, "destroyed" after a verified teardown.
 type standingApply struct {
 	State string `json:"state"`
 	At    string `json:"at"`
@@ -53,6 +55,7 @@ var (
 	standingRG    = regexp.MustCompile(`^rg-[a-z0-9]+-standing-[0-9]{8}$`)
 	standingToken = regexp.MustCompile(`^[0-9a-f]{24}$`)
 	standingUUID  = regexp.MustCompile(`^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$`)
+	standingGen   = regexp.MustCompile(`^g[0-9]{4}$`)
 
 	// test seams: the external command boundary, the OS gate and the state root
 	standingTool = smoke.Native
@@ -60,11 +63,21 @@ var (
 	standingHome = os.UserHomeDir
 )
 
+// Layout under ~/.local/state/seaweed-cloud/standing/<name>/:
+//
+//	gNNNN/    one plan generation: module copy, box.tfvars.json, identity.json, standing.tfplan, Terraform state,
+//	          READY (the plan completed), ATTEMPT (an apply was started here), apply.json (receipt)
+//	CURRENT   the one apply-eligible generation; removed when any plan starts, written only after a plan succeeds
+//
+// The live generation is the one with an ATTEMPT whose receipt is not "destroyed"; teardown is bound to it.
 const (
-	standingVarsFile  = "box.tfvars.json"
-	standingIdentFile = "identity.json"
-	standingApplyFile = "apply.json"
-	standingPlanFile  = "standing.tfplan"
+	standingVarsFile    = "box.tfvars.json"
+	standingIdentFile   = "identity.json"
+	standingApplyFile   = "apply.json"
+	standingPlanFile    = "standing.tfplan"
+	standingReadyFile   = "READY"
+	standingAttemptFile = "ATTEMPT"
+	standingCurrentFile = "CURRENT"
 )
 
 // tfArgv puts every option before the positional arguments (Terraform's parser takes options first).
@@ -73,9 +86,9 @@ func tfArgv(sub string, opts []string, pos ...string) []string {
 	return append(argv, pos...)
 }
 
-// runStanding drives the standing test box (provision/standing). plan pins the inputs, the identity and a reviewed
-// plan file; apply applies exactly that file; start/stop/status act on the VM; destroy uses the same pinned inputs
-// and verifies the pinned RG. apply and destroy need the manager's launch token.
+// runStanding drives the standing test box (provision/standing). plan writes a new generation; apply applies
+// exactly the CURRENT generation's reviewed plan; start/stop/status/destroy act on the live (applied) generation
+// with its own pinned inputs and scope. apply and destroy need the manager's launch token.
 func runStanding(args []string, w io.Writer) int {
 	r := standingResult{Schema: "seaweed.cloud-standing/v1", Code: "USAGE"}
 	if len(args) > 0 {
@@ -121,70 +134,95 @@ func standingDo(ctx context.Context, r *standingResult, rg, module, vars string)
 		r.Code, r.Reason = "UNKNOWN", "no home directory"
 		return
 	}
-	work := filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", r.Name)
-	tf := func(sub string, opts []string, pos ...string) ([]byte, error) {
-		return standingTool(ctx, work, "terraform", tfArgv(sub, opts, pos...)...)
-	}
-	fail := func(what string, out []byte) { r.Code, r.Reason = "FAILED", what+": "+lastLine(out) }
-	if r.Action == "plan" {
-		standingPlan(ctx, r, rg, module, vars, work, tf, fail)
+	box := filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", r.Name)
+	live, liveState, err := standingLive(box)
+	if err != nil {
+		r.Code, r.Reason = "UNKNOWN", err.Error()
 		return
 	}
+	pending := liveState == "started" || liveState == "unresolved" || liveState == "unknown"
+	if r.Action == "plan" {
+		switch {
+		case pending:
+			r.Code, r.Reason = "UNRESOLVED", "generation "+live+" has an unresolved apply (receipt "+liveState+"); no new plan until it is resolved"
+		case live != "":
+			r.Code, r.Reason = "REFUSED", "generation "+live+" is applied; destroy it before planning again"
+		default:
+			standingPlan(ctx, r, box, rg, module, vars)
+		}
+		return
+	}
+	gen := live
+	if r.Action == "apply" {
+		switch {
+		case pending:
+			r.Code, r.Reason = "UNRESOLVED", "generation "+live+" has an unresolved apply (receipt "+liveState+"): resolve it from the provider's operations before any new create; no blind retry"
+			return
+		case live != "":
+			r.Code, r.Reason = "REFUSED", "generation "+live+" is already applied; destroy it before another apply"
+			return
+		}
+		cur, err := os.ReadFile(filepath.Join(box, standingCurrentFile))
+		gen = strings.TrimSpace(string(cur))
+		if err != nil || !standingGen.MatchString(gen) || !exists(filepath.Join(box, gen, standingReadyFile)) {
+			r.Code, r.Reason = "REFUSED", "no apply-eligible plan (no completed CURRENT generation): run plan"
+			return
+		}
+	} else if gen == "" {
+		r.Code, r.Reason = "REFUSED", "no applied generation for this box"
+		return
+	}
+	r.Generation = gen
+	work := filepath.Join(box, gen)
 	id, err := readIdentity(work)
 	if err != nil {
-		r.Code, r.Reason = "REFUSED", "no pinned identity for this box (run plan first): "+err.Error()
+		r.Code, r.Reason = "REFUSED", "generation "+gen+" identity unreadable: "+err.Error()
 		return
 	}
 	if id.Name != r.Name || id.ResourceGroup != rg {
-		r.Code, r.Reason = "REFUSED", fmt.Sprintf("target %s/%s does not match the pinned box %s/%s", rg, r.Name, id.ResourceGroup, id.Name)
+		r.Code, r.Reason = "REFUSED", fmt.Sprintf("target %s/%s does not match generation %s's box %s/%s", rg, r.Name, gen, id.ResourceGroup, id.Name)
 		return
-	}
-	az := func(args ...string) ([]byte, error) {
-		return standingTool(ctx, "", "az", append(args, "--subscription", id.SubscriptionID, "--output", "json", "--only-show-errors")...)
 	}
 	if err := checkPinnedVars(work, id); err != nil {
 		r.Code, r.Reason = "REFUSED", "pinned inputs do not match the pinned identity: "+err.Error()
 		return
 	}
-	varsOpt := []string{"-var-file=" + filepath.Join(work, standingVarsFile)}
-	state := applyState(work)
-	pending := state == "started" || state == "unresolved" || state == "unknown"
+	tf := func(sub string, opts []string, pos ...string) ([]byte, error) {
+		return standingTool(ctx, work, "terraform", tfArgv(sub, opts, pos...)...)
+	}
+	az := func(args ...string) ([]byte, error) {
+		return standingTool(ctx, "", "az", append(args, "--subscription", id.SubscriptionID, "--output", "json", "--only-show-errors")...)
+	}
+	fail := func(what string, out []byte) { r.Code, r.Reason = "FAILED", what+": "+lastLine(out) }
 	switch r.Action {
 	case "apply":
-		if pending {
-			r.Code, r.Reason = "UNRESOLVED", "a previous apply did not complete (receipt "+state+"): resolve it from the provider's operations before any new create; no blind retry"
-			return
-		}
-		if state == "applied" {
-			r.Code, r.Reason = "REFUSED", "the box is already applied; destroy it before another apply"
-			return
-		}
-		if writeApply(work, "started") != nil {
-			r.Code, r.Reason = "UNKNOWN", "cannot write the apply receipt; nothing applied"
+		// ATTEMPT first: from here on this generation is never "new" again; a lost receipt reads as unknown
+		if writeFileSync(filepath.Join(work, standingAttemptFile), []byte(time.Now().UTC().Format(time.RFC3339))) != nil || writeApply(work, "started") != nil {
+			r.Code, r.Reason = "UNKNOWN", "cannot record the apply attempt; nothing applied"
 			return
 		}
 		if out, err := tf("apply", nil, standingPlanFile); err != nil {
 			_ = writeApply(work, "unresolved")
-			r.Code, r.Reason = "UNRESOLVED", "terraform apply failed; the create stays UNRESOLVED until resolved: "+lastLine(out)
+			r.Code, r.Reason = "UNRESOLVED", "terraform apply failed; generation "+gen+" stays UNRESOLVED until resolved: "+lastLine(out)
 			return
 		}
 		if writeApply(work, "applied") != nil {
 			r.Code, r.Reason = "UNKNOWN", "applied, but the receipt could not be written"
 			return
 		}
-		r.Code, r.Reason = "OK", "applied the reviewed plan"
+		r.Code, r.Reason = "OK", "applied generation "+gen
 	case "destroy":
-		if out, err := tf("destroy", append(varsOpt, "-auto-approve")); err != nil {
+		if out, err := tf("destroy", []string{"-var-file=" + filepath.Join(work, standingVarsFile), "-auto-approve"}); err != nil {
 			fail("terraform destroy", out)
 			return
 		}
 		code, reason := standingVerifyGone(az, id)
 		if code == "OK" && pending {
-			r.Code, r.Reason = "UNRESOLVED", "destroyed and "+reason+", but a previous apply is unresolved: an empty observation does not close it"
+			r.Code, r.Reason = "UNRESOLVED", "destroyed and "+reason+", but generation "+gen+"'s apply is unresolved (receipt "+liveState+"): an empty observation does not close it"
 			return
 		}
-		if code == "OK" {
-			_ = writeApply(work, "destroyed")
+		if code == "OK" && writeApply(work, "destroyed") != nil {
+			code, reason = "UNKNOWN", reason+", but the destroyed receipt could not be written"
 		}
 		r.Code, r.Reason = code, reason
 	case "start", "stop", "status":
@@ -208,8 +246,9 @@ func standingDo(ctx context.Context, r *standingResult, rg, module, vars string)
 	}
 }
 
-func standingPlan(ctx context.Context, r *standingResult, rg, module, vars, work string,
-	tf func(string, []string, ...string) ([]byte, error), fail func(string, []byte)) {
+// standingPlan revokes apply eligibility first, then builds a NEW generation; CURRENT names it only once the
+// plan has completed, so a failed re-plan leaves no eligible plan at all.
+func standingPlan(ctx context.Context, r *standingResult, box, rg, module, vars string) {
 	b, err := os.ReadFile(vars)
 	var v struct {
 		ResourceGroup  string `json:"resource_group_name"`
@@ -224,46 +263,111 @@ func standingPlan(ctx context.Context, r *standingResult, rg, module, vars, work
 		r.Code, r.Reason = "REFUSED", "--vars must name the same resource_group_name and name as the command and carry a subscription_id UUID"
 		return
 	}
-	// Nothing in the work dir is touched unless no box is (or may be) applied: a re-plan must never overwrite the
-	// module, inputs or identity an applied box's teardown depends on.
-	switch state := applyState(work); state {
-	case "started", "unresolved", "unknown":
-		r.Code, r.Reason = "UNRESOLVED", "a previous apply is unresolved (receipt "+state+"); no new plan until it is resolved"
+	gens, err := standingGens(box)
+	if err != nil {
+		r.Code, r.Reason = "UNKNOWN", "cannot list generations: "+err.Error()
 		return
-	case "applied":
-		r.Code, r.Reason = "REFUSED", "the box is applied; destroy it before planning again"
-		return
-	case "":
-		if _, err := os.Stat(filepath.Join(work, standingIdentFile)); err == nil {
-			if old, err := readIdentity(work); err != nil {
-				r.Code, r.Reason = "REFUSED", "the pinned identity is unreadable: "+err.Error()
-				return
-			} else if old.ResourceGroup != rg || old.SubscriptionID != v.SubscriptionID {
-				r.Code, r.Reason = "REFUSED", "this box is pinned to "+old.ResourceGroup+"; destroy it before planning another target"
+	}
+	if n := len(gens); n > 0 {
+		if p := filepath.Join(box, gens[n-1], standingIdentFile); exists(p) {
+			if _, err := readIdentity(filepath.Join(box, gens[n-1])); err != nil {
+				r.Code, r.Reason = "REFUSED", "generation "+gens[n-1]+" identity is unreadable: "+err.Error()
 				return
 			}
 		}
 	}
+	if err := os.MkdirAll(box, 0o700); err != nil {
+		r.Code, r.Reason = "FAILED", "state dir: "+err.Error()
+		return
+	}
+	if err := os.Remove(filepath.Join(box, standingCurrentFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		r.Code, r.Reason = "UNKNOWN", "cannot revoke the previous plan's eligibility: "+err.Error()
+		return
+	}
+	gen := fmt.Sprintf("g%04d", len(gens)+1)
+	if len(gens) > 0 {
+		var last int
+		fmt.Sscanf(gens[len(gens)-1], "g%04d", &last)
+		gen = fmt.Sprintf("g%04d", last+1)
+	}
+	work := filepath.Join(box, gen)
+	if err := os.Mkdir(work, 0o700); err != nil {
+		r.Code, r.Reason = "FAILED", "new generation "+gen+": "+err.Error()
+		return
+	}
+	r.Generation = gen
 	id := standingIdentity{Name: r.Name, ResourceGroup: rg, SubscriptionID: v.SubscriptionID, VarsSHA256: fmt.Sprintf("%x", sha256.Sum256(b))}
 	idb, _ := json.Marshal(id)
 	if err := copyModule(module, work); err != nil {
 		r.Code, r.Reason = "FAILED", "copy module: "+err.Error()
 		return
 	}
-	if os.WriteFile(filepath.Join(work, standingVarsFile), b, 0o600) != nil || os.WriteFile(filepath.Join(work, standingIdentFile), idb, 0o600) != nil {
+	if writeFileSync(filepath.Join(work, standingVarsFile), b) != nil || writeFileSync(filepath.Join(work, standingIdentFile), idb) != nil {
 		r.Code, r.Reason = "FAILED", "cannot pin the inputs and identity"
 		return
 	}
-	varsOpt := []string{"-var-file=" + filepath.Join(work, standingVarsFile)}
-	if out, err := tf("init", []string{"-backend=false"}); err != nil {
-		fail("terraform init", out)
-	} else if out, err := tf("plan", append(varsOpt, "-out="+standingPlanFile)); err != nil {
-		fail("terraform plan", out)
-	} else if js, err := standingTool(ctx, work, "terraform", "show", "-json", standingPlanFile); err != nil || os.WriteFile(filepath.Join(work, "standing-plan.json"), js, 0o600) != nil {
-		fail("terraform show", js)
-	} else {
-		r.Code, r.Resources, r.Reason = "OK", planAddresses(js), "plan written to "+filepath.Join(work, standingPlanFile)+"; review it, then apply with a launch token"
+	tf := func(sub string, opts []string, pos ...string) ([]byte, error) {
+		return standingTool(ctx, work, "terraform", tfArgv(sub, opts, pos...)...)
 	}
+	if out, err := tf("init", []string{"-backend=false"}); err != nil {
+		r.Code, r.Reason = "FAILED", "terraform init: "+lastLine(out)
+	} else if out, err := tf("plan", []string{"-var-file=" + filepath.Join(work, standingVarsFile), "-out=" + standingPlanFile}); err != nil {
+		r.Code, r.Reason = "FAILED", "terraform plan (no plan is apply-eligible now): "+lastLine(out)
+	} else if js, err := standingTool(ctx, work, "terraform", "show", "-json", standingPlanFile); err != nil || writeFileSync(filepath.Join(work, "standing-plan.json"), js) != nil {
+		r.Code, r.Reason = "FAILED", "terraform show: "+lastLine(js)
+	} else if writeFileSync(filepath.Join(work, standingReadyFile), []byte(id.VarsSHA256)) != nil || writeFileSync(filepath.Join(box, standingCurrentFile), []byte(gen)) != nil {
+		r.Code, r.Reason = "FAILED", "cannot mark generation "+gen+" apply-eligible"
+	} else {
+		r.Code, r.Resources, r.Reason = "OK", planAddresses(js), "generation "+gen+" planned ("+filepath.Join(work, standingPlanFile)+"); review it, then apply with a launch token"
+	}
+}
+
+// standingGens lists the plan generations in order.
+func standingGens(box string) ([]string, error) {
+	entries, err := os.ReadDir(box)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var gens []string
+	for _, e := range entries {
+		if e.IsDir() && standingGen.MatchString(e.Name()) {
+			gens = append(gens, e.Name())
+		}
+	}
+	sort.Strings(gens)
+	return gens, nil
+}
+
+// standingLive finds the generation an apply was attempted in and not verified destroyed. A generation counts as
+// attempted when it has an ATTEMPT marker, a receipt or Terraform state; its receipt is then "unknown" when missing,
+// unreadable or naming an unknown state. More than one live generation is an error (UNKNOWN).
+func standingLive(box string) (string, string, error) {
+	gens, err := standingGens(box)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot list generations: %v", err)
+	}
+	live, state := "", ""
+	for _, g := range gens {
+		work := filepath.Join(box, g)
+		if !exists(filepath.Join(work, standingAttemptFile)) && !exists(filepath.Join(work, standingApplyFile)) && !exists(filepath.Join(work, "terraform.tfstate")) {
+			continue
+		}
+		s := "unknown"
+		if a, err := readApply(work); err == nil && strings.Contains(" started unresolved applied destroyed ", " "+a.State+" ") {
+			s = a.State
+		}
+		if s == "destroyed" {
+			continue
+		}
+		if live != "" {
+			return "", "", fmt.Errorf("generations %s and %s both hold an unsettled apply", live, g)
+		}
+		live, state = g, s
+	}
+	return live, state, nil
 }
 
 // standingVerifyGone checks the pinned RG in the pinned subscription: gone, or present and listing no resources.
@@ -301,23 +405,6 @@ func readIdentity(work string) (standingIdentity, error) {
 	return id, err
 }
 
-// applyState is the apply receipt's state: "" when there is none, a known state, or "unknown" when the receipt
-// exists but cannot be read or names an unknown state (fail closed: treated as unresolved).
-func applyState(work string) string {
-	if _, err := os.Stat(filepath.Join(work, standingApplyFile)); errors.Is(err, os.ErrNotExist) {
-		return ""
-	}
-	a, err := readApply(work)
-	if err != nil {
-		return "unknown"
-	}
-	switch a.State {
-	case "started", "unresolved", "applied", "destroyed":
-		return a.State
-	}
-	return "unknown"
-}
-
 // checkPinnedVars proves the pinned tfvars are the reviewed bytes and name the pinned identity.
 func checkPinnedVars(work string, id standingIdentity) error {
 	b, err := os.ReadFile(filepath.Join(work, standingVarsFile))
@@ -349,11 +436,31 @@ func readApply(work string) (standingApply, error) {
 
 func writeApply(work, state string) error {
 	b, _ := json.Marshal(standingApply{State: state, At: time.Now().UTC().Format(time.RFC3339)})
-	tmp := filepath.Join(work, standingApplyFile+".tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	return writeFileSync(filepath.Join(work, standingApplyFile), b)
+}
+
+// writeFileSync writes atomically (temp file, fsync, rename) with owner-only permissions.
+func writeFileSync(path string, b []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(work, standingApplyFile))
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // classifyPower maps the instance view to a power state and whether compute is billing: an OS-level shutdown
@@ -395,11 +502,8 @@ func planAddresses(plan []byte) []string {
 	return out
 }
 
-// copyModule copies the module's top-level .tf, cloud-init and lock files into the work dir (state stays there).
+// copyModule copies the module's top-level .tf, cloud-init and lock files into a generation dir.
 func copyModule(src, dst string) error {
-	if err := os.MkdirAll(dst, 0o700); err != nil {
-		return err
-	}
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		return err

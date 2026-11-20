@@ -29,11 +29,15 @@ seaweed-cloud standing apply   --name N --resource-group RG --launch-token ID   
 seaweed-cloud standing start|stop|status --name N --resource-group RG          # stop = deallocate
 seaweed-cloud standing destroy --name N --resource-group RG --launch-token ID   # then RG listed empty / gone
 ```
-State, the plan, the pinned inputs (`box.tfvars.json`), the pinned identity (`identity.json`: subscription, RG, name)
-and the apply receipt (`apply.json`) live under `~/.local/state/seaweed-cloud/standing/<name>/`. The tfvars must carry
-`subscription_id` and name the same RG and box as the command. Every later action must name the pinned box and RG;
-every `az` call is scoped to the pinned subscription; `destroy` reuses the pinned inputs. A failed or killed apply
-stays `UNRESOLVED` across restarts: apply and plan refuse, and destroy + an empty RG reports `UNRESOLVED`, never clean.
+State lives under `~/.local/state/seaweed-cloud/standing/<name>/` in plan generations `gNNNN/` (module copy, pinned
+`box.tfvars.json`, `identity.json` with subscription/RG/name, `standing.tfplan`, Terraform state, `READY`, `ATTEMPT`,
+`apply.json`). The tfvars must carry `subscription_id` and name the same RG and box as the command.
+- Every plan removes `CURRENT` first, then writes a NEW generation; `CURRENT` names it only after the plan completed.
+  Apply runs only the `CURRENT` generation's saved plan, so a failed re-plan leaves nothing apply-eligible.
+- Apply writes `ATTEMPT` before Terraform runs; that generation is never "new" again. The live generation (an attempt
+  not verified destroyed) binds start/stop/status/destroy: its pinned inputs (sha256-checked) and its subscription/RG.
+- A failed, killed or receipt-less attempt stays `UNRESOLVED` across restarts: apply and plan refuse, and destroy + an
+  empty RG reports `UNRESOLVED`, never clean. A plan is refused while any generation is applied or unresolved.
 
 ## Tests (no account calls)
 ```
