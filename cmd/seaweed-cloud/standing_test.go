@@ -204,6 +204,107 @@ func TestStandingUnresolvedCreateIsNeverClosedByAnEmptyObservation(t *testing.T)
 	}
 }
 
+func workFiles(t *testing.T, work string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	entries, _ := os.ReadDir(work)
+	for _, e := range entries {
+		if !e.IsDir() {
+			b, _ := os.ReadFile(filepath.Join(work, e.Name()))
+			out[e.Name()] = string(b)
+		}
+	}
+	return out
+}
+
+func standingWork(t *testing.T) string {
+	home, _ := standingHome()
+	return filepath.Join(home, ".local", "state", "seaweed-cloud", "standing", tBox)
+}
+
+// A second plan against an applied box must not touch what its teardown needs, and the box stays destroyable.
+func TestStandingReplanNeverOverwritesAnAppliedBox(t *testing.T) {
+	f, vars := setupStanding(t)
+	module := filepath.Join("..", "..", "provision", "standing")
+	plan := append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)
+	standingRun(t, plan...)
+	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
+		t.Fatalf("apply: %+v", r)
+	}
+	work := standingWork(t)
+	before := workFiles(t, work)
+	changed := filepath.Join(t.TempDir(), "b.json")
+	_ = os.WriteFile(changed, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"`+tRG+`","name":"`+tBox+`","vm_size":"Standard_D2s_v5"}`), 0o600)
+	n := len(f.calls)
+	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", changed)...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("re-plan of an applied box: %+v, calls %d->%d", r, n, len(f.calls))
+	}
+	after := workFiles(t, work)
+	for k, v := range before {
+		if after[k] != v {
+			t.Fatalf("re-plan changed %s of the applied box", k)
+		}
+	}
+	if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("second apply of an applied box: %+v", r)
+	}
+	if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "OK" {
+		t.Fatalf("applied box must stay destroyable: %+v", r)
+	}
+	if got := strings.Join(f.calls[n].args, " "); got != "destroy -input=false -no-color -var-file="+filepath.Join(work, standingVarsFile)+" -auto-approve" {
+		t.Fatalf("destroy argv %q", got)
+	}
+	if r := standingRun(t, plan...); r.Code != "OK" {
+		t.Fatalf("plan after destroy: %+v", r)
+	}
+}
+
+// An unreadable or unknown receipt, or an unreadable identity, fails closed: never retry, never clean.
+func TestStandingUnreadableStateFailsClosed(t *testing.T) {
+	for _, receipt := range []string{"not json", `{"state":"weird"}`} {
+		f, vars := setupStanding(t)
+		module := filepath.Join("..", "..", "provision", "standing")
+		standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...)
+		work := standingWork(t)
+		_ = os.WriteFile(filepath.Join(work, standingApplyFile), []byte(receipt), 0o600)
+		n := len(f.calls)
+		if r := standingRun(t, append(append([]string{"apply"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+			t.Fatalf("%q: apply %+v calls %d->%d", receipt, r, n, len(f.calls))
+		}
+		if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...); r.Code != "UNRESOLVED" || len(f.calls) != n {
+			t.Fatalf("%q: plan %+v", receipt, r)
+		}
+		if r := standingRun(t, append(append([]string{"destroy"}, target(tRG)...), "--launch-token", tTok)...); r.Code != "UNRESOLVED" {
+			t.Fatalf("%q: destroy + empty RG must stay non-clean: %+v", receipt, r)
+		}
+	}
+	f, vars := setupStanding(t)
+	work := standingWork(t)
+	_ = os.MkdirAll(work, 0o700)
+	_ = os.WriteFile(filepath.Join(work, standingIdentFile), []byte("garbage"), 0o600)
+	if r := standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", "x", "--vars", vars)...); r.Code != "REFUSED" || len(f.calls) != 0 {
+		t.Fatalf("unreadable identity: plan %+v calls %d", r, len(f.calls))
+	}
+}
+
+// The pinned tfvars must be the reviewed bytes naming the pinned identity before any mutation.
+func TestStandingPinnedVarsDriftRefused(t *testing.T) {
+	f, vars := setupStanding(t)
+	module := filepath.Join("..", "..", "provision", "standing")
+	standingRun(t, append(append([]string{"plan"}, target(tRG)...), "--module", module, "--vars", vars)...)
+	work := standingWork(t)
+	_ = os.WriteFile(filepath.Join(work, standingVarsFile), []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
+	n := len(f.calls)
+	for _, a := range []string{"apply", "destroy"} {
+		if r := standingRun(t, append(append([]string{a}, target(tRG)...), "--launch-token", tTok)...); r.Code != "REFUSED" || len(f.calls) != n {
+			t.Fatalf("%s with drifted pinned vars: %+v calls %d->%d", a, r, n, len(f.calls))
+		}
+	}
+	if r := standingRun(t, append([]string{"status"}, target(tRG)...)...); r.Code != "REFUSED" || len(f.calls) != n {
+		t.Fatalf("status with drifted pinned vars: %+v", r)
+	}
+}
+
 func TestStandingModuleConfiguresProvider(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "provision", "standing", "main.tf"))
 	if err != nil {

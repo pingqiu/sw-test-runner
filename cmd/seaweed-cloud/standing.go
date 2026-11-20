@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -141,12 +142,21 @@ func standingDo(ctx context.Context, r *standingResult, rg, module, vars string)
 	az := func(args ...string) ([]byte, error) {
 		return standingTool(ctx, "", "az", append(args, "--subscription", id.SubscriptionID, "--output", "json", "--only-show-errors")...)
 	}
+	if err := checkPinnedVars(work, id); err != nil {
+		r.Code, r.Reason = "REFUSED", "pinned inputs do not match the pinned identity: "+err.Error()
+		return
+	}
 	varsOpt := []string{"-var-file=" + filepath.Join(work, standingVarsFile)}
-	prior, _ := readApply(work)
+	state := applyState(work)
+	pending := state == "started" || state == "unresolved" || state == "unknown"
 	switch r.Action {
 	case "apply":
-		if prior.State == "started" || prior.State == "unresolved" {
-			r.Code, r.Reason = "UNRESOLVED", "a previous apply did not complete ("+prior.State+" "+prior.At+"): resolve it from the provider's operations before any new create; no blind retry"
+		if pending {
+			r.Code, r.Reason = "UNRESOLVED", "a previous apply did not complete (receipt "+state+"): resolve it from the provider's operations before any new create; no blind retry"
+			return
+		}
+		if state == "applied" {
+			r.Code, r.Reason = "REFUSED", "the box is already applied; destroy it before another apply"
 			return
 		}
 		if writeApply(work, "started") != nil {
@@ -169,7 +179,7 @@ func standingDo(ctx context.Context, r *standingResult, rg, module, vars string)
 			return
 		}
 		code, reason := standingVerifyGone(az, id)
-		if code == "OK" && (prior.State == "started" || prior.State == "unresolved") {
+		if code == "OK" && pending {
 			r.Code, r.Reason = "UNRESOLVED", "destroyed and "+reason+", but a previous apply is unresolved: an empty observation does not close it"
 			return
 		}
@@ -214,13 +224,25 @@ func standingPlan(ctx context.Context, r *standingResult, rg, module, vars, work
 		r.Code, r.Reason = "REFUSED", "--vars must name the same resource_group_name and name as the command and carry a subscription_id UUID"
 		return
 	}
-	if old, err := readIdentity(work); err == nil && (old.ResourceGroup != rg || old.SubscriptionID != v.SubscriptionID) {
-		r.Code, r.Reason = "REFUSED", "this box's state is pinned to "+old.ResourceGroup+"; destroy it before planning another target"
+	// Nothing in the work dir is touched unless no box is (or may be) applied: a re-plan must never overwrite the
+	// module, inputs or identity an applied box's teardown depends on.
+	switch state := applyState(work); state {
+	case "started", "unresolved", "unknown":
+		r.Code, r.Reason = "UNRESOLVED", "a previous apply is unresolved (receipt "+state+"); no new plan until it is resolved"
 		return
-	}
-	if prior, _ := readApply(work); prior.State == "started" || prior.State == "unresolved" {
-		r.Code, r.Reason = "UNRESOLVED", "a previous apply is unresolved; no new plan until it is resolved"
+	case "applied":
+		r.Code, r.Reason = "REFUSED", "the box is applied; destroy it before planning again"
 		return
+	case "":
+		if _, err := os.Stat(filepath.Join(work, standingIdentFile)); err == nil {
+			if old, err := readIdentity(work); err != nil {
+				r.Code, r.Reason = "REFUSED", "the pinned identity is unreadable: "+err.Error()
+				return
+			} else if old.ResourceGroup != rg || old.SubscriptionID != v.SubscriptionID {
+				r.Code, r.Reason = "REFUSED", "this box is pinned to "+old.ResourceGroup+"; destroy it before planning another target"
+				return
+			}
+		}
 	}
 	id := standingIdentity{Name: r.Name, ResourceGroup: rg, SubscriptionID: v.SubscriptionID, VarsSHA256: fmt.Sprintf("%x", sha256.Sum256(b))}
 	idb, _ := json.Marshal(id)
@@ -277,6 +299,43 @@ func readIdentity(work string) (standingIdentity, error) {
 		err = fmt.Errorf("invalid pinned identity")
 	}
 	return id, err
+}
+
+// applyState is the apply receipt's state: "" when there is none, a known state, or "unknown" when the receipt
+// exists but cannot be read or names an unknown state (fail closed: treated as unresolved).
+func applyState(work string) string {
+	if _, err := os.Stat(filepath.Join(work, standingApplyFile)); errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	a, err := readApply(work)
+	if err != nil {
+		return "unknown"
+	}
+	switch a.State {
+	case "started", "unresolved", "applied", "destroyed":
+		return a.State
+	}
+	return "unknown"
+}
+
+// checkPinnedVars proves the pinned tfvars are the reviewed bytes and name the pinned identity.
+func checkPinnedVars(work string, id standingIdentity) error {
+	b, err := os.ReadFile(filepath.Join(work, standingVarsFile))
+	if err != nil {
+		return err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(b)) != id.VarsSHA256 {
+		return fmt.Errorf("%s changed since plan (sha256 differs)", standingVarsFile)
+	}
+	var v struct {
+		ResourceGroup  string `json:"resource_group_name"`
+		Name           string `json:"name"`
+		SubscriptionID string `json:"subscription_id"`
+	}
+	if json.Unmarshal(b, &v) != nil || v.ResourceGroup != id.ResourceGroup || v.Name != id.Name || v.SubscriptionID != id.SubscriptionID {
+		return fmt.Errorf("%s names another box, RG or subscription", standingVarsFile)
+	}
+	return nil
 }
 
 func readApply(work string) (standingApply, error) {

@@ -38,7 +38,7 @@ run "spot_box_shape" {
   }
   assert {
     condition = length([for r in azurerm_network_security_group.box.security_rule : r if r.access == "Deny" && r.direction == "Inbound" &&
-      r.protocol == "*" && r.destination_port_range == "*" && r.source_address_prefix == "*" && r.destination_address_prefix == "*" &&
+      r.protocol == "*" && r.source_port_range == "*" && r.destination_port_range == "*" && r.source_address_prefix == "*" && r.destination_address_prefix == "*" &&
     r.priority > 100]) == 1 && length(azurerm_network_security_group.box.security_rule) == 2
     error_message = "a deny-all inbound rule after the SSH allow, and no other rule"
   }
