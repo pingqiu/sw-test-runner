@@ -176,3 +176,32 @@ func TestSettleRefusesInvalidScopeBeforeAzure(t *testing.T) {
 		t.Fatal("invalid scope contacted Azure")
 	}
 }
+
+func TestSettleActivityStatusTiesAreOrderIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		rc         int
+		events     [3]string
+	}{
+		{"older-tie", "SETTLED-CLEAN", 0, [3]string{
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Started", "delete-1", "2026-11-20T18:00:00Z"),
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Succeeded", "delete-1", "2026-11-20T18:00:00Z"),
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Succeeded", "delete-1", "2026-11-20T18:01:00Z"),
+		}},
+		{"latest-tie", "UNKNOWN", 2, [3]string{
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Started", "delete-1", "2026-11-20T18:01:00Z"),
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Succeeded", "delete-1", "2026-11-20T18:01:00Z"),
+			settleEvent("Microsoft.Compute/virtualMachines/delete", "Succeeded", "delete-1", "2026-11-20T18:00:00Z"),
+		}},
+	} {
+		for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+			t.Run(fmt.Sprintf("%s-%v", tc.name, order), func(t *testing.T) {
+				settleFake(t, "["+tc.events[order[0]]+","+tc.events[order[1]]+","+tc.events[order[2]]+"]", "[]", "[]")
+				result, rc := invokeSettle(t)
+				if rc != tc.rc || result["code"] != tc.want {
+					t.Fatalf("order=%v rc=%d result=%v", order, rc, result)
+				}
+			})
+		}
+	}
+}

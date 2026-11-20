@@ -111,8 +111,9 @@ func classifySettlement(raw [3][]byte, rg, vm, sub string) (string, []string, st
 		return unknown("invalid or possibly truncated activity log")
 	}
 	type observed struct {
-		event settleActivity
-		at    time.Time
+		event       settleActivity
+		at          time.Time
+		conflicting bool
 	}
 	latest := map[string]observed{}
 	var deleted, written time.Time
@@ -132,11 +133,11 @@ func classifySettlement(raw [3][]byte, rg, vm, sub string) (string, []string, st
 			return unknown("incomplete mutation evidence")
 		}
 		key := strings.ToLower(event.OperationID + "|" + event.ResourceID + "|" + op)
-		if old, ok := latest[key]; ok && old.at.Equal(at) && !strings.EqualFold(old.event.Status.Value, event.Status.Value) {
-			return unknown("conflicting activity statuses")
-		}
 		if old, ok := latest[key]; !ok || at.After(old.at) {
-			latest[key] = observed{event, at}
+			latest[key] = observed{event: event, at: at}
+		} else if old.at.Equal(at) && !strings.EqualFold(old.event.Status.Value, event.Status.Value) {
+			old.conflicting = true
+			latest[key] = old
 		}
 		if strings.HasSuffix(strings.ToLower(event.ResourceID), "/providers/microsoft.compute/virtualmachines/"+strings.ToLower(vm)) {
 			if op == "microsoft.compute/virtualmachines/delete" && strings.EqualFold(event.Status.Value, "Succeeded") && at.After(deleted) {
@@ -148,6 +149,9 @@ func classifySettlement(raw [3][]byte, rg, vm, sub string) (string, []string, st
 		}
 	}
 	for _, operation := range latest {
+		if operation.conflicting {
+			return unknown("conflicting latest activity statuses")
+		}
 		switch strings.ToLower(operation.event.Status.Value) {
 		case "succeeded", "failed", "canceled", "cancelled":
 		default:
