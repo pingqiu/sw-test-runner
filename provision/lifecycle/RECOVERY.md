@@ -63,6 +63,11 @@ the operator to resolve the pending provider operation. Only after the manager
 records that settlement may the run directory be archived out of the `runs/` parent;
 nothing in the tool settles it automatically.
 
+`seaweed-cloud settle --resource-group RG --vm VM [--subscription UUID]` performs
+a read-only observation of the last hour's activity, RG resources and disks.
+See [settle output](../smoke/README.md#read-only-settlement-observation) for its
+three classifications. It does **not** clear this hold or release an RG claim.
+
 ## 5. After a controller or session death
 
 The next `run` refuses with `RECOVERY_REQUIRED`, naming every earlier guarded run

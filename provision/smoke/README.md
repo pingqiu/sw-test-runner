@@ -235,3 +235,34 @@ Set `"chaos": true` in the config's `cloud` object to run three read-only cases 
 Each case seeds fresh keys on client1-3 and starts the unchanged 120 s HTTP-loader read load. After 30 s it stamps P on every client's own CLOCK_MONOTONIC and sends the fault only when all three stamps succeed. A restart is `kill -KILL` of the unit's MainPID, a wait until that generation is gone, and the same command started as unit `<role>-g2`, with a changed PID/start and readiness. A freeze is SIGSTOP, then S after every thread is `T`, a 20 s hold, C before SIGCONT, and R after no thread is `T`. Each client is judged against its own markers with the lab's `checkWindow`: each failed GET starts at or after P_c, and the first exact completion is at or before P_c+60. For a freeze, only GETs of keys whose seeded fid sits on a volume the frozen server reports (its `/status` read after the seed) count, because the filer serves every other key from vol2..vol6. A client with such keys needs C_c-S_c >= 20 s, one such GET spanning [S_c,C_c] and one starting after R_c. A client with none is recorded in `exposure.json`, not failed, and at least one client must be exposed. The restart cases claim only that every failed GET starts at or after P_c: a restart that no client read through still passes. The freeze targets the role's live unit, which is the `-g2` replacement after the volume restart. Named recovery GETs must be exact. Markers, fault witnesses and step logs go under `<output>/chaos/<case>/`.
 
 Budget about 8 more minutes of all ten VMs (about +$0.15) and set the work deadline accordingly. This covers HTTP reads only: no DC/RDMA, S3 outage, write-under-fault or replication chaos.
+## Read-only settlement observation
+
+On the Linux controller:
+
+```sh
+seaweed-cloud settle --resource-group RG --vm VM --subscription UUID
+```
+
+This command performs only `az monitor activity-log list` (offset `1h`, at most
+1000 events), `az resource list` and `az disk list`, scoped to the RG. Omit
+`--subscription` to use the Azure CLI's current subscription. All three queries
+share a 30-second deadline. It prints one JSON result:
+
+- `SETTLED-CLEAN` (exit 0): both lists are empty, there is a successful delete of
+  the named VM after every observed write to it, and every listed administrative
+  mutation has a terminal event.
+- `SETTLED-EXISTS` (exit 1): lists contain resources and no listed mutation is
+  pending. `resources` contains sorted, deduplicated ARM IDs, including disk-only
+  residue.
+- `UNKNOWN` (exit 2): query failure, invalid/missing evidence, a pending operation,
+  the event limit reached, or empty lists without the required delete evidence.
+
+Operation events are matched by operation ID, resource ID and operation name;
+their timestamps, not list order, determine the latest status. See the
+[Azure activity schema](https://learn.microsoft.com/en-us/azure/azure-monitor/platform/activity-log-schema)
+and [CLI query](https://learn.microsoft.com/en-us/cli/azure/monitor/activity-log#az-monitor-activity-log-list).
+
+This is a bounded observation, not an authoritative resolution of an unknown
+provider operation: activity delivery can lag and the three reads are not an
+atomic snapshot. It never deletes cloud resources, updates run outcomes or
+releases claims. `CREATE_UNRESOLVED` still requires operator resolution.
