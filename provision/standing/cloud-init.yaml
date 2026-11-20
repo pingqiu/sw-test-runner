@@ -1,0 +1,55 @@
+#cloud-config
+# Smoke tool set only. No credentials, no lab or share access, no services beyond the idle guard.
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - jq
+  - fio
+  - nvme-cli
+  - dmsetup
+  - linux-tools-azure
+  - build-essential
+  - python3
+write_files:
+  # needrestart list-only: a late package upgrade must not restart services mid-session (S2 -az lesson)
+  - path: /etc/needrestart/conf.d/50-standing.conf
+    content: |
+      $nrconf{restart} = 'l';
+  - path: /usr/local/sbin/standing-idle-guard
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Active = an established SSH connection or a job marker /run/standing/job-*.
+      # Idle for ${idle_minutes} min -> stop. A CI job (use 2) must write a job marker while it runs.
+      set -u
+      st=/var/lib/standing/last-active; mkdir -p /var/lib/standing /run/standing
+      [ -e $st ] || touch $st
+      ssh_n=$(ss -Htn state established '( sport = :22 )' | wc -l)
+      job_n=$(find /run/standing -maxdepth 1 -name 'job-*' | wc -l)
+      if [ "$ssh_n" -gt 0 ] || [ "$job_n" -gt 0 ]; then touch $st; exit 0; fi
+      idle=$(( $(date +%s) - $(stat -c %Y $st) ))
+      [ $idle -ge $(( ${idle_minutes} * 60 )) ] || exit 0
+      logger -t standing-idle-guard "idle $idle s (no SSH, no job marker): stopping"
+      systemctl poweroff
+  - path: /etc/systemd/system/standing-idle-guard.service
+    content: |
+      [Unit]
+      Description=standing box idle guard
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/standing-idle-guard
+  - path: /etc/systemd/system/standing-idle-guard.timer
+    content: |
+      [Unit]
+      Description=standing box idle guard every 5 min
+      [Timer]
+      OnBootSec=10min
+      OnUnitActiveSec=5min
+      [Install]
+      WantedBy=timers.target
+runcmd:
+  - [mkdir, -p, /var/lib/standing]
+  - [touch, /var/lib/standing/last-active]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, standing-idle-guard.timer]
