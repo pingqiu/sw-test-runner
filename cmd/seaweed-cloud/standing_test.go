@@ -533,3 +533,76 @@ func TestStandingIdleGuardFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// The controller reaper deallocates exactly the boxes reported "stopped" (powered off by the idle guard, still billing).
+func TestStandingReaperDeallocatesOnlyStoppedBoxes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bash reaper runs on Linux")
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	fake := filepath.Join(dir, "seaweed-cloud")
+	_ = os.WriteFile(fake, []byte(`#!/bin/bash
+echo "$*" >> "`+log+`"
+case "$2:$4" in
+  status:a) echo '{"power_state":"stopped","code":"OK"}' ;;
+  status:b) echo '{"power_state":"running","code":"OK"}' ;;
+  status:c) echo '{"code":"UNKNOWN"}' ;;
+  stop:a) echo '{"power_state":"deallocated","code":"OK"}' ;;
+esac
+`), 0o755)
+	cmd := exec.Command("bash", filepath.Join("..", "..", "provision", "standing", "reaper.sh"), fake, "a:rg-a-standing-20261121", "b:rg-b-standing-20261121", "c:rg-c-standing-20261121")
+	cmd.Env = append(os.Environ(), "REAP_ONCE=1", "REAP_STATE="+filepath.Join(dir, "state"))
+	out, err := cmd.CombinedOutput()
+	if err != nil { // c is UNKNOWN once: logged, not yet an alert (REAP_ALERT_AFTER default 3)
+		t.Fatalf("reaper: %v: %s", err, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "state", "last")); len(b) == 0 {
+		t.Fatal("reaper must stamp its last pass for the cost line")
+	}
+	calls, _ := os.ReadFile(log)
+	var stops []string
+	for _, l := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+		if strings.HasPrefix(l, "standing stop") {
+			stops = append(stops, l)
+		}
+	}
+	if len(stops) != 1 || stops[0] != "standing stop --name a --resource-group rg-a-standing-20261121" {
+		t.Fatalf("reaper must deallocate only the stopped box a: %q (output %s)", stops, out)
+	}
+}
+
+// claude06 F2: repeated UNKNOWN status or a failing deallocate must not stay silent: ALERT and exit 3 after
+// REAP_ALERT_AFTER consecutive passes; a later good pass resets the count.
+func TestStandingReaperAlertsOnRepeatedFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bash reaper runs on Linux")
+	}
+	dir := t.TempDir()
+	mode := filepath.Join(dir, "mode")
+	fake := filepath.Join(dir, "seaweed-cloud")
+	_ = os.WriteFile(fake, []byte(`#!/bin/bash
+m=$(cat "`+mode+`")
+case "$2:$m" in
+  status:fail) echo '{"power_state":"stopped","code":"OK"}' ;;
+  stop:fail) echo '{"code":"FAILED","reason":"az vm deallocate: throttled"}'; exit 2 ;;
+  status:good) echo '{"power_state":"deallocated","code":"OK"}' ;;
+esac
+`), 0o755)
+	pass := func(m string) (string, int) {
+		_ = os.WriteFile(mode, []byte(m), 0o644)
+		cmd := exec.Command("bash", filepath.Join("..", "..", "provision", "standing", "reaper.sh"), fake, "a:rg-a-standing-20261121")
+		cmd.Env = append(os.Environ(), "REAP_ONCE=1", "REAP_ALERT_AFTER=2", "REAP_STATE="+filepath.Join(dir, "state"))
+		out, _ := cmd.CombinedOutput()
+		return string(out), cmd.ProcessState.ExitCode()
+	}
+	if out, rc := pass("fail"); rc != 0 || strings.Contains(out, "ALERT") || !strings.Contains(out, "FAILED") {
+		t.Fatalf("first failed stop: rc %d, want 0, logged FAILED, no ALERT yet: %s", rc, out)
+	}
+	if out, rc := pass("fail"); rc != 3 || !strings.Contains(out, "ALERT a: 2 consecutive") {
+		t.Fatalf("second failed stop: rc %d, want 3 with ALERT: %s", rc, out)
+	}
+	if out, rc := pass("good"); rc != 0 || strings.Contains(out, "ALERT") {
+		t.Fatalf("a good pass must reset the count: rc %d: %s", rc, out)
+	}
+}

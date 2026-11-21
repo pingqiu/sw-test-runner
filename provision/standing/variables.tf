@@ -30,6 +30,15 @@ variable "name" {
     error_message = "name must be a short lower-case slug."
   }
 }
+variable "priority" {
+  description = "Spot (default: evicted to Deallocated, max price -1) or Regular (on-demand, e.g. while spot quota is pending)."
+  type        = string
+  default     = "Spot"
+  validation {
+    condition     = contains(["Spot", "Regular"], var.priority)
+    error_message = "priority must be Spot or Regular."
+  }
+}
 variable "vm_size" {
   type    = string
   default = "Standard_D32ads_v5"

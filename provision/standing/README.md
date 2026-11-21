@@ -50,3 +50,24 @@ anything is unclear, tear down at the RG level (the box's own RG holds every res
 terraform init -backend=false && terraform test        # mock provider: shape, no identity, SSH /32 only, refusals
 go test ./cmd/seaweed-cloud/ -run 'Standing|ClassifyPower|PlanAddresses'
 ```
+
+## On-demand and the reaper
+- `priority = "Regular"` runs the same box on demand (e.g. while spot quota is pending): no eviction settings, same
+  hardening (no identity, SSH /32 + deny-all). Default stays `Spot`.
+- `reaper.sh SEAWEED_CLOUD NAME:RG...` runs on the controller and deallocates any box the idle guard powered off
+  (`stopped` = still billing); `REAP_INTERVAL` (default 300 s), `REAP_ONCE=1` for one pass. Anything not `stopped` is
+  left alone.
+- **Silent failure:** a box whose status stays UNKNOWN, or whose deallocate fails, for `REAP_ALERT_AFTER` passes in a
+  row (default 3) gets an `ALERT` line; a single pass then exits 3. `REAP_STATE/last` stamps the last completed pass.
+- **Who runs it:** on the workstation, the Windows scheduled task `c04-standing-reaper` runs one pass every 5 min
+  (`wsl -d Ubuntu -u root -- env REAP_ONCE=1 bash .../reaper.sh /root/c04-standing/bin/seaweed-cloud NAME:RG...`,
+  log appended under the state dir). Every 6-hourly cost line reports `reaper last pass at T` from `REAP_STATE/last`
+  and any ALERT; a stamp older than 15 min means the reaper is not running.
+- **Switching priority replaces the VM:** `priority` is force-new; flipping an existing box between Spot and Regular
+  destroys and recreates it (the OS disk and everything on it are lost). Destroy and re-plan deliberately instead.
+- **No server-side backstop for Regular (decision B, Claude01 2026-11-21):** there is no Azure-side shutdown
+  schedule (Microsoft.DevTestLab is not registered and was removed on purpose). A **dead controller means a stopped
+  Regular box keeps billing** at the full on-demand rate (about USD 0.8/h per D16ads_v5) until the reaper runs again.
+  Therefore Regular boxes run only while the reaper runs; every launch notice states a planned end date (at most 48 h,
+  renewed explicitly) and the box is destroyed (`standing destroy`) at that date; if the reaper's last pass is more
+  than 15 min old, deallocate by hand (`standing stop`) at once.
