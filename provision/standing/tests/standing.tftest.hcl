@@ -69,3 +69,20 @@ run "rejects_shared_rg" {
   variables { resource_group_name = "rg-codex02-azure-test-20261029" }
   expect_failures = [var.resource_group_name]
 }
+run "on_demand" {
+  command = apply
+  variables { priority = "Regular" }
+  assert {
+    condition     = azurerm_linux_virtual_machine.box.priority == "Regular" && azurerm_linux_virtual_machine.box.eviction_policy == null
+    error_message = "Regular = on-demand: no eviction policy (and no max price)"
+  }
+  assert {
+    condition     = length(azurerm_linux_virtual_machine.box.identity) == 0 && length(azurerm_network_security_group.box.security_rule) == 2
+    error_message = "on-demand keeps the same hardening (no identity, SSH /32 + deny-all only)"
+  }
+}
+run "rejects_unknown_priority" {
+  command = plan
+  variables { priority = "Low" }
+  expect_failures = [var.priority]
+}

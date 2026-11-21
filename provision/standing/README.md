@@ -50,3 +50,10 @@ anything is unclear, tear down at the RG level (the box's own RG holds every res
 terraform init -backend=false && terraform test        # mock provider: shape, no identity, SSH /32 only, refusals
 go test ./cmd/seaweed-cloud/ -run 'Standing|ClassifyPower|PlanAddresses'
 ```
+
+## On-demand and the reaper
+- `priority = "Regular"` runs the same box on demand (e.g. while spot quota is pending): no eviction settings, same
+  hardening (no identity, SSH /32 + deny-all). Default stays `Spot`.
+- `reaper.sh SEAWEED_CLOUD NAME:RG...` runs on the controller and deallocates any box the idle guard powered off
+  (`stopped` = still billing); `REAP_INTERVAL` (default 300 s), `REAP_ONCE=1` for one pass. Anything not `stopped` is
+  left alone.

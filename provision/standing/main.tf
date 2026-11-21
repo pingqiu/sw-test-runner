@@ -79,16 +79,17 @@ resource "azurerm_network_interface" "box" {
     public_ip_address_id          = azurerm_public_ip.box.id
   }
 }
-# Spot, evicted to Deallocated (disk kept), max price -1: evicted for capacity only, never for price.
+# Spot (default): evicted to Deallocated (disk kept), max price -1: evicted for capacity only, never for price.
+# Regular (on-demand): no eviction settings. Either way an OS power-off still bills compute; the controller deallocates.
 # No identity block: the box holds no Azure credential.
 resource "azurerm_linux_virtual_machine" "box" {
   name                            = var.name
   resource_group_name             = local.rg
   location                        = var.location
   size                            = var.vm_size
-  priority                        = "Spot"
-  eviction_policy                 = "Deallocate"
-  max_bid_price                   = -1
+  priority                        = var.priority
+  eviction_policy                 = var.priority == "Spot" ? "Deallocate" : null
+  max_bid_price                   = var.priority == "Spot" ? -1 : null
   admin_username                  = var.ssh_user
   disable_password_authentication = true
   network_interface_ids           = [azurerm_network_interface.box.id]

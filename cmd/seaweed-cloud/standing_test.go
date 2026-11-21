@@ -533,3 +533,38 @@ func TestStandingIdleGuardFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// The controller reaper deallocates exactly the boxes reported "stopped" (powered off by the idle guard, still billing).
+func TestStandingReaperDeallocatesOnlyStoppedBoxes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bash reaper runs on Linux")
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	fake := filepath.Join(dir, "seaweed-cloud")
+	_ = os.WriteFile(fake, []byte(`#!/bin/bash
+echo "$*" >> "`+log+`"
+case "$2:$4" in
+  status:a) echo '{"power_state":"stopped","code":"OK"}' ;;
+  status:b) echo '{"power_state":"running","code":"OK"}' ;;
+  status:c) echo '{"code":"UNKNOWN"}' ;;
+  stop:a) echo '{"power_state":"deallocated","code":"OK"}' ;;
+esac
+`), 0o755)
+	cmd := exec.Command("bash", filepath.Join("..", "..", "provision", "standing", "reaper.sh"), fake, "a:rg-a-standing-20261121", "b:rg-b-standing-20261121", "c:rg-c-standing-20261121")
+	cmd.Env = append(os.Environ(), "REAP_ONCE=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reaper: %v: %s", err, out)
+	}
+	calls, _ := os.ReadFile(log)
+	var stops []string
+	for _, l := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+		if strings.HasPrefix(l, "standing stop") {
+			stops = append(stops, l)
+		}
+	}
+	if len(stops) != 1 || stops[0] != "standing stop --name a --resource-group rg-a-standing-20261121" {
+		t.Fatalf("reaper must deallocate only the stopped box a: %q (output %s)", stops, out)
+	}
+}
