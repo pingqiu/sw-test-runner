@@ -29,3 +29,25 @@ closeout, evidence and END-or-quarantine also require that bounded path.
 This is a command binding component, not a runnable two-host scenario or a
 rehearsal approval. Run `python3 -m unittest discover -s scripts/go2 -p
 'test_checker_commands.py'` for local argument/receipt-path controls.
+
+## Mid-flow heal and bounded fallback
+
+Normal work keeps the sealed d-heal phase after takeover and before noresume
+and restore. Include `scenarios/go2/shared/heal.yaml` among the finalization
+phases: it calls the existing nftguard heal and absent directly on both hosts,
+never starts d-heal again. Its host.sh bounded wrapper enforces the admitted
+release deadline on the executing host; action timeouts bound the controller
+wait. No failed or unreadable absence check is converted into success.
+
+The parent scenario must supply validated run-owned m01_packet/m02_packet
+paths and the admitted release_deadline as flat runner variables. It must set
+its shared always_timeout and keep teardown, closeout, evidence and
+END-or-quarantine in later bounded always phases. This shared include is only
+the healing piece, not a replacement for those finalizers or their proofs.
+
+`TestGO2HealFallbackAfterAbortAndNormalHeal` runs the actual engine and shared
+YAML with a recording host model. An ordinary abort after block skips normal
+heal but the finalizer heals and checks both hosts. After normal heal the same
+fallback performs no deletes and still proves modeled absence. Removing
+always makes the abort case fail with both modeled tables left present.
+This is controller-order evidence, not a real nft, unit or lab qualification.
