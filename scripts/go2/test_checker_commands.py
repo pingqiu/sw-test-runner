@@ -17,7 +17,7 @@ spec.loader.exec_module(m)
 class CheckerCommands(unittest.TestCase):
     def setUp(self):
         self.config = {'python': '/tools/python 3', 'packet': '/sealed/packet',
-                       'node': 'controller', 'receipts': '/bundle/commands'}
+                       'node': 'controller', 'runner_receipt_dir': '/runner-only/commands'}
 
     def argv(self, action):
         self.assertEqual(action['action'], 'exec')
@@ -30,7 +30,22 @@ class CheckerCommands(unittest.TestCase):
         self.assertEqual(self.argv(a), ['exec', '/tools/python 3', '-I',
                          '/sealed/packet/lsncheck.py', 'grant', '/bundle/grant.txt',
                          '/bundle/range.txt', '--request', 'move; echo bad'])
-        self.assertEqual(a['receipt_path'], '/bundle/commands/grant.json')
+        self.assertEqual(a['receipt_path'], str(pathlib.Path('/runner-only/commands/grant.json')))
+        self.assertNotIn('runner-only', a['cmd'])
+
+    def test_runner_receipt_is_local_even_when_checker_files_are_remote(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.config['runner_receipt_dir'] = root
+            self.config['node'] = 'm02'
+            a = m.grant(self.config, '/remote-only/grant', '/remote-only/range', 'move')
+            receipt = pathlib.Path(a['receipt_path'])
+            self.assertEqual(receipt.parent, pathlib.Path(root))
+            self.assertNotIn(root, a['cmd'])
+            self.assertIn('/remote-only/grant', a['cmd'])
+            # This path is consumed by beginReceipt before any node call.
+            with receipt.open('x') as f:
+                f.write('runner-local-intent')
+            self.assertEqual(receipt.read_text(), 'runner-local-intent')
 
     def test_image_carries_checker_boundary_and_raced_row_without_deriving_them(self):
         a = m.image(self.config, 'restore-s1', '/b/ledger', '/b/image', '42',

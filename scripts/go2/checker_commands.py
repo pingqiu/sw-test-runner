@@ -1,6 +1,7 @@
 """Render direct exec calls to the pack's Python checkers; no verdict logic.
 
-Paths are on the named POSIX controller node. The caller supplies boundaries
+Checker inputs are on the named POSIX node; receipt_path is runner-local.
+The caller supplies boundaries
 already produced by the pack. This module neither reads evidence nor counts
 reps. Host-side ledger metrics remain inside the pack's existing phase checks.
 """
@@ -16,7 +17,7 @@ def command(c, name, script, *args):
             *map(str, args)]
     return {'action': 'exec', 'node': c['node'],
             'cmd': 'exec ' + shlex.join(argv),
-            'receipt_path': str(pathlib.PurePosixPath(c['receipts']) / (name + '.json'))}
+            'receipt_path': str(pathlib.Path(c['runner_receipt_dir']) / (name + '.json'))}
 
 
 def grant(c, grant_path, range_path, request):
@@ -45,8 +46,9 @@ def gate(c):
 
 
 def evidence_hashes(c, paths):
+    """Hash node-local evidence only; runner receipts need a local hash pass."""
     if not paths:
         raise ValueError('explicit evidence files required')
     return {'action': 'exec', 'node': c['node'],
             'cmd': 'exec ' + shlex.join(['sha256sum', '--', *paths]),
-            'receipt_path': str(pathlib.PurePosixPath(c['receipts']) / 'evidence-hashes.json')}
+            'receipt_path': str(pathlib.Path(c['runner_receipt_dir']) / 'evidence-hashes.json')}

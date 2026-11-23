@@ -1,11 +1,27 @@
 {
   "status": "REFERENCE_ONLY_NOT_REHEARSAL_APPROVAL",
-  "packet_seal": "776a1fb78ab94dca7abce9d8cb9c0ab1a1d49eaafbb05ca265b0bb474f1e5456",
+  "packet_seal": "7886179d34b3913b0ece895dfd5d745cfaa6af6ef65eb9ec5a9cac874dc58673",
   "files": {
     "ledgerscan.py": "ca8cefe2c8ac0cbdbb26d907c9bb8df1f5a6b7b1a01afb114f244f66d3afa428",
     "lsncheck.py": "c8720731e04a2e5a9ad6c5a3b3b91b8aa3dcbef3c67977fe718a4b9819045508",
     "summarize-go2.py": "89582d43f1a8cc9d7ce31ce33356f998b2e20869dcef8ebc8432e04f314b1f15",
     "build/gate.py": "ab730bd9aad666201b4cf4317e182d7c16928611eec3b0bbe341a8c2208ce10e",
-    "GATE.json": "7f41a258a3c274bdd99b85a1f8b8d4e72f0d298cbc271ad9dee0ce7e2c8dd3e6"
+    "GATE.json": "6af8ded4d7756cd8e574c7b36f143224829f4e04142681dd390c1ec3b7cc7a52",
+    "launch.sh": "1b585e8023958479a19e1d3b12f68154ec2975e2866ddd4e2efd15b7d8b64ff8",
+    "op.sh": "aeadd02c27eeb64c9b6c9f8b4940803b6a33ccdc706f7a03ba7b69ae4295a209"
+  },
+  "final_ledger_handoff": {
+    "after": "d-noresume",
+    "before": "d-restore",
+    "files": [
+      "drill/ledger-final.tsv",
+      "drill/raced-seq"
+    ],
+    "destinations": [
+      "ledger-final.tsv",
+      "raced-seq"
+    ],
+    "source": "victim",
+    "target": "takeover_host"
   }
 }

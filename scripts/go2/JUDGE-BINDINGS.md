@@ -15,8 +15,8 @@ records dispatch/result evidence only and is not a judge receipt.
 Image arguments are the boundary and raced-row decision already produced
 by the pack, or the snapshot's own cutLSN. The binding never substitutes a
 controller timestamp, infers an LSN or reinterprets the final row exception.
-All paths refer to collected files on the named POSIX controller node.
-Arguments are shell-quoted individually. Receipt directories must exist and
+Checker arguments and evidence_hashes inputs refer to files on the named POSIX node. receipt_path is different: it is opened runner-local before dispatch and uses the runner OS path syntax via runner_receipt_dir.
+Arguments are shell-quoted individually. Runner-local receipt directories must exist and
 each receipt path must be fresh before dispatch.
 
 Nonzero checker exits fail the exec action, including NOT_COUNTED. No
@@ -53,15 +53,23 @@ always makes the abort case fail with both modeled tables left present.
 This is controller-order evidence, not a real nft, unit or lab qualification.
 
 The current reference is recorded in CHECKER-REFERENCE.json (packet seal
-776a1fb7). It is a reference pin, not a pilot approval or an assertion that
+7886179d). It is a reference pin, not a pilot approval or an assertion that
 the seal has completed review. The gate call is build/gate.py check GATE.json,
 after the packet seal and SHA256SUMS check; it is not another data judge.
 
 Each exec command receipt contains the actual exit code, stdout, stderr and
-complete/incomplete transport outcome. The evidence_hashes action hashes the
-explicit collected output files and command receipts through sha256sum. Run
+complete/incomplete transport outcome. The evidence_hashes action hashes only explicit node-local output files through sha256sum. Runner-local command receipts must be hashed locally as part of the final runner bundle; never send their paths to a remote node. Run
 it in bounded finalization after collection even when the checker failed;
 missing or unreadable files fail the action. Preserve its receipt in the
 bundle. A hash authenticates bytes only: it never makes an incomplete command
 answer complete or a failed checker pass. No hash action approves cleanup or
 release. The full scenario must wire these output paths and finalization.
+
+
+The final scenario must use the 7886179d reference order: d-noresume completes
+before transferring BOTH victim drill/ledger-final.tsv and drill/raced-seq to
+the takeover host's ledger-final.tsv and raced-seq inputs, before d-restore.
+The prefix/live ledger is never substituted. The sealed op.sh postpones d7-f5
+until d-restore so it and every restore use that final pair. The reference
+manifest records these files and the ordering, but is not executable wiring;
+the parent scenario still must enforce it before a rehearsal can be approved.
