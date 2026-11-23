@@ -1,7 +1,7 @@
 {
   "schema": "checker-library/v1",
   "files": {
-    "facts.py": "53b71c6f6622f5ceb3681aec96cfc335711c852de4385e3dc27b6d46c34b1d56",
+    "facts.py": "f6ba8efc63e0b00c73267d1657bebcf86a37b82e7331dcf668ea98389d454fca",
     "loader.py": "e2202a75dcf8f3162815c6c68dbd60c0ecd11d67974ba878d338c1e900c6d906"
   },
   "entries": [

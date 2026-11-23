@@ -24,7 +24,7 @@ class Facts(unittest.TestCase):
         self.assertEqual(result['records'][1]['kind'], 'I')
 
     def test_duplicate_block_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'block .* written twice'):
+        with self.assertRaisesRegex(ValueError, 'expected block'):
             facts.read_ledger((intent() + ack() + intent(1, 0)).encode(), 'FINAL')
 
     def test_orphan_ack_rejected(self):
@@ -48,6 +48,15 @@ class Facts(unittest.TestCase):
         for raw in (intent(7, 7), intent() + ack() + intent(9, 9)):
             with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, 'expected intent sequence'):
                 facts.read_ledger(raw.encode(), 'FINAL')
+
+    def test_blocks_advance_from_first_block(self):
+        prefix = intent(0, 100) + ack(0, 100)
+        for mode in ('LIVE', 'FINAL'):
+            for block in (99, 102, 900):
+                with self.subTest(mode=mode, block=block), self.assertRaisesRegex(ValueError, 'expected block'):
+                    facts.read_ledger((prefix + intent(1, block) + ack(1, block)).encode(), mode)
+            result = facts.read_ledger((prefix + intent(1, 101) + ack(1, 101)).encode(), mode)
+            self.assertEqual(result['metrics']['acked'], 2)
 
     def test_next_intent_requires_prior_terminal(self):
         for mode in ('LIVE', 'FINAL'):
@@ -116,10 +125,13 @@ class Mutants(unittest.TestCase):
         exec(compile(source.replace(old, new), '<synthetic-mutant>', 'exec'), module.__dict__)
         return module
 
-    def test_read_ledger_duplicate_block_mutant(self):
-        m = self.mutant('if block in blocks:', 'if False:')
+    def test_read_ledger_block_progression_mutant(self):
+        m = self.mutant('if block != first_block + seq:', 'if False:')
         # The ordinary control rejects this; this mutant wrongly returns data.
-        self.assertEqual(len(m.read_ledger((intent() + ack() + intent(1, 0)).encode(), 'FINAL')['records']), 2)
+        for block in (0, 2, 900):
+            with self.subTest(block=block):
+                raw = intent() + ack() + intent(1, block)
+                self.assertEqual(len(m.read_ledger(raw.encode(), 'FINAL')['records']), 2)
 
     def test_read_ledger_orphan_ack_mutant(self):
         m = self.mutant("r = recs.get(seq)", "r = recs.setdefault(seq, {'seq': seq, 'block': block, 'sha': p[3], 'kind': 'I', 'iwall': 0})")
@@ -127,7 +139,8 @@ class Mutants(unittest.TestCase):
 
     def test_intent_sequence_mutant(self):
         m = self.mutant('if seq != len(recs):', 'if False:')
-        self.assertIn(7, m.read_ledger(intent(7, 7).encode(), 'FINAL')['records'])
+        raw = intent() + ack() + intent(7, 7)
+        self.assertIn(7, m.read_ledger(raw.encode(), 'FINAL')['records'])
 
     def test_open_intent_mutant(self):
         m = self.mutant('if open_intent is not None:', 'if False:')

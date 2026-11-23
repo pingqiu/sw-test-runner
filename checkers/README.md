@@ -9,7 +9,8 @@ snapshot bytes, the last ACK and a metrics dictionary with `acked`, `exact`,
 `chainbreaks`. LIVE ignores only an incomplete final line; FINAL requires
 termination. Complete malformed rows, duplicate blocks and unmatched terminal
 records raise `ValueError`. Intents start at zero and advance by one; each resolves before the next
-intent. Monotonic timestamps never decrease. One final unresolved intent
+intent. Blocks advance from the first block as `first_block + seq`, rejecting
+gaps, reversals and duplicate blocks. Monotonic timestamps never decrease. One final unresolved intent
 remains valid evidence in either mode.
 Metrics are not a PASS verdict. Classification and image verification stay in
 the calling packet in this extraction; they consume the shared records.

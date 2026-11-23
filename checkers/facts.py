@@ -15,7 +15,7 @@ def read_ledger(data, mode):
 
     LIVE omits only an incomplete final line. FINAL requires a complete file.
     Intents start at zero, advance by one and resolve before the next intent.
-    A terminal matches its intent; blocks are write-once and monotonic time
+    A terminal matches its intent; block = first_block + seq and monotonic time
     never decreases. One final unresolved intent is valid in either mode.
     """
     if mode not in ('LIVE', 'FINAL'):
@@ -24,7 +24,8 @@ def read_ledger(data, mode):
         data = data[:data.rfind(b'\n') + 1]
     elif data and not data.endswith(b'\n'):
         raise ValueError('unterminated FINAL ledger')
-    recs, blocks = {}, set()
+    recs = {}
+    first_block = None
     open_intent = previous_mono = None
     acked = exact = chainbreaks = 0
     previous = last_ack = None
@@ -54,9 +55,10 @@ def read_ledger(data, mode):
                 raise ValueError('line %d: expected intent sequence %d' % (n, len(recs)))
             if open_intent is not None:
                 raise ValueError('line %d: unresolved intent before next intent' % n)
-            if block in blocks:
-                raise ValueError('line %d: block %d written twice' % (n, block))
-            blocks.add(block)
+            if first_block is None:
+                first_block = block
+            if block != first_block + seq:
+                raise ValueError('line %d: expected block %d' % (n, first_block + seq))
             open_intent = seq
             recs[seq] = {'seq': seq, 'block': block, 'sha': p[3], 'kind': 'I', 'iwall': int(p[6])}
             continue
