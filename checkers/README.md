@@ -9,12 +9,20 @@ The library uses only Python's standard library and performs no host actions.
 snapshot bytes, the last ACK and a metrics dictionary with `acked`, `exact`,
 `chainbreaks`. LIVE ignores only an incomplete final line; FINAL requires
 termination. Complete malformed rows, duplicate blocks and unmatched terminal
-records raise `ValueError`. Intents start at zero and advance by one; each resolves before the next
-intent. Blocks advance from the first block as `first_block + seq`, rejecting
-gaps, reversals and duplicate blocks. Monotonic timestamps never decrease. One final unresolved intent
-remains valid evidence in either mode.
-Metrics are not a PASS verdict. Classification and image verification consume these shared records; packet
-adapters must not keep another classifier or image verdict predicate.
+records raise `ValueError`. Intents start at zero and advance by one; each
+resolves before the next intent. Blocks advance as `first_block + seq`,
+rejecting gaps, reversals and duplicate blocks. Monotonic timestamps never
+decrease. One final unresolved intent remains valid evidence in either mode.
+Metrics are not a PASS verdict. Classification and image verification consume
+these shared records; packet adapters must not keep another classifier or
+image verdict predicate.
+
+`block = first_block + seq` is a property of the current sequential load
+generator, not of every well-formed ledger. A load that wraps or restarts at
+another base must declare that behavior as sealed policy. This reader currently
+supports only the sequential policy above; a different policy needs a reviewed
+implementation. Any change to an accepted fact definition requires
+fact-semantics review before merge.
 
 `lease_bound(journal)` preserves the logged lease-bound interpretation and
 returns `(bound_ns, cause, error)`. Missing evidence returns an error, never an
