@@ -1,3 +1,24 @@
+# Force LF on shell scripts and YAML so Windows checkouts don't break runs.
+*.sh    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.go    text eol=lf
+
+# Parser fixtures are compared byte for byte with their golden views.
+actions/testdata/** text eol=lf
+
+# These example resolutions bind the exact requested JSON bytes.
+examples/inventory/*.json text eol=lf
+inventory/*.json text eol=lf
+inventory/testdata/*.json text eol=lf
+
+# Reviewed worker copies retain exact accepted bytes across Windows/Linux.
+packs/seaweed/worker/*.py -text
+# Accepted CRLF vendor sources are byte-pinned; CR is not trailing whitespace.
+packs/seaweed/worker/soak_native_worker.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+packs/seaweed/worker/soak_oracle.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+packs/seaweed/worker/vf_preflight.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
 # Checker pins authenticate canonical bytes on every checkout platform.
 /checkers/*.py text eol=lf
 /checkers/library.json text eol=lf
