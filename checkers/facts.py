@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 
 
 RECORD_SCHEMA = {
-    'I': {'fields': 7, 'numeric': (1, 2, 5, 6), 'lsn': (4,)},
-    'A': {'fields': 8, 'numeric': (1, 2, 6, 7), 'lsn': (4, 5)},
-    'E': {'fields': 6, 'numeric': (1, 2, 3, 4, 5), 'lsn': ()},
+    'I': {'fields': 7, 'numeric': (1, 2, 5, 6), 'lsn': (4,), 'mono': 5},
+    'A': {'fields': 8, 'numeric': (1, 2, 6, 7), 'lsn': (4, 5), 'mono': 6},
+    'E': {'fields': 6, 'numeric': (1, 2, 3, 4, 5), 'lsn': (), 'mono': 4},
 }
 
 
@@ -14,7 +14,9 @@ def read_ledger(data, mode):
     """Return records, immutable judged bytes and metrics; reject corrupt input.
 
     LIVE omits only an incomplete final line. FINAL requires a complete file.
-    A terminal record needs its unique matching intent; blocks are write-once.
+    Intents start at zero, advance by one and resolve before the next intent.
+    A terminal matches its intent; blocks are write-once and monotonic time
+    never decreases. One final unresolved intent is valid in either mode.
     """
     if mode not in ('LIVE', 'FINAL'):
         raise ValueError('mode must be LIVE or FINAL')
@@ -22,7 +24,8 @@ def read_ledger(data, mode):
         data = data[:data.rfind(b'\n') + 1]
     elif data and not data.endswith(b'\n'):
         raise ValueError('unterminated FINAL ledger')
-    recs, blocks, intents, resolved = {}, set(), [], set()
+    recs, blocks = {}, set()
+    open_intent = previous_mono = None
     acked = exact = chainbreaks = 0
     previous = last_ack = None
     for n, raw in enumerate(data.decode('utf-8').splitlines(), 1):
@@ -39,20 +42,28 @@ def read_ledger(data, mode):
             raise ValueError('line %d: malformed digest or LSN' % n)
         if any(p[i] != 'NA' and not re.fullmatch(r'[0-9]+', p[i]) for i in schema['lsn']):
             raise ValueError('line %d: malformed digest or LSN' % n)
+        mono = int(p[schema['mono']])
+        if previous_mono is not None and mono < previous_mono:
+            raise ValueError('line %d: monotonic time decreased' % n)
+        previous_mono = mono
         seq, block = int(p[1]), int(p[2])
         if k == 'I':
             if seq in recs:
                 raise ValueError('line %d: second intent' % n)
+            if seq != len(recs):
+                raise ValueError('line %d: expected intent sequence %d' % (n, len(recs)))
+            if open_intent is not None:
+                raise ValueError('line %d: unresolved intent before next intent' % n)
             if block in blocks:
                 raise ValueError('line %d: block %d written twice' % (n, block))
             blocks.add(block)
-            intents.append(seq)
+            open_intent = seq
             recs[seq] = {'seq': seq, 'block': block, 'sha': p[3], 'kind': 'I', 'iwall': int(p[6])}
             continue
         r = recs.get(seq)
         if r is None or r['kind'] != 'I' or block != r['block'] or (k == 'A' and p[3] != r['sha']):
             raise ValueError('line %d: terminal without its matching intent' % n)
-        resolved.add(seq)
+        open_intent = None
         if k == 'E':
             r.update(kind='E', errno=int(p[3]))
             continue
@@ -62,10 +73,9 @@ def read_ledger(data, mode):
         exact += int(h0 is not None and h1 is not None and h1 == h0 + 1)
         chainbreaks += int(previous is not None and (h0 is None or h0 != previous))
         previous, last_ack = h1, r
-    gaps = sum(q not in resolved for q in intents[:-1])
     return {'records': recs, 'snapshot': data, 'last_ack': last_ack,
             'metrics': {'acked': acked, 'exact': exact,
-                        'chainbreaks': chainbreaks, 'gaps': gaps}}
+                        'chainbreaks': chainbreaks}}
 
 
 def ts(s):
@@ -83,9 +93,11 @@ def lease_bound(j):
     if not fence:
         return (None, None, 'no fence line: the old owner never fenced')
     # One incarnation per journal: the first fence ends its validity; the last
-    # renewal failure supplies the latest bound if that fence omits its time.
+    # renewal failure supplies the latest bound only for failed-renewal expiry.
     cause = fence[0]
     m = re.search('lease expired at (\\S+) without', cause)
+    if not m and not cause.startswith('lease expired after a failed renewal'):
+        return (None, cause, 'fence cause is not a lease expiry')
     try:
         U = ts(m.group(1)) if m else ts(valid[-1]) if valid else None
     except ValueError as e:
