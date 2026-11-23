@@ -49,7 +49,7 @@ loading the library alone performs no observation.
 
 `loader.load_library(root, manifest_sha256)` requires the exact manifest pin,
 checks every declared code file, then loads the verified facts and inventory
-modules. The closure includes facts.py, loader.py, resource_inventory.py and ops_rmguard.py. There
+modules. The closure includes facts.py, loader.py, resource_inventory.py ops_rmguard.py and unit_properties.py. There
 is no ambient import fallback. The loader itself must be authenticated by the
 calling packet before it is executed; its hash is also part of `library.json`.
 A packet's own seal must cover its bootstrap, configuration and library digest.
@@ -85,3 +85,28 @@ with the launcher rework before those helpers can be shared.
 
 Removal controls require POSIX directory-fd operations. Skipping them on another
 platform is not qualification evidence; run them on a supported POSIX host.
+
+## Fact boundaries
+
+- Guest acknowledgement window reads a guest write record and lease/drain bounds;
+  proves its timing classification; does not prove a revoke event or detached authority.
+- Revoke-event completion reads the stop's revoke event and its outcome/timestamps;
+  proves that event completed as recorded; does not prove the detached generation or guest acknowledgement window.
+- Detached-authority proof reads the detach/revoke proof, authority and probe;
+  proves the expected generation/epoch and probe evidence match; does not prove revoke-event timing or guest write durability.
+- Unit inactivity reads current unit properties with checked producer status;
+  proves the unit is not active now; does not prove the unit succeeded.
+- Invocation outcome reads properties and manager records bound to a recorded invocation;
+  proves this invocation ended with this result; does not prove the unit is gone.
+
+Only an identical unit-property observation is shared here. Each packet retains
+its inactivity/completion verdict and expected-exit policy. An expected exit in
+one policy does not authorize accepting a failed unit in another packet.
+
+`show_unit_properties(unit, timeout, systemctl)` reads one property set within
+its caller's remaining producer budget. A failed process, timeout, missing
+required property or empty load/active state raises `ValueError`; packet
+adapters translate this to their existing UNKNOWN path. It returns properties,
+never a PASS or completion decision. The existing reader represents an absent
+ExecMainStatus as `-`, including for services; that marker is not a successful
+exit status. Loading the pinned module does not invoke systemctl.
