@@ -49,7 +49,7 @@ loading the library alone performs no observation.
 
 `loader.load_library(root, manifest_sha256)` requires the exact manifest pin,
 checks every declared code file, then loads the verified facts and inventory
-modules. The closure includes facts.py, loader.py and resource_inventory.py. There
+modules. The closure includes facts.py, loader.py, resource_inventory.py and ops_rmguard.py. There
 is no ambient import fallback. The loader itself must be authenticated by the
 calling packet before it is executed; its hash is also part of `library.json`.
 A packet's own seal must cover its bootstrap, configuration and library digest.
@@ -69,3 +69,19 @@ unreadable inventories, self-unit exclusion and usage. A targeted source mutant
 ignores inventory errors and falsely returns PASS; the ordinary control returns
 UNKNOWN. Loader controls reject every missing/modified closure member and a
 stale published manifest pin.
+
+Operational removal is separate from facts: `loader.load_rmguard(root, pin)`
+verifies the same complete manifest and returns `run(packet_file, arguments)`
+from `ops_rmguard.py`. Loading performs no deletion. `facts.py` never imports
+this module. The packet location selects its existing run.env bindings;
+canonical roots, directory-fd ancestry and identity, complete mount inventory,
+and final identity checks retain their existing refusal and exit protocols.
+The remover deletes the contents and the root itself only after all admission
+checks pass. A mount at the root or beneath it refuses without deleting either.
+
+Ownership-ledger and lock-holder helpers remain identical per packet. Their
+stdin-before-staging and controller event-parser consumers must be addressed
+with the launcher rework before those helpers can be shared.
+
+Removal controls require POSIX directory-fd operations. Skipping them on another
+platform is not qualification evidence; run them on a supported POSIX host.
