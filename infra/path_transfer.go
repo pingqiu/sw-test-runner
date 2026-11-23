@@ -60,6 +60,9 @@ print('UPLOADED '+want+' '+str(count))`
 	stop := context.AfterFunc(ctx, func() { pipe.Close() })
 	defer stop()
 	_, err = io.Copy(pipe, f)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	closeErr := pipe.WriteCloser.Close()
 	if err == nil {
 		err = closeErr

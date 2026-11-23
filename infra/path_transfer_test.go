@@ -99,3 +99,24 @@ func TestDownloadDoesNotPublishPartialEvidence(t *testing.T) {
 		t.Fatalf("partial destination published: %v", err)
 	}
 }
+
+func TestUploadCancellationInterruptsInflightSSH(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	node := commandSSHFixtureResponder(t, nil, nil, func(_ string, ch ssh.Channel) {
+		first := make([]byte, 1)
+		if _, err := io.ReadFull(ch, first); err != nil {
+			t.Errorf("first byte: %v", err)
+			return
+		}
+		cancel()
+		io.Copy(io.Discard, ch)
+	})
+	src := filepath.Join(t.TempDir(), "packet.tgz")
+	if err := os.WriteFile(src, bytes.Repeat([]byte("x"), 8<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := node.UploadContext(ctx, src, "/run/packet.tgz"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want caller cancellation, got %v", err)
+	}
+}
