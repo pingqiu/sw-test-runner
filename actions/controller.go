@@ -83,6 +83,9 @@ func waitExecMatch(ctx context.Context, a *tr.ActionContext, act tr.Action) (map
 			last, stderr, code, err = n.Run(ctx, act.Params["cmd"])
 		}
 		last = strings.TrimSpace(last)
+		if cause := ctx.Err(); cause != nil {
+			return map[string]string{"value": last}, fmt.Errorf("wait_exec_match: %w", cause)
+		}
 		if err != nil {
 			return map[string]string{"value": last}, fmt.Errorf("wait_exec_match: %w", err)
 		}

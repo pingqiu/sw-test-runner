@@ -70,7 +70,7 @@ print('UPLOADED '+want+' '+str(count))`
 	if err != nil {
 		return fmt.Errorf("upload bytes: %w", err)
 	}
-	receipt, err := io.ReadAll(io.LimitReader(pipe.Reader, 4096))
+	receipt, err := readTransferReceipt(pipe.Reader)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -129,7 +129,7 @@ with open(sys.argv[1],'rb') as f:
 	if _, err = io.CopyN(io.MultiWriter(f, h), reader, size); err != nil {
 		return fmt.Errorf("download bytes: %w", err)
 	}
-	trailer, err := io.ReadAll(io.LimitReader(reader, 4096))
+	trailer, err := readTransferReceipt(reader)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -143,4 +143,13 @@ with open(sys.argv[1],'rb') as f:
 		return err
 	}
 	return os.Rename(f.Name(), local)
+}
+
+// Read one byte beyond the cap: a full buffer alone is never proof of EOF.
+func readTransferReceipt(reader io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(reader, 4097))
+	if err == nil && len(b) > 4096 {
+		err = fmt.Errorf("transfer: receipt exceeds 4096 bytes")
+	}
+	return b, err
 }

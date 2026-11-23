@@ -84,6 +84,19 @@ func TestWaitExecMatchCancellation(t *testing.T) {
 		t.Fatalf("err=%v calls=%d", err, calls)
 	}
 }
+
+func TestWaitExecMatchCanceledDoneCannotSucceed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	n := &controllerNode{run: func(context.Context, string) (string, string, int, error) {
+		cancel()
+		return "DONE", "", 0, nil
+	}}
+	_, err := waitExecMatch(ctx, &tr.ActionContext{Nodes: map[string]tr.NodeRunner{"m01": n}}, tr.Action{Node: "m01", Params: map[string]string{"cmd": "status", "match": "^DONE$"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled DONE accepted: %v", err)
+	}
+}
 func TestUploadPathUsesCallerContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
