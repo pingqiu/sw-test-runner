@@ -1,0 +1,3 @@
+forced move issued: volume g request rep-fm1: r1@1 on h2 -> r1@2 on h1 (kept HEAD gen 5, remote LSN 52791)
+volume g restored to the last published image at 2026-11-23T03:44:52Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 5, LSN 52791): writes with LSN <= 52791 are preserved; writes acknowledged by r1@1 after that and before 2026-11-23T03:46:44.592685456Z, master clock, may be lost; the upper bound is a time, not an LSN.
+next: start volume g on h1 (this command moved authority only)
