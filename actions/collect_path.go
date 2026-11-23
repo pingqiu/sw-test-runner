@@ -69,7 +69,7 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	switch kind {
 	case "file":
 		localPath := filepath.Join(destDir, name)
-		if err := node.DownloadContext(ctx, src, localPath); err != nil {
+		if err := downloadCollectedPath(ctx, node, src, localPath); err != nil {
 			return nil, fmt.Errorf("collect_path: download file: %w", err)
 		}
 		actx.Log("  collect_path: %s -> %s", src, localPath)
@@ -92,7 +92,7 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 			defer cancel()
 			node.Run(cleanup, fmt.Sprintf("rm -f %s", execShellQuote(remoteArchive)))
 		}()
-		if err := node.DownloadContext(ctx, remoteArchive, localPath); err != nil {
+		if err := downloadCollectedPath(ctx, node, remoteArchive, localPath); err != nil {
 			return nil, fmt.Errorf("collect_path: download archive: %w", err)
 		}
 		actx.Log("  collect_path: %s -> %s", src, localPath)
@@ -100,6 +100,21 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	default:
 		return nil, fmt.Errorf("collect_path: unsupported path kind %q for %s", kind, src)
 	}
+}
+
+// Legacy collect_path callers may have no action/scenario deadline. Preserve
+// their existing transfer behavior; bounded callers use the verified stream.
+func downloadCollectedPath(ctx context.Context, node interface {
+	Download(string, string) error
+	DownloadContext(context.Context, string, string) error
+}, remote, local string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, bounded := ctx.Deadline(); bounded {
+		return node.DownloadContext(ctx, remote, local)
+	}
+	return node.Download(remote, local)
 }
 
 func collectPathTarCommand(archive, parent, base string) string {
