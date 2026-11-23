@@ -1,4 +1,5 @@
 """One structural ledger judge and shared lease/acknowledgement predicates."""
+import hashlib
 import re
 from datetime import datetime, timezone
 
@@ -119,3 +120,127 @@ def ack_window(r, U, drain):
     if r['wall'] > U + drain:
         return 'completed_after_drain'
     return 'inside'
+
+
+def classify_write(record, boundary):
+    """Classify one validated record by LSN, never its wall-clock timestamp.
+
+    Exact ACKs require H1 = H0 + 1. Missing or inexact LSNs stay uncountable;
+    failed or unresolved writes permit either their exact content or zero.
+    """
+    if record['kind'] != 'A':
+        return 'either'
+    h0, h1 = record['h0'], record['h1']
+    if h0 is None or h1 is None or h1 != h0 + 1:
+        return 'lsnless'
+    if h1 <= boundary:
+        return 'must'
+    if h0 >= boundary:
+        return 'lost'
+    return 'straddle'
+
+
+def classification_counts(recs, cls):
+    c = {k: 0 for k in ('must', 'lost', 'straddle', 'lsnless', 'failed', 'inflight')}
+    for s, k in cls.items():
+        if k == 'either':
+            c['failed' if recs[s]['kind'] == 'E' else 'inflight'] += 1
+        else:
+            c[k] += 1
+    return c
+
+
+def _raced_seq(recs):
+    """Return the last ACK only when H0 is known and H1 is unknown."""
+    acked = [r for r in recs.values() if r['kind'] == 'A']
+    if not acked:
+        return None
+    r = max(acked, key=lambda x: x['seq'])
+    return r['seq'] if r['h0'] is not None and r['h1'] is None else None
+
+
+def image_exact(records, image, boundary, blocks, block_size=4096, raced='none'):
+    """Judge a supplied binary image stream against validated ledger records.
+
+    The stream starts at byte zero; no path is opened and no host is contacted.
+    Exact ACKs must be present at/below L and absent above L. Uncertain writes
+    allow zero or exact bytes, but unresolved ACK LSNs cannot yield PASS.
+    A raced-write exception requires the caller's explicit final-row decision.
+    The result names PASS, FAIL or NOT_COUNTED with counts and diagnostics;
+    stream/decoding failures propagate instead of producing a verdict.
+    """
+    if blocks <= 0 or block_size <= 0 or boundary < 0:
+        raise ValueError('positive image geometry and nonnegative LSN required')
+    cls = {seq: classify_write(record, boundary) for seq, record in records.items()}
+    bad = []
+    rs = _raced_seq(records)
+    want = raced
+    if want != 'none':
+        if rs is None or want != str(rs):
+            actual = 'none' if rs is None else str(rs)
+            bad.append("raced decision %s is not this ledger's raced write (%s)" % (want, actual))
+            rs = None
+    else:
+        # The record's shape alone never supplies the final-row decision.
+        rs = None
+    if rs is not None:
+        cls[rs] = 'must' if records[rs]['h0'] + 1 <= boundary else 'lost'
+    outside = sorted(record['block'] for record in records.values() if not 0 <= record['block'] < blocks)
+    if outside:
+        bad.append('%d ledger record(s) outside the %d-block geometry (first block %d)' % (
+            len(outside), blocks, outside[0]))
+    c = classification_counts(records, cls)
+    raced_messages = []
+    byblock = {record['block']: record for record in records.values()}
+    zero = bytes(block_size)
+    ack_lsns = [record['h1'] for record in records.values() if record['kind'] == 'A' and record['h1'] is not None]
+    hmax = max(ack_lsns, default=0)
+    f = image
+    for block in range(blocks):
+        data = f.read(block_size)
+        if len(data) != block_size:
+            bad.append('short read at block %d' % block)
+            break
+        record = byblock.get(block)
+        if record is None:
+            if data != zero:
+                bad.append('block %d: never written but not zero' % block)
+            continue
+        category, digest = cls[record['seq']], hashlib.sha256(data).hexdigest()
+        if record['seq'] == rs:
+            ok = (digest == record['sha']) if category == 'must' else (data == zero)
+            if category == 'must':
+                relation = '<='
+                if ok:
+                    disposition = 'present byte-exact'
+                else:
+                    disposition = 'ABSENT' if data == zero else 'DIFFERENT'
+            else:
+                relation = '>'
+                disposition = 'absent (zero)' if ok else 'PRESENT'
+            raced_messages.append('raced seq %d block %d (LSN inferred H0+1=%d %s L=%d): %s' % (
+                record['seq'], block, record['h0'] + 1, relation, boundary, disposition))
+        if category == 'must' and digest != record['sha']:
+            state = 'absent' if data == zero else 'different'
+            bad.append('block %d seq %d: acked with LSN <= %d but %s' % (block, record['seq'], boundary, state))
+        elif category == 'lost' and data != zero:
+            bad.append('block %d seq %d: LSN > %d but present (image not exact at L)' % (block, record['seq'], boundary))
+        elif category in ('straddle', 'lsnless', 'either') and data != zero and digest != record['sha']:
+            bad.append('block %d seq %d: neither zero nor its content (torn)' % (block, record['seq']))
+        if len(bad) > 20:
+            break
+    else:
+        if f.read(1):
+            bad.append('image larger than the %d-block geometry' % blocks)
+    info = 'L=%d must=%d lost=%d straddle=%d lsnless=%d failed=%d inflight=%d lost_range=(%d,%d]' % (
+        boundary, c['must'], c['lost'], c['straddle'], c['lsnless'], c['failed'], c['inflight'], boundary, max(hmax, boundary))
+    if rs is not None:
+        detail = raced_messages[0] if raced_messages else 'raced seq %d: block not read' % rs
+        info += ' ' + detail
+    if bad:
+        verdict = 'FAIL'
+    elif c['straddle'] or c['lsnless'] or not (c['must'] + c['lost']):
+        verdict = 'NOT_COUNTED'
+    else:
+        verdict = 'PASS'
+    return {'verdict': verdict, 'counts': c, 'errors': bad, 'info': info}
