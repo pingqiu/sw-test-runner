@@ -12,14 +12,15 @@ type Scenario struct {
 	// bundle's manifest.json so multiple agents/teams sharing one dashboard can
 	// tell runs apart and filter them. Run-context that varies per execution
 	// (project, run_by) is better passed with `run -meta key=value`.
-	Metadata  map[string]string     `yaml:"metadata,omitempty"`
-	Timeout   Duration              `yaml:"timeout"`
-	Env       map[string]string     `yaml:"env"`
-	Cluster   *ClusterSpec          `yaml:"cluster,omitempty"`
-	Topology  Topology              `yaml:"topology"`
-	Targets   map[string]TargetSpec `yaml:"targets"`
-	Phases    []Phase               `yaml:"phases"`
-	Artifacts ArtifactSpec          `yaml:"artifacts"`
+	Metadata      map[string]string     `yaml:"metadata,omitempty"`
+	Timeout       Duration              `yaml:"timeout"`
+	AlwaysTimeout Duration              `yaml:"always_timeout,omitempty"`
+	Env           map[string]string     `yaml:"env"`
+	Cluster       *ClusterSpec          `yaml:"cluster,omitempty"`
+	Topology      Topology              `yaml:"topology"`
+	Targets       map[string]TargetSpec `yaml:"targets"`
+	Phases        []Phase               `yaml:"phases"`
+	Artifacts     ArtifactSpec          `yaml:"artifacts"`
 }
 
 // ClusterSpec declares what cluster the scenario needs.
@@ -82,13 +83,14 @@ type Topology struct {
 
 // NodeSpec defines a remote (or local) machine.
 type NodeSpec struct {
-	Host    string   `yaml:"host"`
-	AltIPs  []string `yaml:"alt_ips"` // additional IPs (e.g. RDMA) for node identification
-	User    string   `yaml:"user"`
-	KeyFile string   `yaml:"key"`
-	HostKey string   `yaml:"host_key"` // Approved OpenSSH public host key, never TOFU.
-	IsLocal bool     `yaml:"is_local"`
-	Agent   string   `yaml:"agent"` // maps node to an agent (coordinator mode)
+	Host     string   `yaml:"host"`
+	AltIPs   []string `yaml:"alt_ips"` // additional IPs (e.g. RDMA) for node identification
+	User     string   `yaml:"user"`
+	KeyFile  string   `yaml:"key"`
+	HostKey  string   `yaml:"host_key"` // Approved OpenSSH public host key, never TOFU.
+	IsLocal  bool     `yaml:"is_local"`
+	IsNative bool     `yaml:"is_native"`
+	Agent    string   `yaml:"agent"` // maps node to an agent (coordinator mode)
 }
 
 // TargetSpec defines an iSCSI/NVMe target instance.

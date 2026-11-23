@@ -119,6 +119,9 @@ func substituteParams(s string, params map[string]string) string {
 
 // validate checks referential integrity and required fields.
 func validate(s *Scenario) error {
+	if s.AlwaysTimeout.Duration < 0 {
+		return fmt.Errorf("always_timeout must be positive when set")
+	}
 	if s.Name == "" {
 		return fmt.Errorf("scenario name is required")
 	}

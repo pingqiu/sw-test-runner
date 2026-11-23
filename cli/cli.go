@@ -1774,11 +1774,12 @@ func setupActionContext(s *tr.Scenario, logFunc func(string, ...interface{})) (*
 	// Create and connect nodes.
 	for name, spec := range s.Topology.Nodes {
 		node := &infra.Node{
-			Host:    resolveTopologyValue(spec.Host, s.Env),
-			User:    resolveTopologyValue(spec.User, s.Env),
-			KeyFile: resolveTopologyValue(spec.KeyFile, s.Env),
-			HostKey: resolveTopologyValue(spec.HostKey, s.Env),
-			IsLocal: spec.IsLocal,
+			Host:     resolveTopologyValue(spec.Host, s.Env),
+			User:     resolveTopologyValue(spec.User, s.Env),
+			KeyFile:  resolveTopologyValue(spec.KeyFile, s.Env),
+			HostKey:  resolveTopologyValue(spec.HostKey, s.Env),
+			IsLocal:  spec.IsLocal,
+			IsNative: spec.IsNative,
 		}
 		if err := node.Connect(); err != nil {
 			return nil, fmt.Errorf("connect node %s: %w", name, err)

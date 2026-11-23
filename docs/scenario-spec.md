@@ -343,3 +343,34 @@ through every v1.x runner version. Field additions are opt-in via new
 top-level keys (e.g. `apiVersion`); behavior changes that would break
 v0 scenarios are deferred to v2 and require a parallel-support cycle
 before v0 retires.
+
+## Controller transfers and finalization
+
+`always_timeout: 25m` gives all always-phases one fresh, shared bounded cleanup
+context after work fails or is canceled (default 60s). Negative values refuse.
+It does not extend an admitted RunScope cleanup envelope. Use always-phases for
+heal, teardown, closeout, evidence, and END-or-quarantine; always settles every
+action and failures remain failures. Host hard deadlines still apply.
+
+`upload_path` requires `node`, local file/archive `path`, and fresh remote `dest`.
+It streams over a separately owned pinned SSH connection and verifies size and
+SHA256 receipt; no unbounded Upload fallback. Extraction and chmod are separate
+visible host calls. Partial remote files stay in the run-owned staging root for
+cleanup; retries use a fresh path. `collect_path` uses bounded streaming download
+and only publishes a local file after complete size/digest verification. The
+hosts require Python 3. Neither method proves host service settlement.
+
+`wait_exec_match` requires `node`, `cmd`, `match` (regexp), and a context deadline
+(scenario/action timeout). `fail_match` is checked before success; nonzero command
+exit and transport errors fail immediately, except an explicitly paired positive
+`pending_code` and `pending_match` (for example rc4 + RUNNING). This exception
+never qualifies success: a matching DONE still requires rc0. `interval` defaults to 1s and must
+be positive. Return `RUNNING ...` while pending; an affirmative `DONE ... rc=0`
+receipt qualifies success. A closed port or unreadable receipt never does.
+
+`exec` may specify a fresh controller-side `receipt_path` in the run bundle.
+It records a command hash/node intent before dispatch and the code/stdout/stderr
+after the answer. A transport error keeps `complete=false` even if partial
+stdout says CLEAN. Missing, truncated, incomplete or reused receipts never
+qualify cleanup or release. `is_native: true` on a topology node runs controller
+commands on the workstation through its configured Bash, without SSH or WSL.

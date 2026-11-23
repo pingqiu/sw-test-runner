@@ -39,6 +39,10 @@ func commandSSHFixture(t *testing.T) *Node {
 }
 
 func commandSSHFixtureKeys(t *testing.T, keys *atomic.Pointer[ssh.ServerConfig], execs *atomic.Int64) *Node {
+	return commandSSHFixtureResponder(t, keys, execs, nil)
+}
+
+func commandSSHFixtureResponder(t *testing.T, keys *atomic.Pointer[ssh.ServerConfig], execs *atomic.Int64, respond func(string, ssh.Channel)) *Node {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -127,6 +131,10 @@ func commandSSHFixtureKeys(t *testing.T, keys *atomic.Pointer[ssh.ServerConfig],
 								continue
 							}
 							_ = request.Reply(true, nil)
+							if respond != nil {
+								respond(payload.Command, channel)
+								return
+							}
 							_, _ = io.Copy(channel, channel)
 							return
 						}
