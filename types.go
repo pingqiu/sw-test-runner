@@ -12,14 +12,15 @@ type Scenario struct {
 	// bundle's manifest.json so multiple agents/teams sharing one dashboard can
 	// tell runs apart and filter them. Run-context that varies per execution
 	// (project, run_by) is better passed with `run -meta key=value`.
-	Metadata  map[string]string     `yaml:"metadata,omitempty"`
-	Timeout   Duration              `yaml:"timeout"`
-	Env       map[string]string     `yaml:"env"`
-	Cluster   *ClusterSpec          `yaml:"cluster,omitempty"`
-	Topology  Topology              `yaml:"topology"`
-	Targets   map[string]TargetSpec `yaml:"targets"`
-	Phases    []Phase               `yaml:"phases"`
-	Artifacts ArtifactSpec          `yaml:"artifacts"`
+	Metadata      map[string]string     `yaml:"metadata,omitempty"`
+	Timeout       Duration              `yaml:"timeout"`
+	AlwaysTimeout Duration              `yaml:"always_timeout,omitempty"`
+	Env           map[string]string     `yaml:"env"`
+	Cluster       *ClusterSpec          `yaml:"cluster,omitempty"`
+	Topology      Topology              `yaml:"topology"`
+	Targets       map[string]TargetSpec `yaml:"targets"`
+	Phases        []Phase               `yaml:"phases"`
+	Artifacts     ArtifactSpec          `yaml:"artifacts"`
 }
 
 // ClusterSpec declares what cluster the scenario needs.

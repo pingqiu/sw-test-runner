@@ -14,6 +14,10 @@ import (
 // RegisterSystemActions registers system/assert actions.
 func RegisterSystemActions(r *tr.Registry) {
 	r.RegisterFunc("exec", tr.TierCore, execAction)
+	r.RegisterFunc("upload_path", tr.TierCore, uploadPath)
+	r.SetRequiredParams("upload_path", []string{"path", "dest"})
+	r.RegisterFunc("wait_exec_match", tr.TierCore, waitExecMatch)
+	r.SetRequiredParams("wait_exec_match", []string{"cmd", "match"})
 	r.RegisterFunc("sleep", tr.TierCore, sleepAction)
 	r.RegisterFunc("assert_equal", tr.TierCore, assertEqual)
 	r.RegisterFunc("assert_greater", tr.TierCore, assertGreater)

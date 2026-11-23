@@ -202,10 +202,14 @@ func (e *Engine) Run(ctx context.Context, s *Scenario, actx *ActionContext) *Sce
 		}
 	}
 
-	// Always-phases run regardless of failure, with a fresh 60s context
+	// Always-phases run regardless of failure, with a fresh bounded context
 	// so they can complete even if the main context was canceled.
 	cleanupCtx := context.Background()
-	cleanupCtx, cleanupCancel := context.WithTimeout(cleanupCtx, 60*time.Second)
+	cleanupTimeout := s.AlwaysTimeout.Duration
+	if cleanupTimeout <= 0 {
+		cleanupTimeout = 60 * time.Second
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(cleanupCtx, cleanupTimeout)
 	defer cleanupCancel()
 	// Admitted runs retain their original cleanup envelope. Always phases may
 	// assess evidence, but cannot reopen ordinary execution after settlement.

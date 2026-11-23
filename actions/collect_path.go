@@ -69,7 +69,7 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	switch kind {
 	case "file":
 		localPath := filepath.Join(destDir, name)
-		if err := node.Download(src, localPath); err != nil {
+		if err := node.DownloadContext(ctx, src, localPath); err != nil {
 			return nil, fmt.Errorf("collect_path: download file: %w", err)
 		}
 		actx.Log("  collect_path: %s -> %s", src, localPath)
@@ -87,8 +87,12 @@ func collectPath(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		if _, stderr, code, err := node.Run(ctx, tarCmd); err != nil || code != 0 {
 			return nil, fmt.Errorf("collect_path: archive dir: code=%d stderr=%s err=%v", code, stderr, err)
 		}
-		defer node.Run(context.Background(), fmt.Sprintf("rm -f %s", execShellQuote(remoteArchive)))
-		if err := node.Download(remoteArchive, localPath); err != nil {
+		defer func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			node.Run(cleanup, fmt.Sprintf("rm -f %s", execShellQuote(remoteArchive)))
+		}()
+		if err := node.DownloadContext(ctx, remoteArchive, localPath); err != nil {
 			return nil, fmt.Errorf("collect_path: download archive: %w", err)
 		}
 		actx.Log("  collect_path: %s -> %s", src, localPath)
