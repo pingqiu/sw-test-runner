@@ -1,12 +1,15 @@
 {
   "schema": "checker-library/v1",
   "files": {
-    "facts.py": "f6ba8efc63e0b00c73267d1657bebcf86a37b82e7331dcf668ea98389d454fca",
-    "loader.py": "e2202a75dcf8f3162815c6c68dbd60c0ecd11d67974ba878d338c1e900c6d906"
+    "facts.py": "caf938987d93562ea6dd7217f1cf08e758652dcc4f9bef6e018f8098e97484c7",
+    "loader.py": "d0c162263fc3f0e94d11b6c4dbad870f0141f62988b51fe6db42ab60e89dd23f",
+    "resource_inventory.py": "b1d6c55d84b3c5c126269098f929522d3a2c5466e2f2335c75ad60485c45a569"
   },
   "entries": [
     "read_ledger",
     "lease_bound",
-    "ack_window"
+    "ack_window",
+    "resources_absent",
+    "resources_absent_cli"
   ]
 }
