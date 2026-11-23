@@ -25,17 +25,23 @@ def split_launch(text):
     hosts = one(text, "# ---- 1. contact both hosts")
     final = one(text, "# ---- 9. closeout:")
     dead = one(text, "# T1-E1 outage observation (")
-    phase = one(text, "phase() {  # 0 rc") if "phase() {  # 0 rc" in text else one(text, "\nphase() {") + 1
+    phases = list(re.finditer(r'^phase\(\) \{(?:  # 0 rc[^\n]*)?$', text, re.M))
+    if len(phases) != 1:
+        raise ValueError("reference must contain exactly one phase anchor across both forms")
+    phase = phases[0].start()
     if not pre < hosts < dead < phase < final:
         raise ValueError("reference sections are not in the expected order")
     preflight, finalize = text[pre:hosts], text[final:]
     work = text[hosts:dead] + text[phase:final]
-    work = re.sub(r'^  case "\$n" in first\|hop-\*\) t1phase.*\n', '', work, flags=re.M)
-    work = re.sub(r'^    case "\$n" in first\|hop-\*\) obswait.*\n', '    sleep "$POLL"\n', work, flags=re.M)
-    work = re.sub(r'^  case "\$n" in first\|hop-\*\) \[ "\$T1ST".*\n', '', work, flags=re.M)
+    replacements = {
+        '  case "$n" in first|hop-*) t1phase "$n" ;; esac': '',
+        '    case "$n" in first|hop-*) obswait "$h" ;; *) sleep "$POLL" ;; esac': '    sleep "$POLL"\n',
+        '  case "$n" in first|hop-*) [ "$T1ST" = idle ] || t1step "$h" ;; esac   # window open: one more read at the phase end': '',
+    }
+    work = ''.join(replacements.get(line.rstrip('\n'), line) for line in work.splitlines(keepends=True))
     if re.search(r'\b(t1phase|t1step|obswait|T1ST)\b', work):
         raise ValueError("unrecognized remaining legacy observation call")
-    prefix = re.sub(r'^OBS_SLEEP=.*\n', '', text[:pre], flags=re.M)
+    prefix = text[:pre]
     launch = prefix + '. "$PK/preflight.sh"\n' + work + '. "$PK/finalize.sh"\n'
     return launch, preflight, finalize
 

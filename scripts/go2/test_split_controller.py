@@ -36,6 +36,15 @@ class SplitController(unittest.TestCase):
   self.assertFalse(m.separate_paths(pathlib.Path('/packet'), pathlib.Path('/packet')))
   self.assertTrue(m.separate_paths(pathlib.Path('/packet'), pathlib.Path('/work/output')))
 
+ def test_refuses_both_phase_anchor_forms(self):
+  text=PREFIX+PRE+WORK.replace('phase() {\n', 'phase() {  # 0 rc 0\n')+'\nphase() {\n}\n'+FINAL
+  with self.assertRaises(ValueError):m.split_launch(text)
+
+ def test_refuses_unknown_command_appended_to_legacy_line(self):
+  line='  case "$n" in first|hop-*) t1phase "$n" ;; esac'
+  text=PREFIX+PRE+WORK.replace('  run_phase',line+'; unexpected_command\n  run_phase')+FINAL
+  with self.assertRaises(ValueError):m.split_launch(text)
+
  def test_compatibility_launcher_transcript_and_refusal(self):
   bash=os.environ.get('BASH_FOR_TESTS') or shutil.which('bash')
   if not bash: self.skipTest('bash unavailable; transcript not qualified')
