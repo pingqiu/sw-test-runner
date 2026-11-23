@@ -1,0 +1,2 @@
+range 1 of 1: request rep-fm1, r1@1 -> epoch 2, lost after LSN 52791, until 2026-11-23T03:46:44.592685456Z (master clock)
+  volume g restored to the last published image at 2026-11-23T03:44:52Z (publishing host clock as recorded in the filer, 1 s resolution) (gen 5, LSN 52791): writes with LSN <= 52791 are preserved; writes acknowledged by r1@1 after that and before 2026-11-23T03:46:44.592685456Z, master clock, may be lost; the upper bound is a time, not an LSN.
