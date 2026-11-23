@@ -119,3 +119,16 @@ def ack_window(r, U, drain):
     if r['wall'] > U + drain:
         return 'completed_after_drain'
     return 'inside'
+
+
+def resources_absent(leftovers, errors):
+    """Decide complete resource observations; unreadable evidence is UNKNOWN.
+
+    Preserve producer diagnostics in order, followed by any observed leftovers.
+    The caller collects inventories; this function performs no host actions.
+    """
+    if errors:
+        return {'verdict': 'UNKNOWN', 'details': list(errors) + list(leftovers)}
+    if leftovers:
+        return {'verdict': 'FAIL', 'details': list(leftovers)}
+    return {'verdict': 'PASS', 'details': []}

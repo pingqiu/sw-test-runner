@@ -14,7 +14,7 @@ def load_library(root, manifest_sha256):
     if hashlib.sha256(raw).hexdigest() != manifest_sha256:
         raise ValueError('checker manifest mismatch')
     manifest = json.loads(raw)
-    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py'}:
+    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py'}:
         raise ValueError('unsupported checker closure')
     code = {}
     for name, pin in manifest['files'].items():
@@ -23,5 +23,12 @@ def load_library(root, manifest_sha256):
             raise ValueError('checker code mismatch')
     module = types.ModuleType('sealed_checker_facts')
     exec(compile(code['facts.py'], str(root / 'facts.py'), 'exec'), module.__dict__)
+    inventory = types.ModuleType('sealed_resource_inventory')
+    exec(compile(code['resource_inventory.py'], str(root / 'resource_inventory.py'), 'exec'), inventory.__dict__)
+
+    def resources_absent_cli(packet_file, arguments):
+        return inventory.main(packet_file, arguments, module.resources_absent)
+
+    module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module
