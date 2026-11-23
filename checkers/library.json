@@ -2,14 +2,16 @@
   "schema": "checker-library/v1",
   "files": {
     "facts.py": "caf938987d93562ea6dd7217f1cf08e758652dcc4f9bef6e018f8098e97484c7",
-    "loader.py": "d0c162263fc3f0e94d11b6c4dbad870f0141f62988b51fe6db42ab60e89dd23f",
-    "resource_inventory.py": "b1d6c55d84b3c5c126269098f929522d3a2c5466e2f2335c75ad60485c45a569"
+    "loader.py": "f74fe1976833d013ec269f9818d38676a16445f9b18b4e2776896e563cf4d3ac",
+    "resource_inventory.py": "b1d6c55d84b3c5c126269098f929522d3a2c5466e2f2335c75ad60485c45a569",
+    "ops_rmguard.py": "e2fe11714e2eab266e9ec6eb2dd2514a897bb18503d3875791edaa788b335d27"
   },
   "entries": [
     "read_ledger",
     "lease_bound",
     "ack_window",
     "resources_absent",
-    "resources_absent_cli"
+    "resources_absent_cli",
+    "load_rmguard"
   ]
 }

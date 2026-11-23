@@ -6,7 +6,7 @@ import re
 import types
 
 
-def load_library(root, manifest_sha256):
+def _verified_code(root, manifest_sha256):
     if not re.fullmatch('[0-9a-f]{64}', manifest_sha256):
         raise ValueError('a lowercase manifest SHA256 pin is required')
     root = Path(root)
@@ -14,13 +14,25 @@ def load_library(root, manifest_sha256):
     if hashlib.sha256(raw).hexdigest() != manifest_sha256:
         raise ValueError('checker manifest mismatch')
     manifest = json.loads(raw)
-    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py'}:
+    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py'}:
         raise ValueError('unsupported checker closure')
     code = {}
     for name, pin in manifest['files'].items():
         code[name] = (root / name).read_bytes()
         if hashlib.sha256(code[name]).hexdigest() != pin:
             raise ValueError('checker code mismatch')
+    return root, code
+
+
+def load_rmguard(root, manifest_sha256):
+    root, code = _verified_code(root, manifest_sha256)
+    operations = types.ModuleType('sealed_rmguard')
+    exec(compile(code['ops_rmguard.py'], str(root / 'ops_rmguard.py'), 'exec'), operations.__dict__)
+    return operations.run
+
+
+def load_library(root, manifest_sha256):
+    root, code = _verified_code(root, manifest_sha256)
     module = types.ModuleType('sealed_checker_facts')
     exec(compile(code['facts.py'], str(root / 'facts.py'), 'exec'), module.__dict__)
     inventory = types.ModuleType('sealed_resource_inventory')

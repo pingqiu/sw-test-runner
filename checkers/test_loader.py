@@ -12,14 +12,14 @@ class Loader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             source = Path(__file__).parent
-            for name in ['library.json', 'facts.py', 'loader.py', 'resource_inventory.py']:
+            for name in ['library.json', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py']:
                 shutil.copy2(source / name, root / name)
             pin = (source / 'library.sha256').read_text().strip()
             self.assertEqual(load_library(root, pin).library_sha256, pin)
             for bad in ['', '0' * 64]:
                 with self.subTest(pin=bad), self.assertRaises(ValueError):
                     load_library(root, bad)
-            for member in ['facts.py', 'loader.py', 'resource_inventory.py']:
+            for member in ['facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py']:
                 with self.subTest(member=member):
                     original = (root / member).read_bytes()
                     (root / member).write_bytes(b'raise RuntimeError("must never execute")')
@@ -37,7 +37,7 @@ class Loader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             source = Path(__file__).parent
-            for name in ['library.json', 'library.sha256', 'facts.py', 'loader.py', 'resource_inventory.py']:
+            for name in ['library.json', 'library.sha256', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py']:
                 shutil.copy2(source / name, root / name)
             published_pin = (root / 'library.sha256').read_text().strip()
             changed = (root / 'library.json').read_bytes() + b'\n'
