@@ -132,3 +132,29 @@ func TestWaitExecMatchHostPhasePendingExit(t *testing.T) {
 		t.Fatalf("calls=%d out=%v err=%v", calls, out, err)
 	}
 }
+
+func TestWaitExecMatchPendingRequiresExactProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		code   int
+	}{
+		{"RUNNING another-phase pid 123", 4},
+		{"DONE d-load rc=0", 4},
+		{"RUNNING d-load pid 123", 3},
+	} {
+		t.Run(fmt.Sprintf("%d-%s", tc.code, tc.output), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			calls := 0
+			n := &controllerNode{run: func(context.Context, string) (string, string, int, error) {
+				calls++
+				return tc.output, "", tc.code, nil
+			}}
+			act := tr.Action{Node: "m01", Params: map[string]string{"cmd": "status d-load", "match": "^DONE d-load rc=0$", "pending_code": "4", "pending_match": "^RUNNING d-load pid [0-9]+$"}}
+			_, err := waitExecMatch(ctx, &tr.ActionContext{Nodes: map[string]tr.NodeRunner{"m01": n}}, act)
+			if err == nil || calls != 1 {
+				t.Fatalf("non-protocol answer not refused immediately: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
