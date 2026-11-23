@@ -18,3 +18,8 @@ packs/seaweed/worker/*.py -text
 packs/seaweed/worker/soak_native_worker.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 packs/seaweed/worker/soak_oracle.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 packs/seaweed/worker/vf_preflight.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# Checker pins authenticate canonical bytes on every checkout platform.
+/checkers/*.py text eol=lf
+/checkers/library.json text eol=lf
+/checkers/library.sha256 text eol=lf

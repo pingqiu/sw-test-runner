@@ -68,3 +68,4 @@ jobs:
           echo "guard refused the empty discovery, as required"
           python "$RUNNER_TEMP/guarded_unittest.py" "$PWD"
           python "$RUNNER_TEMP/guarded_unittest.py" "$GITHUB_WORKSPACE/scripts/tests"
+          python "$RUNNER_TEMP/guarded_unittest.py" "$GITHUB_WORKSPACE/checkers"
