@@ -10,9 +10,48 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestPathTransferRejectsSuffixBeyondReceiptLimit(t *testing.T) {
+	data := []byte("ledger")
+	sum := fmt.Sprintf("%x", sha256.Sum256(data))
+	for _, upload := range []bool{true, false} {
+		t.Run(fmt.Sprint(upload), func(t *testing.T) {
+			node := commandSSHFixtureResponder(t, nil, nil, func(_ string, ch ssh.Channel) {
+				var receipt string
+				if upload {
+					io.Copy(io.Discard, ch)
+					receipt = fmt.Sprintf("UPLOADED %s %d\n", sum, len(data))
+				} else {
+					fmt.Fprintf(ch, "%d\n%s", len(data), data)
+					receipt = "SHA256 " + sum + "\n"
+				}
+				fmt.Fprint(ch, receipt+strings.Repeat(" ", 4096-len(receipt))+"UNREAD-SUFFIX")
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			local := filepath.Join(t.TempDir(), "ledger")
+			var err error
+			if upload {
+				if err = os.WriteFile(local, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				err = node.UploadContext(ctx, local, "/ledger")
+			} else {
+				err = node.DownloadContext(ctx, "/ledger", local)
+				if _, statErr := os.Stat(local); !os.IsNotExist(statErr) {
+					t.Errorf("invalid evidence published: %v", statErr)
+				}
+			}
+			if err == nil {
+				t.Fatal("unread suffix accepted")
+			}
+		})
+	}
+}
 
 func TestPathTransferCanceledBeforeDispatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
