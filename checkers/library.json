@@ -1,12 +1,14 @@
 {
   "schema": "checker-library/v1",
   "files": {
-    "facts.py": "f6ba8efc63e0b00c73267d1657bebcf86a37b82e7331dcf668ea98389d454fca",
+    "facts.py": "bbc3f75e3d552d0ed55ae83f31c4516bba00afc7c6b000d7e6bbf16d169f7b48",
     "loader.py": "e2202a75dcf8f3162815c6c68dbd60c0ecd11d67974ba878d338c1e900c6d906"
   },
   "entries": [
     "read_ledger",
     "lease_bound",
-    "ack_window"
+    "ack_window",
+    "classify_write",
+    "image_exact"
   ]
 }
