@@ -55,6 +55,17 @@ class CheckerCommands(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.image(self.config, '../outside', '/l', '/i', '1', 1, 's', 'g', 'none')
 
+    def test_gate_calls_the_sealed_build_gate(self):
+        self.assertEqual(self.argv(m.gate(self.config))[3:],
+                         ['/sealed/packet/build/gate.py', 'check', '/sealed/packet/GATE.json'])
+
+    def test_hashes_explicit_output_files_without_interpreting_receipts(self):
+        a = m.evidence_hashes(self.config, ['/bundle/commands/grant.json', '/bundle/m01-checks.txt'])
+        self.assertEqual(self.argv(a), ['exec', 'sha256sum', '--',
+                         '/bundle/commands/grant.json', '/bundle/m01-checks.txt'])
+        with self.assertRaises(ValueError):
+            m.evidence_hashes(self.config, [])
+
     def test_shell_preserves_failure_and_not_counted_without_injection(self):
         bash = os.environ.get('BASH_FOR_TESTS', 'bash')
         with tempfile.TemporaryDirectory() as root:

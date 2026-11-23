@@ -51,3 +51,17 @@ heal but the finalizer heals and checks both hosts. After normal heal the same
 fallback performs no deletes and still proves modeled absence. Removing
 always makes the abort case fail with both modeled tables left present.
 This is controller-order evidence, not a real nft, unit or lab qualification.
+
+The current reference is recorded in CHECKER-REFERENCE.json (packet seal
+776a1fb7). It is a reference pin, not a pilot approval or an assertion that
+the seal has completed review. The gate call is build/gate.py check GATE.json,
+after the packet seal and SHA256SUMS check; it is not another data judge.
+
+Each exec command receipt contains the actual exit code, stdout, stderr and
+complete/incomplete transport outcome. The evidence_hashes action hashes the
+explicit collected output files and command receipts through sha256sum. Run
+it in bounded finalization after collection even when the checker failed;
+missing or unreadable files fail the action. Preserve its receipt in the
+bundle. A hash authenticates bytes only: it never makes an incomplete command
+answer complete or a failed checker pass. No hash action approves cleanup or
+release. The full scenario must wire these output paths and finalization.

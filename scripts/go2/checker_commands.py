@@ -37,3 +37,16 @@ def stopbound(c, ledger, journal):
 def summary(c, bundle, state, ready, m01_status, m02_status, run_id):
     return command(c, 'summary', 'summarize-go2.py', bundle, state, ready,
                    m01_status, m02_status, run_id)
+
+
+def gate(c):
+    return command(c, 'gate', 'build/gate.py', 'check',
+                   str(pathlib.PurePosixPath(c['packet']) / 'GATE.json'))
+
+
+def evidence_hashes(c, paths):
+    if not paths:
+        raise ValueError('explicit evidence files required')
+    return {'action': 'exec', 'node': c['node'],
+            'cmd': 'exec ' + shlex.join(['sha256sum', '--', *paths]),
+            'receipt_path': str(pathlib.PurePosixPath(c['receipts']) / 'evidence-hashes.json')}
