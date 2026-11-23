@@ -5,8 +5,8 @@ call these entries; they do not retain a second structural or timing predicate.
 The library uses only Python's standard library and performs no host actions.
 
 `read_ledger(bytes, mode)` returns records keyed by sequence, the exact judged
-snapshot bytes, the last ACK and metrics `(acked, exact, chainbreaks, malformed,
-torntail, gaps)`. LIVE ignores only an incomplete final line; FINAL requires
+snapshot bytes, the last ACK and a metrics dictionary with `acked`, `exact`,
+`chainbreaks` and `gaps`. LIVE ignores only an incomplete final line; FINAL requires
 termination. Complete malformed rows, duplicate blocks and unmatched terminal
 records raise `ValueError`. An unresolved intent remains valid evidence.
 Metrics are not a PASS verdict. Classification and image verification stay in
@@ -14,9 +14,9 @@ the calling packet in this extraction; they consume the shared records.
 
 `lease_bound(journal)` preserves the logged lease-bound interpretation and
 returns `(bound_ns, cause, error)`. Missing evidence returns an error, never an
-invented bound. `ack_window(record, bound_ns, drain_ns)` returns `None` only for
+invented bound. `ack_window(record, bound_ns, drain_ns)` returns `inside` only for
 an intent strictly before the bound and completion no later than bound + drain;
-otherwise it returns `requested` or `drain`. Callers must not treat missing
+otherwise it returns `requested_after_U` or `completed_after_drain`. Callers must not treat missing
 lease evidence or guest-kernel success as a target durability proof.
 
 `loader.load_library(root, manifest_sha256)` requires the exact manifest pin,

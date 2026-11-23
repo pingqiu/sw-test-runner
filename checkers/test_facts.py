@@ -20,7 +20,7 @@ def ack(seq=0, block=0):
 class Facts(unittest.TestCase):
     def test_exact_and_unresolved_intent(self):
         result = facts.read_ledger((intent() + ack() + intent(1, 1)).encode(), 'FINAL')
-        self.assertEqual(result['metrics'], (1, 1, 0, 0, 0, 0))
+        self.assertEqual(result['metrics'], {'acked': 1, 'exact': 1, 'chainbreaks': 0, 'gaps': 0})
         self.assertEqual(result['records'][1]['kind'], 'I')
 
     def test_duplicate_block_rejected(self):
@@ -45,15 +45,39 @@ class Facts(unittest.TestCase):
                 facts.read_ledger(raw.encode(), 'FINAL')
 
     def test_ack_boundaries(self):
-        self.assertIsNone(facts.ack_window({'iwall': 99, 'wall': 105}, 100, 5))
-        self.assertEqual(facts.ack_window({'iwall': 100, 'wall': 100}, 100, 5), 'requested')
-        self.assertEqual(facts.ack_window({'iwall': 99, 'wall': 106}, 100, 5), 'drain')
+        self.assertEqual(facts.ack_window({'iwall': 99, 'wall': 105}, 100, 5), 'inside')
+        self.assertEqual(facts.ack_window({'iwall': 100, 'wall': 100}, 100, 5), 'requested_after_U')
+        self.assertEqual(facts.ack_window({'iwall': 99, 'wall': 106}, 100, 5), 'completed_after_drain')
 
     def test_lease_bound_and_missing_evidence(self):
         journal = 'workspace lease: fenced volume=v replica=r epoch=1: lease expired at 2026-01-01T00:00:00Z without renewal\n'
         self.assertEqual(facts.lease_bound(journal)[0], 1767225600000000000)
         self.assertIsNotNone(facts.lease_bound('')[2])
         self.assertIsNotNone(facts.lease_bound(journal.replace('2026-01-01T00:00:00Z', 'bad'))[2])
+
+    def test_each_record_schema(self):
+        error = 'E\t0\t0\t5\t2\t101\n'
+        self.assertEqual(facts.read_ledger((intent() + error).encode(), 'FINAL')['records'][0]['errno'], 5)
+        for kind, schema in facts.RECORD_SCHEMA.items():
+            row = {'I': intent(), 'A': ack(), 'E': error}[kind]
+            for position in schema['numeric'] + schema['lsn']:
+                fields = row.rstrip('\n').split('\t')
+                fields[position] = 'bad'
+                prefix = '' if kind == 'I' else intent()
+                with self.subTest(kind=kind, position=position), self.assertRaises(ValueError):
+                    facts.read_ledger((prefix + '\t'.join(fields) + '\n').encode(), 'FINAL')
+
+    def test_first_fence_uses_latest_renewal_bound(self):
+        journal = (
+            'workspace lease: renewal failed after 1s (lease valid until 2026-01-01T00:00:00Z): timeout\n'
+            'workspace lease: renewal failed after 1s (lease valid until 2026-01-01T00:00:01Z): timeout\n'
+            'workspace lease: fenced volume=v replica=r epoch=1: lease expired after a failed renewal\n'
+            'workspace lease: fenced volume=v replica=r epoch=1: later diagnostic\n'
+        )
+        bound, cause, error = facts.lease_bound(journal)
+        self.assertEqual(bound, facts.ts('2026-01-01T00:00:01Z'))
+        self.assertEqual(cause, 'lease expired after a failed renewal')
+        self.assertIsNone(error)
 
 
 class Mutants(unittest.TestCase):
@@ -72,11 +96,11 @@ class Mutants(unittest.TestCase):
 
     def test_read_ledger_orphan_ack_mutant(self):
         m = self.mutant("r = recs.get(seq)", "r = recs.setdefault(seq, {'seq': seq, 'block': block, 'sha': p[3], 'kind': 'I', 'iwall': 0})")
-        self.assertEqual(m.read_ledger(ack().encode(), 'FINAL')['metrics'][0], 1)
+        self.assertEqual(m.read_ledger(ack().encode(), 'FINAL')['metrics']['acked'], 1)
 
     def test_ack_window_mutant(self):
         m = self.mutant("if r['iwall'] >= U:", "if r['iwall'] > U:")
-        self.assertIsNone(m.ack_window({'iwall': 100, 'wall': 100}, 100, 5))
+        self.assertEqual(m.ack_window({'iwall': 100, 'wall': 100}, 100, 5), 'inside')
 
     def test_lease_bound_mutant(self):
         m = self.mutant("return (None, None, 'no fence line: the old owner never fenced')", "return (0, 'invented', None)")

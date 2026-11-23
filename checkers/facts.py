@@ -1,6 +1,13 @@
 """One structural ledger judge and shared lease/acknowledgement predicates."""
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+RECORD_SCHEMA = {
+    'I': {'fields': 7, 'numeric': (1, 2, 5, 6), 'lsn': (4,)},
+    'A': {'fields': 8, 'numeric': (1, 2, 6, 7), 'lsn': (4, 5)},
+    'E': {'fields': 6, 'numeric': (1, 2, 3, 4, 5), 'lsn': ()},
+}
 
 
 def read_ledger(data, mode):
@@ -23,10 +30,14 @@ def read_ledger(data, mode):
             continue
         p = raw.split('\t')
         k = p[0]
-        positions = {'I': (1, 2, 5, 6), 'A': (1, 2, 6, 7), 'E': (1, 2, 3, 4, 5)}
-        if k not in positions or len(p) != {'I': 7, 'A': 8, 'E': 6}[k] or any(not re.fullmatch(r'[0-9]+', p[i]) for i in positions[k]):
+        schema = RECORD_SCHEMA.get(k)
+        if schema is None or len(p) != schema['fields']:
             raise ValueError('line %d: malformed record' % n)
-        if k != 'E' and (not re.fullmatch('[0-9a-f]{64}', p[3]) or any(x != 'NA' and not re.fullmatch(r'[0-9]+', x) for x in p[4:5 if k == 'I' else 6])):
+        if any(not re.fullmatch(r'[0-9]+', p[i]) for i in schema['numeric']):
+            raise ValueError('line %d: malformed record' % n)
+        if k != 'E' and not re.fullmatch('[0-9a-f]{64}', p[3]):
+            raise ValueError('line %d: malformed digest or LSN' % n)
+        if any(p[i] != 'NA' and not re.fullmatch(r'[0-9]+', p[i]) for i in schema['lsn']):
             raise ValueError('line %d: malformed digest or LSN' % n)
         seq, block = int(p[1]), int(p[2])
         if k == 'I':
@@ -53,7 +64,8 @@ def read_ledger(data, mode):
         previous, last_ack = h1, r
     gaps = sum(q not in resolved for q in intents[:-1])
     return {'records': recs, 'snapshot': data, 'last_ack': last_ack,
-            'metrics': (acked, exact, chainbreaks, 0, 0, gaps)}
+            'metrics': {'acked': acked, 'exact': exact,
+                        'chainbreaks': chainbreaks, 'gaps': gaps}}
 
 
 def ts(s):
@@ -61,7 +73,8 @@ def ts(s):
     m = re.match('^(\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d)(?:\\.(\\d{1,9}))?Z$', s)
     if not m:
         raise ValueError('time %r' % s)
-    base = int(datetime.strptime(m.group(1), '%Y-%m-%dT%H:%M:%S').replace(tzinfo=__import__('datetime').timezone.utc).timestamp())
+    parsed = datetime.strptime(m.group(1), '%Y-%m-%dT%H:%M:%S')
+    base = int(parsed.replace(tzinfo=timezone.utc).timestamp())
     return base * 10 ** 9 + int((m.group(2) or '0').ljust(9, '0'))
 
 def lease_bound(j):
@@ -69,6 +82,8 @@ def lease_bound(j):
     valid = re.findall('workspace lease: renewal failed after .*lease valid until (\\S+)\\): ', j, re.M)
     if not fence:
         return (None, None, 'no fence line: the old owner never fenced')
+    # One incarnation per journal: the first fence ends its validity; the last
+    # renewal failure supplies the latest bound if that fence omits its time.
     cause = fence[0]
     m = re.search('lease expired at (\\S+) without', cause)
     try:
@@ -80,8 +95,13 @@ def lease_bound(j):
     return (U, cause, None)
 
 def ack_window(r, U, drain):
+    """Classify ACK timing as inside, requested_after_U or completed_after_drain.
+
+    An intent at the lease bound is outside; completion at the drain bound is
+    inside. The request-time violation takes precedence when both apply.
+    """
     if r['iwall'] >= U:
-        return 'requested'
+        return 'requested_after_U'
     if r['wall'] > U + drain:
-        return 'drain'
-    return None
+        return 'completed_after_drain'
+    return 'inside'
