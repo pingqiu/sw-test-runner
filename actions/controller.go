@@ -5,6 +5,7 @@ import (
 	"fmt"
 	tr "github.com/pingqiu/sw-test-runner"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,6 +52,17 @@ func waitExecMatch(ctx context.Context, a *tr.ActionContext, act tr.Action) (map
 			return nil, err
 		}
 	}
+	pendingCode, pending := 0, (*regexp.Regexp)(nil)
+	if text := act.Params["pending_code"]; text != "" {
+		pendingCode, err = strconv.Atoi(text)
+		if err != nil || pendingCode <= 0 || act.Params["pending_match"] == "" {
+			return nil, fmt.Errorf("wait_exec_match: positive pending_code requires pending_match")
+		}
+		pending, err = regexp.Compile(act.Params["pending_match"])
+		if err != nil {
+			return nil, err
+		}
+	}
 	interval := time.Second
 	if text := act.Params["interval"]; text != "" {
 		interval, err = time.ParseDuration(text)
@@ -74,13 +86,13 @@ func waitExecMatch(ctx context.Context, a *tr.ActionContext, act tr.Action) (map
 		if err != nil {
 			return map[string]string{"value": last}, fmt.Errorf("wait_exec_match: %w", err)
 		}
-		if code != 0 {
+		if code != 0 && !(code == pendingCode && pending != nil && pending.MatchString(last)) {
 			return map[string]string{"value": last}, fmt.Errorf("wait_exec_match: code=%d stderr=%q", code, stderr)
 		}
 		if fail != nil && fail.MatchString(last) {
 			return map[string]string{"value": last}, fmt.Errorf("wait_exec_match: terminal receipt %q", last)
 		}
-		if match.MatchString(last) {
+		if code == 0 && match.MatchString(last) {
 			return map[string]string{"value": last}, nil
 		}
 		timer := time.NewTimer(interval)

@@ -99,3 +99,23 @@ func TestUploadPathUsesCallerContext(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// host.sh status returns 4 while the recorded phase invocation is active.
+// A matching RUNNING is pending, never completion; DONE still needs rc=0.
+func TestWaitExecMatchHostPhasePendingExit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	calls := 0
+	n := &controllerNode{run: func(context.Context, string) (string, string, int, error) {
+		calls++
+		if calls == 1 {
+			return "RUNNING d-load pid 123", "", 4, nil
+		}
+		return "DONE d-load rc=0", "", 0, nil
+	}}
+	a := tr.Action{Node: "m01", Params: map[string]string{"cmd": "status d-load", "match": "^DONE d-load rc=0$", "pending_code": "4", "pending_match": "^RUNNING d-load pid [0-9]+$", "interval": "1ns"}}
+	out, err := waitExecMatch(ctx, &tr.ActionContext{Nodes: map[string]tr.NodeRunner{"m01": n}}, a)
+	if err != nil || calls != 2 || out["value"] != "DONE d-load rc=0" {
+		t.Fatalf("calls=%d out=%v err=%v", calls, out, err)
+	}
+}

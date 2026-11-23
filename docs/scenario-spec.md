@@ -362,7 +362,9 @@ hosts require Python 3. Neither method proves host service settlement.
 
 `wait_exec_match` requires `node`, `cmd`, `match` (regexp), and a context deadline
 (scenario/action timeout). `fail_match` is checked before success; nonzero command
-exit and transport errors fail immediately. `interval` defaults to 1s and must
+exit and transport errors fail immediately, except an explicitly paired positive
+`pending_code` and `pending_match` (for example rc4 + RUNNING). This exception
+never qualifies success: a matching DONE still requires rc0. `interval` defaults to 1s and must
 be positive. Return `RUNNING ...` while pending; an affirmative `DONE ... rc=0`
 receipt qualifies success. A closed port or unreadable receipt never does.
 
