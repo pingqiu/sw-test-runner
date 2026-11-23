@@ -1,0 +1,22 @@
+name: go2-heal-fallback
+phases:
+  - name: heal-fallback
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 35s
+        cmd: bash '{{ m02_packet }}/host.sh' bounded '{{ release_deadline }}' bash '{{ m02_packet }}/nftguard.sh' heal
+      - action: exec
+        node: m02
+        timeout: 35s
+        cmd: bash '{{ m02_packet }}/host.sh' bounded '{{ release_deadline }}' bash '{{ m02_packet }}/nftguard.sh' absent
+      - action: exec
+        node: m01
+        timeout: 35s
+        cmd: bash '{{ m01_packet }}/host.sh' bounded '{{ release_deadline }}' bash '{{ m01_packet }}/nftguard.sh' heal
+      - action: exec
+        node: m01
+        timeout: 35s
+        cmd: bash '{{ m01_packet }}/host.sh' bounded '{{ release_deadline }}' bash '{{ m01_packet }}/nftguard.sh' absent
+
