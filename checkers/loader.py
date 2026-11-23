@@ -14,7 +14,7 @@ def _verified_code(root, manifest_sha256):
     if hashlib.sha256(raw).hexdigest() != manifest_sha256:
         raise ValueError('checker manifest mismatch')
     manifest = json.loads(raw)
-    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py'}:
+    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py'}:
         raise ValueError('unsupported checker closure')
     code = {}
     for name, pin in manifest['files'].items():
@@ -41,6 +41,9 @@ def load_library(root, manifest_sha256):
     def resources_absent_cli(packet_file, arguments):
         return inventory.main(packet_file, arguments, module.resources_absent)
 
+    properties = types.ModuleType('sealed_unit_properties')
+    exec(compile(code['unit_properties.py'], str(root / 'unit_properties.py'), 'exec'), properties.__dict__)
+    module.show_unit_properties = properties.show_unit_properties
     module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module
