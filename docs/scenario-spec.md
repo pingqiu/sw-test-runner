@@ -365,3 +365,10 @@ hosts require Python 3. Neither method proves host service settlement.
 exit and transport errors fail immediately. `interval` defaults to 1s and must
 be positive. Return `RUNNING ...` while pending; an affirmative `DONE ... rc=0`
 receipt qualifies success. A closed port or unreadable receipt never does.
+
+`exec` may specify a fresh controller-side `receipt_path` in the run bundle.
+It records a command hash/node intent before dispatch and the code/stdout/stderr
+after the answer. A transport error keeps `complete=false` even if partial
+stdout says CLEAN. Missing, truncated, incomplete or reused receipts never
+qualify cleanup or release. `is_native: true` on a topology node runs controller
+commands on the workstation through its configured Bash, without SSH or WSL.

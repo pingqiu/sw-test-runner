@@ -54,6 +54,13 @@ func execAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		return nil, err
 	}
 
+	receipt, err := beginReceipt(act, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("exec receipt before dispatch: %w", err)
+	}
+	if receipt != nil {
+		defer receipt.Close()
+	}
 	root := act.Params["root"] == "true"
 	var stdout, stderr string
 	var code int
@@ -61,6 +68,9 @@ func execAction(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		stdout, stderr, code, err = node.RunRoot(ctx, cmd)
 	} else {
 		stdout, stderr, code, err = node.Run(ctx, cmd)
+	}
+	if receiptErr := writeReceipt(receipt, act.Node, cmd, stdout, stderr, code, err); receiptErr != nil {
+		return nil, fmt.Errorf("exec receipt: %w", receiptErr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
