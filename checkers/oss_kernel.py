@@ -1,5 +1,7 @@
 """Pure checks over complete, bound kernel observations supplied by a producer."""
 import re
+import hashlib
+from copy import deepcopy
 
 
 def _references(observation, field):
@@ -45,45 +47,78 @@ def _head_roots(head):
     return roots
 
 
-def root_names_exist(expected_heads, heads, objects):
-    """K6: prove existence in the declared scope, not flatness or image content."""
-    pending = []
-    unknown = set()
-    checked = set()
-    missing = set()
-    if (not isinstance(expected_heads, list) or not expected_heads
-            or any(not isinstance(name, str) or not name for name in expected_heads)
-            or not isinstance(heads, dict) or not isinstance(objects, dict)):
-        return {'verdict': 'UNKNOWN', 'checked': [], 'missing': [],
-                'unknown': ['invalid scope or observation maps']}
-    if len(set(expected_heads)) != len(expected_heads):
-        unknown.add('duplicate HEAD scope')
-    if set(heads) - set(expected_heads):
-        unknown.add('unexpected HEAD observation')
-    for volume in expected_heads:
-        head = heads.get(volume)
-        names = _head_roots(head)
-        if names is None:
-            unknown.add(volume)
-            continue
-        pending.extend(names)
+def _read_observation(reader, name):
+    try:
+        return deepcopy(reader(name))
+    except Exception:
+        return None
+
+
+def _head_version(head):
+    if _head_roots(head) is None:
+        return None
+    if head['exists'] and (not isinstance(head.get('generation'), str) or not head['generation']):
+        return None
+    return {key: head.get(key) for key in ('exists', 'generation', 'state', 'current', 'snapshots')}
+
+
+def _inspect_names(names, read_object):
+    pending = list(names)
+    checked, missing, unknown = set(), set(), set()
     while pending:
         name = pending.pop()
         if name in checked:
             continue
         checked.add(name)
-        observation = objects.get(name)
-        names = _references(observation, 'references')
-        if names is None:
+        observation = _read_observation(read_object, name)
+        references = _references(observation, 'references')
+        if references is None:
             unknown.add(name)
             continue
         if not observation['exists']:
             missing.add(name)
             continue
-        pending.extend(names)
+        pending.extend(references)
+    return checked, missing, unknown
+
+
+def root_names_exist(expected_heads, read_head, read_object, max_attempts=3):
+    """K6 at a stable filer HEAD generation; changed observations are retried."""
+    checked, missing, unknown = set(), set(), set()
+    generations = {}
+    if (not isinstance(expected_heads, list) or not expected_heads
+            or any(not isinstance(name, str) or not name for name in expected_heads)
+            or not callable(read_head) or not callable(read_object)
+            or type(max_attempts) is not int or max_attempts < 1):
+        return {'verdict': 'UNKNOWN', 'checked': [], 'missing': [],
+                'unknown': ['invalid scope or filer readers'], 'generations': {}}
+    if len(set(expected_heads)) != len(expected_heads):
+        unknown.add('duplicate HEAD scope')
+    for volume in dict.fromkeys(expected_heads):
+        for attempt in range(max_attempts):
+            head = _read_observation(read_head, volume)
+            before = _head_version(head)
+            if before is None:
+                unknown.add(volume)
+                break
+            attempt_checked, attempt_missing, attempt_unknown = _inspect_names(
+                _head_roots(head), read_object)
+            after = _head_version(_read_observation(read_head, volume))
+            if after is None:
+                unknown.add(volume)
+                break
+            if before != after:
+                if attempt + 1 == max_attempts:
+                    unknown.add(volume)
+                continue
+            generations[volume] = before['generation']
+            checked.update(attempt_checked)
+            missing.update(attempt_missing)
+            unknown.update(attempt_unknown)
+            break
     verdict = 'FAIL' if missing else 'UNKNOWN' if unknown else 'PASS'
     return {'verdict': verdict, 'checked': sorted(checked),
-            'missing': sorted(missing), 'unknown': sorted(unknown)}
+            'missing': sorted(missing), 'unknown': sorted(unknown), 'generations': generations}
 
 
 def _causal_events(scope, observation, scope_field):
@@ -116,37 +151,49 @@ def _causal_events(scope, observation, scope_field):
     return expected, events
 
 
-def entries_data_acknowledged(scope, observation):
-    """K8: judge new-entry visibility against causally prior matching data ACKs."""
-    try:
-        expected, events = _causal_events(scope, observation, 'entries')
-    except ValueError as error:
-        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
-    for event in events:
-        if (event.get('kind') not in ('data_ack', 'entry_visible')
-                or event.get('name') not in expected
-                or not isinstance(event.get('data_id'), str) or not event['data_id']
-                or type(event.get('length')) is not int or event['length'] < 0
-                or not isinstance(event.get('sha256'), str)
-                or not re.fullmatch('[0-9a-f]{64}', event['sha256'])):
-            return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [],
-                    'unknown': ['invalid event at ordinal %d' % event['ordinal']]}
-    acknowledgements = set()
-    checked = set()
-    violations = []
-    for event in observation['events']:
-        identity = (event['name'], event['data_id'], event['length'], event['sha256'])
-        if event['kind'] == 'data_ack':
-            acknowledgements.add(identity)
-        elif event['kind'] == 'entry_visible':
-            checked.add(event['name'])
-            if identity not in acknowledgements:
-                violations.append({'name': event['name'], 'ordinal': event['ordinal'],
-                                   'reason': 'no prior matching data ACK'})
-    unknown = sorted(set(expected) - checked)
-    verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
-    return {'verdict': verdict, 'checked': sorted(checked),
-            'violations': violations, 'unknown': unknown}
+def entries_match_names(volume, list_entries, read_entry):
+    """K8: fully readable filer files have the complete SHA-256 in their names."""
+    checked, violations, unknown = set(), [], []
+    if (not isinstance(volume, str) or not volume or volume in ('.', '..')
+            or any(char in volume for char in '/\\\x00')
+            or not callable(list_entries) or not callable(read_entry)):
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': ['invalid readers or volume']}
+    for namespace in ('pool', 'seg', 'root'):
+        prefix = volume + '/' + namespace + '/'
+        names = _read_observation(list_entries, prefix)
+        if not isinstance(names, list):
+            unknown.append(prefix)
+            continue
+        seen = set()
+        for name in names:
+            if (not isinstance(name, str) or not name.startswith(prefix)
+                    or any(part in ('', '.', '..') for part in name.split('/'))
+                    or '\\' in name or '\x00' in name or name in seen):
+                unknown.append(prefix + ' invalid inventory')
+                continue
+            seen.add(name)
+            suffix = name[len(prefix):]
+            patterns = {'pool': r'[^/]+/[0-9]+-[0-9a-f]{64}',
+                        'seg': r'[^/]+-[0-9a-f]{64}', 'root': r'[0-9a-f]{64}'}
+            if not re.fullmatch(patterns[namespace], suffix):
+                violations.append({'name': name, 'reason': 'invalid content-address name'})
+                continue
+            record = _read_observation(read_entry, name)
+            if (not isinstance(record, dict) or type(record.get('producer_exit')) is not int
+                    or record['producer_exit'] != 0 or record.get('exists') is not True
+                    or type(record.get('size')) is not int or record['size'] < 0
+                    or not isinstance(record.get('content'), bytes)):
+                unknown.append(name)
+                continue
+            data, size = record['content'], record['size']
+            expected_sha = name.rsplit('/', 1)[-1].rsplit('-', 1)[-1]
+            checked.add(name)
+            if len(data) != size:
+                violations.append({'name': name, 'reason': 'incomplete filer content'})
+            if hashlib.sha256(data).hexdigest() != expected_sha:
+                violations.append({'name': name, 'reason': 'content does not match name'})
+    return {'verdict': 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS',
+            'checked': sorted(checked), 'violations': violations, 'unknown': sorted(set(unknown))}
 
 
 def _valid_activity(activity):
@@ -159,16 +206,33 @@ def _valid_activity(activity):
 
 
 def snapshot_removals_safe(scope, observation):
-    """K9 only: HEAD snapshot activity excludes immutable-name removal."""
+    """K9: filer metadata order excludes pool deletion during HEAD snapshot activity."""
     try:
         expected, events = _causal_events(scope, observation, 'names')
         if not _valid_activity(observation.get('initial_activity')):
             raise ValueError('initial HEAD activity is unknown')
+        volume = scope['binding']['volume']
+        if (observation.get('source') != 'filer_metadata'
+                or not isinstance(observation.get('stream_id'), str) or not observation['stream_id']
+                or not isinstance(observation.get('initial_generation'), str)
+                or not observation['initial_generation']
+                or any(not name.startswith(volume + '/pool/') for name in expected)):
+            raise ValueError('metadata stream or pool scope is unknown')
+        generation = observation['initial_generation']
         for event in events:
-            if event.get('kind') == 'head_activity':
-                if not _valid_activity(event.get('activity')):
+            if event.get('kind') == 'head_update':
+                if (not _valid_activity(event.get('activity'))
+                        or event.get('entry') != volume + '/HEAD'
+                        or event.get('before_generation') != generation
+                        or not isinstance(event.get('generation'), str)
+                        or not event['generation'] or event['generation'] == generation):
                     raise ValueError('HEAD activity is unknown')
-            elif event.get('kind') != 'remove_name' or event.get('name') not in expected:
+                generation = event['generation']
+            elif (event.get('kind') != 'delete_entry'
+                    or not isinstance(event.get('name'), str)
+                    or not event['name'].startswith(volume + '/')
+                    or '\\' in event['name'] or '\x00' in event['name']
+                    or any(part in ('', '.', '..') for part in event['name'].split('/'))):
                 raise ValueError('unknown removal event')
     except ValueError as error:
         return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
@@ -176,9 +240,9 @@ def snapshot_removals_safe(scope, observation):
     checked = set()
     violations = []
     for event in events:
-        if event['kind'] == 'head_activity':
+        if event['kind'] == 'head_update':
             activity = event['activity']
-        elif event['kind'] == 'remove_name':
+        elif event['kind'] == 'delete_entry' and event['name'].startswith(volume + '/pool/'):
             checked.add(event['name'])
             if activity['kind'] == 'snap':
                 violations.append({'name': event['name'], 'ordinal': event['ordinal'],

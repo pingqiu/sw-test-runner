@@ -53,7 +53,7 @@ def load_library(root, manifest_sha256):
     kernel = types.ModuleType('sealed_kernel')
     exec(compile(code['oss_kernel.py'], str(root / 'oss_kernel.py'), 'exec'), kernel.__dict__)
     module.root_names_exist = kernel.root_names_exist
-    module.entries_data_acknowledged = kernel.entries_data_acknowledged
+    module.entries_match_names = kernel.entries_match_names
     module.snapshot_removals_safe = kernel.snapshot_removals_safe
     module.acknowledged_writes_synced = kernel.acknowledged_writes_synced
     module.head_updates_conditional = kernel.head_updates_conditional

@@ -1,8 +1,19 @@
+from copy import deepcopy
 import unittest
 import ast
 from pathlib import Path
 import types
-from oss_kernel import root_names_exist
+from oss_kernel import root_names_exist as filer_root_names_exist
+
+
+def check_graph(judge, expected_heads, heads, objects, **options):
+    return judge(
+        expected_heads, lambda volume: heads.get(volume), lambda name: objects.get(name), **options
+    )
+
+
+def root_names_exist(expected_heads, heads, objects, **options):
+    return check_graph(filer_root_names_exist, expected_heads, heads, objects, **options)
 
 
 def snapshot_graph():
@@ -13,6 +24,7 @@ def snapshot_graph():
             'state': 'active',
             'current': 'target/root/live',
             'snapshots': {'saved': {'root': 'target/root/saved'}},
+            'generation': 'g1',
         }
     }
     objects = {
@@ -32,10 +44,89 @@ def snapshot_graph():
         'source/pool/shared': {'producer_exit': 0, 'exists': True, 'references': []},
         'target/pool/shared': {'producer_exit': 0, 'exists': True, 'references': []},
     }
-    return heads, objects
+    return (heads, objects)
 
 
 class RootNames(unittest.TestCase):
+    def test_changed_head_retries_and_discards_old_graph_findings(self):
+        heads, objects = snapshot_graph()
+        old = heads['target']
+        new = deepcopy(old)
+        new.update(generation='g2', snapshots={})
+        objects['target/seg/saved'].update(exists=False, references=[])
+        responses = iter([old, new, new, new])
+        result = filer_root_names_exist(
+            ['target'], lambda _: next(responses), lambda name: objects[name], max_attempts=2
+        )
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(result['missing'], [])
+        self.assertEqual(result['generations'], {'target': 'g2'})
+
+    def test_generation_churn_exhausts_a_bounded_retry_as_unknown(self):
+        heads, objects = snapshot_graph()
+        calls = []
+
+        def read_head(volume):
+            calls.append(volume)
+            return dict(heads[volume], generation='g' + str(len(calls)))
+
+        result = filer_root_names_exist(
+            ['target'], read_head, lambda name: objects[name], max_attempts=2
+        )
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertEqual(result['generations'], {})
+        self.assertEqual(len(calls), 4)
+
+    def test_failed_head_reread_does_not_certify_a_missing_old_name(self):
+        heads, objects = snapshot_graph()
+        objects['target/seg/saved'].update(exists=False, references=[])
+        calls = []
+
+        def read_head(volume):
+            calls.append(volume)
+            if len(calls) == 2:
+                raise OSError('filer read failed')
+            return heads[volume]
+
+        result = filer_root_names_exist(['target'], read_head, lambda name: objects[name])
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertEqual(result['missing'], [])
+
+    def test_omitted_generation_recheck_mutant(self):
+        source = (Path(__file__).parent / 'oss_kernel.py').read_text()
+        anchor = 'if before != after:'
+        self.assertEqual(source.count(anchor), 1)
+        module = types.ModuleType('filer_generation_mutant')
+        exec(compile(source.replace(anchor, 'if False:'), '<mutant>', 'exec'), module.__dict__)
+
+        def run(judge):
+            heads, objects = snapshot_graph()
+            responses = iter([heads['target'], dict(heads['target'], generation='g2')])
+            return judge(
+                ['target'], lambda _: next(responses), lambda name: objects[name], max_attempts=1
+            )
+
+        self.assertEqual(run(filer_root_names_exist)['verdict'], 'UNKNOWN')
+        self.assertEqual(run(module.root_names_exist)['verdict'], 'PASS')
+
+    def test_direct_filer_head_is_reread_after_the_graph(self):
+        heads, objects = snapshot_graph()
+        calls = []
+
+        def read_head(volume):
+            calls.append(('HEAD', volume))
+            return heads[volume]
+
+        def read_object(name):
+            calls.append(('object', name))
+            return objects[name]
+
+        result = filer_root_names_exist(['target'], read_head, read_object)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(calls[0], ('HEAD', 'target'))
+        self.assertEqual(calls[-1], ('HEAD', 'target'))
+        self.assertEqual(sum((kind == 'HEAD' for kind, _ in calls)), 2)
+
     def test_deleted_segment_fault_is_a_reference_violation(self):
         heads, objects = snapshot_graph()
         self.assertEqual(root_names_exist(['target'], heads, objects)['verdict'], 'PASS')
@@ -81,8 +172,8 @@ class RootNames(unittest.TestCase):
         for anchor, replacement, deleted in [
             ('for snapshot in snapshots.values():', 'for snapshot in ():', 'source/pool/shared'),
             (
-                'observation = objects.get(name)',
-                "observation = objects.get('target/' + name.split('/', 1)[-1], objects.get(name))",
+                'observation = _read_observation(read_object, name)',
+                "observation = _read_observation(read_object, 'target/' + name.split('/', 1)[-1])",
                 'source/pool/shared',
             ),
             ('missing.add(name)', 'pass', 'target/seg/saved'),
@@ -98,7 +189,8 @@ class RootNames(unittest.TestCase):
                 objects[deleted].update(exists=False, references=[])
                 self.assertEqual(root_names_exist(['target'], heads, objects)['verdict'], 'FAIL')
                 self.assertEqual(
-                    module.root_names_exist(['target'], heads, objects)['verdict'], 'PASS'
+                    check_graph(module.root_names_exist, ['target'], heads, objects)['verdict'],
+                    'PASS',
                 )
 
     def test_current_and_every_snapshot_root_are_traversed(self):
@@ -112,6 +204,7 @@ class RootNames(unittest.TestCase):
                     'first': {'root': 'target/root/first'},
                     'second': {'root': 'target/root/second'},
                 },
+                'generation': 'g1',
             }
         }
         objects = {
@@ -138,6 +231,7 @@ class RootNames(unittest.TestCase):
                 'state': 'deleting',
                 'current': 'missing',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {'missing': {'producer_exit': 0, 'exists': False, 'references': []}}
@@ -153,6 +247,7 @@ class RootNames(unittest.TestCase):
                 'state': 'deleted',
                 'current': 'missing',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {'missing': {'producer_exit': 0, 'exists': False, 'references': []}}
@@ -168,6 +263,7 @@ class RootNames(unittest.TestCase):
                         'state': state,
                         'current': None,
                         'snapshots': {},
+                        'generation': 'g1',
                     }
                 }
                 self.assertEqual(root_names_exist(['v'], heads, {})['verdict'], 'UNKNOWN')
@@ -185,6 +281,7 @@ class RootNames(unittest.TestCase):
                 'state': 'deleting',
                 'current': 'r',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {'r': {'producer_exit': 0, 'exists': False, 'references': []}}
@@ -192,7 +289,9 @@ class RootNames(unittest.TestCase):
             with self.subTest(state=state):
                 heads['v']['state'] = state
                 self.assertEqual(root_names_exist(['v'], heads, objects)['verdict'], 'PASS')
-                self.assertEqual(module.root_names_exist(['v'], heads, objects)['verdict'], 'FAIL')
+                self.assertEqual(
+                    check_graph(module.root_names_exist, ['v'], heads, objects)['verdict'], 'FAIL'
+                )
 
     def test_complete_foreign_owner_graph(self):
         heads = {
@@ -202,6 +301,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'target/root/h',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {
@@ -221,6 +321,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'v/root/h',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {
@@ -236,18 +337,13 @@ class RootNames(unittest.TestCase):
             (['v'], {}, {}),
             (
                 ['v'],
-                {'v': {'producer_exit': 1, 'exists': False, 'current': None, 'snapshots': {}}},
-                {},
-            ),
-            (
-                ['v'],
                 {
                     'v': {
-                        'producer_exit': 0,
-                        'exists': True,
-                        'state': 'active',
-                        'current': 'r',
+                        'producer_exit': 1,
+                        'exists': False,
+                        'current': None,
                         'snapshots': {},
+                        'generation': None,
                     }
                 },
                 {},
@@ -261,24 +357,63 @@ class RootNames(unittest.TestCase):
                         'state': 'active',
                         'current': 'r',
                         'snapshots': {},
+                        'generation': 'g1',
+                    }
+                },
+                {},
+            ),
+            (
+                ['v'],
+                {
+                    'v': {
+                        'producer_exit': 0,
+                        'exists': True,
+                        'state': 'active',
+                        'current': 'r',
+                        'snapshots': {},
+                        'generation': 'g1',
                     }
                 },
                 {'r': {'producer_exit': 1, 'exists': False, 'references': []}},
             ),
             (
                 ['v'],
-                {'v': {'producer_exit': 0, 'exists': False, 'current': 'r', 'snapshots': {}}},
+                {
+                    'v': {
+                        'producer_exit': 0,
+                        'exists': False,
+                        'current': 'r',
+                        'snapshots': {},
+                        'generation': None,
+                    }
+                },
                 {'r': {'producer_exit': 0, 'exists': True, 'references': []}},
             ),
             ([], {}, {}),
             (
                 ['v', 'v'],
-                {'v': {'producer_exit': 0, 'exists': False, 'current': None, 'snapshots': {}}},
+                {
+                    'v': {
+                        'producer_exit': 0,
+                        'exists': False,
+                        'current': None,
+                        'snapshots': {},
+                        'generation': None,
+                    }
+                },
                 {},
             ),
             (
                 ['v'],
-                {'v': {'producer_exit': False, 'exists': False, 'current': None, 'snapshots': {}}},
+                {
+                    'v': {
+                        'producer_exit': False,
+                        'exists': False,
+                        'current': None,
+                        'snapshots': {},
+                        'generation': None,
+                    }
+                },
                 {},
             ),
         ]
@@ -294,6 +429,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'missing',
                 'snapshots': {'snapshot1': {'root': 'unreadable'}},
+                'generation': 'g1',
             }
         }
         objects = {
@@ -313,6 +449,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'owner/pool/h',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {'other/pool/h': {'producer_exit': 0, 'exists': True, 'references': []}}
@@ -328,6 +465,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'r',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {
@@ -336,11 +474,25 @@ class RootNames(unittest.TestCase):
         }
         self.assertEqual(
             root_names_exist(['v'], heads, objects),
-            {'verdict': 'PASS', 'checked': ['r', 's'], 'missing': [], 'unknown': []},
+            {
+                'verdict': 'PASS',
+                'checked': ['r', 's'],
+                'missing': [],
+                'unknown': [],
+                'generations': {'v': 'g1'},
+            },
         )
 
     def test_absent_head_does_not_create_a_missing_reference(self):
-        heads = {'v': {'producer_exit': 0, 'exists': False, 'current': None, 'snapshots': {}}}
+        heads = {
+            'v': {
+                'producer_exit': 0,
+                'exists': False,
+                'current': None,
+                'snapshots': {},
+                'generation': None,
+            }
+        }
         self.assertEqual(root_names_exist(['v'], heads, {})['verdict'], 'PASS')
 
     def test_definite_absence_survives_duplicate_scope(self):
@@ -351,6 +503,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'r',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         objects = {'r': {'producer_exit': 0, 'exists': False, 'references': []}}
@@ -366,6 +519,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'r',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         for observation in [
@@ -389,6 +543,7 @@ class RootNames(unittest.TestCase):
                 'state': 'active',
                 'current': 'r',
                 'snapshots': {},
+                'generation': 'g1',
             }
         }
         for anchor, replacement, objects, expected in [
@@ -408,13 +563,15 @@ class RootNames(unittest.TestCase):
                     module.__dict__,
                 )
                 self.assertEqual(root_names_exist(['v'], heads, objects)['verdict'], expected)
-                self.assertEqual(module.root_names_exist(['v'], heads, objects)['verdict'], 'PASS')
+                self.assertEqual(
+                    check_graph(module.root_names_exist, ['v'], heads, objects)['verdict'], 'PASS'
+                )
 
     def test_deciding_function_and_runtime_export_inventory(self):
         sites = []
         entries = {
             'root_names_exist',
-            'entries_data_acknowledged',
+            'entries_match_names',
             'snapshot_removals_safe',
             'acknowledged_writes_synced',
             'head_updates_conditional',

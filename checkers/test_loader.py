@@ -1,3 +1,4 @@
+from test_oss_kernel import check_graph
 import hashlib
 import json
 from pathlib import Path
@@ -34,27 +35,41 @@ class Loader(unittest.TestCase):
                     'state': 'active',
                     'current': 'r',
                     'snapshots': {},
+                    'generation': 'g1',
                 }
             }
             objects = {'r': {'producer_exit': 0, 'exists': False, 'references': []}}
-            self.assertEqual(library.root_names_exist(['v'], heads, objects)['verdict'], 'FAIL')
+            self.assertEqual(
+                check_graph(library.root_names_exist, ['v'], heads, objects)['verdict'], 'FAIL'
+            )
             from test_oss_kernel import snapshot_graph
 
             graph_heads, graph_objects = snapshot_graph()
             self.assertEqual(
-                library.root_names_exist(['target'], graph_heads, graph_objects)['verdict'], 'PASS'
+                check_graph(library.root_names_exist, ['target'], graph_heads, graph_objects)[
+                    'verdict'
+                ],
+                'PASS',
             )
             graph_objects['source/pool/shared']['exists'] = False
             self.assertEqual(
-                library.root_names_exist(['target'], graph_heads, graph_objects)['verdict'], 'FAIL'
+                check_graph(library.root_names_exist, ['target'], graph_heads, graph_objects)[
+                    'verdict'
+                ],
+                'FAIL',
             )
             graph_heads['target']['state'] = 'deleted'
             self.assertEqual(
-                library.root_names_exist(['target'], graph_heads, graph_objects)['verdict'], 'PASS'
+                check_graph(library.root_names_exist, ['target'], graph_heads, graph_objects)[
+                    'verdict'
+                ],
+                'PASS',
             )
-            from test_entry_order import entry_trace
+            from test_content_names import content_fixture, check_content
 
-            self.assertEqual(library.entries_data_acknowledged(*entry_trace())['verdict'], 'PASS')
+            self.assertEqual(
+                check_content(library.entries_match_names, content_fixture())['verdict'], 'PASS'
+            )
             from test_removal_order import removal_trace
 
             self.assertEqual(library.snapshot_removals_safe(*removal_trace())['verdict'], 'FAIL')

@@ -283,15 +283,15 @@ this interface does not authenticate a free-standing tag scan.
 
 ### Root-reference existence
 
-`root_names_exist(expected_heads, heads, objects)` reads each declared HEAD's
+`root_names_exist(expected_heads, read_head, read_object, max_attempts=3)` reads each declared HEAD's
 current root and EVERY snapshot root, then all referenced immutable segments and
 chunks; proves that every reachable name exists in its OWNER's pool, except for
 HEADs in deleting or deleted state; does not prove image content, point-in-time
 consistency, flatness, dependency registration or a lying producer's completeness.
-No host actions or object fetches occur in this pure offline function.
+The callbacks read the filer directly; no local status/cache substitutes. Each RPC deadline belongs to the caller. The checker reads HEAD, traverses the graph, then re-reads HEAD. A changed generation or persisted body discards that attempt and retries; exhaustion yields UNKNOWN. Successful results include the stable generation per volume.
 
 `expected_heads` is a nonempty unique volume-identity list. HEAD observations
-have integer `producer_exit: 0` and boolean `exists`. A present HEAD requires
+have integer `producer_exit: 0`, boolean `exists`, and a nonempty opaque `generation` for existing HEADs. A present HEAD requires
 `state: active|detached|deleting|deleted`. Successful deleting/deleted observations
 are excluded BEFORE reference traversal. A failed HEAD read cannot use that
 exclusion. Unknown states yield UNKNOWN, never an inferred active/absent state.
@@ -304,7 +304,7 @@ An affirmatively absent HEAD has `current: null` and `snapshots: {}`; it creates
 no names and does not prove a volume exists or serves. Other snapshot metadata
 such as dependents is outside this existence fact.
 
-`objects` is keyed by exact fully owner-qualified name. Every observation has
+`read_object(name)` reads the exact fully owner-qualified name. Every observation has
 `producer_exit`, `exists`, and a `references` list. Root records name immutable
 segments; segments name every chunk they list; pool payloads explicitly have
 no references. A missing segment is a K6 violation, not permission to skip its
@@ -335,86 +335,64 @@ mutants skip snapshot traversal, ignore missing/failed reads, rebind a foreign
 name to the target or remove the deletion-state exemption; controls detect them.
 
 
-### Immutable-entry publication order
+### Complete content-addressed filer entries
 
-`entries_data_acknowledged(scope, observation)` reads completed data-ACK and
-new immutable-entry visibility events in one collector's causal order; proves
-that each observed entry became visible after an ACK for exactly its data
-identity, complete length and full SHA-256; does not prove a guest ACK was synced,
-HEAD conditional-update isolation, or completeness of an untrusted collector.
-It is the K8 observation seam, not a new product transaction implementation.
+`entries_match_names(volume, list_entries, read_entry)` reads every file in the
+volume's pool/, seg/ and root/ namespaces; proves complete readable bytes match
+the full SHA-256 in each name; does not prove guest ACK durability or collector
+completeness. This is K8; the earlier synthetic ACK timeline is replaced.
 
-`scope` declares `binding: {run, volume}` and a nonempty unique `entries` list
-of fully qualified names expected in the capture. Additional binding identity
-fields may be supplied; the observation must match the whole binding.
-`observation` has integer `producer_exit: 0`, `binding`, an ordered `events` list,
-and `coverage: {first: 0, last: N-1, count: N}` for its N events. Every event has
-`ordinal` (integer index starting at zero), `kind` (`data_ack` or `entry_visible`),
-`name`, `data_id`, nonnegative integer `length`, and a lowercase 64-hex `sha256`.
-Only completed successful data acknowledgements are `data_ack`; a request sent
-or a failed upload is not one. `entry_visible` means newly applied visibility,
-not an attempted create, a lookup, or an existing-name retry no-op.
+The direct filer list callback recursively lists every file in each namespace,
+including all pages. It returns a list of canonical owner-qualified names, even
+when empty. Names are pool/<shard>/<index>-<hash>, seg/<shard>-<hash> or
+root/<hash>, where hash is 64 lowercase hex digits. Duplicate, unsafe or
+out-of-namespace inventory is UNKNOWN; invalid content names are FAIL.
+`read_entry(name)` returns `{producer_exit: 0, exists: true, size, content}`;
+content is the bytes read through EOF and size is the filer's nonnegative size.
+The function computes SHA-256 itself; a supplied hash label is never evidence.
 
-The observer must capture from before data publication until every declared new
-entry is visible. The coverage trailer authenticates the declared bounds only
-when bound and sealed by the producer; arithmetic alone cannot reveal omitted
-events. Independent host monotonic timestamps are never ordered by this leaf.
-Reused entries are outside this new-create scope and require their pre-existing
-complete-object proof. K8 assumes the acknowledged lower-layer primitive is
-durable; it does not re-derive SeaweedFS replication or durability.
+Failed listing/read, disappearance or malformed observation yields UNKNOWN.
+Definite content/size mismatch yields FAIL, even alongside another UNKNOWN.
+All three namespaces are read; an empty volume satisfies this content fact
+vacuously and is not a case-efficacy witness. No wall clock supplies ordering.
 
-A complete valid trace with an entry lacking a causally prior matching data ACK
-is FAIL, including when an unrelated expected entry is unobserved. An invalid,
-unbound or incomplete trace is UNKNOWN. A missing expected entry alone is
-UNKNOWN, so an empty capture never passes. `checked` lists observed entry names;
-`violations` gives the entry, ordinal and reason; `unknown` lists missing scope
-members or observation errors. Only complete matching proof yields PASS.
+Assumptions: faithful complete direct-filer listing/reads, immutable names and
+no hash collision. Invoke this same leaf after every interruption point.
+Synthetic controls enumerate prepare/publish prefixes and plant corrupt or
+partial content; hash/EOF mutants are caught. Real transaction interruption
+joins and producer writer/reader probes remain model-gated and unwired.
+Guard enumeration: one entries_match_names definition and loader export,
+covered by the checker-site inventory; no shadow publication judge remains.
 
-Guard enumeration: `oss_kernel.entries_data_acknowledged` decides; the only
-runtime export is `loader.load_library`. The checker-site inventory covers both
-kernel entries. Transaction producer sites are not wired yet and must be
-registered with probes before adoption. Controls cover publication before ACK,
-wrong identity/length/full hash, missing scope, reader failure and causal order;
-mutants skip the match or incorrectly use an ACK that occurs after visibility.
+### Snapshot activity and pool removal
 
+`snapshot_removals_safe(scope, observation)` reads one volume's filer metadata
+event stream; proves no pool/ entry deletion occurs between the HEAD update
+setting snap(s) and the update clearing it; does not prove reachability, lease
+permission or legality of the HEAD changes. Root/seg deletion is outside K9.
 
-### Snapshot activity and name removal
+The complete capture has `source: filer_metadata`, nonempty `stream_id`,
+`initial_generation` and `initial_activity` from HEAD at its stream boundary.
+Activity is `{kind: idle}` or `{kind: snap|clean, session: id}`. The common
+capture envelope has successful integer producer_exit, exact run/volume binding,
+contiguous ordinal events and coverage `{first: 0, last: N-1, count: N}`.
+`scope.names` is a nonempty unique list of expected pool deletions.
 
-`snapshot_removals_safe(scope, observation)` reads a bound single-volume capture
-of applied HEAD activity changes and successful immutable-name removals; proves
-that no observed removal occurred while that HEAD said `snap`; does not prove
-lease permission, reachability, or admission legality of the activity updates.
-An idle/clean removal satisfies K9 alone, not every cleaning invariant.
+Events are `head_update` with entry `<volume>/HEAD`, before_generation,
+generation and resulting activity, or `delete_entry` with the actual name.
+Each HEAD update must continue the observed generation chain. Stream order is
+authoritative; timestamps and process-memory flags never reorder or replace it.
+An idle update after a deletion cannot erase that violation. Other-volume or
+malformed events, failed capture, missing source and generation gaps are UNKNOWN.
+A missing expected deletion is UNKNOWN unless a violation already proves FAIL.
 
-The capture envelope, producer status, binding and causal ordinals are the same
-observation primitive as the entry-order leaf. `scope.names` declares a nonempty
-unique list of fully qualified names whose removals are expected in this case.
-`observation.initial_activity` is the successfully read HEAD activity immediately
-before capture. Activity is `{kind: idle}` or `{kind: snap|clean, session: id}`
-with a nonempty session identity. Unknown or unreadable activity yields UNKNOWN;
-process memory or retained snapshot metadata cannot substitute for that read.
-
-Events are `{ordinal, kind: head_activity, activity}` for the applied HEAD value,
-or `{ordinal, kind: remove_name, name}` for an actual completed removal. A Claim
-that voids a session is observed as its resulting HEAD activity; it is not an
-independent in-memory reset. A recorded idle before removal permits it for K9;
-the same idle after removal cannot erase the violation. Other-volume events do
-not belong in this single-volume capture. The producer owns identity decoding
-and complete capture of all applied activity changes and removals.
-
-Incomplete, malformed or unbound captures yield UNKNOWN. Missing an expected
-removal yields UNKNOWN unless an observed violation already proves FAIL. Only
-complete matching observations can pass. The result returns attempted removal
-names in `checked`, violations with deciding ordinal/name/reason, and missing
-obligations or observation errors in `unknown`. These are observations, not
-synthetic permission flags.
-
-Assumptions: coherent atomic HEAD updates, trusted complete causal capture, and
-no unobserved external namespace mutation. One deciding function and one sealed
-loader export are enumerated by the checker-site guard; actual transaction
-writers/removers need their own probes before adoption. Mutants ignoring open
-snapshot activity or treating failed collection as success are detected. No
-transaction implementation, host action or second interruption harness is added.
+Assumptions: trusted complete filer metadata capture, a boundary HEAD bound to
+that stream, and no unobserved external namespace mutation. Arithmetic coverage
+alone cannot detect omitted events: the producer must prove its capture closure.
+Guard enumeration: one deciding function/export, checker-site guard and controls
+for source, generation continuity, pool-only scope and ordinal order; actual
+transaction producer/remover probes are required before adoption. Source mutants
+ignoring snapshot activity or accepting failed capture are detected.
 
 
 ### Local log sync before guest acknowledgement
