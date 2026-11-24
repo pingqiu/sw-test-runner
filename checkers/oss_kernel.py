@@ -253,80 +253,85 @@ def snapshot_removals_safe(scope, observation):
             'violations': violations, 'unknown': unknown}
 
 
-def _valid_holder(value):
+def _valid_head_identity(value):
     return (isinstance(value, dict) and type(value.get('epoch')) is int and value['epoch'] > 0
-            and isinstance(value.get('holder'), str) and bool(value['holder']))
+            and isinstance(value.get('holder'), str) and bool(value['holder'])
+            and type(value.get('generation')) is int and value['generation'] >= 0)
 
 
-def _head_update_events(scope, observation):
-    expected, events = _causal_events(scope, observation, 'updates')
-    if not isinstance(scope.get('head'), str) or not scope['head']:
-        raise ValueError('HEAD entry identity is missing')
-    seen = set()
-    for event in events:
-        if (event.get('kind') != 'head_update' or event.get('update_id') not in expected
-                or event['update_id'] in seen):
-            raise ValueError('unknown or duplicate HEAD transition')
-        seen.add(event['update_id'])
-        if not all(_valid_holder(event.get(field)) for field in ('authority', 'writer', 'before', 'after')):
-            raise ValueError('HEAD or authority identity is unknown')
-        if not all(isinstance(event[field].get('generation'), str) and event[field]['generation']
-                   for field in ('before', 'after')):
-            raise ValueError('HEAD generation is unknown')
-        writes = event.get('writes')
-        if not isinstance(writes, list) or not writes:
-            raise ValueError('applied mutation evidence is missing')
-        for write in writes:
-            if (not isinstance(write, dict)
-                    or not isinstance(write.get('entry'), str) or not write['entry']
-                    or write.get('operation') not in ('conditional_update', 'unconditional_update',
-                                                       'exclusive_create', 'delete')
-                    or 'expected_generation' not in write or 'expected_epoch' not in write):
-                raise ValueError('applied mutation or preconditions are unknown')
-            generation, epoch = write['expected_generation'], write['expected_epoch']
-            if (generation is not None and (not isinstance(generation, str) or not generation)
-                    or epoch is not None and (type(epoch) is not int or epoch < 0)):
-                raise ValueError('invalid wire precondition')
-    return expected, events
-
-
-def head_updates_conditional(scope, observation):
-    """K7: one existing-HEAD conditional mutation under the observed authority."""
+def head_updates_ordered(scope, observation):
+    """K7: filer HEAD generations and authority-store grants, never clock order."""
     try:
-        expected, events = _head_update_events(scope, observation)
+        expected, events = _causal_events(scope, observation, 'updates')
+        if (scope.get('head') != scope['binding']['volume'] + '/HEAD'
+                or observation.get('source') != 'filer_metadata'
+                or not isinstance(observation.get('stream_id'), str) or not observation['stream_id']
+                or not _valid_head_identity(observation.get('initial_head'))):
+            raise ValueError('existing HEAD metadata boundary is missing')
+        store = observation.get('authority_store')
+        if (not isinstance(store, dict) or store.get('binding') != scope['binding']
+                or store.get('source') != 'authority_store'
+                or type(store.get('producer_exit')) is not int or store['producer_exit'] != 0
+                or not isinstance(store.get('records'), list) or not store['records']):
+            raise ValueError('authority-store capture is missing')
+        grants = {}
+        previous_revision = 0
+        for record in store['records']:
+            if (not isinstance(record, dict) or type(record.get('revision')) is not int
+                    or record['revision'] <= previous_revision
+                    or type(record.get('epoch')) is not int or record['epoch'] < 1
+                    or not isinstance(record.get('holder'), str) or not record['holder']):
+                raise ValueError('authority records are not in store revision order')
+            previous_revision = record['revision']
+            grants[previous_revision] = record
+        seen = set()
+        for event in events:
+            if (event.get('kind') not in ('head_update', 'delete_entry', 'create_entry')
+                    or event.get('entry') != scope['head']
+                    or event.get('update_id') not in expected or event['update_id'] in seen):
+                raise ValueError('unknown or duplicate HEAD metadata event')
+            seen.add(event['update_id'])
+            if event['kind'] == 'head_update' and not all(
+                    _valid_head_identity(event.get(field)) for field in ('before', 'after')):
+                raise ValueError('HEAD before/after body is unknown')
     except ValueError as error:
         return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
-    checked = set()
-    violations = []
+    current = observation['initial_head']
+    checked, violations, unknown = [], [], []
+    last_authority_revision = 0
     for event in events:
-        before, after = event['before'], event['after']
-        writer, authority = event['writer'], event['authority']
-        writes = event['writes']
+        update_id = event['update_id']
+        checked.append(update_id)
         reasons = []
-        if len(writes) != 1:
-            reasons.append('not one applied entry mutation')
+        if event['kind'] == 'delete_entry':
+            current = None
+        elif event['kind'] == 'create_entry':
+            reasons.append('HEAD recreated for an existing volume')
+            current = None
         else:
-            write = writes[0]
-            if write['entry'] != scope['head'] or write['operation'] != 'conditional_update':
-                reasons.append('not a conditional update of this HEAD')
-            if write['expected_generation'] != before['generation']:
-                reasons.append('generation precondition does not match')
-            if write['expected_epoch'] != before['epoch']:
-                reasons.append('epoch precondition does not match')
-        if (writer['epoch'], writer['holder']) != (authority['epoch'], authority['holder']):
-            reasons.append('writer is not the current authority')
-        if (after['epoch'], after['holder']) != (writer['epoch'], writer['holder']):
-            reasons.append('result does not belong to the writer')
-        if (writer['epoch'] < before['epoch']
-                or writer['epoch'] == before['epoch'] and writer['holder'] != before['holder']):
-            reasons.append('epoch does not permit this holder')
-        if after['generation'] == before['generation']:
-            reasons.append('mutation did not advance the generation')
-        checked.add(event['update_id'])
+            before, after = event['before'], event['after']
+            if current is None:
+                reasons.append('HEAD updated after deletion')
+            elif before != current:
+                unknown.append(update_id + ': metadata capture is discontinuous')
+            if current is not None and after['generation'] != current['generation'] + 1:
+                reasons.append('metadata stream repeated or skipped a generation')
+            if after['generation'] != before['generation'] + 1:
+                reasons.append('generation did not advance by exactly one')
+            if after['epoch'] < before['epoch']:
+                reasons.append('HEAD epoch decreased')
+            revision = event.get('authority_revision_before')
+            if (type(revision) is not int or revision not in grants
+                    or revision < last_authority_revision):
+                unknown.append(update_id + ': prior authority-store join is missing or reversed')
+            else:
+                last_authority_revision = revision
+                grant = grants[revision]
+                if (after['epoch'], after['holder']) != (grant['epoch'], grant['holder']):
+                    reasons.append('HEAD does not match the previously granted line')
+            current = after
         if reasons:
-            violations.append({'update_id': event['update_id'], 'ordinal': event['ordinal'],
-                               'reasons': reasons})
-    unknown = sorted(set(expected) - checked)
-    verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
-    return {'verdict': verdict, 'checked': sorted(checked),
-            'violations': violations, 'unknown': unknown}
+            violations.append({'update_id': update_id, 'ordinal': event['ordinal'], 'reasons': reasons})
+    unknown.extend(sorted(set(expected) - set(checked)))
+    return {'verdict': 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS',
+            'checked': checked, 'violations': violations, 'unknown': unknown}

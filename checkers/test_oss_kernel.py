@@ -574,7 +574,7 @@ class RootNames(unittest.TestCase):
             'entries_match_names',
             'snapshot_removals_safe',
             'acknowledged_writes_survive',
-            'head_updates_conditional',
+            'head_updates_ordered',
         }
         for path in Path(__file__).parent.glob('*.py'):
             if path.name.startswith('test_'):

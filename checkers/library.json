@@ -2,13 +2,13 @@
   "schema": "checker-library/v1",
   "files": {
     "facts.py": "72484602a0a20431d5fcf4439b504cdebbc81adba4cf479e632763cbee8f88da",
-    "loader.py": "b952679a10e38049691406d5fd4775f2a1d72eaea2a97a39922de54045bed273",
+    "loader.py": "79527978ab79885cc4ff7bb1b12bd23bafdf7314f3698d51e0d3a4a118a0cf2e",
     "resource_inventory.py": "b1d6c55d84b3c5c126269098f929522d3a2c5466e2f2335c75ad60485c45a569",
     "ops_rmguard.py": "e2fe11714e2eab266e9ec6eb2dd2514a897bb18503d3875791edaa788b335d27",
     "unit_properties.py": "e472d984b8540a6c202e664c89762a143cb9965ee9b929f0f29228bdc65d4067",
     "completion.py": "1b82b158c44e93c1f6cba6a3fd43d7b79ac1dfea855ab5818fc3480011756f3d",
     "power_loss.py": "d2353914486336c5e082fd79057f58cab6d6a0eb99faf6ea65d26b06ccbc17cb",
-    "oss_kernel.py": "5a0ffce918b9f9c941acebcb8eb239768207cb730d11bde4a02e020db5b929b6"
+    "oss_kernel.py": "b2976a4d937570f5edfc812a888632a7ff0376b19267bad29c205a5e5f9b48c8"
   },
   "entries": [
     "read_ledger",
@@ -24,6 +24,6 @@
     "entries_match_names",
     "snapshot_removals_safe",
     "acknowledged_writes_survive",
-    "head_updates_conditional"
+    "head_updates_ordered"
   ]
 }

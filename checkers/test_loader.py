@@ -81,7 +81,7 @@ class Loader(unittest.TestCase):
             )
             from test_head_update import head_trace
 
-            self.assertEqual(library.head_updates_conditional(*head_trace())['verdict'], 'PASS')
+            self.assertEqual(library.head_updates_ordered(*head_trace())['verdict'], 'PASS')
             self.assertTrue(callable(library.show_unit_properties))
             self.assertTrue(callable(library.rep_complete))
             from test_power_loss import fixture

@@ -55,7 +55,7 @@ def load_library(root, manifest_sha256):
     module.root_names_exist = kernel.root_names_exist
     module.entries_match_names = kernel.entries_match_names
     module.snapshot_removals_safe = kernel.snapshot_removals_safe
-    module.head_updates_conditional = kernel.head_updates_conditional
+    module.head_updates_ordered = kernel.head_updates_ordered
     module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module

@@ -438,47 +438,48 @@ failed/mismatched recovery reads and corruption, and check all ACKs including
 the last and LSN-less ones. Hash-comparison and custody mutants go red.
 
 
-### Conditional existing-HEAD updates
+### Existing HEAD updates in filer order
 
-`head_updates_conditional(scope, observation)` reads complete applied wire
-mutations for existing HEAD transitions together with their before/after and
-current-authority observations; proves each transition is one conditional update
-under that authority with matching generation/epoch conditions; does not prove
-lease timing, session/payload transition legality, image contents or the atomicity
-of the trusted lower-layer conditional-update primitive. This is K7's existing-
-HEAD scope; initialization needs its separate exclusive-create proof.
+`head_updates_ordered(scope, observation)` reads existing-volume HEAD updates
+from the filer's metadata stream and causally joined master authority-store
+records; proves exact +1 generations, nondecreasing epochs matching the granted
+holder line, and no HEAD recreation; does not prove lease timing, payload/session
+legality or initial HEAD creation's empty-pool rule. The former applied-wire
+predicate is replaced, not retained as a second judge.
 
-Use the bound causal capture envelope above. `scope.head` is the exact entry
-identity; `scope.updates` is the nonempty unique expected transition-ID list.
-Each event has `kind: head_update`, `ordinal`, `update_id`, `authority`, `writer`,
-`before`, `after` and `writes`. Authority and writer are `{epoch, holder}`;
-before/after additionally carry a nonempty opaque `generation` token. Epochs
-are positive integers. Authority is observed at the transition's linearization
-cut, not supplied from a remembered writer flag or a later master poll.
+The common capture envelope binds run/volume, successful producer status,
+contiguous event ordinals and complete coverage. `scope.head` is exactly
+`<volume>/HEAD`; `scope.updates` lists nonempty unique expected event IDs.
+Observation source is `filer_metadata`, with a nonempty stream_id and
+`initial_head: {generation, epoch, holder}` from an EXISTING HEAD at the stream
+boundary. Generation is a nonnegative integer and epoch a positive integer.
+An absent initial HEAD cannot qualify this existing-volume fact.
 
-`writes` is the COMPLETE list of actual applied entry mutations for that one
-transition, including applications whose replies were lost. Failed attempts and
-read-back calls are not applied writes. Each mutation carries `entry`, `operation`
-(`conditional_update`, `unconditional_update`, `exclusive_create`, or `delete`),
-`expected_generation`, and `expected_epoch`; explicit null means no condition.
-A missing field means unknown evidence, not an inferred wire precondition.
-The producer must not group a snapshot's distinct Begin and Commit transitions
-as one mutation or call a safe-prefix multi-entry command one atomic commit.
+Events have ordinal, update_id, exact entry and kind head_update, delete_entry
+or create_entry. HEAD updates carry actual before/after identities. Each new
+generation must equal old+1, and consecutive published generations must also
+advance exactly one: repeated or skipped generations FAIL. Discontinuous body
+capture adds UNKNOWN evidence; an independently proven violation retains FAIL.
+New epoch must not decrease. A create in this existing-volume scope FAILs,
+including a delete-then-create pair. A final deletion alone is not prohibited
+by this fact; initialization is a different observation/row.
 
-Exactly one applied conditional update must target this HEAD. Its conditions
-must equal the before generation/epoch. Writer must match current authority;
-after must match writer and have a new generation token. A same-epoch update
-cannot change holders; a higher-epoch claim may change them. Same-epoch restart
-can observe its own HEAD without changing it, but cannot adopt another holder.
-A stale writer, wrong condition, unchanged generation or multiple applied
-mutations is FAIL. An empty applied-write list, malformed/unbound capture or
-missing expected transition is UNKNOWN unless an independent violation proves
-FAIL. Only complete matching proof passes.
+`authority_store` has exact binding, source authority_store, successful integer
+producer_exit and nonempty records `{revision, epoch, holder}` in strictly
+increasing positive store-revision order. Global revisions may skip. Each HEAD
+update supplies `authority_revision_before`, referencing the actual line record
+read before that event; selected revisions cannot move backwards. The resulting
+HEAD epoch AND holder must match that grant. Missing/reversed joins and failed
+store capture are UNKNOWN, not a guessed authority or a later poll.
 
-Assumptions: coherent atomic lower-layer mutations, trusted complete applied-wire
-capture and authority observation, and no unobserved external mutation. B supplies
-the actual producer joins; none is wired by this library-only addition. Source
-inventory enumerates the deciding function and loader export. Controls include
-current updates, advancing claims, missing/stale conditions, writer identities,
-multiple/unconditional mutations and unavailable evidence. Four source mutants
-drop generation, epoch, current-authority or single-write checks and are caught.
+Assumptions: complete faithful filer metadata and authority-store capture with
+a proved causal join. The before-revision field is the producer's evidence
+reference, not a clock-derived ordering claim. Independent store revisions
+cannot themselves establish cross-store order: B must capture/prove the prior
+read and expose its writer/reader probes before adoption. No host clock, even
+monotonic, establishes this order. No adapter or live qualification is wired.
+
+Guard enumeration: one deciding definition, loader/manifest export and checker
+site inventory; controls for exact/repeated/skipped gen, grants, epoch, capture
+failure and delete/create; source mutants bypassing generation, grant and
+recreation checks are caught. Model-gated transaction joins remain separate.
