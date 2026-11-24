@@ -17,9 +17,11 @@ class Loader(unittest.TestCase):
             pin = (source / 'library.sha256').read_text().strip()
             library = load_library(root, pin)
             self.assertEqual(library.library_sha256, pin)
-            heads = {'v': {'producer_exit': 0, 'exists': True, 'roots': ['r']}}
+            heads = {'v': {'producer_exit': 0, 'exists': True, 'state': 'active', 'roots': ['r']}}
             objects = {'r': {'producer_exit': 0, 'exists': False, 'references': []}}
             self.assertEqual(library.root_names_exist(['v'], heads, objects)['verdict'], 'FAIL')
+            from test_entry_order import entry_trace
+            self.assertEqual(library.entries_data_acknowledged(*entry_trace())['verdict'], 'PASS')
             self.assertTrue(callable(library.show_unit_properties))
             self.assertTrue(callable(library.rep_complete))
             from test_power_loss import fixture

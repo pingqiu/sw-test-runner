@@ -284,14 +284,17 @@ this interface does not authenticate a free-standing tag scan.
 ### Root-reference existence
 
 `root_names_exist(expected_heads, heads, objects)` reads the complete declared
-HEAD scope and its reachable immutable-object observations; proves that every
+HEAD scope and its reachable immutable-object observations (excluding HEADs
+in deleting state); proves that every
 referenced name was affirmatively present in its owning namespace; does not prove
 image contents, point-in-time consistency, graph flatness, dependent registration,
 or the producer's completeness. This is an offline fact, with no host actions.
 
 `expected_heads` is a nonempty unique list of volume identities. Each HEAD map
 entry has `producer_exit` (integer zero), `exists` (boolean), and `roots` (list
-of fully qualified object names). The collector enumerates both the current
+of fully qualified object names). Present HEADs also require an explicit `state`
+(`active`, `detached`, `deleting`, or `deleted`); unknown states yield UNKNOWN.
+Deleting HEADs are outside K6 and their references are not traversed. The collector enumerates both the current
 image and every named snapshot. Each object map entry has the same status and
 existence fields plus `references`; pool payloads explicitly have no references.
 Names are opaque, full owner-qualified identities: a matching suffix in another
@@ -320,3 +323,46 @@ It does not enumerate future product writers or detect arbitrary renamed copies;
 transaction adoption must supply that inventory. Controls cover foreign owners,
 missing names, failed reads, mixed FAIL/UNKNOWN, cycles, and authenticated loading;
 mutants skip definite absence or unknown-read accounting and incorrectly pass.
+
+
+### Immutable-entry publication order
+
+`entries_data_acknowledged(scope, observation)` reads completed data-ACK and
+new immutable-entry visibility events in one collector's causal order; proves
+that each observed entry became visible after an ACK for exactly its data
+identity, complete length and full SHA-256; does not prove a guest ACK was synced,
+HEAD conditional-update isolation, or completeness of an untrusted collector.
+It is the K8 observation seam, not a new product transaction implementation.
+
+`scope` declares `binding: {run, volume}` and a nonempty unique `entries` list
+of fully qualified names expected in the capture. Additional binding identity
+fields may be supplied; the observation must match the whole binding.
+`observation` has integer `producer_exit: 0`, `binding`, an ordered `events` list,
+and `coverage: {first: 0, last: N-1, count: N}` for its N events. Every event has
+`ordinal` (integer index starting at zero), `kind` (`data_ack` or `entry_visible`),
+`name`, `data_id`, nonnegative integer `length`, and a lowercase 64-hex `sha256`.
+Only completed successful data acknowledgements are `data_ack`; a request sent
+or a failed upload is not one. `entry_visible` means newly applied visibility,
+not an attempted create, a lookup, or an existing-name retry no-op.
+
+The observer must capture from before data publication until every declared new
+entry is visible. The coverage trailer authenticates the declared bounds only
+when bound and sealed by the producer; arithmetic alone cannot reveal omitted
+events. Independent host monotonic timestamps are never ordered by this leaf.
+Reused entries are outside this new-create scope and require their pre-existing
+complete-object proof. K8 assumes the acknowledged lower-layer primitive is
+durable; it does not re-derive SeaweedFS replication or durability.
+
+A complete valid trace with an entry lacking a causally prior matching data ACK
+is FAIL, including when an unrelated expected entry is unobserved. An invalid,
+unbound or incomplete trace is UNKNOWN. A missing expected entry alone is
+UNKNOWN, so an empty capture never passes. `checked` lists observed entry names;
+`violations` gives the entry, ordinal and reason; `unknown` lists missing scope
+members or observation errors. Only complete matching proof yields PASS.
+
+Guard enumeration: `oss_kernel.entries_data_acknowledged` decides; the only
+runtime export is `loader.load_library`. The checker-site inventory covers both
+kernel entries. Transaction producer sites are not wired yet and must be
+registered with probes before adoption. Controls cover publication before ACK,
+wrong identity/length/full hash, missing scope, reader failure and causal order;
+mutants skip the match or incorrectly use an ACK that occurs after visibility.
