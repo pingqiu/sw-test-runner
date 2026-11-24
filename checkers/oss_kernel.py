@@ -165,3 +165,49 @@ def snapshot_removals_safe(scope, observation):
     verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
     return {'verdict': verdict, 'checked': sorted(checked),
             'violations': violations, 'unknown': unknown}
+
+
+def acknowledged_writes_synced(scope, observation):
+    """K2: match guest ACKs to local records covered by a prior completed sync."""
+    try:
+        expected, events = _causal_events(scope, observation, 'writes')
+        if not isinstance(scope['binding'].get('process'), str) or not scope['binding']['process']:
+            raise ValueError('process incarnation is missing')
+        appended = set()
+        for event in events:
+            if event.get('kind') == 'log_sync':
+                if type(event.get('through_lsn')) is not int or event['through_lsn'] < 0:
+                    raise ValueError('unknown completed sync position')
+                continue
+            if (event.get('kind') not in ('log_append', 'guest_ack')
+                    or event.get('write_id') not in expected
+                    or type(event.get('lsn')) is not int or event['lsn'] < 0
+                    or not isinstance(event.get('sha256'), str)
+                    or not re.fullmatch('[0-9a-f]{64}', event['sha256'])):
+                raise ValueError('invalid log/ACK event')
+            if event['kind'] == 'log_append':
+                if event['write_id'] in appended:
+                    raise ValueError('duplicate scoped append')
+                appended.add(event['write_id'])
+    except ValueError as error:
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
+    records = set()
+    durable = set()
+    checked = set()
+    violations = []
+    for event in events:
+        if event['kind'] == 'log_sync':
+            durable.update(record for record in records if record[1] <= event['through_lsn'])
+            continue
+        record = (event['write_id'], event['lsn'], event['sha256'])
+        if event['kind'] == 'log_append':
+            records.add(record)
+        elif event['kind'] == 'guest_ack':
+            checked.add(event['write_id'])
+            if record not in durable:
+                violations.append({'write_id': event['write_id'], 'ordinal': event['ordinal'],
+                                   'reason': 'ACK lacks a matching synced log record'})
+    unknown = sorted(set(expected) - checked)
+    verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
+    return {'verdict': verdict, 'checked': sorted(checked),
+            'violations': violations, 'unknown': unknown}

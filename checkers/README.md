@@ -405,3 +405,42 @@ loader export are enumerated by the checker-site guard; actual transaction
 writers/removers need their own probes before adoption. Mutants ignoring open
 snapshot activity or treating failed collection as success are detected. No
 transaction implementation, host action or second interruption harness is added.
+
+
+### Local log sync before guest acknowledgement
+
+`acknowledged_writes_synced(scope, observation)` reads actual local append,
+completed sync and guest-ACK events; proves every observed ACK has a matching
+log record covered by a sync completed after that append and before the ACK;
+does not prove fsync from a guest ledger, log membership, elapsed time or exit.
+It is K2's offline seam, not a new local-engine implementation.
+
+Use the same bound causal capture envelope as the other ordering leaves.
+`scope.binding` additionally requires a nonempty `process` incarnation; one
+capture cannot mix restarts. `scope.writes` is the nonempty unique expected
+write-ID list. `log_append` and `guest_ack` events carry `ordinal`, `kind`,
+`write_id`, nonnegative integer `lsn`, and lowercase full `sha256`. A completed
+`log_sync` event carries `ordinal`, `kind`, and integer `through_lsn >= 0`.
+The sync position is its actual completed high-water mark, never the requested
+position. One scoped write has one observed append; retry/duplicate append
+normalization requires a separate producer contract instead of last-write-wins.
+
+Only records already appended when the completed sync is observed become
+durable through its LSN. A later sync cannot repair an earlier ACK. The ACK must
+match both LSN and full bytes digest. Missing append, missing sync, low sync
+position or different bytes yields FAIL; a missing expected ACK is UNKNOWN
+unless an observed independent violation proves FAIL. An invalid/unbound or
+failed capture is UNKNOWN, never PASS. Results list checked write identities,
+deciding violation ordinals/reasons and missing obligations or errors.
+
+Assumptions: a trusted complete producer captures actual successful engine
+boundaries in causal order from before scoped appends through ACKs; a completed
+sync means durability under the local-engine contract. Previously persisted
+prefixes need their historical proof; this interface does not invent appends
+for them. It does not compare independent clock stamps. No engine producer or
+pack is wired yet: adoption must enumerate/probe append, sync and ACK sites.
+
+Guard enumeration lists the deciding function and sealed loader export. Tests
+cover future syncs, sync-before-append, exact-LSN boundary, mismatched records,
+missing operations and failed collection. The mutant that accepts an unsynced
+record merely because it exists is detected. Frozen packet evidence is unchanged.
