@@ -13,6 +13,9 @@ def rep_complete(phase_receipts, required_phases, check_rows, required_checks,
     """
     if not required_phases:
         raise ValueError("completion policy requires phase obligations")
+    row_failures = {name for name, row in check_rows.items() if row[0] == 'FAIL'}
+    if row_failures != set(failed_checks):
+        raise ValueError("failed checks disagree with row statuses")
     candidates = []
 
     def add(kind, source, name, value):

@@ -130,3 +130,11 @@ receipt never satisfies one. Readiness, failed checks, missing requirements and
 host state all use the one total order in completion.py. Parsing and artifact
 writes stay in the callers. Both reports include the deciding receipts as
 additional evidence. This policy is not adopted by the other packet.
+
+Corrected input-consistency weakness: the original verdict block trusted a
+separate failed-name list while treating any present required row as satisfying
+presence. The shared API now raises when that list disagrees with the rows'
+FAIL statuses, including omitted failures and passing/absent named rows.
+Consistent inputs retain their previous verdict; contradictory evidence cannot
+produce PASS. This correction is separate from the explicitly preserved phase
+last-write-wins behavior.

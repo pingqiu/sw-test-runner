@@ -61,6 +61,20 @@ class Completion(unittest.TestCase):
         self.assertEqual(result['deciding_receipts'], [
             dict(kind='FAIL', source='phase', name='extra', value='rc=7')])
 
+    def test_failed_row_omitted_from_failed_names_cannot_pass(self):
+        with self.assertRaisesRegex(ValueError, 'failed checks disagree with row statuses'):
+            self.decide(checks={'required': ('FAIL', 'observed failure')}, required_checks=['required'])
+
+    def test_failed_names_with_passing_or_absent_rows_are_rejected(self):
+        for rows in [{'required': ('PASS', 'observed success')}, {}]:
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(ValueError, 'failed checks disagree with row statuses'):
+                    self.decide(checks=rows, failed=['required'])
+
+    def test_unrequired_failed_row_still_must_match_failure_names(self):
+        with self.assertRaisesRegex(ValueError, 'failed checks disagree with row statuses'):
+            self.decide(checks={'extra': ('FAIL', 'observed failure')})
+
     def test_required_check_absence_is_not_success(self):
         self.assertEqual(self.decide(required_checks=['required'])['verdict'], 'INCONCLUSIVE')
 
