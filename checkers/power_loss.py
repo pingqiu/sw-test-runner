@@ -131,8 +131,9 @@ def _campaign_tick(case):
 def _compare_images(case, workload, local, published):
     """Compare complete images; no host actions or crash construction occur here.
 
-    The baseline is sparse, with zero in every undeclared block. Written-block
-    bytes choose independently between the baseline and the one proposed write.
+    The baseline is sparse, with zero in every undeclared block. Unflushed
+    replacements must recover as a prefix of guest issue order, with OLD after
+    the first gap; every flushed replacement must be NEW.
     The published view must name the snapshot taken after these local reads,
     with no intervening guest writes. Producers supply full SHA256 observations.
     """
@@ -151,6 +152,7 @@ def _compare_images(case, workload, local, published):
         if block not in writes and local_blocks[block] != old:
             history_labels.add('ACKED-LOST')
             history_errors.append({'block': block, 'reason': 'flushed baseline value lost'})
+    earlier_old = None
     for block, write in writes.items():
         actual = local_blocks[block]
         old = baseline.get(block, zero)
@@ -160,6 +162,13 @@ def _compare_images(case, workload, local, published):
         elif not write['flushed'] and actual not in (old, write['new']):
             history_labels.add('UNEXPECTED')
             history_errors.append({'block': block, 'reason': 'neither OLD nor NEW'})
+        if not write['flushed'] and old != write['new']:
+            if earlier_old is not None and actual == write['new']:
+                history_labels.add('NON_PREFIX')
+                history_errors.append({'block': block, 'earlier_old': earlier_old,
+                                       'reason': 'recovery replayed beyond an earlier gap'})
+            if actual == old and earlier_old is None:
+                earlier_old = block
 
     chunks = (volume_bytes + chunk_bytes - 1) // chunk_bytes
     expected_overrides = dict(baseline)
@@ -191,7 +200,7 @@ def _compare_images(case, workload, local, published):
     rows = {
         'LOCAL_HISTORY': {
             'verdict': 'FAIL' if history_labels else 'PASS',
-            'labels': [label for label in ('ACKED-LOST', 'UNEXPECTED') if label in history_labels],
+            'labels': [label for label in ('ACKED-LOST', 'UNEXPECTED', 'NON_PREFIX') if label in history_labels],
             'errors': history_errors[:20]},
         'PUBLISHED_EQUALS_LOCAL': {
             'verdict': 'FAIL' if divergence else 'PASS',

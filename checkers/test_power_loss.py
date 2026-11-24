@@ -4,6 +4,8 @@ import hashlib
 from pathlib import Path
 import types
 import unittest
+import ast
+import itertools
 
 from power_loss import power_loss_image_exact
 
@@ -34,7 +36,7 @@ def fixture(local=None, published=None, fixed=True):
                            {'block': 2, 'new': b'DDDD', 'flushed': True},
                            {'block': 4, 'new': b'EEEE', 'flushed': False}],
                 'operations': ['write']}
-    data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
+    data = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
     local = data if local is None else local
     published = local if published is None else published
 
@@ -58,9 +60,52 @@ def fixture(local=None, published=None, fixed=True):
 
 
 class PowerLoss(unittest.TestCase):
+    def test_every_three_write_subset_has_exactly_the_prefixes_as_legal(self):
+        for kept in itertools.product((False, True), repeat=3):
+            values = [new if keep else old for keep, old, new in
+                      zip(kept, (b'AAAA', b'BBBB', b'CCCC'), (b'ZZZZ', b'DDDD', b'EEEE'))]
+            data = values[0] + bytes(4) + values[1] + bytes(4) + values[2] + bytes(12)
+            inputs = fixture(local=data)
+            for write in inputs[1]['writes']:
+                write['flushed'] = False
+            nonprefix = any(not kept[a] and kept[b]
+                            for a in range(3) for b in range(a + 1, 3))
+            expected = 'FAIL' if nonprefix else 'PASS'
+            with self.subTest(kept=kept):
+                result = power_loss_image_exact(*inputs)
+                self.assertEqual(result['image_verdict'], expected)
+                self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['verdict'], 'PASS')
+
+    def test_guest_issue_order_is_not_block_number_order(self):
+        data = b'ZZZZ' + bytes(4) + b'BBBB' + bytes(4) + b'CCCC' + bytes(12)
+        inputs = fixture(local=data)
+        for write in inputs[1]['writes']:
+            write['flushed'] = False
+        self.assertEqual(power_loss_image_exact(*inputs)['image_verdict'], 'PASS')
+        inputs[1]['writes'].reverse()
+        self.assertEqual(power_loss_image_exact(*inputs)['rows']['LOCAL_HISTORY']['labels'], ['NON_PREFIX'])
+
+    def test_equal_old_new_bytes_do_not_prove_replay_beyond_a_gap(self):
+        data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
+        inputs = fixture(local=data)
+        inputs[1]['baseline'][4] = b'EEEE'
+        self.assertEqual(power_loss_image_exact(*inputs)['image_verdict'], 'PASS')
+
+    def test_prefix_decider_and_runtime_callers_are_enumerated(self):
+        sites = []
+        for path in Path(__file__).parent.glob('*.py'):
+            if path.name.startswith('test_'):
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.FunctionDef) and node.name == '_compare_images':
+                    sites.append((path.name, 'definition'))
+                if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == '_compare_images':
+                    sites.append((path.name, 'reader'))
+        self.assertCountEqual(sites, [('power_loss.py', 'definition'), ('power_loss.py', 'reader')])
+
     def test_legal_unflushed_values_still_fail_when_published_differs(self):
         case, workload, local, published = fixture()
-        old = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        old = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         published = fixture(published=old)[3]
         result = power_loss_image_exact(case, workload, local, published)
         self.assertEqual(result['image_verdict'], 'FAIL')
@@ -68,17 +113,16 @@ class PowerLoss(unittest.TestCase):
         self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['labels'], ['DIVERGED'])
         self.assertEqual(result['counts']['chunks_compared'], 4)
 
-    def test_complete_nonprefix_survival_is_legal(self):
-        result = power_loss_image_exact(*fixture())
-        self.assertEqual(result['verdict'], 'PASS')
+    def test_guest_recovery_must_be_a_prefix(self):
         for value in (b'AAAA', b'ZZZZ'):
             for later in (b'CCCC', b'EEEE'):
                 data = value + bytes(4) + b'DDDD' + bytes(4) + later + bytes(12)
                 with self.subTest(first=value, later=later):
-                    self.assertEqual(power_loss_image_exact(*fixture(local=data))['image_verdict'], 'PASS')
+                    expected = 'FAIL' if value == b'AAAA' and later == b'EEEE' else 'PASS'
+                    self.assertEqual(power_loss_image_exact(*fixture(local=data))['image_verdict'], expected)
 
     def test_flushed_loss_is_distinct_from_divergence(self):
-        data = b'AAAA' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
+        data = b'ZZZZ' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
         result = power_loss_image_exact(*fixture(local=data))
         self.assertEqual(result['image_verdict'], 'FAIL')
         self.assertEqual(result['rows']['LOCAL_HISTORY']['labels'], ['ACKED-LOST'])
@@ -86,7 +130,7 @@ class PowerLoss(unittest.TestCase):
 
     def test_torn_and_untouched_corruption_fail(self):
         for offset in (0, 7, 31):
-            data = bytearray(b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12))
+            data = bytearray(b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12))
             data[offset] = 1
             with self.subTest(offset=offset):
                 result = power_loss_image_exact(*fixture(local=bytes(data)))
@@ -109,7 +153,7 @@ class PowerLoss(unittest.TestCase):
             lambda c, w, l, p: l['binding'].update(image_id='other'),
             lambda c, w, l, p: l['chunks'][0]['binding'].update(volume_id='other'),
             lambda c, w, l, p: p['snapshot'].update(head_gen=8),
-            lambda c, w, l, p: p['blocks'][0].update(data=b'ZZZZ', sha256=digest(b'ZZZZ')),
+            lambda c, w, l, p: p['blocks'][0].update(data=b'QQQQ', sha256=digest(b'QQQQ')),
             lambda c, w, l, p: l['chunks'][0].update(data=b'bad'),
             lambda c, w, l, p: w['writes'].append(copy.deepcopy(w['writes'][0])),
             lambda c, w, l, p: w['writes'][0].update(flushed='yes'),
@@ -177,13 +221,14 @@ class PowerLoss(unittest.TestCase):
         self.assertEqual(power_loss_image_exact(*inputs)['campaign_verdict'], 'FAIL')
 
     def test_one_wal_record_does_not_require_group_atomicity(self):
-        inputs = fixture()
+        data = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        inputs = fixture(local=data)
         for write in inputs[1]['writes']:
             write['write_id'] = 'one-multiblock-record'
         self.assertEqual(power_loss_image_exact(*inputs)['image_verdict'], 'PASS')
 
     def test_full_hash_divergence_needs_no_raw_chunk_diagnostics(self):
-        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        published = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         inputs = fixture(published=published)
         for view in inputs[2:]:
             for chunk in view['chunks']:
@@ -206,7 +251,7 @@ class PowerLoss(unittest.TestCase):
         self.assertEqual(source.count(before), 1)
         module = types.ModuleType('raw_gate_mutant')
         exec(compile(source.replace(before, restored), '<raw-gate-mutant>', 'exec'), module.__dict__)
-        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        published = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         inputs = fixture(published=published)
         for view in inputs[2:]:
             for chunk in view['chunks']:
@@ -222,8 +267,8 @@ class PowerLoss(unittest.TestCase):
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'PASS')
 
     def test_flushed_and_quiet_divergence_remain_distinguishable(self):
-        data = b'AAAA' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
-        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        data = b'ZZZZ' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
+        published = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         result = power_loss_image_exact(*fixture(local=data, published=published))
         self.assertEqual(result['rows']['LOCAL_HISTORY']['labels'], ['ACKED-LOST'])
         self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['labels'], ['DIVERGED'])
@@ -271,13 +316,13 @@ class PowerLoss(unittest.TestCase):
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'UNKNOWN')
 
     def test_quiet_published_chunk_divergence_is_not_skipped(self):
-        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
+        published = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
         result = power_loss_image_exact(*fixture(published=published))
         self.assertEqual(result['rows']['LOCAL_HISTORY']['verdict'], 'PASS')
         self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['chunks'], [3])
 
     def test_missing_tick_proof_does_not_erase_a_bound_image_failure(self):
-        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        published = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         inputs = fixture(published=published)
         inputs[0].pop('proof')
         result = power_loss_image_exact(*inputs)
@@ -297,7 +342,7 @@ class Mutants(unittest.TestCase):
     def test_local_published_comparison_mutant(self):
         compare = self.mutant(
             "if local_chunks[index]['sha256'] != published_chunks[index]['sha256']:", 'if False:')
-        data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        data = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         inputs = fixture(published=data)
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'FAIL')
         self.assertEqual(compare(*inputs)['verdict'], 'PASS')
@@ -305,7 +350,7 @@ class Mutants(unittest.TestCase):
     def test_quiet_chunk_mutant(self):
         compare = self.mutant("if local_chunks[index]['sha256'] != expected_sha:",
                               "if index in by_chunk and local_chunks[index]['sha256'] != expected_sha:")
-        data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
+        data = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
         inputs = fixture(local=data)
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'FAIL')
         self.assertEqual(compare(*inputs)['verdict'], 'PASS')
@@ -319,16 +364,17 @@ class Mutants(unittest.TestCase):
 
     def test_flushed_obligation_mutant(self):
         compare = self.mutant("if write['flushed'] and actual != write['new']:", 'if False:')
-        data = b'AAAA' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
+        data = b'ZZZZ' + bytes(4) + b'BBBB' + bytes(4) + b'EEEE' + bytes(12)
         inputs = fixture(local=data)
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'FAIL')
         self.assertEqual(compare(*inputs)['verdict'], 'PASS')
 
-    def test_prefix_only_survival_mutant(self):
-        before = "image_verdict = 'FAIL' if history_labels or divergence else 'PASS'"
-        compare = self.mutant(before, before + "\n    if local_blocks[0] == baseline[0] and local_blocks[4] != baseline[4]: image_verdict = 'FAIL'")
-        self.assertEqual(power_loss_image_exact(*fixture())['verdict'], 'PASS')
-        self.assertEqual(compare(*fixture())['verdict'], 'FAIL')
+    def test_accepting_nonprefix_guest_survival_mutant(self):
+        compare = self.mutant("if earlier_old is not None and actual == write['new']:", 'if False:')
+        data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
+        inputs = fixture(local=data)
+        self.assertEqual(power_loss_image_exact(*inputs)['rows']['LOCAL_HISTORY']['labels'], ['NON_PREFIX'])
+        self.assertEqual(compare(*inputs)['verdict'], 'PASS')
 
     def test_coverage_status_and_binding_mutants(self):
         for anchor, change in [
@@ -352,7 +398,7 @@ class Mutants(unittest.TestCase):
 
     def test_last_chunk_comparison_mutant(self):
         compare = self.mutant('for index in range(chunks):', 'for index in range(chunks - 1):')
-        data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
+        data = b'ZZZZ' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(11) + b'x'
         inputs = fixture(published=data)
         self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'FAIL')
         self.assertEqual(compare(*inputs)['verdict'], 'PASS')

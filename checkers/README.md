@@ -166,9 +166,12 @@ never inferred zeros or successful comparisons.
 
 - `LOCAL_HISTORY`: a flushed replacement and every previously flushed baseline
   block must hold its flushed value (ACKED-LOST otherwise). An unflushed block
-  independently permits OLD or NEW, never a third/torn value. Illegal values
-  or bytes outside the declared history are UNEXPECTED. Multi-block write
-  group atomicity is not required.
+  permits OLD or NEW, never a third/torn value. Across unflushed writes in
+  guest issue order, NEW values must form a prefix: an earlier OLD followed by
+  a later NEW is NON_PREFIX (FAIL: replay beyond a gap). Equal OLD/NEW bytes
+  do not prove a gap or survival. Illegal values or bytes outside the declared
+  history are UNEXPECTED. This does not impose all-or-nothing multi-block group
+  atomicity; the checked window has one proposed replacement per block.
 - `PUBLISHED_EQUALS_LOCAL`: compares full SHA256 values of every declared
   chunk, including quiet and zero chunks. A difference is DIVERGED even when
   both views independently contain legal OLD/NEW choices. No certification
@@ -204,8 +207,9 @@ window, and undeclared baseline blocks are zero. This is an explicit
 sequential-generator policy for a fresh volume per case, not a fallback for
 missing observations. Reused volumes require a complete declared baseline;
 undeclared nonzero history is not supported.
-`writes` holds unique `{block, new: bytes, flushed: bool}` replacements, at most
-one per block in this crash window. `operations` permits write/flush/fua;
+`writes` holds unique `{block, new: bytes, flushed: bool}` replacements, in
+guest issue order, at most one per block in this crash window. Never sort this
+list by block address, hash or a device replay selection. `operations` permits write/flush/fua;
 discard, write-zeroes and repeated writes are unsupported and yield UNKNOWN.
 Replacements may overlap baseline blocks. The complete observed block set is
 the union of baseline keys and replacement blocks, protecting earlier flushed
@@ -244,10 +248,16 @@ proof with zero extent writes carries `status_poll_ns` and `status_exit: 0`.
 The harness owns the evidence for those values and the replay log/subset join.
 Changing the random seed or labeling an image random does not prove a
 non-prefix selection; campaign completeness remains a separate packet fact.
+A non-prefix DEVICE injection must be witnessed by authenticated replay log
+bytes/full hash and kept/dropped writes (an earlier dropped record and later
+kept record). A device-prefix seed does not count; try the next seed. The
+producer must put at least two unflushed guest writes in distinct log pages.
+Guest content is not the injection witness: recovery must restore a PREFIX,
+with every flushed write NEW and LOCAL equal to PUBLISHED on all chunks.
 
 The synthetic boundary controls use tiny literal images, complete full hashes
 and raw written/differing evidence. Source mutants demonstrate sensitivity to
-missing comparisons, quiet-chunk skipping, prefix-only survival assumptions,
+missing comparisons, quiet-chunk skipping, acceptance of non-prefix guest recovery,
 lost flush obligations, missing coverage, ignored producer failures/bindings,
 and fixed-revision extent writes. Existing frozen packets retain their old pin;
 adoption requires the complete packet oracle and a new seal.
@@ -279,3 +289,13 @@ New qualification runs never use this adapter: they require the full-SHA/raw
 producer interface above. Missing or other purpose declarations yield UNKNOWN.
 Producer provenance and captured-artifact bindings remain pack obligations;
 this interface does not authenticate a free-standing tag scan.
+
+
+Prefix guard enumeration: workload input validation owns unique block obligations
+and complete recovered block bytes; _compare_images is the sole content/prefix
+decider and power_loss_image_exact its sole runtime reader. A source inventory
+control detects a new named decider/caller; the loader continues exporting the
+same image entry. Controls enumerate all eight three-write subsets, guest issue
+order versus block order, indistinguishable values and the mutant that skips
+prefix rejection. Frozen packets and captured evidence are unchanged; device
+receipt admission and its producer joins require a separate reviewed adoption.
