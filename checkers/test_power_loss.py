@@ -192,7 +192,8 @@ class PowerLoss(unittest.TestCase):
         result = power_loss_image_exact(*inputs)
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertEqual(result['rows']['LOCAL_HISTORY']['verdict'], 'PASS')
-        self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['labels'], ['DIVERGED'])
+        self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['labels'], ['DIVERGED', 'RAW-MISSING'])
+        self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['raw_missing_chunks'], [2])
         self.assertEqual(result['campaign_verdict'], 'UNKNOWN')
 
     def test_raw_diagnostic_gate_mutant(self):

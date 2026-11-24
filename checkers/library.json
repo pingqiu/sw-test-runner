@@ -7,7 +7,7 @@
     "ops_rmguard.py": "e2fe11714e2eab266e9ec6eb2dd2514a897bb18503d3875791edaa788b335d27",
     "unit_properties.py": "e472d984b8540a6c202e664c89762a143cb9965ee9b929f0f29228bdc65d4067",
     "completion.py": "1b82b158c44e93c1f6cba6a3fd43d7b79ac1dfea855ab5818fc3480011756f3d",
-    "power_loss.py": "6f32d461edfc551d73c77dea00e0387aefc225423363f1756bcba559184470f1"
+    "power_loss.py": "d2353914486336c5e082fd79057f58cab6d6a0eb99faf6ea65d26b06ccbc17cb"
   },
   "entries": [
     "read_ledger",

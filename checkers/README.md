@@ -225,7 +225,9 @@ duplicate, out-of-range or truncated-hash records yield UNKNOWN.
 Every observed written block has `{block, sha256, data: bytes}`. A validated
 full-SHA mismatch alone proves DIVERGED, even without raw chunk diagnostics.
 Producers should supply differing chunk bytes for diagnosis; those bytes are
-not a precondition for FAIL. Optional raw chunk evidence is validated too.
+not a precondition for FAIL. Missing chunk diagnostics add `RAW-MISSING` and
+`raw_missing_chunks` to the DIVERGED row while keeping FAIL. Optional raw
+chunk evidence is validated too.
 All raw evidence must agree with its full hash and any overlapping raw block.
 Equal chunk hashes with conflicting raw block observations are rejected.
 Sparse expected bytes plus the observed written blocks reconstruct expected

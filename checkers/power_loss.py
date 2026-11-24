@@ -145,6 +145,7 @@ def _compare_images(case, workload, local, published):
     baseline = workload['baseline']
     writes = {r['block']: r for r in workload['writes']}
     history_labels, history_errors, divergence = set(), [], []
+    raw_missing = []
     zero = bytes(block_bytes)
     for block, old in baseline.items():
         if block not in writes and local_blocks[block] != old:
@@ -184,6 +185,8 @@ def _compare_images(case, workload, local, published):
             history_errors.append({'chunk': index, 'reason': 'outside declared history'})
         if local_chunks[index]['sha256'] != published_chunks[index]['sha256']:
             divergence.append(index)
+            if 'data' not in local_chunks[index] or 'data' not in published_chunks[index]:
+                raw_missing.append(index)
 
     rows = {
         'LOCAL_HISTORY': {
@@ -192,8 +195,8 @@ def _compare_images(case, workload, local, published):
             'errors': history_errors[:20]},
         'PUBLISHED_EQUALS_LOCAL': {
             'verdict': 'FAIL' if divergence else 'PASS',
-            'labels': ['DIVERGED'] if divergence else [],
-            'chunks': divergence[:20]},
+            'labels': (['DIVERGED'] if divergence else []) + (['RAW-MISSING'] if raw_missing else []),
+            'chunks': divergence[:20], 'raw_missing_chunks': raw_missing[:20]},
     }
     image_verdict = 'FAIL' if history_labels or divergence else 'PASS'
     return {'verdict': image_verdict, 'image_verdict': image_verdict,
