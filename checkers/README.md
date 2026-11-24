@@ -283,46 +283,56 @@ this interface does not authenticate a free-standing tag scan.
 
 ### Root-reference existence
 
-`root_names_exist(expected_heads, heads, objects)` reads the complete declared
-HEAD scope and its reachable immutable-object observations (excluding HEADs
-in deleting state); proves that every
-referenced name was affirmatively present in its owning namespace; does not prove
-image contents, point-in-time consistency, graph flatness, dependent registration,
-or the producer's completeness. This is an offline fact, with no host actions.
+`root_names_exist(expected_heads, heads, objects)` reads each declared HEAD's
+current root and EVERY snapshot root, then all referenced immutable segments and
+chunks; proves that every reachable name exists in its OWNER's pool, except for
+HEADs in deleting or deleted state; does not prove image content, point-in-time
+consistency, flatness, dependency registration or a lying producer's completeness.
+No host actions or object fetches occur in this pure offline function.
 
-`expected_heads` is a nonempty unique list of volume identities. Each HEAD map
-entry has `producer_exit` (integer zero), `exists` (boolean), and `roots` (list
-of fully qualified object names). Present HEADs also require an explicit `state`
-(`active`, `detached`, `deleting`, or `deleted`); unknown states yield UNKNOWN.
-Deleting HEADs are outside K6 and their references are not traversed. The collector enumerates both the current
-image and every named snapshot. Each object map entry has the same status and
-existence fields plus `references`; pool payloads explicitly have no references.
-Names are opaque, full owner-qualified identities: a matching suffix in another
-owner's pool never satisfies a reference. All observations belong to the same
-coherent collection cut; the caller owns that binding and decoding obligation.
+`expected_heads` is a nonempty unique volume-identity list. HEAD observations
+have integer `producer_exit: 0` and boolean `exists`. A present HEAD requires
+`state: active|detached|deleting|deleted`. Successful deleting/deleted observations
+are excluded BEFORE reference traversal. A failed HEAD read cannot use that
+exclusion. Unknown states yield UNKNOWN, never an inferred active/absent state.
 
-A successfully observed absent referenced object yields FAIL. Missing or failed
-reads and contradictory shapes yield UNKNOWN. An independent proven missing
-object retains FAIL even if another read is unknown. Only complete traversal
-passes. An affirmatively absent HEAD has no roots and creates no existence
-obligation; this does not prove the volume exists or serves. Traversal terminates
-on cycles, which are outside this fact's flatness claim. `checked` lists attempted
-object reads, `missing` definite absences, and `unknown` undecidable identities or
-scope errors; callers must inspect the verdict, not the attempted-read count.
+Eligible HEADs require explicit `current` (a fully qualified root name or null
+for no current references) and `snapshots` (the complete snapshot-name map, each
+value containing a nonempty `root` name). The checker itself enumerates both
+fields. A pre-flattened `roots` list cannot replace missing snapshot metadata.
+An affirmatively absent HEAD has `current: null` and `snapshots: {}`; it creates
+no names and does not prove a volume exists or serves. Other snapshot metadata
+such as dependents is outside this existence fact.
 
-Assumptions: immutable object names, coherent filer reads, no hash collisions,
-no unobserved external namespace mutation, and a complete trusted producer.
-This entry has no transaction producer or pack consumer wired yet. It cannot be
-used as whole-system invariant qualification until those sites are enumerated
-and probed. Existing packets retain their original library bytes and pins.
+`objects` is keyed by exact fully owner-qualified name. Every observation has
+`producer_exit`, `exists`, and a `references` list. Root records name immutable
+segments; segments name every chunk they list; pool payloads explicitly have
+no references. A missing segment is a K6 violation, not permission to skip its
+subtree. A foreign chunk keeps its SOURCE volume's pool identity; an identical
+suffix in the target pool never satisfies it. The collector must fetch/observe
+that source key without rebinding it to the declaring HEAD's volume.
 
-Guard enumeration: `oss_kernel.root_names_exist` is the sole deciding function;
-`loader.load_library` is the only runtime export. The source-inventory control
-rejects another named definition, export or direct consumer in checker modules.
-It does not enumerate future product writers or detect arbitrary renamed copies;
-transaction adoption must supply that inventory. Controls cover foreign owners,
-missing names, failed reads, mixed FAIL/UNKNOWN, cycles, and authenticated loading;
-mutants skip definite absence or unknown-read accounting and incorrectly pass.
+A successful observation of an absent referenced name yields FAIL. Missing or
+failed observations and contradictory shapes yield UNKNOWN; an independent
+known absence retains FAIL. Only complete successful traversal yields PASS.
+Cycles terminate without proving flatness. `checked` lists attempted object
+reads, `missing` definite absent names and `unknown` undecidable identities or
+scope errors. An excluded HEAD has no attempted object reads.
+
+Assumptions: immutable names, coherent complete HEAD/root/segment observations,
+no hash collisions, no unobserved external mutation and faithful producer decoding.
+No transaction producer or pack consumer is wired; product qualification requires
+B's writer/reader inventory, probes and model gate. Existing frozen packets keep
+their own immutable library versions and pins.
+
+Guard enumeration: one deciding function and one loader export; the checker
+source inventory detects new named definitions, exports or direct consumers.
+It does not detect arbitrary renamed copies or enumerate future product sites.
+Controls start with a healthy current-plus-snapshot graph, then delete a segment
+or a foreign source chunk (with a target lookalike still present), and require
+FAIL. Deleting/deleted HEADs with the same dangling graph must NOT fire. Source
+mutants skip snapshot traversal, ignore missing/failed reads, rebind a foreign
+name to the target or remove the deletion-state exemption; controls detect them.
 
 
 ### Immutable-entry publication order

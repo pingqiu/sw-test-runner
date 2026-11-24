@@ -18,6 +18,33 @@ def _references(observation, field):
     return names
 
 
+def _head_roots(head):
+    if (not isinstance(head, dict) or type(head.get('producer_exit')) is not int
+            or head['producer_exit'] != 0 or type(head.get('exists')) is not bool):
+        return None
+    if head['exists']:
+        if head.get('state') not in ('active', 'detached', 'deleting', 'deleted'):
+            return None
+        if head['state'] in ('deleting', 'deleted'):
+            return []
+    if 'current' not in head or not isinstance(head.get('snapshots'), dict):
+        return None
+    current, snapshots = head['current'], head['snapshots']
+    if current is not None and (not isinstance(current, str) or not current):
+        return None
+    if not head['exists'] and (current is not None or snapshots):
+        return None
+    if any(not isinstance(name, str) or not name for name in snapshots):
+        return None
+    roots = [] if current is None else [current]
+    for snapshot in snapshots.values():
+        if (not isinstance(snapshot, dict) or not isinstance(snapshot.get('root'), str)
+                or not snapshot['root']):
+            return None
+        roots.append(snapshot['root'])
+    return roots
+
+
 def root_names_exist(expected_heads, heads, objects):
     """K6: prove existence in the declared scope, not flatness or image content."""
     pending = []
@@ -35,14 +62,9 @@ def root_names_exist(expected_heads, heads, objects):
         unknown.add('unexpected HEAD observation')
     for volume in expected_heads:
         head = heads.get(volume)
-        names = _references(head, 'roots')
+        names = _head_roots(head)
         if names is None:
             unknown.add(volume)
-            continue
-        if head['exists'] and head.get('state') not in ('active', 'detached', 'deleting', 'deleted'):
-            unknown.add(volume)
-            continue
-        if head['exists'] and head['state'] == 'deleting':
             continue
         pending.extend(names)
     while pending:

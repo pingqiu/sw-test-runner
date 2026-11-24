@@ -8,7 +8,7 @@
     "unit_properties.py": "e472d984b8540a6c202e664c89762a143cb9965ee9b929f0f29228bdc65d4067",
     "completion.py": "1b82b158c44e93c1f6cba6a3fd43d7b79ac1dfea855ab5818fc3480011756f3d",
     "power_loss.py": "d2353914486336c5e082fd79057f58cab6d6a0eb99faf6ea65d26b06ccbc17cb",
-    "oss_kernel.py": "9479c354472288fc2a5be3f0f6ffb91ffa1a834384d36ae78819d37d3cea0ab7"
+    "oss_kernel.py": "947808f77e124fda82754ee814dfccef1e82b38613226cdf3d07e02a479367a9"
   },
   "entries": [
     "read_ledger",
