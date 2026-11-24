@@ -182,11 +182,36 @@ class PowerLoss(unittest.TestCase):
             write['write_id'] = 'one-multiblock-record'
         self.assertEqual(power_loss_image_exact(*inputs)['image_verdict'], 'PASS')
 
-    def test_differing_chunk_raw_bytes_are_required(self):
+    def test_full_hash_divergence_needs_no_raw_chunk_diagnostics(self):
         published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
         inputs = fixture(published=published)
-        inputs[2]['chunks'][2].pop('data')
-        self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'UNKNOWN')
+        for view in inputs[2:]:
+            for chunk in view['chunks']:
+                chunk.pop('data')
+        inputs[0].pop('proof')
+        result = power_loss_image_exact(*inputs)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['rows']['LOCAL_HISTORY']['verdict'], 'PASS')
+        self.assertEqual(result['rows']['PUBLISHED_EQUALS_LOCAL']['labels'], ['DIVERGED'])
+        self.assertEqual(result['campaign_verdict'], 'UNKNOWN')
+
+    def test_raw_diagnostic_gate_mutant(self):
+        before = "    for block in written:\n"
+        restored = ("    for index, chunk in local_chunks.items():\n"
+                    "        if chunk['sha256'] != published_chunks[index]['sha256']:\n"
+                    "            _require('data' in chunk and 'data' in published_chunks[index], 'raw required')\n"
+                    + before)
+        source = (Path(__file__).parent / 'power_loss.py').read_text()
+        self.assertEqual(source.count(before), 1)
+        module = types.ModuleType('raw_gate_mutant')
+        exec(compile(source.replace(before, restored), '<raw-gate-mutant>', 'exec'), module.__dict__)
+        published = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'CCCC' + bytes(12)
+        inputs = fixture(published=published)
+        for view in inputs[2:]:
+            for chunk in view['chunks']:
+                chunk.pop('data')
+        self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'FAIL')
+        self.assertEqual(module.power_loss_image_exact(*inputs)['verdict'], 'UNKNOWN')
 
     def test_equal_chunk_evidence_needs_no_whole_volume_raw_stream(self):
         inputs = fixture()

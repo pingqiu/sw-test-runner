@@ -93,9 +93,6 @@ def _validate_inputs(case, workload, local, published):
     written.update(workload['baseline'])
     local_chunks, local_blocks = _validate_observation(case, local, 'local', written)
     published_chunks, published_blocks = _validate_observation(case, published, 'published', written)
-    for index, chunk in local_chunks.items():
-        if chunk['sha256'] != published_chunks[index]['sha256']:
-            _require('data' in chunk and 'data' in published_chunks[index], 'differing chunks require raw bytes')
     for block in written:
         index = block * block_bytes // chunk_bytes
         if local_chunks[index]['sha256'] == published_chunks[index]['sha256']:

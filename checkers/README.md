@@ -199,7 +199,8 @@ harness event ordinals `recovery_complete < local_complete < snapshot_complete`
 and `guest_writes: 0`; these are order receipts, not cross-host clock readings.
 
 `workload.baseline` is a sparse block-index to full block-bytes map of the
-last flushed image; undeclared baseline blocks are zero. This is an explicit
+last flushed image; every declared baseline block is FLUSHED before the
+window, and undeclared baseline blocks are zero. This is an explicit
 sequential-generator policy for a fresh volume per case, not a fallback for
 missing observations. Reused volumes require a complete declared baseline;
 undeclared nonzero history is not supported.
@@ -221,9 +222,10 @@ counts equal to the number of chunks, bytes equal to volume length, and
 inclusive byte bounds zero through volume length minus one. Short, extra,
 duplicate, out-of-range or truncated-hash records yield UNKNOWN.
 
-Every observed written block has `{block, sha256, data: bytes}`. For every
-chunk whose local and published hashes differ, both chunk records must also
-carry complete `data: bytes`. Optional raw chunk evidence is validated too.
+Every observed written block has `{block, sha256, data: bytes}`. A validated
+full-SHA mismatch alone proves DIVERGED, even without raw chunk diagnostics.
+Producers should supply differing chunk bytes for diagnosis; those bytes are
+not a precondition for FAIL. Optional raw chunk evidence is validated too.
 All raw evidence must agree with its full hash and any overlapping raw block.
 Equal chunk hashes with conflicting raw block observations are rejected.
 Sparse expected bytes plus the observed written blocks reconstruct expected
@@ -234,7 +236,8 @@ substitute for this interface.
 `case.write_ahead_fixed` is the packet's sealed boolean revision policy.
 `proof` carries the matching run/image/volume/revision `binding`, `revision`,
 host `clock_id`, integer `write_ack_ns`, `cut_mark_ns`, and nonnegative
-`extent_writes`. The unfixed proof also carries `extent_write_ns`. A fixed
+`extent_writes`. Here `cut_mark_ns` means the crash point in the device log,
+not a product snapshot cut. The unfixed proof also carries `extent_write_ns`. A fixed
 proof with zero extent writes carries `status_poll_ns` and `status_exit: 0`.
 The harness owns the evidence for those values and the replay log/subset join.
 Changing the random seed or labeling an image random does not prove a
