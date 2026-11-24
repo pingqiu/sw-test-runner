@@ -279,3 +279,207 @@ New qualification runs never use this adapter: they require the full-SHA/raw
 producer interface above. Missing or other purpose declarations yield UNKNOWN.
 Producer provenance and captured-artifact bindings remain pack obligations;
 this interface does not authenticate a free-standing tag scan.
+
+
+### Root-reference existence
+
+`root_names_exist(expected_heads, read_head, read_object, max_attempts=3)` reads each declared HEAD's
+current root and EVERY snapshot root, then all referenced immutable segments and
+chunks; proves that every reachable name exists in its OWNER's pool, except for
+HEADs in deleting or deleted state; does not prove image content, point-in-time
+consistency, flatness, dependency registration or a lying producer's completeness.
+The callbacks read the filer directly; no local status/cache substitutes. Each RPC deadline belongs to the caller. The checker reads HEAD, traverses the graph, then re-reads HEAD. A changed generation or persisted body discards that attempt and retries; exhaustion yields UNKNOWN. Successful results include the stable generation per volume.
+
+`expected_heads` is a nonempty unique volume-identity list. HEAD observations
+have integer `producer_exit: 0`, boolean `exists`, and a nonempty opaque `generation` for existing HEADs. A present HEAD requires
+`state: active|detached|deleting|deleted`. Successful deleting/deleted observations
+are excluded BEFORE reference traversal. A failed HEAD read cannot use that
+exclusion. Unknown states yield UNKNOWN, never an inferred active/absent state.
+
+Eligible HEADs require explicit `current` (a fully qualified root name or null
+for no current references) and `snapshots` (the complete snapshot-name map, each
+value containing a nonempty `root` name). The checker itself enumerates both
+fields. A pre-flattened `roots` list cannot replace missing snapshot metadata.
+An affirmatively absent HEAD has `current: null` and `snapshots: {}`; it creates
+no names and does not prove a volume exists or serves. Other snapshot metadata
+such as dependents is outside this existence fact.
+
+`read_object(name)` reads the exact fully owner-qualified name. Every observation has
+`producer_exit`, `exists`, and a `references` list. Root records name immutable
+segments; segments name every chunk they list; pool payloads explicitly have
+no references. A missing segment is a K6 violation, not permission to skip its
+subtree. A foreign chunk keeps its SOURCE volume's pool identity; an identical
+suffix in the target pool never satisfies it. The collector must fetch/observe
+that source key without rebinding it to the declaring HEAD's volume.
+
+A successful observation of an absent referenced name yields FAIL. Missing or
+failed observations and contradictory shapes yield UNKNOWN; an independent
+known absence retains FAIL. Only complete successful traversal yields PASS.
+Cycles terminate without proving flatness. `checked` lists attempted object
+reads, `missing` definite absent names and `unknown` undecidable identities or
+scope errors. An excluded HEAD has no attempted object reads.
+
+Assumptions: immutable names, coherent complete HEAD/root/segment observations,
+no hash collisions, no unobserved external mutation and faithful producer decoding.
+No transaction producer or pack consumer is wired; product qualification requires
+B's writer/reader inventory, probes and model gate. Existing frozen packets keep
+their own immutable library versions and pins.
+
+Guard enumeration: one deciding function and one loader export; the checker
+source inventory detects new named definitions, exports or direct consumers.
+It does not detect arbitrary renamed copies or enumerate future product sites.
+Controls start with a healthy current-plus-snapshot graph, then delete a segment
+or a foreign source chunk (with a target lookalike still present), and require
+FAIL. Deleting/deleted HEADs with the same dangling graph must NOT fire. Source
+mutants skip snapshot traversal, ignore missing/failed reads, rebind a foreign
+name to the target or remove the deletion-state exemption; controls detect them.
+
+
+### Complete content-addressed filer entries
+
+`entries_match_names(volume, list_entries, read_entry)` reads every file in the
+volume's pool/, seg/ and root/ namespaces; proves complete readable bytes match
+the full SHA-256 in each name; does not prove guest ACK durability or collector
+completeness. This is K8; the earlier synthetic ACK timeline is replaced.
+
+The direct filer list callback recursively lists every file in each namespace,
+including all pages. It returns a list of canonical owner-qualified names, even
+when empty. Names are pool/<shard>/<index>-<hash>, seg/<shard>-<hash> or
+root/<hash>, where hash is 64 lowercase hex digits. Duplicate, unsafe or
+out-of-namespace inventory is UNKNOWN; invalid content names are FAIL.
+`read_entry(name)` returns `{producer_exit: 0, exists: true, size, content}`;
+content is the bytes read through EOF and size is the filer's nonnegative size.
+The function computes SHA-256 itself; a supplied hash label is never evidence.
+
+Failed listing/read, disappearance or malformed observation yields UNKNOWN.
+Definite content/size mismatch yields FAIL, even alongside another UNKNOWN.
+All three namespaces are read; an empty volume satisfies this content fact
+vacuously and is not a case-efficacy witness. No wall clock supplies ordering.
+
+Assumptions: faithful complete direct-filer listing/reads, immutable names and
+no hash collision. Invoke this same leaf after every interruption point.
+Synthetic controls enumerate prepare/publish prefixes and plant corrupt or
+partial content; hash/EOF mutants are caught. Real transaction interruption
+joins and producer writer/reader probes remain model-gated and unwired.
+Guard enumeration: one entries_match_names definition and loader export,
+covered by the checker-site inventory; no shadow publication judge remains.
+
+### Snapshot activity and pool removal
+
+`snapshot_removals_safe(scope, observation)` reads one volume's filer metadata
+event stream; proves no pool/ entry deletion occurs between the HEAD update
+setting snap(s) and the update clearing it; does not prove reachability, lease
+permission or legality of the HEAD changes. Root/seg deletion is outside K9.
+
+The complete capture has `source: filer_metadata`, nonempty `stream_id`,
+`initial_generation` and `initial_activity` from HEAD at its stream boundary.
+Activity is `{kind: idle}` or `{kind: snap|clean, session: id}`. The common
+capture envelope has successful integer producer_exit, exact run/volume binding,
+contiguous ordinal events and coverage `{first: 0, last: N-1, count: N}`.
+`scope.names` is a nonempty unique list of expected pool deletions.
+
+Events are `head_update` with entry `<volume>/HEAD`, before_generation,
+generation and resulting activity, or `delete_entry` with the actual name.
+Each HEAD update must continue the observed generation chain. Stream order is
+authoritative; timestamps and process-memory flags never reorder or replace it.
+An idle update after a deletion cannot erase that violation. Other-volume or
+malformed events, failed capture, missing source and generation gaps are UNKNOWN.
+A missing expected deletion is UNKNOWN unless a violation already proves FAIL.
+
+Assumptions: trusted complete filer metadata capture, a boundary HEAD bound to
+that stream, and no unobserved external namespace mutation. Arithmetic coverage
+alone cannot detect omitted events: the producer must prove its capture closure.
+Guard enumeration: one deciding function/export, checker-site guard and controls
+for source, generation continuity, pool-only scope and ordinal order; actual
+transaction producer/remover probes are required before adoption. Source mutants
+ignoring snapshot activity or accepting failed capture are detected.
+
+
+### External acknowledged-write survival
+
+`acknowledged_writes_survive(scope, witness, crash, read_block)` reads an
+OFF-HOST guest ACK witness and complete recovered guest blocks after real power
+loss; proves every witnessed fsync/FUA acknowledgement survived; does not prove
+an internal sync happened by inspecting its return, log file or device cache.
+This is the external K2 observation. The old internal append/sync trace is removed.
+
+Scope declares exact `binding: {run, volume, crash_id}`, crashed `host`, distinct
+`witness_host`, positive `blocks` and `block_bytes`. The off-host witness has
+matching binding/host, successful integer producer_exit, source
+`off_host_guest_ack`, durability `fsync|fua` and complete FINAL `ledger` bytes.
+It reuses read_ledger's existing I/A/E parser and fresh sequential block policy.
+Every A is checked, including ACKs without LSNs. No remote cut/lost-range rule
+forgives an acknowledged record. An empty ACK corpus is UNKNOWN.
+
+The separate external loss receipt has matching binding/crashed host, successful
+integer producer_exit, source `external_controller`, kind `power_cut|vm_kill`
+and affirmative `confirmed_dead`. A process SIGKILL or in-process probe does
+not qualify. The callback reads each acknowledged block via the recovered guest
+before new writes. Its record has matching binding and integer `block`, source
+`recovered_guest`, successful producer_exit, recovery_complete true,
+integer guest_writes zero and boolean exists. Existing blocks require exactly
+block_bytes of raw `data`; the checker computes their full SHA-256 and matches
+the witness's digest. A proven absent or mismatched acknowledged block is FAIL
+with ACKED-LOST. Failed/unbound/incomplete recovery evidence is UNKNOWN; an
+independent proven loss retains FAIL. Result checked/violations identify the
+witness sequence numbers, with block identities on deciding violations.
+
+Assumptions: sealed honest producers retain the complete off-host ACK witness
+across the loss, prove actual external host/VM loss, and bind recovery reads to
+that loss before subsequent writes. Receipt labels alone are not qualification.
+There is no live pack adapter here. No independent host clocks are compared.
+
+Guard enumeration: one facts.py definition, using the existing FINAL parser,
+and one manifest export through the authenticated facts module. Site inventory
+and loader controls cover it. Actual guest/witness, power controller and recovery
+reader writers/readers remain adoption obligations, each requiring probes.
+Controls reject same-host witnesses, process-only kill, malformed witnesses,
+failed/mismatched recovery reads and corruption, and check all ACKs including
+the last and LSN-less ones. Hash-comparison and custody mutants go red.
+
+
+### Existing HEAD updates in filer order
+
+`head_updates_ordered(scope, observation)` reads existing-volume HEAD updates
+from the filer's metadata stream and causally joined master authority-store
+records; proves exact +1 generations, nondecreasing epochs matching the granted
+holder line, and no HEAD recreation; does not prove lease timing, payload/session
+legality or initial HEAD creation's empty-pool rule. The former applied-wire
+predicate is replaced, not retained as a second judge.
+
+The common capture envelope binds run/volume, successful producer status,
+contiguous event ordinals and complete coverage. `scope.head` is exactly
+`<volume>/HEAD`; `scope.updates` lists nonempty unique expected event IDs.
+Observation source is `filer_metadata`, with a nonempty stream_id and
+`initial_head: {generation, epoch, holder}` from an EXISTING HEAD at the stream
+boundary. Generation is a nonnegative integer and epoch a positive integer.
+An absent initial HEAD cannot qualify this existing-volume fact.
+
+Events have ordinal, update_id, exact entry and kind head_update, delete_entry
+or create_entry. HEAD updates carry actual before/after identities. Each new
+generation must equal old+1, and consecutive published generations must also
+advance exactly one: repeated or skipped generations FAIL. Discontinuous body
+capture adds UNKNOWN evidence; an independently proven violation retains FAIL.
+New epoch must not decrease. A create in this existing-volume scope FAILs,
+including a delete-then-create pair. A final deletion alone is not prohibited
+by this fact; initialization is a different observation/row.
+
+`authority_store` has exact binding, source authority_store, successful integer
+producer_exit and nonempty records `{revision, epoch, holder}` in strictly
+increasing positive store-revision order. Global revisions may skip. Each HEAD
+update supplies `authority_revision_before`, referencing the actual line record
+read before that event; selected revisions cannot move backwards. The resulting
+HEAD epoch AND holder must match that grant. Missing/reversed joins and failed
+store capture are UNKNOWN, not a guessed authority or a later poll.
+
+Assumptions: complete faithful filer metadata and authority-store capture with
+a proved causal join. The before-revision field is the producer's evidence
+reference, not a clock-derived ordering claim. Independent store revisions
+cannot themselves establish cross-store order: B must capture/prove the prior
+read and expose its writer/reader probes before adoption. No host clock, even
+monotonic, establishes this order. No adapter or live qualification is wired.
+
+Guard enumeration: one deciding definition, loader/manifest export and checker
+site inventory; controls for exact/repeated/skipped gen, grants, epoch, capture
+failure and delete/create; source mutants bypassing generation, grant and
+recreation checks are caught. Model-gated transaction joins remain separate.
