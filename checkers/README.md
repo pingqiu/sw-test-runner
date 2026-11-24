@@ -279,3 +279,44 @@ New qualification runs never use this adapter: they require the full-SHA/raw
 producer interface above. Missing or other purpose declarations yield UNKNOWN.
 Producer provenance and captured-artifact bindings remain pack obligations;
 this interface does not authenticate a free-standing tag scan.
+
+
+### Root-reference existence
+
+`root_names_exist(expected_heads, heads, objects)` reads the complete declared
+HEAD scope and its reachable immutable-object observations; proves that every
+referenced name was affirmatively present in its owning namespace; does not prove
+image contents, point-in-time consistency, graph flatness, dependent registration,
+or the producer's completeness. This is an offline fact, with no host actions.
+
+`expected_heads` is a nonempty unique list of volume identities. Each HEAD map
+entry has `producer_exit` (integer zero), `exists` (boolean), and `roots` (list
+of fully qualified object names). The collector enumerates both the current
+image and every named snapshot. Each object map entry has the same status and
+existence fields plus `references`; pool payloads explicitly have no references.
+Names are opaque, full owner-qualified identities: a matching suffix in another
+owner's pool never satisfies a reference. All observations belong to the same
+coherent collection cut; the caller owns that binding and decoding obligation.
+
+A successfully observed absent referenced object yields FAIL. Missing or failed
+reads and contradictory shapes yield UNKNOWN. An independent proven missing
+object retains FAIL even if another read is unknown. Only complete traversal
+passes. An affirmatively absent HEAD has no roots and creates no existence
+obligation; this does not prove the volume exists or serves. Traversal terminates
+on cycles, which are outside this fact's flatness claim. `checked` lists attempted
+object reads, `missing` definite absences, and `unknown` undecidable identities or
+scope errors; callers must inspect the verdict, not the attempted-read count.
+
+Assumptions: immutable object names, coherent filer reads, no hash collisions,
+no unobserved external namespace mutation, and a complete trusted producer.
+This entry has no transaction producer or pack consumer wired yet. It cannot be
+used as whole-system invariant qualification until those sites are enumerated
+and probed. Existing packets retain their original library bytes and pins.
+
+Guard enumeration: `oss_kernel.root_names_exist` is the sole deciding function;
+`loader.load_library` is the only runtime export. The source-inventory control
+rejects another named definition, export or direct consumer in checker modules.
+It does not enumerate future product writers or detect arbitrary renamed copies;
+transaction adoption must supply that inventory. Controls cover foreign owners,
+missing names, failed reads, mixed FAIL/UNKNOWN, cycles, and authenticated loading;
+mutants skip definite absence or unknown-read accounting and incorrectly pass.

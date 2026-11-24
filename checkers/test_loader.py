@@ -12,11 +12,14 @@ class Loader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             source = Path(__file__).parent
-            for name in ['library.json', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py']:
+            for name in ['library.json', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py', 'oss_kernel.py']:
                 shutil.copy2(source / name, root / name)
             pin = (source / 'library.sha256').read_text().strip()
             library = load_library(root, pin)
             self.assertEqual(library.library_sha256, pin)
+            heads = {'v': {'producer_exit': 0, 'exists': True, 'roots': ['r']}}
+            objects = {'r': {'producer_exit': 0, 'exists': False, 'references': []}}
+            self.assertEqual(library.root_names_exist(['v'], heads, objects)['verdict'], 'FAIL')
             self.assertTrue(callable(library.show_unit_properties))
             self.assertTrue(callable(library.rep_complete))
             from test_power_loss import fixture
@@ -26,7 +29,7 @@ class Loader(unittest.TestCase):
             for bad in ['', '0' * 64]:
                 with self.subTest(pin=bad), self.assertRaises(ValueError):
                     load_library(root, bad)
-            for member in ['facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py']:
+            for member in ['facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py', 'oss_kernel.py']:
                 with self.subTest(member=member):
                     original = (root / member).read_bytes()
                     (root / member).write_bytes(b'raise RuntimeError("must never execute")')
@@ -44,7 +47,7 @@ class Loader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             source = Path(__file__).parent
-            for name in ['library.json', 'library.sha256', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py']:
+            for name in ['library.json', 'library.sha256', 'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py', 'oss_kernel.py']:
                 shutil.copy2(source / name, root / name)
             published_pin = (root / 'library.sha256').read_text().strip()
             changed = (root / 'library.json').read_bytes() + b'\n'
