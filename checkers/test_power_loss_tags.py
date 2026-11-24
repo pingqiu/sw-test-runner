@@ -17,7 +17,7 @@ def tag_fixture():
     case, _, local, published = fixture()
     case.update(block_bytes=4096, chunk_bytes=8192, volume_bytes=16384,
                 observation_purpose='legacy_parity')
-    workload = {'baseline': {}, 'writes': [
+    workload = {'unflushed_sequential': True, 'baseline': {}, 'writes': [
         {'block': 0, 'new': pattern('new'), 'flushed': False}], 'operations': ['write']}
     for view in (local, published):
         view['encoding'] = 'pattern-tags/v1'
@@ -31,6 +31,15 @@ def tag_fixture():
 
 
 class TagScan(unittest.TestCase):
+    def test_legacy_encoding_cannot_invent_sequentiality(self):
+        for declared in (None, False):
+            args = tag_fixture()
+            if declared is None:
+                args[1].pop('unflushed_sequential')
+            else:
+                args[1]['unflushed_sequential'] = declared
+            self.assertEqual(power_loss_image_exact(*args)['verdict'], 'UNKNOWN')
+
     def test_tags_require_explicit_legacy_parity_purpose(self):
         for purpose in (None, 'qualification', 'legacy_parity_typo'):
             args = tag_fixture()
