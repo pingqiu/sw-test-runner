@@ -444,3 +444,49 @@ Guard enumeration lists the deciding function and sealed loader export. Tests
 cover future syncs, sync-before-append, exact-LSN boundary, mismatched records,
 missing operations and failed collection. The mutant that accepts an unsynced
 record merely because it exists is detected. Frozen packet evidence is unchanged.
+
+
+### Conditional existing-HEAD updates
+
+`head_updates_conditional(scope, observation)` reads complete applied wire
+mutations for existing HEAD transitions together with their before/after and
+current-authority observations; proves each transition is one conditional update
+under that authority with matching generation/epoch conditions; does not prove
+lease timing, session/payload transition legality, image contents or the atomicity
+of the trusted lower-layer conditional-update primitive. This is K7's existing-
+HEAD scope; initialization needs its separate exclusive-create proof.
+
+Use the bound causal capture envelope above. `scope.head` is the exact entry
+identity; `scope.updates` is the nonempty unique expected transition-ID list.
+Each event has `kind: head_update`, `ordinal`, `update_id`, `authority`, `writer`,
+`before`, `after` and `writes`. Authority and writer are `{epoch, holder}`;
+before/after additionally carry a nonempty opaque `generation` token. Epochs
+are positive integers. Authority is observed at the transition's linearization
+cut, not supplied from a remembered writer flag or a later master poll.
+
+`writes` is the COMPLETE list of actual applied entry mutations for that one
+transition, including applications whose replies were lost. Failed attempts and
+read-back calls are not applied writes. Each mutation carries `entry`, `operation`
+(`conditional_update`, `unconditional_update`, `exclusive_create`, or `delete`),
+`expected_generation`, and `expected_epoch`; explicit null means no condition.
+A missing field means unknown evidence, not an inferred wire precondition.
+The producer must not group a snapshot's distinct Begin and Commit transitions
+as one mutation or call a safe-prefix multi-entry command one atomic commit.
+
+Exactly one applied conditional update must target this HEAD. Its conditions
+must equal the before generation/epoch. Writer must match current authority;
+after must match writer and have a new generation token. A same-epoch update
+cannot change holders; a higher-epoch claim may change them. Same-epoch restart
+can observe its own HEAD without changing it, but cannot adopt another holder.
+A stale writer, wrong condition, unchanged generation or multiple applied
+mutations is FAIL. An empty applied-write list, malformed/unbound capture or
+missing expected transition is UNKNOWN unless an independent violation proves
+FAIL. Only complete matching proof passes.
+
+Assumptions: coherent atomic lower-layer mutations, trusted complete applied-wire
+capture and authority observation, and no unobserved external mutation. B supplies
+the actual producer joins; none is wired by this library-only addition. Source
+inventory enumerates the deciding function and loader export. Controls include
+current updates, advancing claims, missing/stale conditions, writer identities,
+multiple/unconditional mutations and unavailable evidence. Four source mutants
+drop generation, epoch, current-authority or single-write checks and are caught.

@@ -211,3 +211,82 @@ def acknowledged_writes_synced(scope, observation):
     verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
     return {'verdict': verdict, 'checked': sorted(checked),
             'violations': violations, 'unknown': unknown}
+
+
+def _valid_holder(value):
+    return (isinstance(value, dict) and type(value.get('epoch')) is int and value['epoch'] > 0
+            and isinstance(value.get('holder'), str) and bool(value['holder']))
+
+
+def _head_update_events(scope, observation):
+    expected, events = _causal_events(scope, observation, 'updates')
+    if not isinstance(scope.get('head'), str) or not scope['head']:
+        raise ValueError('HEAD entry identity is missing')
+    seen = set()
+    for event in events:
+        if (event.get('kind') != 'head_update' or event.get('update_id') not in expected
+                or event['update_id'] in seen):
+            raise ValueError('unknown or duplicate HEAD transition')
+        seen.add(event['update_id'])
+        if not all(_valid_holder(event.get(field)) for field in ('authority', 'writer', 'before', 'after')):
+            raise ValueError('HEAD or authority identity is unknown')
+        if not all(isinstance(event[field].get('generation'), str) and event[field]['generation']
+                   for field in ('before', 'after')):
+            raise ValueError('HEAD generation is unknown')
+        writes = event.get('writes')
+        if not isinstance(writes, list) or not writes:
+            raise ValueError('applied mutation evidence is missing')
+        for write in writes:
+            if (not isinstance(write, dict)
+                    or not isinstance(write.get('entry'), str) or not write['entry']
+                    or write.get('operation') not in ('conditional_update', 'unconditional_update',
+                                                       'exclusive_create', 'delete')
+                    or 'expected_generation' not in write or 'expected_epoch' not in write):
+                raise ValueError('applied mutation or preconditions are unknown')
+            generation, epoch = write['expected_generation'], write['expected_epoch']
+            if (generation is not None and (not isinstance(generation, str) or not generation)
+                    or epoch is not None and (type(epoch) is not int or epoch < 0)):
+                raise ValueError('invalid wire precondition')
+    return expected, events
+
+
+def head_updates_conditional(scope, observation):
+    """K7: one existing-HEAD conditional mutation under the observed authority."""
+    try:
+        expected, events = _head_update_events(scope, observation)
+    except ValueError as error:
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
+    checked = set()
+    violations = []
+    for event in events:
+        before, after = event['before'], event['after']
+        writer, authority = event['writer'], event['authority']
+        writes = event['writes']
+        reasons = []
+        if len(writes) != 1:
+            reasons.append('not one applied entry mutation')
+        else:
+            write = writes[0]
+            if write['entry'] != scope['head'] or write['operation'] != 'conditional_update':
+                reasons.append('not a conditional update of this HEAD')
+            if write['expected_generation'] != before['generation']:
+                reasons.append('generation precondition does not match')
+            if write['expected_epoch'] != before['epoch']:
+                reasons.append('epoch precondition does not match')
+        if (writer['epoch'], writer['holder']) != (authority['epoch'], authority['holder']):
+            reasons.append('writer is not the current authority')
+        if (after['epoch'], after['holder']) != (writer['epoch'], writer['holder']):
+            reasons.append('result does not belong to the writer')
+        if (writer['epoch'] < before['epoch']
+                or writer['epoch'] == before['epoch'] and writer['holder'] != before['holder']):
+            reasons.append('epoch does not permit this holder')
+        if after['generation'] == before['generation']:
+            reasons.append('mutation did not advance the generation')
+        checked.add(event['update_id'])
+        if reasons:
+            violations.append({'update_id': event['update_id'], 'ordinal': event['ordinal'],
+                               'reasons': reasons})
+    unknown = sorted(set(expected) - checked)
+    verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
+    return {'verdict': verdict, 'checked': sorted(checked),
+            'violations': violations, 'unknown': unknown}

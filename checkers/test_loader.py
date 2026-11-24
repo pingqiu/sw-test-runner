@@ -26,6 +26,8 @@ class Loader(unittest.TestCase):
             self.assertEqual(library.snapshot_removals_safe(*removal_trace())['verdict'], 'FAIL')
             from test_log_ack_order import log_trace
             self.assertEqual(library.acknowledged_writes_synced(*log_trace())['verdict'], 'PASS')
+            from test_head_update import head_trace
+            self.assertEqual(library.head_updates_conditional(*head_trace())['verdict'], 'PASS')
             self.assertTrue(callable(library.show_unit_properties))
             self.assertTrue(callable(library.rep_complete))
             from test_power_loss import fixture

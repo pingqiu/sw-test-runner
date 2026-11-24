@@ -56,6 +56,7 @@ def load_library(root, manifest_sha256):
     module.entries_data_acknowledged = kernel.entries_data_acknowledged
     module.snapshot_removals_safe = kernel.snapshot_removals_safe
     module.acknowledged_writes_synced = kernel.acknowledged_writes_synced
+    module.head_updates_conditional = kernel.head_updates_conditional
     module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module
