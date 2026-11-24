@@ -15,7 +15,8 @@ def pattern(tag):
 
 def tag_fixture():
     case, _, local, published = fixture()
-    case.update(block_bytes=4096, chunk_bytes=8192, volume_bytes=16384)
+    case.update(block_bytes=4096, chunk_bytes=8192, volume_bytes=16384,
+                observation_purpose='legacy_parity')
     workload = {'baseline': {}, 'writes': [
         {'block': 0, 'new': pattern('new'), 'flushed': False}], 'operations': ['write']}
     for view in (local, published):
@@ -30,6 +31,16 @@ def tag_fixture():
 
 
 class TagScan(unittest.TestCase):
+    def test_tags_require_explicit_legacy_parity_purpose(self):
+        for purpose in (None, 'qualification', 'legacy_parity_typo'):
+            args = tag_fixture()
+            if purpose is None:
+                args[0].pop('observation_purpose')
+            else:
+                args[0]['observation_purpose'] = purpose
+            with self.subTest(purpose=purpose):
+                self.assertEqual(power_loss_image_exact(*args)['verdict'], 'UNKNOWN')
+
     def test_patterns_rebuild_bytes_and_equal_views_pass(self):
         result = power_loss_image_exact(*tag_fixture())
         self.assertEqual(result['verdict'], 'PASS')
@@ -120,3 +131,10 @@ class TagMutants(unittest.TestCase):
         args = tag_fixture()
         self.assertEqual(power_loss_image_exact(*args)['verdict'], 'PASS')
         self.assertNotEqual(judge(*args)['verdict'], 'PASS')
+
+    def test_qualification_tag_admission_mutant(self):
+        judge = self.mutant("case.get('observation_purpose') == 'legacy_parity'", 'True')
+        args = tag_fixture()
+        args[0]['observation_purpose'] = 'qualification'
+        self.assertEqual(power_loss_image_exact(*args)['verdict'], 'UNKNOWN')
+        self.assertEqual(judge(*args)['verdict'], 'PASS')

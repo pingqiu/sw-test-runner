@@ -229,6 +229,8 @@ def _tag_bytes(record):
 
 def _tag_views(case, workload, local, published):
     """Rebuild one chunk at a time; only differing chunks retain raw bytes."""
+    _require(case.get('observation_purpose') == 'legacy_parity',
+             'pattern tags are permitted only for legacy parity, never qualification')
     size, chunk_bytes = case['volume_bytes'], case['chunk_bytes']
     _require(case['block_bytes'] == 4096 and _number(size, 1) and size % 4096 == 0 and
              _number(chunk_bytes, 4096) and chunk_bytes % 4096 == 0 and

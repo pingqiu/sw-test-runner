@@ -248,7 +248,9 @@ and fixed-revision extent writes. Existing frozen packets retain their old pin;
 adoption requires the complete packet oracle and a new seal.
 
 
-Pattern-tag observations may use `encoding: pattern-tags/v1` on both views,
+For reviewed legacy-corpus parity ONLY, the case must declare
+`observation_purpose: legacy_parity`; pattern-tag observations may then use
+`encoding: pattern-tags/v1` on both views,
 `tag_blocks: [{block, tag, data?}]`, and `nonzero_blocks` in each chunk record.
 The same identity, range, coverage and producer-status obligations apply.
 This adapter supports 4096-byte blocks: `zero` reconstructs zeros; a tag of at
@@ -268,5 +270,7 @@ Optional `scan_sha256` is a 16-hex legacy prefix or 64-hex full independent hash
 A mismatch against reconstructed bytes makes the `TAG_SCAN` row FAIL with
 `HARNESS-HASH-MISMATCH`; it does not relabel the separate image/campaign facts.
 The adapter computes full hashes itself even with legacy prefix observations.
+New qualification runs never use this adapter: they require the full-SHA/raw
+producer interface above. Missing or other purpose declarations yield UNKNOWN.
 Producer provenance and captured-artifact bindings remain pack obligations;
 this interface does not authenticate a free-standing tag scan.
