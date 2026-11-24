@@ -1,5 +1,6 @@
 """One structural ledger judge and shared lease/acknowledgement predicates."""
 import re
+import hashlib
 from datetime import datetime, timezone
 
 
@@ -8,6 +9,68 @@ RECORD_SCHEMA = {
     'A': {'fields': 8, 'numeric': (1, 2, 6, 7), 'lsn': (4, 5), 'mono': 6},
     'E': {'fields': 6, 'numeric': (1, 2, 3, 4, 5), 'lsn': (), 'mono': 4},
 }
+
+
+def acknowledged_writes_survive(scope, witness, crash, read_block):
+    """K2: off-host acknowledged fsync/FUA records survive real host power loss."""
+    checked, violations, unknown = [], [], []
+    try:
+        binding = scope['binding']
+        if (not isinstance(binding, dict)
+                or any(not isinstance(binding.get(k), str) or not binding[k]
+                       for k in ('run', 'volume', 'crash_id'))
+                or any(not isinstance(scope.get(k), str) or not scope[k]
+                       for k in ('host', 'witness_host'))
+                or scope['host'] == scope['witness_host']
+                or type(scope['blocks']) is not int or scope['blocks'] < 1
+                or type(scope['block_bytes']) is not int or scope['block_bytes'] < 1
+                or not callable(read_block)):
+            raise ValueError('invalid external witness scope')
+        if (witness['binding'] != binding or witness['host'] != scope['witness_host']
+                or witness['source'] != 'off_host_guest_ack'
+                or type(witness['producer_exit']) is not int or witness['producer_exit'] != 0
+                or witness['durability'] not in ('fsync', 'fua')
+                or not isinstance(witness['ledger'], bytes)):
+            raise ValueError('off-host durable ACK witness is missing')
+        if (crash['binding'] != binding or crash['host'] != scope['host']
+                or crash['source'] != 'external_controller'
+                or type(crash['producer_exit']) is not int or crash['producer_exit'] != 0
+                or crash['kind'] not in ('power_cut', 'vm_kill')
+                or crash['confirmed_dead'] is not True):
+            raise ValueError('external host power-loss evidence is missing')
+        records = read_ledger(witness['ledger'], 'FINAL')['records']
+        if any(record['block'] >= scope['blocks'] for record in records.values()):
+            raise ValueError('witness record outside geometry')
+        acknowledged = [record for record in records.values() if record['kind'] == 'A']
+        if not acknowledged:
+            raise ValueError('no acknowledged records witnessed')
+    except (KeyError, TypeError, ValueError, UnicodeError) as error:
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
+    for record in acknowledged:
+        seq, block = record['seq'], record['block']
+        try:
+            observation = read_block(block)
+            if (observation['binding'] != binding or observation['source'] != 'recovered_guest'
+                    or type(observation['block']) is not int or observation['block'] != block
+                    or type(observation['producer_exit']) is not int or observation['producer_exit'] != 0
+                    or observation['recovery_complete'] is not True
+                    or type(observation['guest_writes']) is not int or observation['guest_writes'] != 0
+                    or type(observation['exists']) is not bool):
+                raise ValueError('unbound or failed recovered guest read')
+            if observation['exists']:
+                data = observation['data']
+                if not isinstance(data, bytes) or len(data) != scope['block_bytes']:
+                    raise ValueError('incomplete recovered block')
+                intact = hashlib.sha256(data).hexdigest() == record['sha']
+            else:
+                intact = False
+            checked.append(seq)
+            if not intact:
+                violations.append({'seq': seq, 'block': block, 'label': 'ACKED-LOST'})
+        except Exception as error:
+            unknown.append({'seq': seq, 'reason': str(error)})
+    return {'verdict': 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS',
+            'checked': checked, 'violations': violations, 'unknown': unknown}
 
 
 def read_ledger(data, mode):

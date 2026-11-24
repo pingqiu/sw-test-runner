@@ -573,7 +573,7 @@ class RootNames(unittest.TestCase):
             'root_names_exist',
             'entries_match_names',
             'snapshot_removals_safe',
-            'acknowledged_writes_synced',
+            'acknowledged_writes_survive',
             'head_updates_conditional',
         }
         for path in Path(__file__).parent.glob('*.py'):
@@ -590,14 +590,20 @@ class RootNames(unittest.TestCase):
                     name = getattr(node.func, 'id', getattr(node.func, 'attr', None))
                     if name in entries:
                         sites.append((path.name, 'consumer', name))
-        self.assertCountEqual(
-            sites,
-            [
-                (file, kind, entry)
-                for entry in entries
-                for file, kind in [('oss_kernel.py', 'definition'), ('loader.py', 'export')]
-            ],
-        )
+        expected = []
+        for entry in entries:
+            if entry == 'acknowledged_writes_survive':
+                expected.append(('facts.py', 'definition', entry))
+            else:
+                expected.extend(
+                    [('oss_kernel.py', 'definition', entry), ('loader.py', 'export', entry)]
+                )
+        self.assertCountEqual(sites, expected)
+        import json
+
+        manifest = json.loads((Path(__file__).parent / 'library.json').read_text())
+        self.assertTrue(entries <= set(manifest['entries']))
+        self.assertEqual(len(manifest['entries']), len(set(manifest['entries'])))
 
 
 if __name__ == '__main__':

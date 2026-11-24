@@ -73,9 +73,12 @@ class Loader(unittest.TestCase):
             from test_removal_order import removal_trace
 
             self.assertEqual(library.snapshot_removals_safe(*removal_trace())['verdict'], 'FAIL')
-            from test_log_ack_order import log_trace
+            from test_ack_survival import survival_fixture, check_survival
 
-            self.assertEqual(library.acknowledged_writes_synced(*log_trace())['verdict'], 'PASS')
+            self.assertEqual(
+                check_survival(library.acknowledged_writes_survive, survival_fixture())['verdict'],
+                'PASS',
+            )
             from test_head_update import head_trace
 
             self.assertEqual(library.head_updates_conditional(*head_trace())['verdict'], 'PASS')

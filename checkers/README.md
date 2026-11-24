@@ -395,43 +395,47 @@ transaction producer/remover probes are required before adoption. Source mutants
 ignoring snapshot activity or accepting failed capture are detected.
 
 
-### Local log sync before guest acknowledgement
+### External acknowledged-write survival
 
-`acknowledged_writes_synced(scope, observation)` reads actual local append,
-completed sync and guest-ACK events; proves every observed ACK has a matching
-log record covered by a sync completed after that append and before the ACK;
-does not prove fsync from a guest ledger, log membership, elapsed time or exit.
-It is K2's offline seam, not a new local-engine implementation.
+`acknowledged_writes_survive(scope, witness, crash, read_block)` reads an
+OFF-HOST guest ACK witness and complete recovered guest blocks after real power
+loss; proves every witnessed fsync/FUA acknowledgement survived; does not prove
+an internal sync happened by inspecting its return, log file or device cache.
+This is the external K2 observation. The old internal append/sync trace is removed.
 
-Use the same bound causal capture envelope as the other ordering leaves.
-`scope.binding` additionally requires a nonempty `process` incarnation; one
-capture cannot mix restarts. `scope.writes` is the nonempty unique expected
-write-ID list. `log_append` and `guest_ack` events carry `ordinal`, `kind`,
-`write_id`, nonnegative integer `lsn`, and lowercase full `sha256`. A completed
-`log_sync` event carries `ordinal`, `kind`, and integer `through_lsn >= 0`.
-The sync position is its actual completed high-water mark, never the requested
-position. One scoped write has one observed append; retry/duplicate append
-normalization requires a separate producer contract instead of last-write-wins.
+Scope declares exact `binding: {run, volume, crash_id}`, crashed `host`, distinct
+`witness_host`, positive `blocks` and `block_bytes`. The off-host witness has
+matching binding/host, successful integer producer_exit, source
+`off_host_guest_ack`, durability `fsync|fua` and complete FINAL `ledger` bytes.
+It reuses read_ledger's existing I/A/E parser and fresh sequential block policy.
+Every A is checked, including ACKs without LSNs. No remote cut/lost-range rule
+forgives an acknowledged record. An empty ACK corpus is UNKNOWN.
 
-Only records already appended when the completed sync is observed become
-durable through its LSN. A later sync cannot repair an earlier ACK. The ACK must
-match both LSN and full bytes digest. Missing append, missing sync, low sync
-position or different bytes yields FAIL; a missing expected ACK is UNKNOWN
-unless an observed independent violation proves FAIL. An invalid/unbound or
-failed capture is UNKNOWN, never PASS. Results list checked write identities,
-deciding violation ordinals/reasons and missing obligations or errors.
+The separate external loss receipt has matching binding/crashed host, successful
+integer producer_exit, source `external_controller`, kind `power_cut|vm_kill`
+and affirmative `confirmed_dead`. A process SIGKILL or in-process probe does
+not qualify. The callback reads each acknowledged block via the recovered guest
+before new writes. Its record has matching binding and integer `block`, source
+`recovered_guest`, successful producer_exit, recovery_complete true,
+integer guest_writes zero and boolean exists. Existing blocks require exactly
+block_bytes of raw `data`; the checker computes their full SHA-256 and matches
+the witness's digest. A proven absent or mismatched acknowledged block is FAIL
+with ACKED-LOST. Failed/unbound/incomplete recovery evidence is UNKNOWN; an
+independent proven loss retains FAIL. Result checked/violations identify the
+witness sequence numbers, with block identities on deciding violations.
 
-Assumptions: a trusted complete producer captures actual successful engine
-boundaries in causal order from before scoped appends through ACKs; a completed
-sync means durability under the local-engine contract. Previously persisted
-prefixes need their historical proof; this interface does not invent appends
-for them. It does not compare independent clock stamps. No engine producer or
-pack is wired yet: adoption must enumerate/probe append, sync and ACK sites.
+Assumptions: sealed honest producers retain the complete off-host ACK witness
+across the loss, prove actual external host/VM loss, and bind recovery reads to
+that loss before subsequent writes. Receipt labels alone are not qualification.
+There is no live pack adapter here. No independent host clocks are compared.
 
-Guard enumeration lists the deciding function and sealed loader export. Tests
-cover future syncs, sync-before-append, exact-LSN boundary, mismatched records,
-missing operations and failed collection. The mutant that accepts an unsynced
-record merely because it exists is detected. Frozen packet evidence is unchanged.
+Guard enumeration: one facts.py definition, using the existing FINAL parser,
+and one manifest export through the authenticated facts module. Site inventory
+and loader controls cover it. Actual guest/witness, power controller and recovery
+reader writers/readers remain adoption obligations, each requiring probes.
+Controls reject same-host witnesses, process-only kill, malformed witnesses,
+failed/mismatched recovery reads and corruption, and check all ACKs including
+the last and LSN-less ones. Hash-comparison and custody mutants go red.
 
 
 ### Conditional existing-HEAD updates
