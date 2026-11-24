@@ -64,13 +64,12 @@ def root_names_exist(expected_heads, heads, objects):
             'missing': sorted(missing), 'unknown': sorted(unknown)}
 
 
-def entries_data_acknowledged(scope, observation):
-    """K8: judge new-entry visibility against causally prior matching data ACKs."""
+def _causal_events(scope, observation, scope_field):
+    """Validate the identical capture envelope used by ordered-event facts."""
     if not isinstance(scope, dict) or not isinstance(observation, dict):
-        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [],
-                'unknown': ['invalid scope or observation']}
+        raise ValueError('invalid scope or observation')
     binding = scope.get('binding')
-    expected = scope.get('entries')
+    expected = scope.get(scope_field)
     events = observation.get('events')
     status = observation.get('producer_exit')
     coverage = observation.get('coverage')
@@ -87,19 +86,29 @@ def entries_data_acknowledged(scope, observation):
         and all(type(value) is int for value in coverage.values())
         and coverage == {'first': 0, 'last': len(events) - 1, 'count': len(events)})
     if not valid:
-        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [],
-                'unknown': ['incomplete or unbound trace']}
+        raise ValueError('incomplete or unbound trace')
     for ordinal, event in enumerate(events):
-        if (not isinstance(event, dict)
-                or type(event.get('ordinal')) is not int or event['ordinal'] != ordinal
-                or event.get('kind') not in ('data_ack', 'entry_visible')
+        if (not isinstance(event, dict) or type(event.get('ordinal')) is not int
+                or event['ordinal'] != ordinal):
+            raise ValueError('invalid causal ordinal %d' % ordinal)
+    return expected, events
+
+
+def entries_data_acknowledged(scope, observation):
+    """K8: judge new-entry visibility against causally prior matching data ACKs."""
+    try:
+        expected, events = _causal_events(scope, observation, 'entries')
+    except ValueError as error:
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
+    for event in events:
+        if (event.get('kind') not in ('data_ack', 'entry_visible')
                 or event.get('name') not in expected
                 or not isinstance(event.get('data_id'), str) or not event['data_id']
                 or type(event.get('length')) is not int or event['length'] < 0
                 or not isinstance(event.get('sha256'), str)
                 or not re.fullmatch('[0-9a-f]{64}', event['sha256'])):
             return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [],
-                    'unknown': ['invalid event at ordinal %d' % ordinal]}
+                    'unknown': ['invalid event at ordinal %d' % event['ordinal']]}
     acknowledgements = set()
     checked = set()
     violations = []
@@ -112,6 +121,46 @@ def entries_data_acknowledged(scope, observation):
             if identity not in acknowledgements:
                 violations.append({'name': event['name'], 'ordinal': event['ordinal'],
                                    'reason': 'no prior matching data ACK'})
+    unknown = sorted(set(expected) - checked)
+    verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
+    return {'verdict': verdict, 'checked': sorted(checked),
+            'violations': violations, 'unknown': unknown}
+
+
+def _valid_activity(activity):
+    if not isinstance(activity, dict):
+        return False
+    if activity.get('kind') == 'idle':
+        return True
+    return (activity.get('kind') in ('snap', 'clean')
+            and isinstance(activity.get('session'), str) and bool(activity['session']))
+
+
+def snapshot_removals_safe(scope, observation):
+    """K9 only: HEAD snapshot activity excludes immutable-name removal."""
+    try:
+        expected, events = _causal_events(scope, observation, 'names')
+        if not _valid_activity(observation.get('initial_activity')):
+            raise ValueError('initial HEAD activity is unknown')
+        for event in events:
+            if event.get('kind') == 'head_activity':
+                if not _valid_activity(event.get('activity')):
+                    raise ValueError('HEAD activity is unknown')
+            elif event.get('kind') != 'remove_name' or event.get('name') not in expected:
+                raise ValueError('unknown removal event')
+    except ValueError as error:
+        return {'verdict': 'UNKNOWN', 'checked': [], 'violations': [], 'unknown': [str(error)]}
+    activity = observation['initial_activity']
+    checked = set()
+    violations = []
+    for event in events:
+        if event['kind'] == 'head_activity':
+            activity = event['activity']
+        elif event['kind'] == 'remove_name':
+            checked.add(event['name'])
+            if activity['kind'] == 'snap':
+                violations.append({'name': event['name'], 'ordinal': event['ordinal'],
+                                   'reason': 'HEAD snapshot activity is open'})
     unknown = sorted(set(expected) - checked)
     verdict = 'FAIL' if violations else 'UNKNOWN' if unknown else 'PASS'
     return {'verdict': verdict, 'checked': sorted(checked),

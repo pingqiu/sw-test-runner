@@ -126,7 +126,7 @@ class RootNames(unittest.TestCase):
 
     def test_deciding_function_and_runtime_export_inventory(self):
         sites = []
-        entries = {'root_names_exist', 'entries_data_acknowledged'}
+        entries = {'root_names_exist', 'entries_data_acknowledged', 'snapshot_removals_safe'}
         for path in Path(__file__).parent.glob('*.py'):
             if path.name.startswith('test_'):
                 continue

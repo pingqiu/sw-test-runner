@@ -54,6 +54,7 @@ def load_library(root, manifest_sha256):
     exec(compile(code['oss_kernel.py'], str(root / 'oss_kernel.py'), 'exec'), kernel.__dict__)
     module.root_names_exist = kernel.root_names_exist
     module.entries_data_acknowledged = kernel.entries_data_acknowledged
+    module.snapshot_removals_safe = kernel.snapshot_removals_safe
     module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module

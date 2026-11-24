@@ -366,3 +366,42 @@ kernel entries. Transaction producer sites are not wired yet and must be
 registered with probes before adoption. Controls cover publication before ACK,
 wrong identity/length/full hash, missing scope, reader failure and causal order;
 mutants skip the match or incorrectly use an ACK that occurs after visibility.
+
+
+### Snapshot activity and name removal
+
+`snapshot_removals_safe(scope, observation)` reads a bound single-volume capture
+of applied HEAD activity changes and successful immutable-name removals; proves
+that no observed removal occurred while that HEAD said `snap`; does not prove
+lease permission, reachability, or admission legality of the activity updates.
+An idle/clean removal satisfies K9 alone, not every cleaning invariant.
+
+The capture envelope, producer status, binding and causal ordinals are the same
+observation primitive as the entry-order leaf. `scope.names` declares a nonempty
+unique list of fully qualified names whose removals are expected in this case.
+`observation.initial_activity` is the successfully read HEAD activity immediately
+before capture. Activity is `{kind: idle}` or `{kind: snap|clean, session: id}`
+with a nonempty session identity. Unknown or unreadable activity yields UNKNOWN;
+process memory or retained snapshot metadata cannot substitute for that read.
+
+Events are `{ordinal, kind: head_activity, activity}` for the applied HEAD value,
+or `{ordinal, kind: remove_name, name}` for an actual completed removal. A Claim
+that voids a session is observed as its resulting HEAD activity; it is not an
+independent in-memory reset. A recorded idle before removal permits it for K9;
+the same idle after removal cannot erase the violation. Other-volume events do
+not belong in this single-volume capture. The producer owns identity decoding
+and complete capture of all applied activity changes and removals.
+
+Incomplete, malformed or unbound captures yield UNKNOWN. Missing an expected
+removal yields UNKNOWN unless an observed violation already proves FAIL. Only
+complete matching observations can pass. The result returns attempted removal
+names in `checked`, violations with deciding ordinal/name/reason, and missing
+obligations or observation errors in `unknown`. These are observations, not
+synthetic permission flags.
+
+Assumptions: coherent atomic HEAD updates, trusted complete causal capture, and
+no unobserved external namespace mutation. One deciding function and one sealed
+loader export are enumerated by the checker-site guard; actual transaction
+writers/removers need their own probes before adoption. Mutants ignoring open
+snapshot activity or treating failed collection as success are detected. No
+transaction implementation, host action or second interruption harness is added.
