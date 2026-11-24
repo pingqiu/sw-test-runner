@@ -14,7 +14,7 @@ def _verified_code(root, manifest_sha256):
     if hashlib.sha256(raw).hexdigest() != manifest_sha256:
         raise ValueError('checker manifest mismatch')
     manifest = json.loads(raw)
-    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py'}:
+    if manifest.get('schema') != 'checker-library/v1' or set(manifest.get('files', {})) != {'facts.py', 'loader.py', 'resource_inventory.py', 'ops_rmguard.py', 'unit_properties.py', 'completion.py', 'power_loss.py'}:
         raise ValueError('unsupported checker closure')
     code = {}
     for name, pin in manifest['files'].items():
@@ -47,6 +47,9 @@ def load_library(root, manifest_sha256):
     exec(compile(code['completion.py'], str(root / 'completion.py'), 'exec'), completion.__dict__)
     module.rep_complete = completion.rep_complete
     module.show_unit_properties = properties.show_unit_properties
+    power_loss = types.ModuleType('sealed_power_loss')
+    exec(compile(code['power_loss.py'], str(root / 'power_loss.py'), 'exec'), power_loss.__dict__)
+    module.power_loss_image_exact = power_loss.power_loss_image_exact
     module.resources_absent_cli = resources_absent_cli
     module.library_sha256 = manifest_sha256
     return module

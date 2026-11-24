@@ -49,7 +49,8 @@ loading the library alone performs no observation.
 
 `loader.load_library(root, manifest_sha256)` requires the exact manifest pin,
 checks every declared code file, then loads the verified facts and inventory
-modules. The closure includes facts.py, loader.py, resource_inventory.py ops_rmguard.py, unit_properties.py and completion.py. There
+modules. The closure includes facts.py, loader.py, resource_inventory.py,
+ops_rmguard.py, unit_properties.py, completion.py and power_loss.py. There
 is no ambient import fallback. The loader itself must be authenticated by the
 calling packet before it is executed; its hash is also part of `library.json`.
 A packet's own seal must cover its bootstrap, configuration and library digest.
@@ -145,3 +146,136 @@ and a present required row with INFO, UNKNOWN, SKIP, INCONCLUSIVE or any other
 non-PASS/non-FAIL status yields INCONCLUSIVE. Optional INFO is not a verdict
 input. Reporting-only rows belong outside the required PASS obligations;
 merely observing a measurement is not evidence that a required check passed.
+
+## Recovered and published image comparison
+
+`power_loss_image_exact(case, workload, local, published)` reads complete,
+bound observations of a recovered local view and its subsequent published
+snapshot. It proves their whole-volume content agreement and the local
+image's declared block-history obligations. It does not prove that a crash
+image was built correctly, that a campaign contains a non-prefix subset, or
+that a repetition is counted under a packet's policy. Those observations and
+decisions stay with the packet, with authenticated artifact joins.
+
+The result has `image_verdict`, `campaign_verdict`, an overall `verdict`,
+three named `rows`, coverage `counts` and `deciding_evidence` identities.
+Each verdict is PASS, FAIL or UNKNOWN. Overall FAIL takes precedence over
+UNKNOWN; an independently established image failure is retained when the
+tick proof is absent. Missing or contradictory image evidence gives UNKNOWN,
+never inferred zeros or successful comparisons.
+
+- `LOCAL_HISTORY`: a flushed replacement and every previously flushed baseline
+  block must hold its flushed value (ACKED-LOST otherwise). An unflushed block
+  independently permits OLD or NEW, never a third/torn value. Illegal values
+  or bytes outside the declared history are UNEXPECTED. Multi-block write
+  group atomicity is not required.
+- `PUBLISHED_EQUALS_LOCAL`: compares full SHA256 values of every declared
+  chunk, including quiet and zero chunks. A difference is DIVERGED even when
+  both views independently contain legal OLD/NEW choices. No certification
+  bitmap is derived or consumed.
+- `CAMPAIGN_TICK`: on a revision without the write-ahead fix, requires a
+  logged extent write of the unflushed block strictly between the write ACK
+  and cut/crash marks. On a fixed revision, requires at least 250 ms of host
+  time (two 100 ms periods plus 50 ms), with a successful status response
+  strictly between those marks. A bound positive unsynced-extent count on a
+  fixed revision is WRITE-AHEAD-VIOLATION, a campaign FAIL independent of the
+  image verdict. Unknown proof is not a product-content failure.
+
+### Producer interface
+
+The entry takes parsed Python values, not paths. Adapters authenticate and
+parse their input files, check the producer's status, bound reads, and decode
+required raw evidence to `bytes`. The manifest pin authenticates the function;
+the packet seal binds its revision policy and expected workload. The function
+does not execute a producer or trust an ambient library import.
+
+`case` carries `run_id`, `image_id`, `volume_id`, `revision`, distinct
+`local_view_id`/`published_view_id`, and positive `volume_bytes`, `block_bytes`,
+`chunk_bytes`. Chunks and volume lengths must be whole blocks. The reader's
+per-chunk working-memory ceiling is 64 MiB; larger chunks return UNKNOWN.
+The last chunk may be partial. `snapshot` contains an `attempt`, positive
+`head_gen`, and nonnegative `cut_lsn`. `window` contains monotonically ordered
+harness event ordinals `recovery_complete < local_complete < snapshot_complete`
+and `guest_writes: 0`; these are order receipts, not cross-host clock readings.
+
+`workload.baseline` is a sparse block-index to full block-bytes map of the
+last flushed image; every declared baseline block is FLUSHED before the
+window, and undeclared baseline blocks are zero. This is an explicit
+sequential-generator policy for a fresh volume per case, not a fallback for
+missing observations. Reused volumes require a complete declared baseline;
+undeclared nonzero history is not supported.
+`writes` holds unique `{block, new: bytes, flushed: bool}` replacements, at most
+one per block in this crash window. `operations` permits write/flush/fua;
+discard, write-zeroes and repeated writes are unsupported and yield UNKNOWN.
+Replacements may overlap baseline blocks. The complete observed block set is
+the union of baseline keys and replacement blocks, protecting earlier flushed
+neighbors as well as the last unflushed writes.
+
+Each view has a `source` (local or published), integer `producer_exit: 0`,
+`binding`, `chunks`, `blocks`, and a coverage trailer. Bindings contain the
+case's run/image/volume/revision and the appropriate `view_id`; each chunk
+repeats that binding and source. The published view also repeats the exact
+`snapshot`. One chunk record has `{chunk_index, offset, length, sha256}`:
+ranges must cover the geometry exactly once; SHA256 is 64 lowercase hex
+characters. The trailer is `{chunks, count, bytes, first, last}`, with both
+counts equal to the number of chunks, bytes equal to volume length, and
+inclusive byte bounds zero through volume length minus one. Short, extra,
+duplicate, out-of-range or truncated-hash records yield UNKNOWN.
+
+Every observed written block has `{block, sha256, data: bytes}`. A validated
+full-SHA mismatch alone proves DIVERGED, even without raw chunk diagnostics.
+Producers should supply differing chunk bytes for diagnosis; those bytes are
+not a precondition for FAIL. Missing chunk diagnostics add `RAW-MISSING` and
+`raw_missing_chunks` to the DIVERGED row while keeping FAIL. Optional raw
+chunk evidence is validated too.
+All raw evidence must agree with its full hash and any overlapping raw block.
+Equal chunk hashes with conflicting raw block observations are rejected.
+Sparse expected bytes plus the observed written blocks reconstruct expected
+changed-chunk hashes; zero-only chunk hashes are cached. Whole-volume raw
+streams are not required. An abbreviated legacy hash/tag scan is not a
+substitute for this interface.
+
+`case.write_ahead_fixed` is the packet's sealed boolean revision policy.
+`proof` carries the matching run/image/volume/revision `binding`, `revision`,
+host `clock_id`, integer `write_ack_ns`, `cut_mark_ns`, and nonnegative
+`extent_writes`. Here `cut_mark_ns` means the crash point in the device log,
+not a product snapshot cut. The unfixed proof also carries `extent_write_ns`. A fixed
+proof with zero extent writes carries `status_poll_ns` and `status_exit: 0`.
+The harness owns the evidence for those values and the replay log/subset join.
+Changing the random seed or labeling an image random does not prove a
+non-prefix selection; campaign completeness remains a separate packet fact.
+
+The synthetic boundary controls use tiny literal images, complete full hashes
+and raw written/differing evidence. Source mutants demonstrate sensitivity to
+missing comparisons, quiet-chunk skipping, prefix-only survival assumptions,
+lost flush obligations, missing coverage, ignored producer failures/bindings,
+and fixed-revision extent writes. Existing frozen packets retain their old pin;
+adoption requires the complete packet oracle and a new seal.
+
+
+For reviewed legacy-corpus parity ONLY, the case must declare
+`observation_purpose: legacy_parity`; pattern-tag observations may then use
+`encoding: pattern-tags/v1` on both views,
+`tag_blocks: [{block, tag, data?}]`, and `nonzero_blocks` in each chunk record.
+The same identity, range, coverage and producer-status obligations apply.
+This adapter supports 4096-byte blocks: `zero` reconstructs zeros; a tag of at
+most 50 UTF-8 bytes reconstructs a 64-byte `WALFS<tag>` line padded with dots
+through byte 63, followed by newline, repeated 64 times. Every block is rebuilt
+and judged against the declared workload bytes by the existing content judge;
+equal tag strings across views are never equality evidence on their own.
+An `other:` tag requires all 4096 raw bytes and a matching 16-byte hex prefix;
+without raw bytes the image is UNKNOWN. A reconstructed third value fails the
+same OLD-or-NEW/history rule, including corruption in quiet chunks.
+
+Every emitted block is unique and within the declared geometry. Reconstructed
+nonzero blocks must equal each chunk's `nonzero_blocks` count; missing chunk
+records, short coverage or contradictory raw bytes are UNKNOWN. Only raw bytes
+of differing chunks are retained, plus the complete workload block set.
+Optional `scan_sha256` is a 16-hex legacy prefix or 64-hex full independent hash.
+A mismatch against reconstructed bytes makes the `TAG_SCAN` row FAIL with
+`HARNESS-HASH-MISMATCH`; it does not relabel the separate image/campaign facts.
+The adapter computes full hashes itself even with legacy prefix observations.
+New qualification runs never use this adapter: they require the full-SHA/raw
+producer interface above. Missing or other purpose declarations yield UNKNOWN.
+Producer provenance and captured-artifact bindings remain pack obligations;
+this interface does not authenticate a free-standing tag scan.
