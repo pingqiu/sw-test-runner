@@ -200,7 +200,9 @@ and `guest_writes: 0`; these are order receipts, not cross-host clock readings.
 
 `workload.baseline` is a sparse block-index to full block-bytes map of the
 last flushed image; undeclared baseline blocks are zero. This is an explicit
-sequential-generator policy, not a fallback for missing observations.
+sequential-generator policy for a fresh volume per case, not a fallback for
+missing observations. Reused volumes require a complete declared baseline;
+undeclared nonzero history is not supported.
 `writes` holds unique `{block, new: bytes, flushed: bool}` replacements, at most
 one per block in this crash window. `operations` permits write/flush/fua;
 discard, write-zeroes and repeated writes are unsupported and yield UNKNOWN.
