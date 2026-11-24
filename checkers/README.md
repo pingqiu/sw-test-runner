@@ -49,7 +49,7 @@ loading the library alone performs no observation.
 
 `loader.load_library(root, manifest_sha256)` requires the exact manifest pin,
 checks every declared code file, then loads the verified facts and inventory
-modules. The closure includes facts.py, loader.py, resource_inventory.py ops_rmguard.py and unit_properties.py. There
+modules. The closure includes facts.py, loader.py, resource_inventory.py ops_rmguard.py, unit_properties.py and completion.py. There
 is no ambient import fallback. The loader itself must be authenticated by the
 calling packet before it is executed; its hash is also part of `library.json`.
 A packet's own seal must cover its bootstrap, configuration and library digest.
@@ -110,3 +110,31 @@ adapters translate this to their existing UNKNOWN path. It returns properties,
 never a PASS or completion decision. The existing reader represents an absent
 ExecMainStatus as `-`, including for services; that marker is not a successful
 exit status. Loading the pinned module does not invoke systemctl.
+
+T1 repetition completion reads the parsed phase receipts, check outcomes,
+readiness and host-clean observations of one repetition; proves that repetition's
+verdict under T1's completion policy; does not prove the repetition complete
+under another packet's policy. The online and maintained offline T1 callers
+share this policy. The other packet's completion policy remains separate.
+
+Known discrepancy: phase parsing keeps the last receipt for each phase, while
+the prose says every phase failure fails; this verdict follows the parsed
+last-write-wins mapping. This extraction preserves that behavior explicitly.
+
+`rep_complete(phase_receipts, required_phases, check_rows, required_checks,
+failed_checks, ready, state, host_states)` consumes the callers' parsed mappings
+and preserves their missing/failed lists. It returns the verdict, only the
+receipts that decided that verdict, and failed/missing/clean fields used by the
+existing reports. Required phase obligations must be supplied; an absent
+receipt never satisfies one. Readiness, failed checks, missing requirements and
+host state all use the one total order in completion.py. Parsing and artifact
+writes stay in the callers. Both reports include the deciding receipts as
+additional evidence. This policy is not adopted by the other packet.
+
+Corrected input-consistency weakness: the original verdict block trusted a
+separate failed-name list while treating any present required row as satisfying
+presence. The shared API now raises when that list disagrees with the rows'
+FAIL statuses, including omitted failures and passing/absent named rows.
+Consistent inputs retain their previous verdict; contradictory evidence cannot
+produce PASS. This correction is separate from the explicitly preserved phase
+last-write-wins behavior.
