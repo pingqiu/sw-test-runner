@@ -2,10 +2,11 @@
   "schema": "checker-library/v1",
   "files": {
     "facts.py": "caf938987d93562ea6dd7217f1cf08e758652dcc4f9bef6e018f8098e97484c7",
-    "loader.py": "1c4a00a5e333fed6f6328b7f9b8ed3d2f2f6cfa224b5c4e6329d925abc3e7a64",
+    "loader.py": "c16e6058b6f392ec93ebba2f339b78a341cb8a9ce4a9ee0d9f3d096e98ade74d",
     "resource_inventory.py": "b1d6c55d84b3c5c126269098f929522d3a2c5466e2f2335c75ad60485c45a569",
     "ops_rmguard.py": "e2fe11714e2eab266e9ec6eb2dd2514a897bb18503d3875791edaa788b335d27",
-    "unit_properties.py": "e472d984b8540a6c202e664c89762a143cb9965ee9b929f0f29228bdc65d4067"
+    "unit_properties.py": "e472d984b8540a6c202e664c89762a143cb9965ee9b929f0f29228bdc65d4067",
+    "completion.py": "2901bfbaaa613f606d62ef7e2c00f1a95324fd03a4efd4c23b238ff59894ff42"
   },
   "entries": [
     "read_ledger",
@@ -14,6 +15,7 @@
     "resources_absent",
     "resources_absent_cli",
     "load_rmguard",
-    "show_unit_properties"
+    "show_unit_properties",
+    "rep_complete"
   ]
 }
