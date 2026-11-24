@@ -63,6 +63,8 @@ def _validate_observation(case, observation, source, written):
 
 
 def _validate_inputs(case, workload, local, published):
+    _require(workload.get('unflushed_sequential') is True,
+             'unflushed writes must be issued one at a time, returning before the next')
     block_bytes, chunk_bytes, size = (case[k] for k in ('block_bytes', 'chunk_bytes', 'volume_bytes'))
     _require(all(_number(v, 1) for v in (block_bytes, chunk_bytes, size)) and
              size % block_bytes == 0 and chunk_bytes % block_bytes == 0 and

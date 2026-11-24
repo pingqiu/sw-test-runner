@@ -209,7 +209,14 @@ missing observations. Reused volumes require a complete declared baseline;
 undeclared nonzero history is not supported.
 `writes` holds unique `{block, new: bytes, flushed: bool}` replacements, in
 guest issue order, at most one per block in this crash window. Never sort this
-list by block address, hash or a device replay selection. `operations` permits write/flush/fua;
+list by block address, hash or a device replay selection.
+`workload.unflushed_sequential` must be exactly boolean true: the producer
+issues one unflushed write at a time and waits for its return before issuing
+the next. Only then is guest issue order a log-order oracle. Missing, false
+or non-boolean declarations yield UNKNOWN before judging even an apparent
+NON_PREFIX. Concurrent guest writes are unsupported by this prefix oracle.
+A list's order alone is not a declaration. Producers must enforce the policy;
+adapters may not default existing receipts or captured artifacts to true. `operations` permits write/flush/fua;
 discard, write-zeroes and repeated writes are unsupported and yield UNKNOWN.
 Replacements may overlap baseline blocks. The complete observed block set is
 the union of baseline keys and replacement blocks, protecting earlier flushed
@@ -294,8 +301,16 @@ this interface does not authenticate a free-standing tag scan.
 Prefix guard enumeration: workload input validation owns unique block obligations
 and complete recovered block bytes; _compare_images is the sole content/prefix
 decider and power_loss_image_exact its sole runtime reader. A source inventory
-control detects a new named decider/caller; the loader continues exporting the
+control detects a new named decider/caller or sequential-declaration reader; the loader continues exporting the
 same image entry. Controls enumerate all eight three-write subsets, guest issue
 order versus block order, indistinguishable values and the mutant that skips
 prefix rejection. Frozen packets and captured evidence are unchanged; device
 receipt admission and its producer joins require a separate reviewed adoption.
+
+Sequentiality guard writers in the synthetic controls are the literal and
+legacy-tag fixture constructors; both explicitly declare the known one-at-a-time
+policy. Runtime validation has one reader in _validate_inputs. Actual packet
+producer/adapter writers remain unwired here and must prove sequential issuance
+before writing this declaration; a synthetic fixture declaration does not
+qualify a real run. Missing/false/truthy-impostor controls and a guard-removal
+mutant verify UNKNOWN for both apparently valid and non-prefix guest images.

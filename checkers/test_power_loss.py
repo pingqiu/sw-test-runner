@@ -31,7 +31,8 @@ def fixture(local=None, published=None, fixed=True):
                   'extent_writes': 0 if fixed else 1,
                   'extent_write_ns': None if fixed else 100000001},
     }
-    workload = {'baseline': {0: b'AAAA', 2: b'BBBB', 4: b'CCCC'},
+    workload = {'unflushed_sequential': True,
+                'baseline': {0: b'AAAA', 2: b'BBBB', 4: b'CCCC'},
                 'writes': [{'block': 0, 'new': b'ZZZZ', 'flushed': False},
                            {'block': 2, 'new': b'DDDD', 'flushed': True},
                            {'block': 4, 'new': b'EEEE', 'flushed': False}],
@@ -60,6 +61,20 @@ def fixture(local=None, published=None, fixed=True):
 
 
 class PowerLoss(unittest.TestCase):
+    def test_unflushed_sequential_declaration_is_required_before_judging_prefix(self):
+        for declaration in (None, False, 'true', 1):
+            for nonprefix in (False, True):
+                inputs = fixture()
+                if nonprefix:
+                    data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
+                    inputs = fixture(local=data)
+                if declaration is None:
+                    inputs[1].pop('unflushed_sequential', None)
+                else:
+                    inputs[1]['unflushed_sequential'] = declaration
+                with self.subTest(declaration=declaration, nonprefix=nonprefix):
+                    self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'UNKNOWN')
+
     def test_every_three_write_subset_has_exactly_the_prefixes_as_legal(self):
         for kept in itertools.product((False, True), repeat=3):
             values = [new if keep else old for keep, old, new in
@@ -101,7 +116,12 @@ class PowerLoss(unittest.TestCase):
                     sites.append((path.name, 'definition'))
                 if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == '_compare_images':
                     sites.append((path.name, 'reader'))
-        self.assertCountEqual(sites, [('power_loss.py', 'definition'), ('power_loss.py', 'reader')])
+                if (isinstance(node, ast.Call) and getattr(node.func, 'attr', None) == 'get'
+                        and node.args and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == 'unflushed_sequential'):
+                    sites.append((path.name, 'sequential declaration reader'))
+        self.assertCountEqual(sites, [('power_loss.py', 'definition'), ('power_loss.py', 'reader'),
+                                     ('power_loss.py', 'sequential declaration reader')])
 
     def test_legal_unflushed_values_still_fail_when_published_differs(self):
         case, workload, local, published = fixture()
@@ -332,6 +352,18 @@ class PowerLoss(unittest.TestCase):
 
 
 class Mutants(unittest.TestCase):
+    def test_missing_sequential_declaration_mutant(self):
+        compare = self.mutant("_require(workload.get('unflushed_sequential') is True,",
+                              '_require(True,')
+        for nonprefix in (False, True):
+            inputs = fixture()
+            if nonprefix:
+                data = b'AAAA' + bytes(4) + b'DDDD' + bytes(4) + b'EEEE' + bytes(12)
+                inputs = fixture(local=data)
+            inputs[1].pop('unflushed_sequential')
+            self.assertEqual(power_loss_image_exact(*inputs)['verdict'], 'UNKNOWN')
+            self.assertEqual(compare(*inputs)['verdict'], 'FAIL' if nonprefix else 'PASS')
+
     def mutant(self, before, after):
         source = (Path(__file__).parent / 'power_loss.py').read_text()
         self.assertEqual(source.count(before), 1)
