@@ -246,3 +246,27 @@ missing comparisons, quiet-chunk skipping, prefix-only survival assumptions,
 lost flush obligations, missing coverage, ignored producer failures/bindings,
 and fixed-revision extent writes. Existing frozen packets retain their old pin;
 adoption requires the complete packet oracle and a new seal.
+
+
+Pattern-tag observations may use `encoding: pattern-tags/v1` on both views,
+`tag_blocks: [{block, tag, data?}]`, and `nonzero_blocks` in each chunk record.
+The same identity, range, coverage and producer-status obligations apply.
+This adapter supports 4096-byte blocks: `zero` reconstructs zeros; a tag of at
+most 50 UTF-8 bytes reconstructs a 64-byte `WALFS<tag>` line padded with dots
+through byte 63, followed by newline, repeated 64 times. Every block is rebuilt
+and judged against the declared workload bytes by the existing content judge;
+equal tag strings across views are never equality evidence on their own.
+An `other:` tag requires all 4096 raw bytes and a matching 16-byte hex prefix;
+without raw bytes the image is UNKNOWN. A reconstructed third value fails the
+same OLD-or-NEW/history rule, including corruption in quiet chunks.
+
+Every emitted block is unique and within the declared geometry. Reconstructed
+nonzero blocks must equal each chunk's `nonzero_blocks` count; missing chunk
+records, short coverage or contradictory raw bytes are UNKNOWN. Only raw bytes
+of differing chunks are retained, plus the complete workload block set.
+Optional `scan_sha256` is a 16-hex legacy prefix or 64-hex full independent hash.
+A mismatch against reconstructed bytes makes the `TAG_SCAN` row FAIL with
+`HARNESS-HASH-MISMATCH`; it does not relabel the separate image/campaign facts.
+The adapter computes full hashes itself even with legacy prefix observations.
+Producer provenance and captured-artifact bindings remain pack obligations;
+this interface does not authenticate a free-standing tag scan.

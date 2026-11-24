@@ -21,6 +21,8 @@ class Loader(unittest.TestCase):
             self.assertTrue(callable(library.rep_complete))
             from test_power_loss import fixture
             self.assertEqual(library.power_loss_image_exact(*fixture())['verdict'], 'PASS')
+            from test_power_loss_tags import tag_fixture
+            self.assertEqual(library.power_loss_image_exact(*tag_fixture())['verdict'], 'PASS')
             for bad in ['', '0' * 64]:
                 with self.subTest(pin=bad), self.assertRaises(ValueError):
                     load_library(root, bad)

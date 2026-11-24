@@ -205,9 +205,95 @@ def _compare_images(case, workload, local, published):
                        'differing_chunks': len(divergence)}}
 
 
+
+def _tag_bytes(record):
+    tag = record['tag']
+    _require(isinstance(tag, str), 'invalid pattern tag')
+    if tag == 'zero':
+        data = bytes(4096)
+    elif tag.startswith('other:'):
+        data = record.get('data')
+        _require(isinstance(data, bytes) and len(data) == 4096,
+                 'other block requires complete raw bytes')
+        _require(re.fullmatch('other:[0-9a-f]{32}', tag) is not None and
+                 data[:16].hex() == tag[6:], 'other prefix/raw disagreement')
+    else:
+        encoded = tag.encode('utf-8')
+        _require(len(encoded) <= 50 and b'\n' not in encoded and b'\r' not in encoded,
+                 'unsupported pattern tag')
+        line = (b'WALFS<' + encoded + b'>').ljust(63, b'.') + b'\n'
+        data = line * 64
+    _require('data' not in record or record['data'] == data, 'pattern/raw disagreement')
+    return data
+
+
+def _tag_views(case, workload, local, published):
+    """Rebuild one chunk at a time; only differing chunks retain raw bytes."""
+    size, chunk_bytes = case['volume_bytes'], case['chunk_bytes']
+    _require(case['block_bytes'] == 4096 and _number(size, 1) and size % 4096 == 0 and
+             _number(chunk_bytes, 4096) and chunk_bytes % 4096 == 0 and
+             chunk_bytes <= MAX_CHUNK_BYTES, 'unsupported tag geometry')
+    count = (size + chunk_bytes - 1) // chunk_bytes
+    written = set(workload['baseline']) | {w['block'] for w in workload['writes']}
+    converted, by_view, checks = [], [], []
+    for view in (local, published):
+        _require(view.get('encoding') == 'pattern-tags/v1', 'both tag views required')
+        records = {}
+        for record in view['tag_blocks']:
+            block = record['block']
+            _require(_number(block) and block < size // 4096 and block not in records,
+                     'duplicate or out-of-range tag block')
+            records[block] = _tag_bytes(record)
+        chunks = {r['chunk_index']: r for r in view['chunks']}
+        _require(len(chunks) == len(view['chunks']) == count and
+                 set(chunks) == set(range(count)), 'incomplete tag chunk coverage')
+        output = dict(view, chunks=[], blocks=[])
+        grouped = {}
+        for block, data in records.items():
+            grouped.setdefault(block * 4096 // chunk_bytes, []).append((block, data))
+        for block in sorted(written):
+            data = records.get(block, bytes(4096))
+            output['blocks'].append({'block': block, 'sha256': _sha(data), 'data': data})
+        converted.append(output)
+        by_view.append((chunks, grouped))
+    for index in range(count):
+        rebuilt = []
+        for output, (chunks, grouped) in zip(converted, by_view):
+            length = min(chunk_bytes, size - index * chunk_bytes)
+            data = bytearray(length)
+            nonzero = 0
+            for block, raw in grouped.get(index, []):
+                offset = block * 4096 - index * chunk_bytes
+                data[offset:offset + 4096] = raw
+                nonzero += raw != bytes(4096)
+            record = dict(chunks[index])
+            _require(type(record['nonzero_blocks']) is int and
+                     record['nonzero_blocks'] == nonzero, 'nonzero block count disagreement')
+            digest = _sha(data)
+            observed = record.get('scan_sha256')
+            if observed is not None:
+                _require(isinstance(observed, str) and
+                         re.fullmatch('(?:[0-9a-f]{16}|[0-9a-f]{64})', observed) is not None,
+                         'invalid scan hash cross-check')
+                if digest[:len(observed)] != observed:
+                    checks.append({'source': output['source'], 'chunk': index})
+            record['sha256'] = digest
+            output['chunks'].append(record)
+            rebuilt.append(bytes(data))
+        if rebuilt[0] != rebuilt[1]:
+            for output, data in zip(converted, rebuilt):
+                output['chunks'][-1]['data'] = data
+    row = {'verdict': 'FAIL' if checks else 'PASS',
+           'labels': ['HARNESS-HASH-MISMATCH'] if checks else [], 'chunks': checks[:20]}
+    return converted[0], converted[1], row
+
+
 def power_loss_image_exact(case, workload, local, published):
     """Return UNKNOWN on incomplete, unsupported or inconsistently bound evidence."""
     try:
+        tag_row = None
+        if 'encoding' in local or 'encoding' in published:
+            local, published, tag_row = _tag_views(case, workload, local, published)
         _validate_inputs(case, workload, local, published)
         result = _compare_images(case, workload, local, published)
         tick = _campaign_tick(case)
@@ -215,6 +301,10 @@ def power_loss_image_exact(case, workload, local, published):
         result['campaign_verdict'] = tick['verdict']
         if result['image_verdict'] != 'FAIL':
             result['verdict'] = tick['verdict']
+        if tag_row is not None:
+            result['rows']['TAG_SCAN'] = tag_row
+            if tag_row['verdict'] == 'FAIL':
+                result['verdict'] = 'FAIL'
         result['deciding_evidence'] = {
             'local': dict(local['binding']), 'published': dict(published['binding']),
             'snapshot': dict(case['snapshot']), 'window': dict(case['window']),
@@ -223,6 +313,8 @@ def power_loss_image_exact(case, workload, local, published):
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         rows = {name: {'verdict': 'UNKNOWN', 'labels': []} for name in
                 ('LOCAL_HISTORY', 'PUBLISHED_EQUALS_LOCAL', 'CAMPAIGN_TICK')}
+        if 'encoding' in local or 'encoding' in published:
+            rows['TAG_SCAN'] = {'verdict': 'UNKNOWN', 'labels': [], 'errors': [str(error)]}
         return {'verdict': 'UNKNOWN', 'image_verdict': 'UNKNOWN',
                 'campaign_verdict': 'UNKNOWN', 'rows': rows,
                 'errors': [str(error)], 'counts': {'chunks_compared': 0, 'blocks_checked': 0,
