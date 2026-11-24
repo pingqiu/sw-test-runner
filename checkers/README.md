@@ -138,3 +138,10 @@ FAIL statuses, including omitted failures and passing/absent named rows.
 Consistent inputs retain their previous verdict; contradictory evidence cannot
 produce PASS. This correction is separate from the explicitly preserved phase
 last-write-wins behavior.
+
+Check-row vocabulary: current producers emit PASS/FAIL verdict rows and INFO
+reporting rows. Only PASS satisfies a required check; FAIL remains a failure,
+and a present required row with INFO, UNKNOWN, SKIP, INCONCLUSIVE or any other
+non-PASS/non-FAIL status yields INCONCLUSIVE. Optional INFO is not a verdict
+input. Reporting-only rows belong outside the required PASS obligations;
+merely observing a measurement is not evidence that a required check passed.

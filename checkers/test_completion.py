@@ -75,6 +75,21 @@ class Completion(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'failed checks disagree with row statuses'):
             self.decide(checks={'extra': ('FAIL', 'observed failure')})
 
+    def test_required_non_verdict_row_is_inconclusive(self):
+        result = self.decide(checks={'required': ('INFO', 'measurement only')}, required_checks=['required'])
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertEqual(result['deciding_receipts'], [
+            dict(kind='INCONCLUSIVE', source='check', name='required', value=('INFO', 'measurement only'))])
+
+    def test_other_required_non_pass_statuses_cannot_pass(self):
+        for status in ['UNKNOWN', 'SKIP', 'INCONCLUSIVE', '', 'future-status']:
+            with self.subTest(status=status):
+                self.assertEqual(self.decide(checks={'required': (status, 'not a pass')},
+                                             required_checks=['required'])['verdict'], 'INCONCLUSIVE')
+
+    def test_optional_info_remains_non_verdict_input(self):
+        self.assertEqual(self.decide(checks={'measurement': ('INFO', 'reported only')})['verdict'], 'PASS')
+
     def test_required_check_absence_is_not_success(self):
         self.assertEqual(self.decide(required_checks=['required'])['verdict'], 'INCONCLUSIVE')
 

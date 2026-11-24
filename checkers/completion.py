@@ -36,8 +36,10 @@ def rep_complete(phase_receipts, required_phases, check_rows, required_checks,
     for name in required_checks:
         if name not in check_rows:
             add('INCONCLUSIVE', 'check', name, None)
-        else:
+        elif check_rows[name][0] == 'PASS':
             add('PASS', 'check', name, check_rows[name])
+        elif check_rows[name][0] != 'FAIL':
+            add('INCONCLUSIVE', 'check', name, check_rows[name])
     for name in required_phases:
         value = phase_receipts.get(name)
         kind = 'PASS' if value is not None and value.startswith('rc=') else 'INCONCLUSIVE'
