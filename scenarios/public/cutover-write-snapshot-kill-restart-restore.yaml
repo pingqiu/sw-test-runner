@@ -13,6 +13,7 @@ env:
   head: ""
   weed_binary: "/path/to/weed"
   weed_sha256: ""
+  go_binary: "go"
   scratch_root: "/tmp/sw-cutover-e2e"
 
 topology:
@@ -54,10 +55,10 @@ phases:
           set -eu
           d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
           cd "$d/source"
-          go build -o "$d/bin/blockmaster" ./cmd/blockmaster
-          go build -o "$d/bin/blockvolume" ./cmd/blockvolume
-          go build -o "$d/bin/sw-block" ./cmd/sw-block
-          go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/cutover-e2e.test" ./cmd/blockvolume
+          '{{ go_binary }}' build -o "$d/bin/blockmaster" ./cmd/blockmaster
+          '{{ go_binary }}' build -o "$d/bin/blockvolume" ./cmd/blockvolume
+          '{{ go_binary }}' build -o "$d/bin/sw-block" ./cmd/sw-block
+          '{{ go_binary }}' test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/cutover-e2e.test" ./cmd/blockvolume
           sha256sum "$d/bin/"* > "$d/evidence/binaries.sha256"
 
   - name: real_cluster_test
