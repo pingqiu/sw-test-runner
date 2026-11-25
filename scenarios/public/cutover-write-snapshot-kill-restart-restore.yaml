@@ -74,6 +74,10 @@ phases:
             > "$d/evidence/test.log" 2>&1
           rc=$?
           cat "$d/evidence/test.log"
+          if [ "$rc" -eq 0 ]; then
+            grep -Eq '^--- PASS: TestCutoverWriteSnapshotKillRestartRestore \(' "$d/evidence/test.log" || exit 1
+            grep -Fxq PASS "$d/evidence/test.log" || exit 1
+          fi
           exit "$rc"
 
   - name: collect
