@@ -18,6 +18,7 @@ env:
 topology:
   nodes:
     test_node:
+      is_local: true
       host: "{{ host }}"
       user: "{{ user }}"
       key: "{{ ssh_key }}"
