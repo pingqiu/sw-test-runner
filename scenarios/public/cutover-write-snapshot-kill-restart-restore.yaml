@@ -93,4 +93,10 @@ phases:
           d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
           test -f "$d/.cutover-e2e-owned" || exit 0
           test "${d#'{{ scratch_root }}/'}" != "$d" || exit 2
+          for p in /proc/[0-9]*; do
+            cwd=$(readlink "$p/cwd" 2>/dev/null || true)
+            case "$cwd" in
+              "$d"/*) echo "owned process still running: ${p##*/}" >&2; exit 1 ;;
+            esac
+          done
           rm -rf -- "$d"
