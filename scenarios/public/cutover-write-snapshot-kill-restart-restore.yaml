@@ -1,0 +1,96 @@
+# Runs the tagged real-cluster test from an exact product commit. The test
+# owns its stock filer, block processes, and NVMe frontend in one test tempdir.
+# Supply a Linux test node, a 40-character product commit, and a pinned weed.
+name: cutover-write-snapshot-kill-restart-restore
+timeout: 50m
+always_timeout: 5m
+
+env:
+  host: "127.0.0.1"
+  user: "testdev"
+  ssh_key: ""
+  product_repo: "/path/to/seaweed-block"
+  head: ""
+  weed_binary: "/path/to/weed"
+  weed_sha256: ""
+  scratch_root: "/tmp/sw-cutover-e2e"
+
+topology:
+  nodes:
+    test_node:
+      host: "{{ host }}"
+      user: "{{ user }}"
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: prepare
+    actions:
+      - action: exec
+        node: test_node
+        timeout: 2m
+        cmd: |
+          set -eu
+          head='{{ head }}'
+          case "$head" in
+            *[!0-9a-f]*|'') echo 'head must be a full hexadecimal commit' >&2; exit 2 ;;
+          esac
+          test ${#head} -eq 40
+          test -n '{{ weed_sha256 }}'
+          test -f '{{ weed_binary }}'
+          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' | sha256sum -c -
+          d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
+          test ! -e "$d"
+          mkdir -p "$d/source" "$d/bin" "$d/tmp" "$d/evidence"
+          touch "$d/.cutover-e2e-owned"
+          git -C '{{ product_repo }}' cat-file -e "$head^{commit}"
+          git -C '{{ product_repo }}' archive "$head" | tar -xf - -C "$d/source"
+          git -C '{{ product_repo }}' rev-parse "$head^{commit}" > "$d/evidence/product.sha"
+          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' > "$d/evidence/weed.sha256"
+      - action: exec
+        node: test_node
+        timeout: 15m
+        cmd: |
+          set -eu
+          d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
+          cd "$d/source"
+          go build -o "$d/bin/blockmaster" ./cmd/blockmaster
+          go build -o "$d/bin/blockvolume" ./cmd/blockvolume
+          go build -o "$d/bin/sw-block" ./cmd/sw-block
+          go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/cutover-e2e.test" ./cmd/blockvolume
+          sha256sum "$d/bin/"* > "$d/evidence/binaries.sha256"
+
+  - name: real_cluster_test
+    actions:
+      - action: exec
+        node: test_node
+        timeout: 42m
+        cmd: |
+          d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
+          cd "$d/source" || exit 2
+          TMPDIR="$d/tmp" CHUNKSTORE_WEED='{{ weed_binary }}' SWBLOCK_TEST_BINS="$d/bin" \
+            "$d/bin/cutover-e2e.test" -test.run '^TestCutoverWriteSnapshotKillRestartRestore$' -test.v -test.timeout 40m \
+            > "$d/evidence/test.log" 2>&1
+          rc=$?
+          cat "$d/evidence/test.log"
+          exit "$rc"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: test_node
+        path: "{{ scratch_root }}/{{ run_id }}-cutover-e2e/evidence"
+        name: "cutover-e2e"
+        ignore_error: true
+
+  - name: teardown
+    always: true
+    actions:
+      - action: exec
+        node: test_node
+        timeout: 2m
+        cmd: |
+          d='{{ scratch_root }}/{{ run_id }}-cutover-e2e'
+          test -f "$d/.cutover-e2e-owned" || exit 0
+          test "${d#'{{ scratch_root }}/'}" != "$d" || exit 2
+          rm -rf -- "$d"
