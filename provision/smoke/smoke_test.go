@@ -53,6 +53,7 @@ type fake struct {
 	live         bool
 	cancel       context.CancelFunc
 	cleanContext bool
+	disks        int // OS disk IDs terraform reports (0: ten)
 }
 
 func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([]byte, error) {
@@ -83,7 +84,11 @@ func (f *fake) command(ctx context.Context, dir, tool string, args ...string) ([
 	if args[0] == "output" {
 		if args[len(args)-1] == "os_disk_ids" {
 			ids := []string{}
-			for i := 0; i < 10; i++ {
+			n := f.disks
+			if n == 0 {
+				n = 10
+			}
+			for i := 0; i < n; i++ {
 				ids = append(ids, "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/dedicated-test/providers/Microsoft.Compute/disks/os"+fmt.Sprint(i))
 			}
 			return json.Marshal(ids)

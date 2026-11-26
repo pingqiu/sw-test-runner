@@ -1,7 +1,19 @@
 locals {
   tags          = { seaweed_run = var.run_id, managed_by = "sw-test-runner", expires_at = var.run_declaration.hard_deadline }
   disk_nodes    = { for id, n in var.nodes : id => n if n.cache_disk_gib > 0 }
-  service_ports = sort(distinct(flatten([for n in values(var.nodes) : [for s in n.services : tostring(s.port)]])))
+  service_ports = sort(distinct(concat(flatten([for n in values(var.nodes) : [for s in n.services : tostring(s.port)]]), [for p in var.internal_ports : tostring(p)])))
+  # cloud-init: the module's file, plus the NVMe/TCP client prerequisites only
+  # when nvme_client is set. Without it the document is the file's own, so the
+  # other profiles' custom_data is unchanged.
+  cloud_init_base = yamldecode(file("${path.module}/cloud-init.yaml"))
+  cloud_init = merge(local.cloud_init_base, [for _ in(var.nvme_client ? [1] : []) : {
+    packages = concat(local.cloud_init_base.packages, ["nvme-cli"])
+    write_files = [
+      { path = "/etc/modprobe.d/seaweed-nvme-multipath.conf", permissions = "0644", content = "options nvme_core multipath=Y\n" },
+      { path = "/etc/modules-load.d/seaweed-nvme-tcp.conf", permissions = "0644", content = "nvme_tcp\n" },
+    ]
+    runcmd = [["modprobe", "nvme_tcp"]]
+  }]...)
 }
 resource "azurerm_virtual_network" "run" {
   name                = "${var.run_id}-vnet"
@@ -111,7 +123,7 @@ resource "azurerm_linux_virtual_machine" "node" {
     sku       = "server"
     version   = var.image_version
   }
-  custom_data = base64encode(try(var.node_host_keys[each.key], var.host_keys) == null ? file("${path.module}/cloud-init.yaml") : "#cloud-config\n${yamlencode(merge(yamldecode(file("${path.module}/cloud-init.yaml")), { ssh_keys = try(var.node_host_keys[each.key], var.host_keys) }))}")
+  custom_data = base64encode(try(var.node_host_keys[each.key], var.host_keys) == null ? (var.nvme_client ? "#cloud-config\n${yamlencode(local.cloud_init)}" : file("${path.module}/cloud-init.yaml")) : "#cloud-config\n${yamlencode(merge(local.cloud_init, { ssh_keys = try(var.node_host_keys[each.key], var.host_keys) }))}")
   depends_on  = [azurerm_subnet_network_security_group_association.run]
 }
 resource "azurerm_managed_disk" "cache" {

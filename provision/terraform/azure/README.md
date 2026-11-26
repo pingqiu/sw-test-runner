@@ -14,6 +14,16 @@ Each node supplies a stable private IPv4, VM size, roles, cache-disk GiB, explic
 
 `managed_resource_ids` includes VMs, their OS disks, cache disks, NICs, public IPs, subnet, VNet and NSG. Terraform attachment/association pseudo-IDs are not independently billable ARM resources. Partial apply may not produce complete outputs: reconcile the private state and live run-tagged inventory before teardown; an empty/missing output cannot prove absence.
 
+## The block R4 profile (three_node)
+
+`azure-validation` with `three_node = true` (exclusive with `cluster`) declares three nodes, `node-1`, `node-2` and `node-3`. Each is a `Standard_D2s_v5` with the `client` role, private address `10.84.1.11` to `.13`, no HTTP module services and no cache disk. The controller pins one server key per node before any create, and it handles the profile like the ten-node cluster: subscription-wide residue scan, orphan sweep, recovery record, and one explicit OS disk tag per node. No new VM size is admitted.
+
+It sets two module inputs that are off by default, so no other profile changes:
+
+- `internal_ports = [19600, 19601, 19602, 4420]`: the blockmaster, data, control and NVMe/TCP ports, opened in the existing `internal-services` rule with the run's own subnet as **both** source and destination. Port 22 is refused, and SSH stays controller-only.
+- `nvme_client = true`: cloud-init adds `nvme-cli`, sets `options nvme_core multipath=Y` (`/etc/modprobe.d/seaweed-nvme-multipath.conf`), loads `nvme_tcp` at boot and once at first start. `r4.sh client-check` verifies all three on the client before any I/O.
+
+Without `nvme_client`, a node's cloud-init is the module's file unchanged (`tests/nvme_client.tftest.hcl` asserts it byte for byte).
 ## Admission and teardown launch gates
 
 The small [one-VM smoke controller](../../smoke/README.md) uses a pinned saved Terraform plan/apply, the existing shared pack's normal S0b admission, then destroy and an independent full RG list. It has no outer S0b, second admission or delete-identity fence: the dedicated existing RG and one existing lease/run are the reviewed assumptions. Credentials/private Terraform state stay on Linux, never tp01 or guests. Guests get only the public key. This module creates no RG, managed identity, Automation account or RBAC assignment. Runtime still requires the manager's launch token; local tests grant none.
