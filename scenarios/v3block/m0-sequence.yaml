@@ -112,27 +112,26 @@ phases:
         spec_path: "{{ work }}/cluster-spec.yaml"
         base_port: "{{ base_port }}"
         nqn_prefix: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
-      - action: v3_start_blockmaster
-        node: host
-        save_as: bm
-        bin: "{{ work }}/bin/blockmaster"
-        listen: "127.0.0.1:{{ master_port }}"
-        authority_dir: "{{ work }}/master/authority"
-        lifecycle_store: "{{ work }}/master/lifecycle"
-        cluster_spec: "{{ work }}/cluster-spec.yaml"
-        expected_slots: "1"
-        extra_args: "--workspace-rpc --chunk-filer 127.0.0.1:{{ weed_filer_grpc_port }} --chunk-path {{ chunk_path }}"
-        log_path: "{{ work }}/log/blockmaster.log"
-        ready_timeout: "60"
+      # The master as the store: refused if its port already listens (another
+      # run's master, a leftover), ready only when THIS process holds the port,
+      # and recorded as owned (pid and start time) before anything uses it.
       - action: exec
         node: host
-        timeout: 30s
+        timeout: 3m
+        save_as: bm_pid
         env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
         env.TOK: "{{ owner }}"
         env.WORK: "{{ work }}"
-        env.PID: "{{ bm_pid }}"
-        cmd: bash "$OWN" record "$WORK" "$TOK" blockmaster "$PID"
-
+        env.MP: "{{ master_port }}"
+        env.FG: "{{ weed_filer_grpc_port }}"
+        env.CP: "{{ chunk_path }}"
+        cmd: |
+          set -eu
+          mkdir -p "$WORK/master/authority" "$WORK/master/lifecycle"
+          bash "$OWN" spawn "$WORK" "$TOK" blockmaster $MP -- "$WORK/bin/blockmaster" --listen 127.0.0.1:$MP \
+            --authority-store "$WORK/master/authority" --lifecycle-store "$WORK/master/lifecycle" \
+            --cluster-spec "$WORK/cluster-spec.yaml" --expected-slots-per-volume 1 \
+            --workspace-rpc --chunk-filer 127.0.0.1:$FG --chunk-path "$CP"
   - name: sequence
     actions:
       - {action: v3_op_create, node: host, volume: v1}
