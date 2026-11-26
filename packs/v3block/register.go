@@ -54,6 +54,7 @@ func RegisterPack(r *tr.Registry) {
 	// Typed operations (ops.go): one operator operation on one volume, each
 	// recording invoke and complete in the run's history; they decide nothing.
 	r.RegisterFunc("v3_op_spec", tr.TierDevOps, v3OpSpec)
+	r.RegisterFunc("v3_history_end", tr.TierBlock, v3HistoryEnd)
 	for name, f := range map[string]tr.ActionHandlerFunc{
 		"v3_op_create": v3OpCreate, "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
 		"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,

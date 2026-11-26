@@ -12,7 +12,7 @@
 #
 # One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
 # the product under test), runner_src (this checkout), weed (the pinned
-# SeaweedFS binary). Expected refusals: none.
+# SeaweedFS binary). Expected refusals: one, declared at its step (expect: refused).
 #
 #   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD \
 #     -env weed=/path/weed -env work=/root/m0-run scenarios/v3block/m0-sequence.yaml
@@ -163,6 +163,10 @@ phases:
       - {action: v3_op_stop, node: host, volume: v1}
       - {action: v3_op_delete, node: host, volume: v1}
       - {action: v3_op_observe, node: host, volume: v1}
+      # The same name again after its delete: v1 refuses it (the master keeps
+      # the name's deletion reservation). Declared here, at this step only (C7).
+      - {action: v3_op_create, node: host, volume: v1, expect: refused}
+      - {action: v3_op_observe, node: host, volume: v1}
 
   # Only what this run acquired: nothing at all if the claim failed.
   - name: teardown
@@ -176,3 +180,27 @@ phases:
         env.WORK: "{{ work }}"
         env.NQN: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
         cmd: bash "$OWN" teardown "$WORK" "$TOK" "$NQN"
+
+  # After teardown, whatever happened: the daemons' logs into the bundle, then
+  # the checkers judge the history alone. Their verdicts decide the run.
+  - name: judge
+    always: true
+    actions:
+      # Close the history first: its end record says it is the whole run.
+      - action: v3_history_end
+        node: host
+      - action: collect_path
+        node: host
+        path: "{{ work }}/log"
+        name: "daemon-logs"
+      - action: collect_path
+        node: host
+        path: "{{ work }}/vol"
+        name: "volume-logs"
+      - action: exec
+        node: host
+        timeout: 2m
+        env.HIST: "{{ bundle_dir }}/history.jsonl"
+        env.OUT: "{{ artifacts_dir }}/checks.json"
+        env.CHECK: "{{ runner_src }}/checkers/history_check.py"
+        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT"

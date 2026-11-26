@@ -48,8 +48,8 @@ func TestHistoryRecordsInFileOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := readHistory(t, path)
-	if len(rs) != 3 {
-		t.Fatalf("%d records", len(rs))
+	if len(rs) != 4 || rs[3].Kind != HistoryEnd {
+		t.Fatalf("%d records, last %+v; want 3 and the end record", len(rs), rs[len(rs)-1])
 	}
 	for i, r := range rs {
 		if r.Seq != uint64(i+1) {
@@ -103,11 +103,12 @@ func TestHistoryRefuses(t *testing.T) {
 	if _, err := h.Invoke(HistoryRecord{Op: "HolderInterface.Write", Verb: "write"}); err == nil {
 		t.Error("a closed history accepted a record")
 	}
-	// The open invocation stays in the file, without a completion.
+	// The open invocation stays in the file, without a completion; the end
+	// record says one was open.
 	rs := readHistory(t, path)
-	last := rs[len(rs)-1]
-	if last.Kind != HistoryInvoke {
-		t.Errorf("last record %+v", last)
+	inv, end := rs[len(rs)-2], rs[len(rs)-1]
+	if inv.Kind != HistoryInvoke || end.Kind != HistoryEnd || end.Result["open_invocations"] != float64(1) {
+		t.Errorf("last records %+v %+v", inv, end)
 	}
 }
 
@@ -147,6 +148,11 @@ func TestHistoryLatchesAFailedAppend(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "other.jsonl")); len(b) != 0 {
 		t.Errorf("records written after the failure: %q", b)
 	}
+	// A latched history gets no end record: it never looks whole.
+	_ = h.Close()
+	if b, _ := os.ReadFile(filepath.Join(dir, "other.jsonl")); len(b) != 0 {
+		t.Errorf("the latched history was closed with an end record: %q", b)
+	}
 }
 
 // Concurrent writers still produce a gapless sequence in file order.
@@ -176,7 +182,7 @@ func TestHistoryConcurrentAppendsHaveNoGap(t *testing.T) {
 	wg.Wait()
 	_ = h.Close()
 	rs := readHistory(t, path)
-	if len(rs) != 16*20*2 {
+	if len(rs) != 16*20*2+1 || rs[len(rs)-1].Kind != HistoryEnd {
 		t.Fatalf("%d records", len(rs))
 	}
 	for i, r := range rs {

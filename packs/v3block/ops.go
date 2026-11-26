@@ -46,6 +46,10 @@ type opEnv struct {
 	bin, master, filer, chunkPath, root, client string
 	// The run's ownership (m0-own.sh): its script, work directory and token.
 	ownScript, work, owner string
+	// expect is the step's declared outcome ("refused"), recorded in its
+	// invocation so the checkers know which refusal the scenario expected.
+	// Per step, never per verb: any other refusal still fails the run.
+	expect string
 	lockDirs                                   bool
 }
 
@@ -125,8 +129,11 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 	}
 	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
 		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
-		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true",
+		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
 		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
+	if e.expect != "" && e.expect != tr.OutcomeRefused {
+		return nil, opEnv{}, nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
+	}
 	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
 		if strings.Contains(f, "{{") {
 			return nil, opEnv{}, nil, fmt.Errorf("%s: unresolved configuration %q", name, f)
@@ -151,6 +158,12 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 
 // record runs one operation between its invoke and complete records.
 func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func() (string, map[string]any)) (map[string]string, error) {
+	if e.expect != "" {
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["expect"] = e.expect
+	}
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: e.client, Op: opIDs[verb], Verb: verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err
@@ -176,6 +189,22 @@ func fromChunk(stdout string, code int, result map[string]any) (string, map[stri
 		result["detail"] = d
 	}
 	return r, result
+}
+
+// v3HistoryEnd closes the run's history now, writing its end record, so a
+// later phase of the same run (the checkers) judges a history that says it is
+// whole. Every record after it is refused; the CLI's own close at the end of
+// the run is then a no-op.
+func v3HistoryEnd(_ context.Context, actx *tr.ActionContext, _ tr.Action) (map[string]string, error) {
+	if actx.History == nil {
+		return nil, errors.New("v3_history_end: no history (typed operations run only with a run bundle)")
+	}
+	open := actx.History.Open()
+	if err := actx.History.Close(); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
+	actx.Log("  v3_history_end: %s closed, %d invocations open", actx.History.Path(), open)
+	return map[string]string{"value": strconv.Itoa(open)}, nil
 }
 
 // v3OpSpec writes the cluster spec for the named volumes: each gets two hosts
