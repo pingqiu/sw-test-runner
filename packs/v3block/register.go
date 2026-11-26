@@ -36,6 +36,21 @@ func RegisterPack(r *tr.Registry) {
 	r.RegisterFunc("v3_wait_primary", tr.TierBlock, v3WaitPrimary)
 	r.RegisterFunc("v3_assert_no_authority_leak", tr.TierBlock, v3AssertNoAuthorityLeak)
 
+	// TierBlock — typed operations over a volume set (volset.go), each
+	// through the operator surface, outcome ok / refused / unknown.
+	r.RegisterFunc("v3_vs_spec", tr.TierDevOps, v3VsSpec)
+	r.RegisterFunc("v3_vs_create", tr.TierBlock, v3VsCreate)
+	r.RegisterFunc("v3_vs_attach", tr.TierBlock, v3VsAttach)
+	r.RegisterFunc("v3_vs_write", tr.TierBlock, v3VsWrite)
+	r.RegisterFunc("v3_vs_verify", tr.TierBlock, v3VsVerify)
+	r.RegisterFunc("v3_vs_snapshot", tr.TierBlock, v3VsSnapshot)
+	r.RegisterFunc("v3_vs_snapshot_delete", tr.TierBlock, v3VsSnapshotDelete)
+	r.RegisterFunc("v3_vs_objects", tr.TierBlock, v3VsObjects)
+	r.RegisterFunc("v3_vs_restart", tr.TierBlock, v3VsRestart)
+	r.RegisterFunc("v3_vs_serving", tr.TierBlock, v3VsServing)
+	r.RegisterFunc("v3_vs_move", tr.TierBlock, v3VsMove)
+	r.RegisterFunc("v3_vs_host", tr.TierBlock, v3VsHost)
+	r.RegisterFunc("v3_vs_stop", tr.TierBlock, v3VsStop)
 	// Typed operations (ops.go): one operator operation on one volume, each
 	// recording invoke and complete in the run's history; they decide nothing.
 	r.RegisterFunc("v3_op_spec", tr.TierDevOps, v3OpSpec)

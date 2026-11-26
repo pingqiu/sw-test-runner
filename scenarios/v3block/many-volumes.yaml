@@ -1,0 +1,328 @@
+# Many volumes on one server, on the content-named store.
+#
+# Pass line (stated before the run): N volumes created through the master,
+# each by one timed CreateVolume call; one blockvolume process and one kernel
+# NVMe/TCP connection per volume on one host; concurrent guest writes on all;
+# a snapshot of every volume; one volume-server restart and one master restart
+# mid-way; planned moves of the first M volumes; every volume's acknowledged
+# blocks read back; no volume stuck; after the snapshot deletes and the
+# product's cleaning, each volume's pool holds exactly its live set.
+# Sampler: fixed 1 s deadlines from before create/attach through final verification;
+# report maximum gap and fail above 2 s or on incomplete coverage.
+# Reported, not judged against performance thresholds: CreateVolume p50/p99/max, planned-move freeze (detach --plain to
+# target serving) median/max, host RSS, open fds and CPU at peak.
+#
+# Every step is a typed action (packs/v3block/volset.go) on the operator
+# surface: sw-block, or the master call sw-block itself makes (v3ctl).
+#
+# One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
+# the product under test), weed (the pinned SeaweedFS binary). Defaults are the
+# 4-volume report-only smoke; counted requires class=counted count=200 move_count=10 parallel=200.
+# Work is retained as evidence; every run needs a fresh work directory.
+#
+#   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD -env weed=/path/weed \
+#     -env product_head=<40hex> -env runner_head=<40hex> -env weed_sha256=<64hex> \\
+#     -env work=/root/vs-run scenarios/v3block/many-volumes.yaml
+
+name: v3block-many-volumes
+timeout: 120m
+always_timeout: 10m
+
+env:
+  class: "smoke"
+  product_head: ""
+  runner_head: ""
+  weed_sha256: ""
+  product_src: ""
+  runner_src: ""   # this repository's checkout (for packs/v3block/v3ctl)
+  weed: ""
+  work: "/root/vs-run"
+  count: "4"
+  move_count: "2"
+  parallel: "16"
+  size_bytes: "16777216"
+  base_port: "20000"
+  weed_master_port: "19333"
+  weed_volume_port: "19380"
+  weed_filer_port: "19388"
+  weed_filer_grpc_port: "29388"   # the filer port + 10000, SeaweedFS's convention
+  master_port: "19400"
+  chunk_path: "/vs"
+  lock_dirs_test_only: "true"
+
+topology:
+  nodes:
+    host:
+      is_local: true
+
+phases:
+  - name: run-class
+    actions:
+      - action: exec
+        node: host
+        save_as: counted
+        timeout: 10s
+        env.CLASS: "{{ class }}"
+        env.N: "{{ count }}"
+        env.M: "{{ move_count }}"
+        env.P: "{{ parallel }}"
+        cmd: |
+          case "$CLASS:$N:$M:$P" in counted:200:10:200) echo 1 ;; smoke:*) echo 0 ;; *) echo 'invalid counted shape or class' >&2; exit 2 ;; esac
+  - name: build
+    actions:
+      - action: exec
+        node: host
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.WORK: "{{ work }}"
+        env.RUNNER: "{{ runner_src }}"
+        env.PRODUCT_HEAD: "{{ product_head }}"
+        env.RUNNER_HEAD: "{{ runner_head }}"
+        cmd: |
+          set -eu
+          [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
+          [ ! -e "$WORK" ] || { echo "work directory exists: $WORK" >&2; exit 2; }
+          mkdir -p "$WORK/bin" "$WORK/log"
+          printf '%s\n' "$PRODUCT_HEAD" "$RUNNER_HEAD" | grep -Ex '[0-9a-f]{40}' | { [ "$(wc -l)" -eq 2 ]; }
+          [ "$(git -C "$SRC" rev-parse "$PRODUCT_HEAD^{commit}")" = "$PRODUCT_HEAD" ]
+          [ "$(git -C "$RUNNER" rev-parse "$RUNNER_HEAD^{commit}")" = "$RUNNER_HEAD" ]
+          mkdir "$WORK/src"
+          git -C "$SRC" archive --output="$WORK/product.tar" "$PRODUCT_HEAD"
+          tar -xf "$WORK/product.tar" -C "$WORK/src"
+          printf '%s\n' "$PRODUCT_HEAD" > "$WORK/product.sha"
+          printf '%s\n' "$RUNNER_HEAD" > "$WORK/runner.sha"
+          for b in blockmaster blockvolume sw-block; do (cd "$WORK/src" && go build -o "$WORK/bin/$b" ./cmd/$b); done
+          # Build the helper from the pinned runner tree; never write to product_src.
+          mkdir "$WORK/src/.runner-v3ctl"
+          git -C "$RUNNER" show "$RUNNER_HEAD:packs/v3block/v3ctl/main.go" > "$WORK/v3ctl.go"
+          tail -n +2 "$WORK/v3ctl.go" > "$WORK/src/.runner-v3ctl/main.go"
+          (cd "$WORK/src" && go build -o "$WORK/bin/v3ctl" ./.runner-v3ctl)
+  - name: store
+    actions:
+      - action: exec
+        node: host
+        timeout: 3m
+        env.WEED: "{{ weed }}"
+        env.WEED_SHA: "{{ weed_sha256 }}"
+        env.WORK: "{{ work }}"
+        env.MP: "{{ weed_master_port }}"
+        env.VP: "{{ weed_volume_port }}"
+        env.FP: "{{ weed_filer_port }}"
+        cmd: |
+          set -eu
+          [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
+          printf '%s  %s\n' "$WEED_SHA" "$WEED" | sha256sum -c -
+          mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
+          "$WEED" version > "$WORK/weed.version"
+          # POSIX sh (no /dev/tcp): curl exits 7 when the port refuses; any other answer is a listener.
+          up() { for i in $(seq 1 120); do rc=0; curl -s -m 1 -o /dev/null "http://127.0.0.1:$1/" || rc=$?; [ $rc -ne 7 ] && [ $rc -ne 28 ] && return 0; sleep 0.5; done; echo "port $1 not listening" >&2; return 1; }
+          setsid "$WEED" master -ip=127.0.0.1 -port=$MP -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000 >"$WORK/log/weed-master.log" 2>&1 </dev/null & echo $! > "$WORK/weed-master.pid"
+          up $MP
+          setsid "$WEED" volume -ip=127.0.0.1 -port=$VP -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=64 >"$WORK/log/weed-volume.log" 2>&1 </dev/null & echo $! > "$WORK/weed-volume.pid"
+          setsid "$WEED" filer -ip=127.0.0.1 -port=$FP -master=127.0.0.1:$MP -defaultStoreDir="$WORK/weed/f" >"$WORK/log/weed-filer.log" 2>&1 </dev/null & echo $! > "$WORK/weed-filer.pid"
+          up $((FP+10000))
+          # The filer accepts a write once a volume is growable.
+          for i in $(seq 1 120); do curl -s -m 5 -F file=@"$WORK/product.sha" "http://127.0.0.1:$FP/vs-probe/" >/dev/null && exit 0; sleep 0.5; done
+          echo "filer never accepted a write" >&2; exit 1
+
+  - name: spec
+    actions:
+      - action: v3_vs_spec
+        node: host
+        bin_dir: "{{ work }}/bin"
+        master: "127.0.0.1:{{ master_port }}"
+        filer: "127.0.0.1:{{ weed_filer_grpc_port }}"
+        chunk_path: "{{ chunk_path }}"
+        root: "{{ work }}/vol"
+        count: "{{ count }}"
+        spec_path: "{{ work }}/cluster-spec.yaml"
+        size_bytes: "{{ size_bytes }}"
+        base_port: "{{ base_port }}"
+        parallel: "{{ parallel }}"
+        lock_dirs_test_only: "{{ lock_dirs_test_only }}"
+
+  - name: master
+    actions:
+      - action: v3_start_blockmaster
+        node: host
+        save_as: bm
+        bin: "{{ work }}/bin/blockmaster"
+        listen: "127.0.0.1:{{ master_port }}"
+        authority_dir: "{{ work }}/master/authority"
+        lifecycle_store: "{{ work }}/master/lifecycle"
+        cluster_spec: "{{ work }}/cluster-spec.yaml"
+        expected_slots: "1"
+        extra_args: "--workspace-rpc --chunk-filer 127.0.0.1:{{ weed_filer_grpc_port }} --chunk-path {{ chunk_path }}"
+        log_path: "{{ work }}/log/blockmaster-1.log"
+        ready_timeout: "60"
+
+  - name: create
+    actions:
+      - action: v3_vs_host
+        node: host
+        mode: start
+      - action: v3_vs_create
+        node: host
+        save_as: create
+
+  - name: attach
+    actions:
+      - action: v3_vs_attach
+        node: host
+        save_as: attach
+        ready_seconds: "120"
+      - action: v3_vs_objects
+        node: host
+        mode: record
+        save_as: objects_before
+
+  - name: io-with-sampling
+    actions:
+      - action: v3_vs_write
+        node: host
+        round: r1
+
+  - name: snapshot-and-write
+    actions:
+      - action: v3_vs_snapshot
+        node: host
+        name: s1
+        save_as: snapshot
+      - action: v3_vs_write
+        node: host
+        round: r2
+      - action: v3_vs_verify
+        node: host
+
+  - name: volume-server-restart
+    actions:
+      - action: v3_vs_restart
+        node: host
+        index: "1"
+        signal: TERM
+        save_as: vs_restart
+      - action: v3_vs_verify
+        node: host
+
+  - name: master-restart
+    actions:
+      - action: exec
+        node: host
+        timeout: 1m
+        cmd: "kill {{ bm_pid }} && for i in $(seq 1 60); do kill -0 {{ bm_pid }} 2>/dev/null || exit 0; sleep 0.5; done; echo 'master still running' >&2; exit 1"
+      - action: v3_start_blockmaster
+        node: host
+        save_as: bm
+        bin: "{{ work }}/bin/blockmaster"
+        listen: "127.0.0.1:{{ master_port }}"
+        authority_dir: "{{ work }}/master/authority"
+        lifecycle_store: "{{ work }}/master/lifecycle"
+        cluster_spec: "{{ work }}/cluster-spec.yaml"
+        expected_slots: "1"
+        extra_args: "--workspace-rpc --chunk-filer 127.0.0.1:{{ weed_filer_grpc_port }} --chunk-path {{ chunk_path }}"
+        log_path: "{{ work }}/log/blockmaster-2.log"
+        ready_timeout: "60"
+      - action: v3_vs_serving
+        node: host
+        bound_seconds: "120"
+      - action: v3_vs_write
+        node: host
+        round: r3
+      - action: v3_vs_verify
+        node: host
+
+  - name: planned-moves
+    actions:
+      # The first moved volume deletes snapshot s1 between its stop and its
+      # clean move: an operator write of HEAD the move must still admit.
+      - action: v3_vs_move
+        node: host
+        first: "{{ move_count }}"
+        op_write_snapshot: s1
+        save_as: freeze
+        ready_seconds: "120"
+      - action: v3_vs_serving
+        node: host
+        bound_seconds: "60"
+      - action: v3_vs_verify
+        node: host
+
+  - name: snapshot-delete-and-cleaning
+    actions:
+      # All holders now serve, including the moved one whose s1 was deleted
+      # store-direct. A fresh holder-routed delete kicks cleaning on every volume.
+      - action: v3_vs_snapshot
+        node: host
+        name: s2
+      - action: v3_vs_snapshot_delete
+        node: host
+        name: s1
+      - action: v3_vs_snapshot_delete
+        node: host
+        name: s2
+      - action: v3_vs_objects
+        node: host
+        mode: live
+        save_as: objects_after
+        # A kicked pass must reclaim within five minutes; otherwise FAIL.
+        bound_seconds: "300"
+        timeout: 6m
+      - action: v3_vs_verify
+        node: host
+      - action: v3_vs_host
+        node: host
+        mode: stop
+        save_as: peak
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ product_head }}"
+        gate_pass: "{{ counted }}"
+        __vs_class: "{{ class }}"
+        __vs_move_count: "{{ move_count }}"
+        __vs_parallel: "{{ parallel }}"
+        __vs_runner_sha: "{{ runner_head }}"
+        __vs_weed_sha256: "{{ weed_sha256 }}"
+        __vs_count: "{{ count }}"
+        __vs_create_p50_ms: "{{ create_p50_ms }}"
+        __vs_create_p99_ms: "{{ create_p99_ms }}"
+        __vs_create_max_ms: "{{ create_max_ms }}"
+        __vs_freeze_p50_ms: "{{ freeze_p50_ms }}"
+        __vs_freeze_max_ms: "{{ freeze_max_ms }}"
+        __vs_freeze_n: "{{ freeze_n }}"
+        __vs_peak_max_gap_s: "{{ peak_max_gap_s }}"
+        __vs_peak_samples: "{{ peak_samples }}"
+        __vs_peak_rss_mib: "{{ peak_rss_mib }}"
+        __vs_peak_open_fds: "{{ peak_open_fds }}"
+        __vs_peak_cpu_busy_pct: "{{ peak_cpu_busy_pct }}"
+
+  - name: teardown
+    always: true
+    actions:
+      - action: v3_vs_host
+        node: host
+        mode: cleanup
+      - action: v3_vs_stop
+        node: host
+        timeout: 2m
+      - action: exec
+        node: host
+        timeout: 1m
+        env.WORK: "{{ work }}"
+        cmd: |
+          set -u; rc=0
+          for p in "$WORK"/weed-filer.pid "$WORK"/weed-volume.pid "$WORK"/weed-master.pid; do
+            [ -f "$p" ] || continue; pid=$(cat "$p"); kill "$pid" 2>/dev/null
+            for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+            kill -0 "$pid" 2>/dev/null && { kill -9 "$pid"; sleep 1; }
+            kill -0 "$pid" 2>/dev/null && { echo "pid $pid of $p still running after KILL" >&2; rc=1; }
+          done
+          exit $rc
+      - action: exec
+        node: host
+        timeout: 30s
+        env.PID: "{{ bm_pid }}"
+        cmd: |
+          case "$PID" in ''|*[!0-9]*) echo "no master was started"; exit 0 ;; esac
+          kill "$PID" 2>/dev/null
+          for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || exit 0; sleep 0.5; done
+          echo "master $PID still running" >&2; exit 1
