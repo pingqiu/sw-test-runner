@@ -27,6 +27,7 @@ func TestM0ScenarioWiring(t *testing.T) {
 				t.Fatal(err)
 			}
 			s.Env["product_src"], s.Env["runner_src"], s.Env["weed"], s.Env["bundle_dir"] = "/src", "/runner", "/bin/weed", "/bundle"
+			s.Env["run_id"] = "run-1" // set by the CLI in a bundled run
 			var mu sync.Mutex
 			var steps []string
 			var bad []string
@@ -40,12 +41,19 @@ func TestM0ScenarioWiring(t *testing.T) {
 					}
 				}
 				if strings.HasPrefix(a.Action, "v3_op_") && a.Action != "v3_op_spec" {
-					want := map[string]string{"bin_dir": "/root/m0-run/bin", "master": "127.0.0.1:19600", "filer": "127.0.0.1:29588", "root": "/root/m0-run/vol", "client": "c1"}
+					want := map[string]string{"bin_dir": "/root/m0-run/bin", "master": "127.0.0.1:19600", "filer": "127.0.0.1:29588", "root": "/root/m0-run/vol", "client": "c1",
+						"own_script": "/runner/scenarios/v3block/m0-own.sh", "work": "/root/m0-run", "owner": "ok"}
 					for k, w := range want {
 						if got := opParam(a, actx, k); got != w {
 							bad = append(bad, fmt.Sprintf("%s %s resolved to %q, want %q", a.Action, k, got, w))
 						}
 					}
+				}
+				if a.Action == "v3_op_spec" && a.Params["nqn_prefix"] != "nqn.2026-11.io.seaweedfs:op-run-1-" {
+					bad = append(bad, "the NQN prefix does not carry the run id: "+a.Params["nqn_prefix"])
+				}
+				if a.Action == "exec" && strings.Contains(a.Params["cmd"], " teardown ") && a.Params["env.NQN"] != "nqn.2026-11.io.seaweedfs:op-run-1-" {
+					bad = append(bad, "teardown's NQN prefix is not this run's: "+a.Params["env.NQN"])
 				}
 				if a.Action == "v3_start_blockmaster" {
 					actx.Vars["bm_pid"] = "4242"
@@ -71,6 +79,9 @@ func TestM0ScenarioWiring(t *testing.T) {
 			last := steps[len(steps)-1]
 			if !strings.HasPrefix(last, "exec ") {
 				t.Errorf("teardown did not run last: %q", last)
+			}
+			if first := steps[0]; !strings.HasPrefix(first, "exec ") {
+				t.Errorf("the run does not start by claiming its work directory: %q", first)
 			}
 			if fail != "" {
 				return

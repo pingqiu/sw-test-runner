@@ -28,8 +28,8 @@ func parseV3ctl(stdout string, code int, volume string) (v3ctlAnswer, string) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil || a.Volume != volume {
 		return a, "unknown"
 	}
-	want := map[string]int{"ok": 0, "refused": 1, "unknown": 3}[a.Outcome]
-	if a.Outcome == "" || want != code || (a.Outcome == "ok" && len(a.LayoutID) != 32) {
+	want, known := map[string]int{"ok": 0, "refused": 1, "unknown": 3}[a.Outcome]
+	if !known || want != code || (a.Outcome == "ok" && len(a.LayoutID) != 32) {
 		return a, "unknown"
 	}
 	return a, a.Outcome

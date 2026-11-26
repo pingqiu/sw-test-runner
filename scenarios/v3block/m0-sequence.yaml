@@ -21,9 +21,6 @@ name: v3block-m0-sequence
 timeout: 30m
 always_timeout: 5m
 
-metadata:
-  expected_refusals: ""
-
 env:
   product_src: ""
   runner_src: ""
@@ -44,6 +41,10 @@ env:
   filer: "127.0.0.1:{{ weed_filer_grpc_port }}"
   root: "{{ work }}/vol"
   client: "c1"
+  # What this run owns (m0-own.sh): its work directory, by token; its processes, by pid and start time;
+  # its kernel NVMe controllers, by an NQN prefix that carries the run id (written out where exec and
+  # v3_op_spec use them: the engine expands one level). The typed operations read own_script and work.
+  own_script: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
 
 topology:
   nodes:
@@ -53,6 +54,15 @@ topology:
 phases:
   - name: build
     actions:
+      # Acquire the work directory exclusively first: every later step, and the
+      # teardown, acts only under the token this returns.
+      - action: exec
+        node: host
+        timeout: 30s
+        save_as: owner
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.WORK: "{{ work }}"
+        cmd: bash "$OWN" claim "$WORK"
       - action: exec
         node: host
         timeout: 20m
@@ -63,7 +73,6 @@ phases:
           set -eu
           [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
           [ -f "$V3CTL" ] || { echo "runner_src is not this checkout: $V3CTL" >&2; exit 2; }
-          [ ! -e "$WORK" ] || { echo "work directory exists: $WORK" >&2; exit 2; }
           mkdir -p "$WORK/bin" "$WORK/log"
           git -C "$SRC" rev-parse HEAD > "$WORK/product.sha"
           for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
@@ -75,7 +84,9 @@ phases:
     actions:
       - action: exec
         node: host
-        timeout: 3m
+        timeout: 5m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
         env.WEED: "{{ weed }}"
         env.WORK: "{{ work }}"
         env.MP: "{{ weed_master_port }}"
@@ -87,16 +98,12 @@ phases:
           [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
           mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
           "$WEED" version > "$WORK/weed.version"
-          # POSIX sh (no /dev/tcp): curl exits 7 when the port refuses; any other answer is a listener.
-          up() { for i in $(seq 1 120); do rc=0; curl -s -m 1 -o /dev/null "http://127.0.0.1:$1/" || rc=$?; [ $rc -ne 7 ] && [ $rc -ne 28 ] && return 0; sleep 0.5; done; echo "port $1 not listening" >&2; return 1; }
-          setsid "$WEED" master -ip=127.0.0.1 -port=$MP -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000 >"$WORK/log/weed-master.log" 2>&1 </dev/null & echo $! > "$WORK/weed-master.pid"
-          up $MP
-          setsid "$WEED" volume -ip=127.0.0.1 -port=$VP -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=32 >"$WORK/log/weed-volume.log" 2>&1 </dev/null & echo $! > "$WORK/weed-volume.pid"
-          setsid "$WEED" filer -ip=127.0.0.1 -port=$FP -master=127.0.0.1:$MP -defaultStoreDir="$WORK/weed/f" >"$WORK/log/weed-filer.log" 2>&1 </dev/null & echo $! > "$WORK/weed-filer.pid"
-          up $FG
+          # Each daemon is refused if its ports already listen, and ready only when IT holds them.
+          bash "$OWN" spawn "$WORK" "$TOK" weed-master $MP -- "$WEED" master -ip=127.0.0.1 -port=$MP -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000
+          bash "$OWN" spawn "$WORK" "$TOK" weed-volume $VP -- "$WEED" volume -ip=127.0.0.1 -port=$VP -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=32
+          bash "$OWN" spawn "$WORK" "$TOK" weed-filer $FP $FG -- "$WEED" filer -ip=127.0.0.1 -port=$FP -master=127.0.0.1:$MP -defaultStoreDir="$WORK/weed/f"
           for i in $(seq 1 120); do curl -s -m 5 -F file=@"$WORK/product.sha" "http://127.0.0.1:$FP/m0-probe/" >/dev/null && exit 0; sleep 0.5; done
           echo "filer never accepted a write" >&2; exit 1
-
   - name: master
     actions:
       - action: v3_op_spec
@@ -104,6 +111,7 @@ phases:
         volumes: "v1 v2"
         spec_path: "{{ work }}/cluster-spec.yaml"
         base_port: "{{ base_port }}"
+        nqn_prefix: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
       - action: v3_start_blockmaster
         node: host
         save_as: bm
@@ -116,6 +124,14 @@ phases:
         extra_args: "--workspace-rpc --chunk-filer 127.0.0.1:{{ weed_filer_grpc_port }} --chunk-path {{ chunk_path }}"
         log_path: "{{ work }}/log/blockmaster.log"
         ready_timeout: "60"
+      - action: exec
+        node: host
+        timeout: 30s
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WORK: "{{ work }}"
+        env.PID: "{{ bm_pid }}"
+        cmd: bash "$OWN" record "$WORK" "$TOK" blockmaster "$PID"
 
   - name: sequence
     actions:
@@ -149,27 +165,15 @@ phases:
       - {action: v3_op_delete, node: host, volume: v1}
       - {action: v3_op_observe, node: host, volume: v1}
 
+  # Only what this run acquired: nothing at all if the claim failed.
   - name: teardown
     always: true
     actions:
       - action: exec
         node: host
-        timeout: 2m
+        timeout: 3m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
         env.WORK: "{{ work }}"
-        env.HIST: "{{ bundle_dir }}/history.jsonl"
-        env.BM: "{{ bm_pid }}"
-        cmd: |
-          set -u; rc=0
-          # Kernel NVMe/TCP connections of this run, through sysfs.
-          for d in /sys/class/nvme/nvme*; do case "$(cat "$d/subsysnqn" 2>/dev/null)" in nqn.2026-11.io.seaweedfs:op-*) echo 1 > "$d/delete_controller" ;; esac; done
-          # Every blockvolume this run started, by the pid each attach recorded in the history.
-          pids=$(grep -o '"pid":"[0-9]*"' "$HIST" 2>/dev/null | grep -o '[0-9]*' | sort -u)
-          case "$BM" in ''|*[!0-9]*) ;; *) pids="$pids $BM" ;; esac
-          for p in "$WORK"/weed-filer.pid "$WORK"/weed-volume.pid "$WORK"/weed-master.pid; do [ -f "$p" ] && pids="$pids $(cat "$p")"; done
-          for pid in $pids; do
-            kill "$pid" 2>/dev/null || continue
-            for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-            kill -0 "$pid" 2>/dev/null && { kill -9 "$pid"; sleep 1; }
-            kill -0 "$pid" 2>/dev/null && { echo "pid $pid still running after KILL" >&2; rc=1; }
-          done
-          exit $rc
+        env.NQN: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
+        cmd: bash "$OWN" teardown "$WORK" "$TOK" "$NQN"

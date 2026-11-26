@@ -44,6 +44,8 @@ var opIDs = map[string]string{
 // opEnv is the configuration every operation shares, from params or vars.
 type opEnv struct {
 	bin, master, filer, chunkPath, root, client string
+	// The run's ownership (m0-own.sh): its script, work directory and token.
+	ownScript, work, owner string
 	lockDirs                                   bool
 }
 
@@ -59,6 +61,7 @@ type opVolume struct {
 	Hosts    []vsHost          `json:"hosts"`
 	Cur      int               `json:"cur"`
 	PID      string            `json:"pid,omitempty"`
+	PIDStart string            `json:"pid_start,omitempty"` // with PID, the holder's identity
 	Epoch    uint64            `json:"epoch,omitempty"`
 	Written  map[string]bool   `json:"written,omitempty"` // lbas a write was attempted on
 	Extra    map[string]string `json:"extra,omitempty"`
@@ -122,7 +125,8 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 	}
 	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
 		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
-		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true"}
+		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true",
+		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
 	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
 		if strings.Contains(f, "{{") {
 			return nil, opEnv{}, nil, fmt.Errorf("%s: unresolved configuration %q", name, f)
@@ -297,50 +301,110 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			}
 			v.LayoutID = a.LayoutID
 		}
-		mk := "mkdir -p " + shellQuote(e.root+"/"+h.Server)
-		if e.lockDirs {
-			mk += " " + shellQuote(e.root+"/"+h.Server+".locks")
-		}
-		if _, _, code, err := node.Run(ctx, mk); err != nil || code != 0 {
-			return fail("mkdir")
-		}
-		logPath := fmt.Sprintf("%s/%s.%d.log", e.root, h.Server, time.Now().UnixNano())
-		stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s %s >%s 2>&1 </dev/null & echo $!", shellQuote(e.bin+"/blockvolume"), strings.Join(quoteAll(e.volumeArgs(v, h, blocks)), " "), shellQuote(logPath)))
-		pid := strings.TrimSpace(stdout)
-		if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
-			return fail("start: " + firstLine(stderr))
-		}
-		v.PID = pid
-		res := map[string]any{"pid": pid, "log": logPath, "layout_id": v.LayoutID}
-		end := time.Now().Add(bound)
-		for {
-			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && st.Epoch > v.Epoch {
-				v.Epoch, res["epoch"] = st.Epoch, st.Epoch
-				break
-			}
-			if !alive(ctx, node, pid) {
-				res["detail"] = "blockvolume exited before serving"
-				return tr.OutcomeUnknown, res
-			}
-			if time.Now().After(end) {
-				res["detail"] = fmt.Sprintf("not serving above epoch %d within %s", v.Epoch, bound)
-				return tr.OutcomeUnknown, res
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		host, port, _ := strings.Cut(h.NVMe, ":")
-		if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
-			res["detail"] = why
-			return tr.OutcomeUnknown, res
-		}
-		dev, why := deviceOf(ctx, node, v.NQN, 20*time.Second)
-		if why != "" {
-			res["detail"] = why
-			return tr.OutcomeUnknown, res
-		}
-		res["device"] = dev
-		return tr.OutcomeOK, res
+		return e.startHolder(ctx, node, v, h, blocks, bound)
 	})
+}
+
+func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
+
+// startHolder starts blockvolume for v on host h and credits readiness only
+// to that process:
+//   - every endpoint of h must be free before the launch (a listener already
+//     there, another run's or a leftover, refuses the start: nothing launched);
+//   - the child is identified by its pid and start time and recorded as owned;
+//   - it is ready only while that child runs, its status serves above the
+//     recorded epoch, AND the status and NVMe listeners are held by it;
+//   - only then is the kernel host connected, to this run's NQN.
+func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
+	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
+	held, err := listenerPIDs(ctx, node, ports)
+	if err != nil {
+		return fail("endpoint check: " + err.Error())
+	}
+	for _, p := range ports {
+		if len(held[p]) > 0 {
+			return fail(fmt.Sprintf("endpoint :%s already listens (pids %v): blockvolume not started", p, held[p]))
+		}
+	}
+	mk := "mkdir -p " + shellQuote(e.root+"/"+h.Server)
+	if e.lockDirs {
+		mk += " " + shellQuote(e.root+"/"+h.Server+".locks")
+	}
+	if _, _, code, err := node.Run(ctx, mk); err != nil || code != 0 {
+		return fail("mkdir")
+	}
+	logPath := fmt.Sprintf("%s/%s.%d.log", e.root, h.Server, time.Now().UnixNano())
+	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s %s >%s 2>&1 </dev/null & echo $!", shellQuote(e.bin+"/blockvolume"), strings.Join(quoteAll(e.volumeArgs(v, h, blocks)), " "), shellQuote(logPath)))
+	pid := strings.TrimSpace(stdout)
+	if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
+		return fail("start: " + firstLine(stderr))
+	}
+	start, state := procStart(ctx, node, pid)
+	res := map[string]any{"pid": pid, "pid_start": start, "log": logPath, "layout_id": v.LayoutID}
+	if state != procRunning {
+		res["detail"] = "blockvolume exited at once, or its identity could not be read"
+		return tr.OutcomeUnknown, res
+	}
+	v.PID, v.PIDStart = pid, start
+	if why := e.recordOwned(ctx, node, "blockvolume-"+h.Server, pid); why != "" {
+		res["detail"] = why
+		return tr.OutcomeUnknown, res
+	}
+	end := time.Now().Add(bound)
+	for {
+		switch procState(ctx, node, pid, start) {
+		case procGone:
+			res["detail"] = "blockvolume exited before serving"
+			return tr.OutcomeUnknown, res
+		case procRunning:
+			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && st.Epoch > v.Epoch {
+				owners, err := listenerPIDs(ctx, node, []string{portOf(h.Status), portOf(h.NVMe)})
+				if err == nil && contains(owners[portOf(h.Status)], pid) && contains(owners[portOf(h.NVMe)], pid) {
+					v.Epoch, res["epoch"] = st.Epoch, st.Epoch
+					host, port, _ := strings.Cut(h.NVMe, ":")
+					if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
+						res["detail"] = why
+						return tr.OutcomeUnknown, res
+					}
+					dev, why := deviceOf(ctx, node, v.NQN, 20*time.Second)
+					if why != "" {
+						res["detail"] = why
+						return tr.OutcomeUnknown, res
+					}
+					res["device"] = dev
+					return tr.OutcomeOK, res
+				}
+			}
+		}
+		if time.Now().After(end) {
+			res["detail"] = fmt.Sprintf("not serving above epoch %d from its own listeners within %s", v.Epoch, bound)
+			return tr.OutcomeUnknown, res
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// recordOwned records a started process with the run's ownership script
+// (m0-own.sh record), so the teardown may stop it by its identity. Without an
+// ownership script configured nothing is recorded.
+func (e opEnv) recordOwned(ctx context.Context, node runner, name, pid string) string {
+	if e.ownScript == "" {
+		return ""
+	}
+	_, stderr, code, err := node.Run(ctx, fmt.Sprintf("bash %s record %s %s %s %s", shellQuote(e.ownScript), shellQuote(e.work), shellQuote(e.owner), shellQuote(name), pid))
+	if err != nil || code != 0 {
+		return "recording ownership: " + firstLine(stderr)
+	}
+	return ""
+}
+
+func contains(set []string, v string) bool {
+	for _, x := range set {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // blockTag is the content of one written block: a repeated tag naming the
@@ -499,7 +563,7 @@ func v3OpSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		return nil, errors.New("v3_op_snapshot_delete: name is required")
 	}
 	via := "store"
-	if alive(ctx, node, v.PID) {
+	if alive(ctx, node, v.PID, v.PIDStart) {
 		via = "holder"
 	}
 	return record(actx, e, "snapshot_delete", v.Name, map[string]any{"name": name, "via": via}, func() (string, map[string]any) {
@@ -600,10 +664,10 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[stri
 		res["revoke_exit"] = code
 		return res, "revoke: " + firstLine(out+" "+errOut)
 	}
-	if why := waitGone(ctx, node, v.PID, 40*time.Second); why != "" {
+	if why := waitGone(ctx, node, v.PID, v.PIDStart, 40*time.Second); why != "" {
 		return res, "the holder did not exit by itself after the revoke: " + why
 	}
-	v.PID = ""
+	v.PID, v.PIDStart = "", ""
 	ack := regexp.MustCompile(fmt.Sprintf(`(?m)^recorded ACK: r1@%d HEAD generation (\d+)\r?$`, v.Epoch))
 	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(500 * time.Millisecond) {
 		out, _, c, e2 := e.workspace(ctx, node, v.Name, "show")
