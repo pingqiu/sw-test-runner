@@ -83,7 +83,8 @@ phases:
           [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
           mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
           "$WEED" version > "$WORK/weed.version"
-          up() { for i in $(seq 1 120); do (exec 3<>/dev/tcp/127.0.0.1/$1) 2>/dev/null && return 0; sleep 0.5; done; echo "port $1 not listening" >&2; return 1; }
+          # POSIX sh (no /dev/tcp): curl exits 7 when the port refuses; any other answer is a listener.
+          up() { for i in $(seq 1 120); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$1/"; rc=$?; [ $rc -ne 7 ] && [ $rc -ne 28 ] && return 0; sleep 0.5; done; echo "port $1 not listening" >&2; return 1; }
           setsid "$WEED" master -ip=127.0.0.1 -port=$MP -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000 >"$WORK/log/weed-master.log" 2>&1 </dev/null & echo $! > "$WORK/weed-master.pid"
           up $MP
           setsid "$WEED" volume -ip=127.0.0.1 -port=$VP -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=64 >"$WORK/log/weed-volume.log" 2>&1 </dev/null & echo $! > "$WORK/weed-volume.pid"

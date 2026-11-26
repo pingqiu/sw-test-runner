@@ -1160,6 +1160,10 @@ func wsOutcomeOr(err error, code int) string {
 // recorded pid. Always phases call it; it settles all volumes and fails if any
 // connection or process remains.
 func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	if actx.Vars[volSetVar] == "" {
+		actx.Log("  v3_vs_stop: no volume set was built; nothing to stop")
+		return map[string]string{"value": "0"}, nil
+	}
 	node, s, err := vsBegin(actx, act, "v3_vs_stop")
 	if err != nil {
 		return nil, err
