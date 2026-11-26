@@ -1,18 +1,18 @@
 # R4 node loss, standalone (systemd), 3 cloud VMs, mutual TLS.
 #
-# The release's manual-failover rule, end to end: a primary whose host loses
-# power is NOT replaced automatically; the operator's failover moves the line
-# through the fencing round; no acknowledged write is lost; the old primary,
+# Fenced automatic failover, end to end: a primary whose host loses power
+# is replaced only after a fencing round; no acknowledged write is lost; the old primary,
 # powered on again, is fenced and rejoins as a replica.
 #
 # Pass line (stated before the run), each asserted below with a failing
 # control (packs/v3block/r4_scenario_test.go), for rf=3 and then rf=2:
 #   P1  the primary's VM (node-2) loses power abruptly (cloud_vm_power:
 #       az vm stop --skip-shutdown; the node no longer answers).
-#   P2  NO automatic promotion: for hold_seconds no survivor becomes primary
-#       and none leaves the line's epoch, every survivor watched over the
-#       same whole window (r4.sh held, one parallel phase).
-#   P3  the operator's failover (sw-block ops failover --expect-current
+#   P2  automatic mode: the master's persisted line carries promotion evidence
+#       BasisFenced and FencedEpoch=e+1, a configured survivor serves at e+1,
+#       zero operator calls and all ACKs read back. No automatic operator fallback.
+#       Explicit operator mode retains held for an undecidable-round case.
+#   P3  in operator mode, failover (sw-block ops failover --expect-current
 #       --confirm-old-node-off) moves the line through the fencing round:
 #       the target is primary at epoch e+1 (r4.sh wait-role primary).
 #   P4  a writer runs through the power-off; intent precedes each write and
@@ -33,10 +33,9 @@
 # The during-loss streaming round is the exception: I/O errors and unacked
 # attempts are expected around the fault; it must have acknowledged a write
 # before the fault, stay running through it, and stop before reconnecting.
-# P3 observes role/epoch and the operator answer; the fencing round itself is
-# inferred from that operator transition, not independently observed here.
-# P2 polls every five seconds: a transient status between polls is not seen;
-# a published line change is caught through its monotonically increasing epoch.
+# The authority receipt, serving status and full ACK readback are all required;
+# status readiness alone is not fencing evidence. The observed successor may
+# be r2 or r3; subsequent connections follow its persisted endpoint.
 # The device is found again by its NQN after every connect (r4.sh connect /
 # dev): exactly one namespace with a live path to the expected target.
 # The checkers C1-C3 do not judge this scenario in v1: it records no typed
@@ -100,6 +99,7 @@ env:
   ssh_user: "seaweed"
   ssh_key: ""
   hold_seconds: "240"
+  failover_mode: "automatic" # operator is explicit, for a round that cannot decide
   writes: "64"
   master_port: "19600"
   data_port: "19601"
@@ -125,6 +125,7 @@ phases:
         env.RS: "{{ runner_src }}"
         env.RHEAD: "{{ runner_head }}"
         env.RF: "{{ rf }}"
+        env.MODE: "{{ failover_mode }}"
         cmd: |
           python3 - <<'PY'
           import os,re,subprocess
@@ -133,6 +134,7 @@ phases:
               return subprocess.check_output(['git','-C',repo,'show',sha+':'+path],text=True,timeout=20)
           src,head,rs,rhead=(os.environ[k] for k in ('SRC','HEAD','RS','RHEAD'))
           assert os.environ['RF'] in ('2','3'), 'rf must be 2 or 3'
+          assert os.environ['MODE'] in ('automatic','operator'), 'invalid failover_mode'
           files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
           for flag in ('allow-external-nvme-bind','master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
               assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
@@ -142,7 +144,7 @@ phases:
               assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
           assert 'RestartPreventExitStatus=78' in files['deploy/systemd/sw-blockvolume.service']
           from pathlib import Path
-          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh'):
+          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh','scripts/r4/auto-p2.py'):
               assert Path(rs,p).read_text()==show(rs,rhead,p), 'runner working copy differs from pin: '+p
           print('PREFLIGHT PASS product='+head+' runner='+rhead+' rf='+os.environ['RF'])
           PY
@@ -172,6 +174,7 @@ phases:
           git -C "$SRC" archive -o "$L/src.tar" "$HEAD" && tar -xf "$L/src.tar" -C "$L/src"
           for b in blockmaster blockvolume sw-block; do (cd "$L/src" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$L/pkg/bin/$b" ./cmd/$b); done
           git -C "$RS" show "$RHEAD:scenarios/v3block/r4.sh" > "$L/pkg/r4.sh"
+          git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py" > "$L/pkg/auto-p2.py"
           # Development certificates from the product's script (files only):
           # blockmaster's carries DNS:blockmaster, so every node maps that
           # name to node-1's private address and dials blockmaster by name.
@@ -179,7 +182,7 @@ phases:
           (cd "$L/pkg" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
           tar -C "$L/pkg" -czf "$L/r4-pkg.tgz" .
           { echo "product_head=$HEAD"; echo "runner_head=$RHEAD"; go version
-            grep -E ' \./(bin/|r4\.sh)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
+            grep -E ' \./(bin/|r4\.sh|auto-p2\.py)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
           cat "$L/provenance.txt"
       - {action: upload_path, node: node-1, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
       - {action: upload_path, node: node-2, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
@@ -279,18 +282,22 @@ phases:
         timeout: 1m
         cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
 
-  # P2: every survivor watched over the same whole window, at once.
+  - name: operator-call-count
+    actions:
+      - {action: exec, node: node-1, cmd: "printf '0\\n' | sudo tee /var/lib/r4/{{ run_id }}-rf{{ rf }}/operator-calls >/dev/null"}
+
+  # Only explicit operator mode may wait for an undecidable automatic round.
   - name: hold
     parallel: true
     actions:
       - action: exec                                             # r3 (rf=3) / r2 (rf=2)
         node: node-3
         timeout: 10m
-        cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
+        cmd: "[ '{{ failover_mode }}' = operator ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
       - action: exec                                             # r2 (rf=3 only)
         node: node-1
         timeout: 10m
-        cmd: "[ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
+        cmd: "[ '{{ failover_mode }}' = operator ] && [ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
 
   - name: operator-failover
     actions:
@@ -299,17 +306,41 @@ phases:
         timeout: 3m
         cmd: |
           bash -e -o pipefail <<'R4STEP'
+          [ '{{ failover_mode }}' = operator ] || exit 0
+          printf '1\n' | sudo tee /var/lib/r4/{{ run_id }}-rf{{ rf }}/operator-calls >/dev/null
           T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); sudo env SW_BLOCK_TLS_CERT=$W/tls/failback-executor.crt SW_BLOCK_TLS_KEY=$W/tls/failback-executor.key SW_BLOCK_TLS_CA=$W/tls/ca.crt $W/bin/sw-block ops failover --master blockmaster:{{ master_port }} --volume v1 --target r2 --target-data "$DATA:{{ data_port }}" --target-ctrl "$DATA:{{ ctrl_port }}" --expect-current r1@1 --confirm-old-node-off v1 | sudo tee $W/failover.txt
           R4STEP
-      # The new primary is r2: on node-1 (rf=3) or node-3 (rf=2).
-      - {action: exec, node: node-1, timeout: 3m, cmd: "[ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
-      - {action: exec, node: node-3, timeout: 3m, cmd: "[ {{ rf }} = 2 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
+
+  - name: fenced-successor
+    actions:
+      - action: exec
+        node: node-1
+        timeout: 6m
+        save_as: promotion
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }});
+          EXTRA=$([ {{ rf }} = 3 ] && echo '--candidate r3={{ n3_data }}:{{ data_port }}' || true);
+          sudo python3 $W/auto-p2.py wait --authority $W/master/authority/v1.v3auth.json
+          --seconds {{ hold_seconds }} --mode {{ failover_mode }} --calls $W/operator-calls
+          --candidate r2=$DATA:{{ data_port }} $EXTRA --out $W/promotion.json
+      - action: exec
+        node: node-1
+        timeout: 3m
+        env.PROMOTION: "{{ promotion }}"
+        cmd: "[ {{ rf }} = 3 ] || exit 0; W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/auto-p2.py status \"$PROMOTION\" r2 http://127.0.0.1:{{ status_port }}/status?volume=v1 $W/successor-status.json"
+      - action: exec
+        node: node-3
+        timeout: 3m
+        env.PROMOTION: "{{ promotion }}"
+        cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2); sudo python3 $W/auto-p2.py status \"$PROMOTION\" $R http://127.0.0.1:{{ status_port }}/status?volume=v1 $W/successor-status.json"
       - action: exec                                             # P4 + its red control
         node: node-1
         timeout: 5m
+        env.PROMOTION: "{{ promotion }}"
         cmd: |
           bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$(python3 $W/auto-p2.py field "$PROMOTION" host); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo python3 $W/auto-p2.py verify "$PROMOTION" $W/r4.sh "$DEV" $W/ledger | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
           R4STEP
       - action: exec                                             # P4b (rf=2)
         node: node-1
@@ -331,9 +362,10 @@ phases:
       - action: exec                                             # P6
         node: node-1
         timeout: 5m
+        env.PROMOTION: "{{ promotion }}"
         cmd: |
           bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss after-rejoin | sudo tee $W/verify-after-rejoin.txt
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$(python3 $W/auto-p2.py field "$PROMOTION" host); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss after-rejoin | sudo tee $W/verify-after-rejoin.txt
           R4STEP
 
   - name: collect

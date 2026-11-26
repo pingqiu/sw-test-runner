@@ -500,7 +500,7 @@ cmd_evidence() {
       bad=1
     fi
   done
-  for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+  for f in ledger operator-calls promotion.json successor-status.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ ! -f "$w/$f" ]] || cp "$w/$f" "$ev/"
   done
   chmod 0755 "$ev"
@@ -527,7 +527,7 @@ cmd_cleanup() {
     rm -f "$unitdir/$u.service"
   done
   "$systemctl_bin" daemon-reload || true
-  for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+  for f in ledger operator-calls promotion.json successor-status.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ -f "$w/$f" ]] && cp "$w/$f" "$ev/"
   done
   # cleanup runs as root, while collect_path uses the inventory SSH user.
