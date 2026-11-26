@@ -314,17 +314,20 @@ def c2(recs):
 @unknown_on_overlap
 def c3(recs):
     """Independence after a restore, both ways. A direction is exercised only
-    by a successful (ok or unknown) write on one side at a block, followed by
-    an ok read of the SAME block on the other side; a refused write, a read
-    before the write or a read of another block exercises nothing. A
-    direction not exercised is a FAIL: C3 judged nothing there."""
+    by an ACKNOWLEDGED (ok) write on one side at a block whose content the
+    other side may not already hold there, followed by an ok read of the SAME
+    block on the other side. A write that cannot tell propagation from
+    isolation (the other side may hold the same content anyway), an unknown or
+    refused write, a read before the write, or a read of another block
+    exercises nothing. A direction not exercised is a FAIL: C3 judged nothing."""
     _, events, images = replay(recs)
     f = []
     if not restores(recs):
         return verdict(['no restore in the history: C3 judges nothing'])
     for target, source, snap, at in restores(recs):
         image = images.get(at) or {}
-        written = {source: {}, target: {}}   # volume -> lba -> {sha: completion seq} after the restore
+        written = {source: {}, target: {}}   # volume -> lba -> {sha: completion seq} after the restore (ok or unknown)
+        acked = {source: {}, target: {}}     # volume -> lba -> {sha} of ok writes only
         exercised = {source: False, target: False}   # keyed by the WRITTEN side
         for ev in events:
             if ev[0] not in ('read', 'write') or ev[2]['seq'] <= at or ev[1].get('volume') not in written:
@@ -333,10 +336,13 @@ def c3(recs):
             other = target if vol == source else source
             if ev[0] == 'write' and ev[2]['outcome'] in ('ok', 'unknown'):
                 written[vol].setdefault(lba, {})[ev[1]['args']['sha256']] = ev[2]['seq']
+                if ev[2]['outcome'] == 'ok':
+                    acked[vol].setdefault(lba, set()).add(ev[1]['args']['sha256'])
             elif ev[0] == 'read':
                 got = (ev[2].get('result') or {}).get('sha256')
-                if written[other].get(lba):
-                    exercised[other] = True   # a write on the other side at this block came first
+                # ev[3]: what the reading volume may hold here by its own history.
+                if acked[other].get(lba, set()) - ev[3]:
+                    exercised[other] = True   # a distinguishing acknowledged write on the other side came first
                 foreign = set(written[other].get(lba, {})) - (image.get(lba, set()) if vol == target else set())
                 if got in foreign:
                     if vol == target:

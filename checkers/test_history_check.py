@@ -345,6 +345,20 @@ class Exercise(unittest.TestCase):
                                  ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
                                  ('read', 'v1', {'lba': 7}, 'ok', {'sha256': hc.ZERO})), 'FAIL')
 
+    def test_a_write_the_other_side_may_already_hold_exercises_nothing(self):
+        # All ok, but the source writes A, the snapshot's own content: a
+        # target reading A cannot tell isolation from propagation.
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})), 'FAIL')
+
+    def test_an_unknown_write_exercises_nothing(self):
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'unknown', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S})), 'FAIL')
+
     def test_a_refused_write_exercises_nothing(self):
         self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'refused', {}),
                                  ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
