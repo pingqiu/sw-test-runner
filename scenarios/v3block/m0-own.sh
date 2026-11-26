@@ -37,13 +37,14 @@ start_of() {
 # (no such pid, or another process now holds it), or unreadable (it exists
 # but its identity cannot be read: nothing may be concluded).
 proc_state() {
-  local s
-  [ -e "$PROC/$1" ] || { echo gone; return; }
-  s=$(cat "$PROC/$1/stat" 2>/dev/null) || { echo unreadable; return; }
+  # Keep the arguments: 'set --' below replaces the positional parameters.
+  local pid=$1 want=$2 s
+  [ -e "$PROC/$pid" ] || { echo gone; return; }
+  s=$(cat "$PROC/$pid/stat" 2>/dev/null) || { echo unreadable; return; }
   s=${s##*) }
   set -- $s
   [ -n "${20:-}" ] || { echo unreadable; return; }
-  [ "${20}" = "$2" ] && echo running || echo gone
+  [ "${20}" = "$want" ] && echo running || echo gone
 }
 
 owned() { # WORK TOKEN
