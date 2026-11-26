@@ -152,7 +152,7 @@ phases:
     actions:
       - action: cloud_vm_power                                   # P1
         node: node-1
-        vm: node-2                  # the VM to power off (#169 must read this key; see the PR note)
+        vm: node-2                  # the VM to power off
       - action: exec                                             # P2 (a survivor on node-3)
         node: node-3
         timeout: 10m
@@ -201,7 +201,7 @@ phases:
     actions:
       - action: cloud_vm_power_restore                           # P5: a new boot
         node: node-1
-        vm: node-2                  # the VM to power off (#169 must read this key; see the PR note)
+        vm: node-2                  # the VM to power off
       - {action: exec, node: node-2, timeout: 2m, cmd: "sudo systemctl start r4-blockvolume || sudo systemctl restart r4-blockvolume"}
       - {action: exec, node: node-2, timeout: 5m, cmd: "bash {{ work }}/r4.sh wait-role 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240"}
       - action: exec                                             # P6
