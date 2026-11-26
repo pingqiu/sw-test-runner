@@ -192,7 +192,7 @@ func decodeVerdict(e tr.ExitInfo, want SoakBinding, criteria []string) (SoakVerd
 		return v, errors.New("soak verdict without its misses qualification")
 	}
 	// Rule A rows: every member present, typed and finite. The offsets are rounded diagnostics: the Python
-	// assessor alone classifies, so the sign is not judged again here (codex01 on 66da7699).
+	// assessor alone classifies, so the sign is not judged again here (the reviewer on 66da7699).
 	for _, u := range v.MissesUndecidable {
 		if u.Op == "" || u.Vid == nil || *u.Vid <= 0 || u.SubmitMinusEarlyBS == nil || u.SubmitMinusLateBS == nil ||
 			math.IsNaN(*u.SubmitMinusEarlyBS) || math.IsInf(*u.SubmitMinusEarlyBS, 0) || math.IsNaN(*u.SubmitMinusLateBS) ||

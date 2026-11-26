@@ -23,7 +23,7 @@ func TestUnfinishedSiblingBlocksOnlyItsOwnRG(t *testing.T) {
 		{"another subscription, same RG name", `{"subscription_id":"22222222-2222-2222-2222-222222222222","resource_group_name":"dedicated-test"}`, false},
 		{"malformed target", `{"subscription_id":`, true},
 		{"target without an RG", `{"subscription_id":"11111111-1111-1111-1111-111111111111"}`, true},
-		// codex01 #143 review: only canonical unique keys and identities admission accepts
+		// The reviewer #143 review: only canonical unique keys and identities admission accepts
 		{"duplicate RG key (same, then another)", `{"subscription_id":"11111111-1111-1111-1111-111111111111","resource_group_name":"dedicated-test","resource_group_name":"another-rg"}`, true},
 		{"case-aliased RG key", `{"subscription_id":"11111111-1111-1111-1111-111111111111","resource_group_name":"dedicated-test","RESOURCE_GROUP_NAME":"another-rg"}`, true},
 		{"garbage subscription", `{"subscription_id":"not-a-uuid","resource_group_name":"another-rg"}`, true},

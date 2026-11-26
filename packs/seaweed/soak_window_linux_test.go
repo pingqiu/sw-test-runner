@@ -50,7 +50,7 @@ func TestSoakWindowPublishIsExclusiveAndReadBoundIsStrict(t *testing.T) {
 	}
 }
 
-// codex01's control: a symlink planted where the temp (or the final file) goes
+// The reviewer's control: a symlink planted where the temp (or the final file) goes
 // must never be followed: its target stays byte-identical and nothing is
 // published through it.
 func TestPublishNeverFollowsAPlantedSymlink(t *testing.T) {

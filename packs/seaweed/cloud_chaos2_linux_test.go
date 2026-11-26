@@ -227,7 +227,7 @@ func TestChaos2SetsRunEveryCase(t *testing.T) {
 	}
 }
 
-// codex01 #56: a failed load and a failed markers.json save must both reach
+// The reviewer #56: a failed load and a failed markers.json save must both reach
 // the error; the save error alone hid which client's load failed.
 func TestChaos2FailedLoadSurvivesSaveError(t *testing.T) {
 	d, c, f := chaos2Input(t, "load-fail", "A")

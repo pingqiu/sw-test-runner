@@ -168,7 +168,7 @@ func TestDirectRecordsItselfOnceAndStatusNeedsTheRecord(t *testing.T) {
 	}
 }
 
-// codex01's negatives on 42d315e: every record that is not exactly what
+// The reviewer's negatives on 42d315e: every record that is not exactly what
 // direct writes, and every inspection error other than "absent", refuses;
 // nothing reads as RUNNING or as a PASS that was not recorded.
 func TestDirectStatusRefusesAnythingButExactRecords(t *testing.T) {

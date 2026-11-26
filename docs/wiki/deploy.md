@@ -21,11 +21,11 @@ flowchart LR
   WS["workstation / agent<br/>runs swblock"] -- SSH --> M01
   WS -- SSH --> M02
   subgraph LAB["m01 / m02 lab"]
-    M01["M01 192.168.1.181<br/>kernel/VFS client · dashboard · RDMA 10.0.0.1"]
-    M02["M02 192.168.1.184<br/>SeaweedFS · block · k3s · RDMA 10.0.0.3"]
+    M01["M01 198.51.100.181<br/>kernel/VFS client · dashboard · RDMA 10.0.0.1"]
+    M02["M02 198.51.100.184<br/>SeaweedFS · block · k3s · RDMA 10.0.0.3"]
     M01 <-- "25 Gbps RoCE" --> M02
   end
-  WS -- writes bundles --> SMB[("SMB //192.168.1.34/Work<br/>testops/results + docs")]
+  WS -- writes bundles --> SMB[("SMB //198.51.100.34/Work<br/>testops/results + docs")]
   M01 -- serves --> DASH["dashboard/controller :9099<br/>reads SMB results · submits RDMA queue"]
   SMB --> DASH
 ```
@@ -42,12 +42,12 @@ name and the runner runs the command there via **`infra.Node`** (SSH or local):
 ```yaml
 topology:
   nodes:
-    m02: { host: 192.168.1.184, user: testdev, key: ~/.ssh/testdev_key }
-    m01: { host: 192.168.1.181, user: testdev, key: ~/.ssh/testdev_key, alt_ips: [10.0.0.1] }
+    m02: { host: 198.51.100.184, user: testdev, key: ~/.ssh/testdev_key }
+    m01: { host: 198.51.100.181, user: testdev, key: ~/.ssh/testdev_key, alt_ips: [10.0.0.1] }
 ```
 
 ```bash
-swblock run <scenario> -results-dir /mnt/smb/work/share/testops/results/<project>
+swblock run <scenario> -results-dir /mnt/share/testops/results/<project>
 ```
 
 ## Dashboard (systemd on M01)
@@ -61,12 +61,12 @@ service also exposes the RDMA queue submit/status panel:
 [Service]
 User=testdev
 ExecStart=/usr/local/bin/testops-dashboard \
-  -root /mnt/smb/work/share/testops/results \
-  -docs /mnt/smb/work/share/testops/docs \
+  -root /mnt/share/testops/results \
+  -docs /mnt/share/testops/docs \
   -controller \
-  -controller-queue /mnt/smb/work/share/testops/queue/rdma-ci \
-  -controller-state /mnt/smb/work/share/testops/state/rdma-ci \
-  -controller-logs /mnt/smb/work/share/testops/logs/rdma-ci \
+  -controller-queue /mnt/share/testops/queue/rdma-ci \
+  -controller-state /mnt/share/testops/state/rdma-ci \
+  -controller-logs /mnt/share/testops/logs/rdma-ci \
   -port 9099
 Restart=always
 ```
@@ -96,14 +96,14 @@ TESTOPS_POLL_SECONDS=10 ./scripts/testops-ci-worker.sh
 
 The worker:
 
-- reads requests from `/mnt/smb/work/share/testops/queue/rdma-ci`;
-- takes one lab lock at `/mnt/smb/work/share/testops/locks/rdma-lab.lock`;
+- reads requests from `/mnt/share/testops/queue/rdma-ci`;
+- takes one lab lock at `/mnt/share/testops/locks/rdma-lab.lock`;
 - calls `scripts/run-rdma-ci.sh`;
-- writes result bundles to `/mnt/smb/work/share/testops/results/rdma-ci`;
+- writes result bundles to `/mnt/share/testops/results/rdma-ci`;
 - moves requests to `state/rdma-ci/done` or `state/rdma-ci/failed`;
 - writes request status JSON under `state/rdma-ci/status`;
 - updates `state/rdma-ci/status/last-run.json`;
-- writes logs under `/mnt/smb/work/share/testops/logs/rdma-ci`.
+- writes logs under `/mnt/share/testops/logs/rdma-ci`.
 
 ### All four suites (rdma / s3 / block / vfs)
 
@@ -152,12 +152,12 @@ submit request only writes one `.env` file under the selected suite queue.
 
 ```bash
 testops-dashboard \
-  -root /mnt/smb/work/share/testops/results \
-  -docs /mnt/smb/work/share/testops/docs \
+  -root /mnt/share/testops/results \
+  -docs /mnt/share/testops/docs \
   -controller \
-  -controller-queue-root /mnt/smb/work/share/testops/queue \
-  -controller-state-root /mnt/smb/work/share/testops/state \
-  -controller-log-root /mnt/smb/work/share/testops/logs \
+  -controller-queue-root /mnt/share/testops/queue \
+  -controller-state-root /mnt/share/testops/state \
+  -controller-log-root /mnt/share/testops/logs \
   -port 9099
 ```
 
@@ -170,10 +170,10 @@ User=testdev
 WorkingDirectory=/opt/rdma-lab-ci/sw-test-runner
 Environment=TESTOPS_CONTROLLER_TOKEN=
 ExecStart=/usr/local/bin/testops-controller \
-  -queue /mnt/smb/work/share/testops/queue/rdma-ci \
-  -state /mnt/smb/work/share/testops/state/rdma-ci \
-  -logs /mnt/smb/work/share/testops/logs/rdma-ci \
-  -dashboard http://192.168.1.181:9099/ \
+  -queue /mnt/share/testops/queue/rdma-ci \
+  -state /mnt/share/testops/state/rdma-ci \
+  -logs /mnt/share/testops/logs/rdma-ci \
+  -dashboard http://198.51.100.181:9099/ \
   -port 9109
 Restart=always
 ```

@@ -49,7 +49,7 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 	if v, err := decodeVerdict(captured([]byte(undecidable)), testBinding, soakCriteria); err != nil || v.Status != "PASS" || len(v.MissesUndecidable) != 1 {
 		t.Fatalf("PASS with an undecidable miss: %+v %v", v.MissesUndecidable, err)
 	}
-	// codex01 on 66da7699: the offsets are rounded diagnostics, not a second classifier. A submit 0.1 us after
+	// The reviewer on 66da7699: the offsets are rounded diagnostics, not a second classifier. A submit 0.1 us after
 	// early(B) rounds to an early offset of 0.0, and a multi-VID op reports a VID already after B with a positive
 	// late offset; both are valid producer rows and must decode.
 	for name, edit := range map[string]func(map[string]any){
@@ -73,13 +73,13 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		t.Fatalf("assessor error row not decoded as FAIL: %v", err)
 	}
 	for name, body := range map[string]string{
-		// codex01's controls: an incomplete PASS, two values on one line, a duplicate status.
+		// The reviewer's controls: an incomplete PASS, two values on one line, a duplicate status.
 		"PASS with only wrong_reads":  `{"status":"PASS","criteria":{"wrong_reads":{"outcome":"PASS","reason":"0 wrong"}},"k7":[],"resources":"NOT_OBSERVED","binding":` + mustJSON(testBinding) + `}`,
 		"PASS then FAIL on one line":  pass + " " + fail,
 		"duplicate status, last PASS": strings.Replace(fail, `"status":"FAIL"`, `"status":"FAIL","status":"PASS"`, 1),
 		"duplicate nested outcome":    strings.Replace(pass, `"routes":{"outcome":"PASS"`, `"routes":{"outcome":"FAIL","outcome":"PASS"`, 1),
 		"two rows":                    pass + "\n" + pass,
-		// codex01 round 2: case-folded aliases the struct decoder merges, last value winning.
+		// The reviewer round 2: case-folded aliases the struct decoder merges, last value winning.
 		"outcome FAIL then Outcome PASS": strings.Replace(pass, `"routes":{"outcome":"PASS"`, `"routes":{"outcome":"FAIL","Outcome":"PASS"`, 1),
 		"run_id foreign then RUN_ID":     strings.Replace(pass, `"run_id":"run-1"`, `"run_id":"run-2","RUN_ID":"run-1"`, 1),
 		"status FAIL then long-s alias":  strings.Replace(fail, `"status":"FAIL"`, `"status":"FAIL","ſtatus":"PASS"`, 1),
@@ -101,7 +101,7 @@ func TestDecodeVerdictFailsClosed(t *testing.T) {
 		"no qualification":    passRow(t, func(r map[string]any) { delete(r, "misses_qualification") }),
 		"empty limit":         passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["limit"] = "" }),
 		"qualification extra": passRow(t, func(r map[string]any) { r["misses_qualification"].(map[string]any)["vibes"] = "x" }),
-		// rule A rows (codex01 R1 on #110): the field and each member are typed, required and alias-guarded.
+		// rule A rows (the reviewer R1 on #110): the field and each member are typed, required and alias-guarded.
 		"undecidable alias": passRow(t, func(r map[string]any) { r["MISSES_UNDECIDABLE"] = []any{} }),
 		"undecidable op bool": passRow(t, func(r map[string]any) {
 			r["misses_undecidable"] = []any{undecidableRow(func(u map[string]any) { u["op"] = true })}

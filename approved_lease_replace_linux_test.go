@@ -43,7 +43,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 		}
 	}
 	fresh := func(at float64) []byte {
-		raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "claude02", "renewed": at})
+		raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "worker-b", "renewed": at})
 		return raw
 	}
 	settle := func(n int) { // cifs-late: the same inode, its mtime moves after the read
@@ -68,7 +68,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 	var clock time.Time
 	var onSleep func()
 	run := func(on func(n int)) outcome {
-		write(filepath.Join(dir, id+"-acquire.json"), map[string]any{"lease_id": id, "agent": "claude02", "started": now - 240})
+		write(filepath.Join(dir, id+"-acquire.json"), map[string]any{"lease_id": id, "agent": "worker-b", "started": now - 240})
 		if err := os.WriteFile(renew, fresh(now-200), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 				on(n)
 			}
 		}
-		r, err := ReadLiveLease(dir, id, "claude02")
+		r, err := ReadLiveLease(dir, id, "worker-b")
 		recordCaptured = func(string) {}
 		return outcome{r, n, clock.Sub(time.Unix(1000, 0)), err}
 	}
@@ -138,7 +138,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 	}
 	o = run(func(n int) {
 		if n == 1 {
-			raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "codex03", "renewed": now - 1})
+			raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "worker-a", "renewed": now - 1})
 			replace(raw)
 		}
 	})
@@ -154,7 +154,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 		t.Fatalf("a torn record behind the change must still be refused, without further retries: %+v", o)
 	}
 
-	// codex01 R1: a record that vanished after its read is unprovable, never "settling", even if it comes back.
+	// The reviewer R1: a record that vanished after its read is unprovable, never "settling", even if it comes back.
 	moved := renew + ".moved"
 	o = run(func(n int) {
 		if n == 1 {
@@ -182,7 +182,7 @@ func TestLiveLeaseLedgerCaptureSettles(t *testing.T) {
 		t.Fatalf("an unchanged record is no change: %v", e)
 	}
 
-	// codex01 R2: nothing is accepted, and no capture starts, past the settle deadline.
+	// The reviewer R2: nothing is accepted, and no capture starts, past the settle deadline.
 	o = run(func(n int) { clock = clock.Add(7 * time.Second) })
 	if o.err == nil || !strings.Contains(o.err.Error(), "settle bound") || o.captures != 1 {
 		t.Fatalf("an unchanged capture that ended past the deadline must not be accepted: %+v", o)

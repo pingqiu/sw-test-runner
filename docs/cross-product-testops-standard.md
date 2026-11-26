@@ -87,8 +87,8 @@ declared in the scenario — never hard-coded in actions:
 ```yaml
 topology:
   nodes:
-    m02: { host: 192.168.1.184, user: testdev, key: "{{ ssh_key }}" }
-    m01: { host: 192.168.1.181, user: testdev, key: "{{ ssh_key }}" }
+    m02: { host: 198.51.100.184, user: testdev, key: "{{ ssh_key }}" }
+    m01: { host: 198.51.100.181, user: testdev, key: "{{ ssh_key }}" }
     swdev: { host: <swdev-ip>, user: testdev, key: "{{ ssh_key }}" }
     local: { host: 127.0.0.1, is_local: true }
 ```
@@ -102,10 +102,10 @@ Standard env keys (override with `-env KEY=VALUE`, **before** the scenario path)
 | `<product>_image` / `_csi_image` | image refs under test |
 | injected: `run_id`, `bundle_dir`, `artifacts_dir` | per-run, for routing artifacts |
 
-Lab facts (the swappable part): m01 `192.168.1.181`, m02 `192.168.1.184`
+Lab facts (the swappable part): m01 `198.51.100.181`, m02 `198.51.100.184`
 (control-plane + build host, `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`, **k3s
-v1.34.4 VAP-enabled**), tp01 `192.168.1.188` (NotReady), swdev (VFS kernel),
-shared SMB `V:/share`=`/mnt/smb/work/share`. Secrets are **paths, not values** —
+v1.34.4 VAP-enabled**), the test host `198.51.100.188` (NotReady), swdev (VFS kernel),
+a shared folder (`/mnt/share`). Secrets are **paths, not values** —
 the key lives on the controller, scenarios reference it by `{{ ssh_key }}`.
 
 ## 5. Per-product mapping
@@ -196,7 +196,7 @@ model:
 ### Shared layout (on the SMB share, visible to every node + the dashboard)
 
 ```
-/mnt/smb/work/share/testops/
+/mnt/share/testops/
 ├── results/                 one root, per-project subdir → the global dashboard reads this
 │   ├── block-qa/<run-id>/    (run bundles: manifest.json, status.json, result.html, artifacts/)
 │   ├── vfs-rdma-qa/<run-id>/
@@ -207,8 +207,8 @@ model:
 Each agent runs with its own results subdir:
 
 ```bash
-swblock run  -results-dir /mnt/smb/work/share/testops/results/block-qa     <scenario>
-sweedvfs run -results-dir /mnt/smb/work/share/testops/results/vfs-rdma-qa  <scenario>
+swblock run  -results-dir /mnt/share/testops/results/block-qa     <scenario>
+sweedvfs run -results-dir /mnt/share/testops/results/vfs-rdma-qa  <scenario>
 ```
 
 Scenarios/workspaces stay **parallel and private** to each project (own folder,
@@ -253,7 +253,7 @@ root — it walks `…/results/<project>/<run>/manifest.json`, lists every run
 lab host for the whole team:
 
 ```bash
-testops-dashboard -root /mnt/smb/work/share/testops/results -port 9099
+testops-dashboard -root /mnt/share/testops/results -port 9099
 # browser → http://<lab-host>:9099   (auto-refreshes; "what ran + reports")
 ```
 

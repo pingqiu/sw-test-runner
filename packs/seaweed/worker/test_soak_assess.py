@@ -1,5 +1,5 @@
 """Labelled SYNTHETIC evidence for the soak verdict: one complete consistent
-run, then negatives. Each negative is a PLAUSIBLE fake PASS (codex01's method):
+run, then negatives. Each negative is a PLAUSIBLE fake PASS (the reviewer's method):
 evidence that looks whole but lies about one criterion, and must fail exactly it."""
 import copy
 import datetime
@@ -181,7 +181,7 @@ class SoakAssess(unittest.TestCase):
         ev['events'].insert(-3, dict(dict(op=str(q['dispatched']), worker=0, action='get', key='k2', dispatched=1200, submitted=1200.01,
                                           completed=1200.1, sequence=5), **kw))
 
-    # codex01's seven demonstrated false PASSes, each now RED on exactly its rule.
+    # The reviewer's seven demonstrated false PASSes, each now RED on exactly its rule.
     def test_every_native_stats_file_removed(self):
         self.mutate(lambda ev: ev['stats'].clear(), 'routes')
 
@@ -434,7 +434,7 @@ class SoakAssess(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'bracket the body'):
             soak_assess.clock_bracket(dict(m02_boot_id=M02_BOOT, run_id='run-1'), s1, s1)
 
-    # codex01 review b954b275.
+    # Review b954b275.
     def test_a_birthless_episode_is_refused(self):
         def ch(ev):
             c = self.collected(ev)
@@ -461,7 +461,7 @@ class SoakAssess(unittest.TestCase):
             e['line'] = 'same presentation prefix'
         self.assertEqual(self.ledger(a, b, c), {20: EPOCH + 1160})
 
-    # The retiring boundary B (mono #969) and C9 (claude02 miss analysis 2026-11-04).
+    # The retiring boundary B (mono #969) and C9 (a reviewer miss analysis 2026-11-04).
     def starts(self, *rows, begin=EPOCH + 900, end=EPOCH + 2900):
         rows = list(rows)
         return soak_assess.start_boundaries(rows, begin, end, soak_assess.rotation_boundaries(rows, begin, end))
@@ -475,7 +475,7 @@ class SoakAssess(unittest.TestCase):
         rows = (line('birth', 20, 995), line('start', 20, 1150), line('start', 20, 1159.9), line('success', 20, 1160))
         self.assertAlmostEqual(self.starts(*rows)[20], EPOCH + 1150, places=5)  # the first attempt's seal fenced readers
 
-    def test_the_accepted_limit_a_failed_first_attempt_without_a_later_read(self):  # codex01 R2 on fa1bad9, pinned
+    def test_the_accepted_limit_a_failed_first_attempt_without_a_later_read(self):  # the reviewer R2 on fa1bad9, pinned
         # Failed first attempt line 1150; exact read 1154.1; loss 1155; miss 1156; retry line 1159.9; S 1160. With no
         # later same-VID read the miss is EXCUSED: inside the accepted last-exact..S blind spot, not a guarantee of C9.
         args = self.boundary_args(1156)
@@ -511,7 +511,7 @@ class SoakAssess(unittest.TestCase):
         soak_assess.miss_judgement = lambda e, *a: ('unexcused', []) if e['op'] == g2['op'] else orig(e, *a)
         self.assertEqual(self.failing(self.run_on(ev)), ['misses'])  # the same miss unexcused fails the row
 
-    # codex01 R2 on #110: rule A through the real assessor, no mocks. The fixture's measured samples give a +-0.1 s
+    # The reviewer R2 on #110: rule A through the real assessor, no mocks. The fixture's measured samples give a +-0.1 s
     # bracket; vid 20's S is at mono 1175. A #972 start line at 1174.5 makes B's bracket (1174.4, 1174.6].
     def rule_a(self, submit, start=1174.5, narrow=False, later_hit=False):
         ev = evidence()
@@ -561,7 +561,7 @@ class SoakAssess(unittest.TestCase):
         row, _ = self.rule_a(1174.55, narrow=True)  # late(B) = 1174.51 < 1174.55: ordered after B, plainly excused
         self.assertEqual((row['status'], self.failing(row), row['misses_undecidable']), ('PASS', [], []), row['criteria'])
 
-    def test_a_resumed_rotation_whose_first_attempt_left_the_volume_serving_is_c9s(self):  # claude03 P3-1, via C9
+    def test_a_resumed_rotation_whose_first_attempt_left_the_volume_serving_is_c9s(self):  # a reviewer P3-1, via C9
         args = self.boundary_args(1159.95)
         starts = {20: EPOCH + 1150}  # first line long before the miss
         self.assertTrue(soak_assess.miss_excused(*args, starts, {20: 1110.1}))  # fenced since: excused
@@ -593,7 +593,7 @@ class SoakAssess(unittest.TestCase):
         self.assertFalse(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {20: 1159.96}))  # the VID still served
         self.assertTrue(soak_assess.miss_excused(*args, {20: EPOCH + 1159.9}, {3: 1999.0}))  # another VID's later hit
 
-    # codex01 R2 on 3a0e87c: C9 through the full assessor, a different key on the miss's VID and on another VID.
+    # The reviewer R2 on 3a0e87c: C9 through the full assessor, a different key on the miss's VID and on another VID.
     def add_hit_on(self, ev, key, vid, submitted):
         q = ev['events'][-1]
         seq = max(a['sequence'] for a in ev['acks']) + 1
@@ -670,7 +670,7 @@ class SoakAssess(unittest.TestCase):
         row = self.run_on(ev)
         self.assertEqual((row['status'], self.failing(row)), ('PASS', []), row['criteria'])
 
-    # codex01 review abacdf35: an ok=True row labelled miss whose results are hit-shaped or absent must not earn
+    # Review abacdf35: an ok=True row labelled miss whose results are hit-shaped or absent must not earn
     # retirement credit (same shape rule as the worker's classify_get).
     def test_an_ok_true_miss_with_hit_results(self):
         self.mutate(lambda ev: self.ev(ev, 'g2').update(ok=True, error='', results=[True], length=1, sha256='wrong'), 'get_outcomes')
@@ -765,7 +765,7 @@ class SoakAssess(unittest.TestCase):
     def test_an_unknown_event_kind(self):
         self.refused(lambda ev: ev['events'].insert(-1, dict(event='surprise')))
 
-    # Decision 3 revision (e45019f9, codex01 8c56cca4), section 3: the pre-registered counterexamples, by number.
+    # Decision 3 revision (e45019f9, the reviewer 8c56cca4), section 3: the pre-registered counterexamples, by number.
     # S is vid 20's success line at 1175; m is ACKed at 1100, read exactly at 1110, missed at 1180.
     def m_ack(self, ev, at):
         a = next(a for a in ev['acks'] if a['key'] == 'm')
@@ -899,7 +899,7 @@ class SoakAssess(unittest.TestCase):
         ch(ev)
         self.assertIn('misses', self.failing(self.run_on(ev)))
 
-    # codex01 review f94b5c19: the read-back is bound to the GET's own recorded version, not relabelled as the latest.
+    # Review f94b5c19: the read-back is bound to the GET's own recorded version, not relabelled as the latest.
     def test_c5_a_hit_with_an_unknown_sequence_is_no_read_back(self):
         self.mutate(lambda ev: self.ev(ev, 'g1m').update(sequence=999), 'misses')
 
@@ -915,7 +915,7 @@ class SoakAssess(unittest.TestCase):
             self.ev(ev, 'g2').update(sequence=n, fids=['20,cd'])
         self.mutate(ch, 'misses')
 
-    # codex01 review f490de8a: raw worker sequences, not the replay's ACK-order ordinals.
+    # Review f490de8a: raw worker sequences, not the replay's ACK-order ordinals.
     def raw_m(self, ev, raw):
         a = next(a for a in ev['acks'] if a['key'] == 'm')
         a['sequence'] = raw
@@ -1149,10 +1149,10 @@ class KVLoadAssess(unittest.TestCase):
             if counter == -1:
                 ev['stats']['native-stats-11-1.jsonl'][0]['stats']['native_budget_refusal_process']['missing_keys_deadline'] = 41
             self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL', counter)
-        # codex01: hits in an earlier generation of the worker still need the route, whatever the last snapshot says.
+        # The reviewer: hits in an earlier generation of the worker still need the route, whatever the last snapshot says.
         # (outside_kill: so the hits in the SAME process, not the mid-kill GET, are what deny it)
         self.assertEqual(self.run_on(all_refused(outside_kill(kv_evidence())))['criteria']['routes']['outcome'], 'FAIL')
-        # codex01: no hit is not all refused. One plain miss of worker 1 inside E1's window (excused there as
+        # The reviewer: no hit is not all refused. One plain miss of worker 1 inside E1's window (excused there as
         # reported) keeps its route requirement.
         ev = worker1_refused(all_refused(outside_kill(kv_evidence())))
         plain = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['submitted'] > 1010)
@@ -1188,7 +1188,7 @@ class KVLoadAssess(unittest.TestCase):
         inside = next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1 and e['dispatched'] >= 1072)
         inside.update(dispatched=1071.5, submitted=1071.51, completed=1071.52)
         self.assertEqual(self.run_on(ev)['criteria']['routes']['outcome'], 'FAIL')
-        # codex01: an op of a worker outside workers.json is foreign evidence, refused at the boundary: an old
+        # The reviewer: an op of a worker outside workers.json is foreign evidence, refused at the boundary: an old
         # hit of worker 1 relabelled 99 must not quietly drop out of worker 1's generation.
         ev = replacement_refused(outside_kill(kv_evidence()))
         next(e for e in ev['events'] if e.get('action') == 'get' and e['worker'] == 1)['worker'] = 99

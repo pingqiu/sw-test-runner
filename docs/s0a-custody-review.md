@@ -7,7 +7,7 @@ historical trial and its five captured hashes below are preserved as review
 input, not re-labelled as the corrected source. R4-R6/TierChaos remain open.
 
 Ruling 6ae3c15b9c9fd1ba9ca52868 releases the measured 559-line SSH custody
-trial for commit on Draft runner#4 and independent review by Claude02.
+trial for commit on Draft runner#4 and independent review by a reviewer.
 It does not release TierChaos witness code, lab use, merge or S1 activation.
 Ping owns the wider program decision. The final 1,150 cap is unchanged.
 
@@ -58,14 +58,14 @@ The following are disclosed unfinished safety obligations, not waived limits:
    enrollment and EOF/deadline cleanup have no executed Linux controls yet.
    Static implementation plus cross-compilation does not qualify these.
 
-Do not use this head on the lab. Findings go to Claude01 for disposition;
+Do not use this head on the lab. Findings go to the coordinator for disposition;
 author and reviewer are different. Corrections still have only 24 charged
 lines available under the existing cap; do not silently spend beyond it.
 
 ## Evidence
 
 Frozen source and command capture:
-`V:/share/rdma/codex01-s0a-final-cut-20261029/`.
+the run's share folder.
 CAPTURE.json binds the five exact files. Twelve selected local fake/argv
 regressions pass; Windows build and Windows/Linux-amd64 test compilation pass.
 Linux process execution, SSH and lab tests are NOT_RUN. The prior 61-pass,

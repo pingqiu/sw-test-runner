@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	tRG  = "rg-claude04-standing-20261120"
+	tRG  = "rg-box-standing-20261120"
 	tBox = "c04-standing"
 	tSub = "11111111-2222-3333-4444-555555555555"
 	tTok = "0123456789abcdef01234567"
@@ -159,14 +159,14 @@ func TestClassifyPowerBillingOnlyWhenNotDeallocated(t *testing.T) {
 func TestStandingRefusalsMakeNoToolCall(t *testing.T) {
 	f, _ := setupStanding(t)
 	other := filepath.Join(t.TempDir(), "other.json")
-	_ = os.WriteFile(other, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
+	_ = os.WriteFile(other, []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-box-standing-20261121","name":"`+tBox+`"}`), 0o600)
 	for _, c := range []struct {
 		args []string
 		code string
 	}{
 		{nil, "USAGE"},
 		{append([]string{"reboot"}, target(tRG)...), "USAGE"},
-		{append([]string{"status"}, target("rg-codex02-azure-test-20261029")...), "USAGE"},
+		{append([]string{"status"}, target("rg-runner-azure-test-20261029")...), "USAGE"},
 		{append([]string{"plan"}, target(tRG)...), "USAGE"},
 		{append([]string{"apply"}, target(tRG)...), "REFUSED"},
 		{append(append([]string{"destroy"}, target(tRG)...), "--launch-token", "xyz"), "REFUSED"},
@@ -217,7 +217,7 @@ func TestStandingLifecycleArgvAndPinnedScope(t *testing.T) {
 	}
 	// a different RG for the applied box is refused before any tool call
 	n = len(f.calls)
-	if r := standingRun(t, append([]string{"status"}, target("rg-claude04-standing-20261121")...)...); r.Code != "REFUSED" || len(f.calls) != n {
+	if r := standingRun(t, append([]string{"status"}, target("rg-box-standing-20261121")...)...); r.Code != "REFUSED" || len(f.calls) != n {
 		t.Fatalf("wrong-RG status: %+v calls %d->%d", r, n, len(f.calls))
 	}
 	if r := standingRun(t, append([]string{"stop"}, target(tRG)...)...); r.Code != "OK" || r.Billing != "no" {
@@ -275,7 +275,7 @@ func TestStandingFailedReplanRevokesTheOldPlan(t *testing.T) {
 
 func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
 
-// claude05 disposition (2): an unknown Lstat error on generation evidence is UNKNOWN (fail closed), never "absent".
+// The lead disposition (2): an unknown Lstat error on generation evidence is UNKNOWN (fail closed), never "absent".
 func TestStandingEvidenceReadErrorIsUnknown(t *testing.T) {
 	old := standingLstat
 	t.Cleanup(func() { standingLstat = old })
@@ -418,7 +418,7 @@ func TestStandingUnreadableReceiptFailsClosed(t *testing.T) {
 	}
 }
 
-// codex01 P2 fixture: a viable module and a real read error on the newest generation's identity: the guard alone
+// The reviewer P2 fixture: a viable module and a real read error on the newest generation's identity: the guard alone
 // refuses, with zero tool calls and nothing written.
 func TestStandingUnreadableIdentityRefusesAViablePlan(t *testing.T) {
 	f, vars := setupStanding(t)
@@ -444,7 +444,7 @@ func TestStandingPinnedVarsDriftRefused(t *testing.T) {
 	if r := standingRun(t, tokArgs("apply")...); r.Code != "OK" {
 		t.Fatalf("apply: %+v", r)
 	}
-	_ = os.WriteFile(filepath.Join(standingBox(), "g0001", standingVarsFile), []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-claude04-standing-20261121","name":"`+tBox+`"}`), 0o600)
+	_ = os.WriteFile(filepath.Join(standingBox(), "g0001", standingVarsFile), []byte(`{"subscription_id":"`+tSub+`","resource_group_name":"rg-box-standing-20261121","name":"`+tBox+`"}`), 0o600)
 	n := len(f.calls)
 	for _, a := range [][]string{tokArgs("destroy"), append([]string{"status"}, target(tRG)...)} {
 		if r := standingRun(t, a...); r.Code != "REFUSED" || len(f.calls) != n {
@@ -572,7 +572,7 @@ esac
 	}
 }
 
-// claude06 F2: repeated UNKNOWN status or a failing deallocate must not stay silent: ALERT and exit 3 after
+// The architect F2: repeated UNKNOWN status or a failing deallocate must not stay silent: ALERT and exit 3 after
 // REAP_ALERT_AFTER consecutive passes; a later good pass resets the count.
 func TestStandingReaperAlertsOnRepeatedFailure(t *testing.T) {
 	if runtime.GOOS != "linux" {

@@ -104,7 +104,7 @@ func init() {
 				r.RegisterLeaseEnvelope(func(PackInputs) (time.Duration, error) { return 2 * SoakHorizon, nil })
 			}
 		case "soak-hook-refused":
-			// codex01's composed control: an approved_job first, a late soak
+			// The reviewer's composed control: an approved_job first, a late soak
 			// handler, and a pack judgement that refuses the plan.
 			register = func(r *Registry) {
 				r.RegisterLeaseEnvelope(func(PackInputs) (time.Duration, error) { return 0, errors.New("test: not a valid soak plan") })

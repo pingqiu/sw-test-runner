@@ -131,12 +131,12 @@ func TestM02EvidenceRefusesAnyMismatchOrMalformedReference(t *testing.T) {
 		"two values in the file": {refRow(malformed, nil), fetch(malformed)},
 		"a failed collect file":  {refRow(wrongStatus, nil), fetch(wrongStatus)},
 		"a failed fetch":         {refRow(body, nil), func(string) (string, error) { return "", errors.New("ssh: gone") }},
-		// codex01 R3: a case-folded alias of a reference field is refused, not decoded into it.
+		// The reviewer R3: a case-folded alias of a reference field is refused, not decoded into it.
 		"a Bytes alias":  {aliased(refRow(body, nil), `"bytes"`, `"Bytes"`), fetch(body)},
 		"a FILE alias":   {aliased(refRow(body, nil), `"file"`, `"FILE"`), fetch(body)},
 		"a SHA256 alias": {aliased(refRow(body, nil), `"sha256"`, `"SHA256"`), fetch(body)},
 		"a Clock alias":  {aliased(refRow(body, nil), `"clock"`, `"Clock"`), fetch(body)},
-		// codex01 R1: both clocks valid, and the file's the same as the reference row's.
+		// The reviewer R1: both clocks valid, and the file's the same as the reference row's.
 		"another boot in the file":       {refRow(reclocked(body, `"boot_id":"b"`, `"boot_id":"c"`), nil), fetch(reclocked(body, `"boot_id":"b"`, `"boot_id":"c"`))},
 		"another exit stamp in the file": {refRow(reclocked(body, `"exit_mono":4`, `"exit_mono":5`), nil), fetch(reclocked(body, `"exit_mono":4`, `"exit_mono":5`))},
 		"no clock in the file":           {refRow(reclocked(body, `"clock":{`, `"clock_x":{`), nil), fetch(reclocked(body, `"clock":{`, `"clock_x":{`))},

@@ -160,7 +160,7 @@ func readPid(t *testing.T, path string) int {
 }
 
 // The leader exits first, leaving a child behind: the pack's group is retired on
-// a normal and on a failed exit, so no child outlives the pack (codex01 P1:
+// a normal and on a failed exit, so no child outlives the pack (the reviewer P1:
 // CommandContext stops watching once the leader is reaped).
 func TestExecPackLeaderExitsFirstRetiresChildren(t *testing.T) {
 	for _, tc := range []struct {

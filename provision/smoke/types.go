@@ -7,7 +7,7 @@ import (
 
 // moduleTypes lists every resource provision/terraform/azure declares (type
 // and name), and is the one source of type coverage for the create re-read
-// (settleCreates) and the orphan sweep (Claude01 ruling 6ae76c16). A test keeps
+// (settleCreates) and the orphan sweep (the coordinator ruling 6ae76c16). A test keeps
 // it equal to the module, so a new resource cannot slip past either. ARM is ""
 // for a type that is not a top-level ARM resource of its own (a child or an
 // association); it is neither re-read nor swept and goes with its parent.
@@ -52,7 +52,7 @@ func sweepRank(arm string) (int, bool) {
 // lostCreateForms is a create PUT that lost its response, for every top-level
 // module resource: the PUT names an ARM ID of its type, and the "with" address,
 // the "in resource" line and the source line all name that same module
-// resource, spelled out literally (codex01 #55: no contradictory names). Run 7e
+// resource, spelled out literally (the reviewer #55: no contradictory names). Run 7e
 // lost a VM create (api 2024-03-01).
 func lostCreateForms() string {
 	uuid := `[a-f0-9-]{36}`

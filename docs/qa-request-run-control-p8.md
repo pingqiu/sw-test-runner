@@ -96,7 +96,7 @@ they SSH into m02 or sit at the Windows workstation.
 swblock run \
   -env product_root=/tmp/seaweed-block-nvme-p4l \
   -env ssh_key=/home/testdev/.ssh/testdev_key \
-  -results-dir /mnt/smb/work/share/g15d-k8s/testops-runs/runs \
+  -results-dir /mnt/share/g15d-k8s/testops-runs/runs \
   testops/scenarios/iscsi-p8-compat-soak-chain.yaml
 ```
 

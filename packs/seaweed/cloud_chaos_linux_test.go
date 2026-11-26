@@ -342,7 +342,7 @@ func TestCloudChaosFreezeCoverageIsPerOwner(t *testing.T) {
 		t.Fatal(e, f.log)
 	}
 	var outcomes []any
-	for s := 0.5; s < 120; s += 0.75 { // claude03's control: serial unblocked 0.5 s GETs
+	for s := 0.5; s < 120; s += 0.75 { // a reviewer's control: serial unblocked 0.5 s GETs
 		outcomes = append(outcomes, map[string]any{"key": "k-1", "started": s, "ended": s + 0.5})
 	}
 	w := freezeWindow{PreStop: 30, Stopped: 31, PreCont: 52, Resumed: 53}

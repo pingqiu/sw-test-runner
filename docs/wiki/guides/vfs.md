@@ -31,8 +31,8 @@ standalone suite.
 
 | Node | Role |
 |---|---|
-| **M01** `192.168.1.181` | VFS **mount** (FUSE/kernel), reader/writer, RDMA `10.0.0.1` |
-| **M02** `192.168.1.184` | filer + volume (the shared object/KV data), RDMA `10.0.0.3` |
+| **M01** `198.51.100.181` | VFS **mount** (FUSE/kernel), reader/writer, RDMA `10.0.0.1` |
+| **M02** `198.51.100.184` | filer + volume (the shared object/KV data), RDMA `10.0.0.3` |
 
 Source lives in the mono repo `C:\work\rdma\seaweed-mono-rdma-refresh`:
 `seaweed-vfs` (client) + `enterprise/rust/sw-rdma-vfs` (RDMA VFS path) +

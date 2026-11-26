@@ -19,7 +19,7 @@ env:                                 # variables, overridable with `run -env K=V
 
 topology:                            # which machines actions can target
   nodes:
-    m02: { host: 192.168.1.184, user: testdev, key: ~/.ssh/testdev_key }
+    m02: { host: 198.51.100.184, user: testdev, key: ~/.ssh/testdev_key }
 
 phases:
   - name: build
@@ -87,16 +87,16 @@ target it*.
 ```yaml
 topology:
   nodes:
-    m01: { host: 192.168.1.181, user: testdev, key: "{{ ssh_key }}" }   # client
-    m02: { host: 192.168.1.184, user: testdev, key: "{{ ssh_key }}" }   # service
+    m01: { host: 198.51.100.181, user: testdev, key: "{{ ssh_key }}" }   # client
+    m02: { host: 198.51.100.184, user: testdev, key: "{{ ssh_key }}" }   # service
 phases:
   - name: setup
     actions:
-      - { action: exec, node: m02, cmd: "start-server --ip 192.168.1.184" }   # advertise a REACHABLE ip
+      - { action: exec, node: m02, cmd: "start-server --ip 198.51.100.184" }   # advertise a REACHABLE ip
       - { action: exec, node: m02, cmd: "compute value", save_as: server_val } # cross-node value
   - name: test
     actions:
-      - { action: exec, node: m01, cmd: "connect 192.168.1.184; check == {{ server_val }}" }
+      - { action: exec, node: m01, cmd: "connect 198.51.100.184; check == {{ server_val }}" }
 ```
 
 - **Advertise a reachable IP** on the service (`192.168.1.x`, not `127.0.0.1`), or

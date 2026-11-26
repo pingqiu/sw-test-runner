@@ -7,7 +7,7 @@ func TestParseSuite_Valid(t *testing.T) {
 name: test-suite
 topology:
   nodes:
-    m01: {host: 192.168.1.1, user: test, key: /tmp/key}
+    m01: {host: 198.51.100.1, user: test, key: /tmp/key}
 deploy:
   kill_ports: [9433]
   binaries:

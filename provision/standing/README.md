@@ -65,7 +65,7 @@ go test ./cmd/seaweed-cloud/ -run 'Standing|ClassifyPower|PlanAddresses'
   and any ALERT; a stamp older than 15 min means the reaper is not running.
 - **Switching priority replaces the VM:** `priority` is force-new; flipping an existing box between Spot and Regular
   destroys and recreates it (the OS disk and everything on it are lost). Destroy and re-plan deliberately instead.
-- **No server-side backstop for Regular (decision B, Claude01 2026-11-21):** there is no Azure-side shutdown
+- **No server-side backstop for Regular (decision B, the coordinator 2026-11-21):** there is no Azure-side shutdown
   schedule (Microsoft.DevTestLab is not registered and was removed on purpose). A **dead controller means a stopped
   Regular box keeps billing** at the full on-demand rate (about USD 0.8/h per D16ads_v5) until the reaper runs again.
   Therefore Regular boxes run only while the reaper runs; every launch notice states a planned end date (at most 48 h,

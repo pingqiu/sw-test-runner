@@ -42,7 +42,7 @@ sw-test-runner validate-bundle results/RUN # offline result/status check
 
 ## How to run `seaweed-cloud direct`
 
-For the operator-staged tp01 nightly sweep, see [Nightly local regression](docs/nightly-regression.md).
+For the operator-staged nightly sweep, see [Nightly local regression](docs/nightly-regression.md).
 
 Use one existing Linux host with SSH, systemd, passwordless sudo, Python 3,
 `curl`, `tar`, `sha256sum`, and `ss`. A local container reached over SSH with
@@ -133,7 +133,7 @@ mkdocs serve            # http://127.0.0.1:8000   (or: make wiki)
   guide for Block, S3, VFS, and RDMA agents running shared lab tests and
   reporting evidence.
 - **Reference:** `docs/wiki/` — code map, packs & binaries, scenario catalog, product testing guides, the live dashboard
-- **Live run dashboard/controller:** http://192.168.1.181:9099/ (global run view; M01 can enable RDMA queue submit)
+- **Live run dashboard/controller:** http://198.51.100.181:9099/ (global run view; M01 can enable RDMA queue submit)
 
 ## Agent quick start
 
@@ -141,7 +141,7 @@ For RDMA PR/lab validation, submit to the M01 queue so the lab lock, shared
 results, and dashboard metadata are handled consistently:
 
 ```bash
-ssh testdev@192.168.1.181
+ssh testdev@198.51.100.181
 cd /opt/rdma-lab-ci/sw-test-runner
 TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 ```
@@ -150,12 +150,12 @@ For Block/S3/VFS scenarios, run the product binary with shared results and
 metadata:
 
 ```bash
-swblock run <scenario.yaml> -results-dir /mnt/smb/work/share/testops/results/block-qa \
+swblock run <scenario.yaml> -results-dir /mnt/share/testops/results/block-qa \
   -meta project=block-qa -meta team=block -meta run_by=<agent> \
   -meta test_id=<test-id> -meta branch=<branch-or-sha> -meta commit=<sha>
 ```
 
-Watch runs at http://192.168.1.181:9099/. Report the `project/run_id`, bundle
+Watch runs at http://198.51.100.181:9099/. Report the `project/run_id`, bundle
 path, branch/commit, pass/fail, and key metrics.
 
 If the dashboard is started with controller flags, the same page can submit the

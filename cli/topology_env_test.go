@@ -25,8 +25,8 @@ func TestResolveTopologyValue(t *testing.T) {
 		},
 		{
 			name: "literal preserved",
-			in:   "192.168.1.184",
-			want: "192.168.1.184",
+			in:   "198.51.100.184",
+			want: "198.51.100.184",
 		},
 		{
 			name: "unknown preserved",

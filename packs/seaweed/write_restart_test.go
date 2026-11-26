@@ -78,7 +78,7 @@ func TestWriteReportSplitsAroundKillAndReady(t *testing.T) {
 	}
 }
 
-// codex01: a SET submitted before the kill that completes after it is the first ACK.
+// The reviewer: a SET submitted before the kill that completes after it is the first ACK.
 func TestFirstAckUsesCompletionNotSubmission(t *testing.T) {
 	r, err := writeReport(fixtureRows(t, nil), writeCfg(), 104.005, 106.5)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestFreshGetsAreCountedApartAndOnlyOnce(t *testing.T) {
 	}
 }
 
-// codex01: a fresh GET is the key's first GET of any kind, whatever order the rows arrive in.
+// The reviewer: a fresh GET is the key's first GET of any kind, whatever order the rows arrive in.
 func TestFreshGetAfterAnOrdinaryGetIsRefused(t *testing.T) {
 	_, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
 		g[1]["fresh"] = true // g[0] already read this key
@@ -125,7 +125,7 @@ func TestFreshGetAfterAnOrdinaryGetIsRefused(t *testing.T) {
 	}
 }
 
-// codex01: two fresh GETs identical but for their operation id are still two reads of one key.
+// The reviewer: two fresh GETs identical but for their operation id are still two reads of one key.
 func TestTwoIdenticalFreshGetsAreRefused(t *testing.T) {
 	_, err := writeReport(fixtureRows(t, func(_, g []map[string]any, _ map[string]any) {
 		for _, i := range []int{1, 2} {

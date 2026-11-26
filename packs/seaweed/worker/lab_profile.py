@@ -466,7 +466,7 @@ def launch(config, role, replacement=False):
         if role == 'master' and replacement:
             # Never record a fresh join: re-verify the ORIGINAL join right before
             # publication and record that, so a swap after the first check is
-            # refused, not adopted (codex01 R3).
+            # refused, not adopted (the reviewer R3).
             check_master_state(root, old, config)
             identity['master_state'] = old['master_state']
         elif role == 'master':

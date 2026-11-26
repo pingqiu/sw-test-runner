@@ -190,7 +190,7 @@ type AssignLayout struct {
 	TTL         string `json:"ttl"`
 }
 
-// Frozen soak budgets (contract r3, R3/R4). SoakHorizon is claude01's ruling
+// Frozen soak budgets (contract r3, R3/R4). SoakHorizon is the coordinator's ruling
 // (6ae7b460): a ceiling on the plan's hard deadline, never an extension.
 const (
 	SoakHorizon       = tr.SoakHorizon // one value: the worker envelope admits a soak scenario up to it
@@ -308,7 +308,7 @@ func (p Plan) profileSettings(faultReady bool) SmokeSettings {
 
 func secs(n int) time.Duration { return time.Duration(n) * time.Second }
 
-// checkSchedule bounds every number before any arithmetic on it (codex01 R1:
+// checkSchedule bounds every number before any arithmetic on it (the reviewer R1:
 // an at_s near MaxInt64 overflowed the seconds math). bindSoak and runSoak
 // both call it, so a direct runSoak call can't dispatch an unchecked plan.
 func (x *SoakPlan) checkSchedule() error { return x.checkScheduleWithin(SoakHorizon) }

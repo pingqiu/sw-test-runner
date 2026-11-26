@@ -21,6 +21,17 @@ jobs:
       - name: build
         run: go build ./cmd/sw-test-runner
 
+  public-text:
+    # The repository is public: no internal seat names, lab host names, lab
+    # addresses or internal share paths in its tracked text.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: self-test of the check
+        run: bash scripts/tests/test_public_text_check.sh
+      - name: public-text check
+        run: bash scripts/public-text-check.sh HEAD
+
   build-matrix:
     strategy:
       matrix:

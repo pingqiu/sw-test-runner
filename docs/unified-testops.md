@@ -60,14 +60,14 @@ and AI all build around it instead of replacing it.
 
 ## 3. The one entry point
 
-**`http://192.168.1.181:9099/`** (M01) — dashboard + suite controller.
+**`http://198.51.100.181:9099/`** (M01) — dashboard + suite controller.
 
 ```bash
 # submit a reviewable ref for any registered+enabled suite
 POST /api/<suite>/submit   { ref, scenario, run_by, team, test_id }
 GET  /api/controller/status?suite=<suite>          # queue/running/done/failed
 # watch
-http://192.168.1.181:9099/?project=<suite>-ci
+http://198.51.100.181:9099/?project=<suite>-ci
 ```
 
 The controller is safe: the UI submits a **scenario + controlled parameters**; it

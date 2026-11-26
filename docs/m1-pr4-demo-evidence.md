@@ -1,6 +1,6 @@
 # M1 PR-4 Demo Evidence — `nvme_assert_subsystem`
 
-Evidence captured 2026-05-07 on m02 (`192.168.1.184`,
+Evidence captured 2026-05-07 on m02 (`198.51.100.184`,
 k3s 1.34, kernel 6.17.0-19, nvme-cli 2.8). All five test runs
 hit the same V3 `seaweed-block` binaries built from
 `frontend/nvme-ana-parity-plan` HEAD at the time of the run.
@@ -74,7 +74,7 @@ FrontendPrimaryReady=true`.
 ## Test 3 — NVMe-P5 CSI dynamic PVC (bash) — FAIL
 
 Run ID: `20260507T183000Z-nvme-p5-csi-622fae7`
-Artifact: `/mnt/smb/work/share/g15d-k8s/20260507T183000Z-nvme-p5-csi-622fae7/`
+Artifact: `/mnt/share/g15d-k8s/20260507T183000Z-nvme-p5-csi-622fae7/`
 
 Console tail:
 

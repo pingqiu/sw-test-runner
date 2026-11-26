@@ -17,8 +17,8 @@ import (
 //	name: phase20-t6-stage1
 //	topology:
 //	  nodes:
-//	    m01: {host: 192.168.1.181, user: testdev, key: /opt/work/testdev_key}
-//	    m02: {host: 192.168.1.184, user: testdev, key: /opt/work/testdev_key}
+//	    m01: {host: 198.51.100.181, user: testdev, key: /opt/work/testdev_key}
+//	    m02: {host: 198.51.100.184, user: testdev, key: /opt/work/testdev_key}
 //
 //	deploy:
 //	  build:

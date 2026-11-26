@@ -8,7 +8,7 @@ import (
 	"testing/synctest"
 )
 
-// From claude03's #46 review: a destroy that loses ONLY a NIC or Public IP
+// From a reviewer's #46 review: a destroy that loses ONLY a NIC or Public IP
 // Delete response must still go through the exact-ID re-read; with an unknown
 // re-read (AuthorizationFailed) it refuses. No per-type Delete form bypasses it.
 func TestNoDeleteFormBypassesReread(t *testing.T) {

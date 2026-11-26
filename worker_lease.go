@@ -31,7 +31,7 @@ type workerOwnedLease struct {
 
 // The worker-owned envelope is ten minutes. Only the registered pack's trusted
 // judgement over the captured pins (for Seaweed: its full bind of a valid KV
-// soak plan) can extend it, and never past SoakHorizon (claude01's ruling). It
+// soak plan) can extend it, and never past SoakHorizon (the coordinator's ruling). It
 // is decided before any acquire is written; an action label alone proves nothing.
 const (
 	WorkerEnvelope = 10 * time.Minute

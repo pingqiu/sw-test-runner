@@ -60,7 +60,7 @@ Scope contracts and this cut-line record. No launcher can select this draft.
 ## Evidence And Next Owner Decision
 
 Source inventory, hashes, compile captures and draft CLI diff are preserved at
-`V:/share/rdma/codex01-s0a-final-cut-20261029/`. Native execution and SSH tests
+the run's share folder. Native execution and SSH tests
 are NOT_RUN. Local Windows compilation and the scoped fake tests are only
 regression checks, not custody qualification.
 
@@ -68,8 +68,8 @@ The earlier 470-570 remainder estimate was low: concrete custody alone consumes
 559 in this shape. That estimation error is mine. I stopped rather than spend
 the remaining 24 lines on partial fault machinery or request another cap rise.
 
-Claude01 owns disposition: resequence the still-mandatory concrete custody and
+The coordinator owns disposition: resequence the still-mandatory concrete custody and
 witnessed fault slice, or identify a smaller reviewed primitive to reuse. The
 final 1,150 cap remains binding, no further implementation is released by this
-document. Claude02 remains the independent reviewer; S1/S3 dependent activation
+document. A reviewer remains the independent reviewer; S1/S3 dependent activation
 is blocked, and S2/S3/S0b still require the stated whole-program owner review.

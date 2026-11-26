@@ -4,7 +4,7 @@ A global run view across projects, served by the `testops-dashboard` binary.
 Result reports are read-only. On M01, the same service can also enable the
 suite queue submit/status panel.
 
-**URL:** `http://192.168.1.181:9099/` (M01)
+**URL:** `http://198.51.100.181:9099/` (M01)
 
 | Page | Shows |
 |---|---|
@@ -39,7 +39,7 @@ TestOps Controller panel:
 - open the normal result report after the worker finishes.
 
 The panel does not execute shell commands. It writes one `.env` request file
-under `/mnt/smb/work/share/testops/queue/<project>`; the suite worker owns
+under `/mnt/share/testops/queue/<project>`; the suite worker owns
 execution and the lab lock. Block is registered in the panel but submit remains
 disabled until a block worker adapter is installed.
 
@@ -48,11 +48,11 @@ disabled until a block worker adapter is installed.
 Point the runner at the shared results root, under your project's subdir:
 
 ```bash
-<binary> run <scenario> -results-dir /mnt/smb/work/share/testops/results/<project>
+<binary> run <scenario> -results-dir /mnt/share/testops/results/<project>
 ```
 
 `<project>` (e.g. `block-qa`, `s3-qa`, `rdma-qa`) becomes the **Project** column.
-The shared root is on SMB (`//192.168.1.34/Work`), so bundles do **not** consume
+The shared root is on SMB (`//198.51.100.34/Work`), so bundles do **not** consume
 m01/m02 local disk.
 
 ## Run metadata (test_id · project · run_by · team)
@@ -76,7 +76,7 @@ Three ways to set it, highest precedence last:
 2. **`run -meta key=value`** (repeatable) — run-context that varies per execution:
    ```bash
    swblock run <scenario> -meta project=rdma-qa -meta run_by=vfs-rdma-agent \
-     -results-dir /mnt/smb/work/share/testops/results/rdma-qa
+     -results-dir /mnt/share/testops/results/rdma-qa
    ```
 3. **`meta.json` sidecar** — drop
    `{"test_id":…,"run_by":…,"team":…,"project":…}` into the bundle dir to annotate
@@ -93,7 +93,7 @@ for your own tooling.
 ```bash
 # unit: /etc/systemd/system/testops-dashboard.service  (User=testdev, Restart=always)
 # binary: /usr/local/bin/testops-dashboard
-# serves: /mnt/smb/work/share/testops/{results/<project>/<run>/, docs/}
+# serves: /mnt/share/testops/{results/<project>/<run>/, docs/}
 sudo systemctl status testops-dashboard
 ```
 

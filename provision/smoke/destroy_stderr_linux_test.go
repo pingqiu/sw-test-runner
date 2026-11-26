@@ -73,7 +73,7 @@ func TestNativeDestroyClassifiesTerraformStderr(t *testing.T) {
 	}
 }
 
-// Controls from claude03's #45 review: no stdout text can make a retry fire, and an
+// Controls from a reviewer's #45 review: no stdout text can make a retry fire, and an
 // unknown stderr line still refuses. Drives the real Native boundary with a
 // fake terraform that splits stdout/stderr.
 func TestNativeStdoutNeverRetries(t *testing.T) {

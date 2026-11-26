@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Original two regression witnesses from codex01 review 294eb392, followed by
+// Original two regression witnesses from review 294eb392, followed by
 // repeated/early cleanup and mixed known-outcome/UNKNOWN custody controls.
 
 type reviewerFailedService struct {

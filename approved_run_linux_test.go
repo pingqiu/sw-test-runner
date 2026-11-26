@@ -88,11 +88,11 @@ func newApprovedFixture(t *testing.T) *approvedFixture {
 	}
 	id := "0123456789abcdef0123456789abcdef"
 	stamp := float64(time.Now().UnixNano()) / 1e9
-	raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "codex03", "started": stamp - 10, "host": "broker-only"})
+	raw, _ := json.Marshal(map[string]any{"lease_id": id, "agent": "worker-a", "started": stamp - 10, "host": "broker-only"})
 	if err = os.WriteFile(filepath.Join(ledger, id+"-acquire.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.binding = RunBinding{RequestID: "r1", RunID: "run1", Workload: "kv", Transport: "rdma", Inventory: inventory, Scenario: FilePin{scenarioPath, fmt.Sprintf("%x", sha256.Sum256(scenario))}, Policy: policyPin, Artifacts: artifacts, Hosts: []ApprovedHost{host}, LeaseID: id, LeaseOwner: "codex03", LeaseResource: "explicit-test-resource", OutputDir: host.Root, WorkDeadline: time.Now().Add(30 * time.Second), HardDeadline: time.Now().Add(40 * time.Second), CleanupReserveMS: 5000}
+	f.binding = RunBinding{RequestID: "r1", RunID: "run1", Workload: "kv", Transport: "rdma", Inventory: inventory, Scenario: FilePin{scenarioPath, fmt.Sprintf("%x", sha256.Sum256(scenario))}, Policy: policyPin, Artifacts: artifacts, Hosts: []ApprovedHost{host}, LeaseID: id, LeaseOwner: "worker-a", LeaseResource: "explicit-test-resource", OutputDir: host.Root, WorkDeadline: time.Now().Add(30 * time.Second), HardDeadline: time.Now().Add(40 * time.Second), CleanupReserveMS: 5000}
 	request := ClaimedRequest{Version: "s0b-request-v1", Binding: f.binding}
 	raw, _ = json.Marshal(request)
 	f.request = filepath.Join(running, "r1.env")

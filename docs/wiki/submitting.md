@@ -7,7 +7,7 @@ suites (`rdma`, `s3`, `block`, `vfs`) — they work the same way.
 
 | Path | How | Use when | Result |
 |---|---|---|---|
-| **CI** — submit to M01 | `POST http://192.168.1.181:9099/api/<suite>/submit` (or the 9099 panel) | a pushed, reviewable ref; team-visible; lab-locked; on the dashboard | ACCEPT / REJECT |
+| **CI** — submit to M01 | `POST http://198.51.100.181:9099/api/<suite>/submit` (or the 9099 panel) | a pushed, reviewable ref; team-visible; lab-locked; on the dashboard | ACCEPT / REJECT |
 | **CLI** — run locally | `<runner> run <scenario> …` from any host that can SSH the lab | debug, dirty local build (`<suite>-dev`, never ACCEPT) | same bundle, your responsibility |
 
 Both produce the **same bundle** and are validated by the **same
@@ -21,7 +21,7 @@ You do **not** write or pass a scenario. Each suite has **one canonical gate**;
 you submit the thing under test:
 
 ```bash
-curl -X POST http://192.168.1.181:9099/api/s3/submit \
+curl -X POST http://198.51.100.181:9099/api/s3/submit \
   -H 'Content-Type: application/json' \
   -d '{"ref":"master","run_by":"you","test_id":"my-check"}'
 ```
@@ -41,8 +41,8 @@ checked by `qa-assert --ref`, proving the bundle tested what you submitted.
 **Watch + accept:**
 
 ```bash
-http://192.168.1.181:9099/?project=<suite>-ci        # dashboard
-curl -s "http://192.168.1.181:9099/api/controller/status?suite=<suite>"   # queue/running/done
+http://198.51.100.181:9099/?project=<suite>-ci        # dashboard
+curl -s "http://198.51.100.181:9099/api/controller/status?suite=<suite>"   # queue/running/done
 # the worker runs qa-assert; a run that reaches "done" already passed it
 ```
 
@@ -53,7 +53,7 @@ Dirty or uncommitted work must **not** become CI evidence. Run via the CLI to a
 
 ```bash
 sweeds3 run scenarios/s3-smoke-chain.yaml \
-  -results-dir /mnt/smb/work/share/testops/results/s3-dev \
+  -results-dir /mnt/share/testops/results/s3-dev \
   -meta project=s3-dev -meta run_by=you -meta dirty=true
 ```
 
@@ -96,20 +96,20 @@ primary, replica) is just *which actions target it*.
 ```yaml
 topology:
   nodes:
-    m01: { host: 192.168.1.181, user: testdev, key: "{{ ssh_key }}" }   # client
-    m02: { host: 192.168.1.184, user: testdev, key: "{{ ssh_key }}" }   # service
+    m01: { host: 198.51.100.181, user: testdev, key: "{{ ssh_key }}" }   # client
+    m02: { host: 198.51.100.184, user: testdev, key: "{{ ssh_key }}" }   # service
 
 phases:
   - name: setup           # service side: bring up the server on m02
     actions:
       - action: s3_start_stack
         node: m02
-        ip: 192.168.1.184                     # advertise a REACHABLE ip, not 127.0.0.1
+        ip: 198.51.100.184                     # advertise a REACHABLE ip, not 127.0.0.1
   - name: mount           # client side: connect from m01
     actions:
       - action: exec
         node: m01
-        cmd: "weed mount -filer=192.168.1.184:8888 -dir=/tmp/mnt ..."
+        cmd: "weed mount -filer=198.51.100.184:8888 -dir=/tmp/mnt ..."
   - name: test            # cross-node: write on service, read on client
     actions:
       - action: exec
@@ -124,7 +124,7 @@ phases:
 Rules that bite:
 
 - **Advertise a reachable IP.** A service bound to `127.0.0.1` is invisible to the
-  other node. Pass the node's LAN/RDMA IP (`-ip=192.168.1.184`).
+  other node. Pass the node's LAN/RDMA IP (`-ip=198.51.100.184`).
 - **Pass values across nodes** with `save_as` on one node + `{{ var }}` on another —
   the runner threads variables between nodes for you.
 - **`{{ ssh_key }}`** comes from `env`. Under CI the worker overrides it to the M01
@@ -140,9 +140,9 @@ Full field reference: [Scenario Syntax](syntax.md). Worked cross-node example:
 
 ```bash
 # run an existing gate (CI)
-curl -X POST http://192.168.1.181:9099/api/<suite>/submit -d '{"ref":"<ref>","run_by":"you"}'
+curl -X POST http://198.51.100.181:9099/api/<suite>/submit -d '{"ref":"<ref>","run_by":"you"}'
 # watch
-open http://192.168.1.181:9099/?project=<suite>-ci
+open http://198.51.100.181:9099/?project=<suite>-ci
 # accept a bundle yourself
 bash scripts/qa-assert.sh <bundle> --ref <ref> --profile docs/qa-profiles/<suite>.expect
 # run locally (debug)

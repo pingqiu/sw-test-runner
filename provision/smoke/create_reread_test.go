@@ -53,7 +53,7 @@ func TestCreateResetRereadsAndImports(t *testing.T) {
 		{"out-of-scope-refuses", strings.ReplaceAll(lost, "dedicated-test", "other-rg"), object("output"), nil, false, "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 		{"import-failure-refuses", lost, object("output"), nil, true, "APPLY_FAILED_OR_UNKNOWN", 1, 1},
 		{"replan-replacing-import-refuses", lost, object("output"), plan("delete", "create"), false, "APPLY_FAILED_OR_UNKNOWN", 1, 1},
-		// codex01 #52: a standalone Put EOF naming an ARM ID has no address to
+		// The reviewer #52: a standalone Put EOF naming an ARM ID has no address to
 		// import into; a re-plan must name the import with known actions.
 		{"put-eof-naming-an-id-refuses", `Error: Put "https://management.azure.com` + id + `?api-version=2025-07-01": EOF`, object("output"), nil, false, "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 		{"replan-without-the-import-refuses", lost, object("output"), []byte(`{"resource_changes":[]}`), false, "APPLY_FAILED_OR_UNKNOWN", 1, 1},

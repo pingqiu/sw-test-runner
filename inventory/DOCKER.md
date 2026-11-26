@@ -1,6 +1,6 @@
 # Gate 0a Docker inventory extension (schema-only Draft)
 
-This extends the accepted #11 data validator on the same `seaweed.inventory/v1` seam. It implements no Docker command/client, privileged adapter, process custody, deployment, fault provider, lease or cleanup. The shared pack remains unconditionally refused. Schema validity and a matching observation digest are data only, never S0b admission. Runtime Gate 0a is M01 under a separate lab lease, not tp01; a host name in this schema cannot grant that turn.
+This extends the accepted #11 data validator on the same `seaweed.inventory/v1` seam. It implements no Docker command/client, privileged adapter, process custody, deployment, fault provider, lease or cleanup. The shared pack remains unconditionally refused. Schema validity and a matching observation digest are data only, never S0b admission. Runtime Gate 0a is M01 under a separate lab lease, not the test host; a host name in this schema cannot grant that turn.
 
 ## Topology and shared metadata
 
