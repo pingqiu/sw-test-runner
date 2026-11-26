@@ -298,8 +298,13 @@ unit_of() { echo "r4-$1-$2"; } # TAG ROLE
 
 # A unit that is loaded in any form (a transient one too) is not absent.
 unit_active() { # UNIT: active, activating, deactivating or reloading
-  local st; st=$("$systemctl_bin" is-active "$1" 2>/dev/null || true)
-  [[ "$st" =~ ^(active|activating|deactivating|reloading)$ ]]
+  local st rc
+  if st=$("$systemctl_bin" is-active "$1" 2>/dev/null); then rc=0; else rc=$?; fi
+  case "$st" in
+    active|activating|deactivating|reloading) return 0 ;;
+    inactive|failed|unknown) [[ "$rc" == 0 || "$rc" == 3 || "$rc" == 4 ]] && return 1 ;;
+  esac
+  die "cannot establish unit state for $1 (rc=$rc, $st); retained"
 }
 
 cmd_install() {
@@ -418,7 +423,13 @@ cmd_cleanup() {
     [[ ! -e "$unitdir/$u.service" ]] || { echo "cleanup: $u.service still present" >&2; bad=1; }
     if unit_active "$u"; then echo "cleanup: $u is still $("$systemctl_bin" is-active "$u" 2>/dev/null)" >&2; bad=1; fi
   done
-  if "$pgrep_bin" -f -- "$w/bin/" >/dev/null 2>&1; then echo "cleanup: a process from $w/bin is still running" >&2; bad=1; fi
+  local prc
+  if "$pgrep_bin" -f -- "$w/bin/" >/dev/null 2>&1; then prc=0; else prc=$?; fi
+  case "$prc" in
+    0) echo "cleanup: a process from $w/bin is still running" >&2; bad=1 ;;
+    1) : ;;
+    *) echo "cleanup: process query failed ($prc); retained" >&2; bad=1 ;;
+  esac
   for f in "$w"/no-ack.*/pid; do
     [[ -f "$f" ]] || continue
     local pid; pid=$(cat "$f")

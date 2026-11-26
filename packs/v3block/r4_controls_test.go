@@ -100,7 +100,7 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	units := filepath.Join(dir, "units")
 	hosts := r4File(t, filepath.Join(dir, "hosts"), "127.0.0.1 localhost\n")
 	os.MkdirAll(units, 0755)
-	ctl := r4File(t, filepath.Join(dir, "systemctl"), "#!/bin/sh\nif [ \"$1\" = is-active ]; then echo \"${R4_TEST_ACTIVE:-inactive}\"; exit 0; fi\nexit 0\n")
+	ctl := r4File(t, filepath.Join(dir, "systemctl"), "#!/bin/sh\nif [ \"$1\" = is-active ]; then [ -z \"${R4_TEST_CTL_ERROR:-}\" ] || exit 1; echo \"${R4_TEST_ACTIVE:-inactive}\"; exit 0; fi\nexit 0\n")
 	journal := r4File(t, filepath.Join(dir, "journalctl"), "#!/bin/sh\nexit 0\n")
 	pgrep := r4File(t, filepath.Join(dir, "pgrep"), "#!/bin/sh\nexit ${R4_TEST_PGREP:-1}\n")
 	env := []string{"R4_ROOT=" + root, "R4_UNITDIR=" + units, "R4_HOSTS=" + hosts, "R4_SYSTEMCTL=" + ctl, "R4_JOURNALCTL=" + journal, "R4_PGREP=" + pgrep}
@@ -131,7 +131,7 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	if out, err := r4Env(t, env, "start", "test", "volume"); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	for _, extra := range []string{"R4_TEST_ACTIVE=active", "R4_TEST_PGREP=0"} {
+	for _, extra := range []string{"R4_TEST_ACTIVE=active", "R4_TEST_PGREP=0", "R4_TEST_PGREP=2", "R4_TEST_CTL_ERROR=1"} {
 		bad := append(append([]string{}, env...), extra)
 		if out, err := r4Env(t, bad, "cleanup", "test"); err == nil {
 			t.Fatalf("failed absence passed: %s", out)
