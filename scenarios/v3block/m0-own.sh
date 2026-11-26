@@ -99,10 +99,19 @@ teardown)
     [ "$(start_of "$pid" 2>/dev/null)" = "$st" ] && { echo "m0-own: $name (pid $pid) still running" >&2; exit 1; }
     echo "m0-own: stopped $name (pid $pid)"
   done || rc=1
-  for d in "$SYS"/nvme*; do
-    [ -e "$d" ] || continue
-    case "$(cat "$d/subsysnqn" 2>/dev/null)" in "$prefix"*) echo "m0-own: controller $d of this run remains" >&2; rc=1 ;; esac
+  # The kernel removes a deleted controller asynchronously: wait (bounded)
+  # until none of this run's prefix is left before calling one a leftover.
+  left=""
+  for i in $(seq 1 40); do
+    left=""
+    for d in "$SYS"/nvme*; do
+      [ -e "$d" ] || continue
+      case "$(cat "$d/subsysnqn" 2>/dev/null)" in "$prefix"*) left="$left $d" ;; esac
+    done
+    [ -z "$left" ] && break
+    sleep 0.25
   done
+  [ -z "$left" ] || { echo "m0-own: controllers of this run remain after 10 s:$left" >&2; rc=1; }
   exit $rc ;;
 *) die "usage: claim | spawn | record | teardown" ;;
 esac
