@@ -228,6 +228,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 			}
 			counts := map[string]int{}
 			starts := 0
+			masters := 0
 			connects := 0
 			writer := false
 			writerStopped := false
@@ -241,6 +242,12 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 					}
 				}
 				cmd := a.Params["cmd"]
+				if strings.Contains(cmd, "/bin/blockmaster ") {
+					masters++
+					if !strings.Contains(cmd, "--lifecycle-product-loop-interval 200ms") {
+						return nil, fmt.Errorf("cluster-spec assignment requires the lifecycle product loop")
+					}
+				}
 				if strings.Contains(cmd, "r4.sh unit $T writer") {
 					writer = true
 				}
@@ -284,7 +291,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				reg.RegisterFunc(n, tr.TierCore, handler)
 			}
 			result := tr.NewEngine(reg, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
-			if result.Status != tr.StatusPass || starts != 3 || connects != 2 || !failover || !rejoin || !post || !writer || !writerStopped {
+			if result.Status != tr.StatusPass || masters != 1 || starts != 3 || connects != 2 || !failover || !rejoin || !post || !writer || !writerStopped {
 				t.Fatalf("%s %s starts=%d connects=%d failover=%v rejoin=%v post=%v", result.Status, result.Error, starts, connects, failover, rejoin, post)
 			}
 			for _, n := range []string{"node-1", "node-2", "node-3"} {

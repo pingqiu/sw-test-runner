@@ -135,7 +135,7 @@ phases:
           files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
           for flag in ('allow-external-nvme-bind','master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
               assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
-          for flag in ('failback-runtime-rpc','tls-cert','role-file','launcher-replication-ack'):
+          for flag in ('failback-runtime-rpc','tls-cert','role-file','launcher-replication-ack','lifecycle-product-loop-interval'):
               assert '"'+flag+'"' in files['cmd/blockmaster/main.go'], 'removed master flag '+flag
           for flag in ('target-data','target-ctrl','expect-current','confirm-old-node-off'):
               assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
@@ -203,6 +203,7 @@ phases:
           sudo bash $W/r4.sh unit $T master -- $W/bin/blockmaster
           --authority-store $W/master/authority --lifecycle-store $W/master/lifecycle
           --cluster-spec $W/cluster-spec.yaml --expected-slots-per-volume {{ rf }}
+          --lifecycle-product-loop-interval 200ms
           --launcher-replication-ack sync-quorum --listen 0.0.0.0:{{ master_port }}
           --tls-cert $W/tls/master.crt --tls-key $W/tls/master.key --tls-client-ca $W/tls/ca.crt
           --role-file $W/tls/roles --failback-runtime-rpc &&
