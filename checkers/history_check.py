@@ -62,8 +62,9 @@ code is 0 only when every checker passes.
       fsync (a write record without "flush": false), or once a later flush
       of its volume is acknowledged; a flush with outcome unknown makes
       nothing durable. An unknown write may take effect until its holder is
-      known dead (a kill; not mapped to volumes, so any kill). After a
-      process kill (verb kill, not refused) a block may read only its last
+      known dead. A holder kill (args.volume) reaches that volume only, a
+      master kill no volume, a kill naming no volume every volume (noted).
+      After a kill that reaches its volume a block may read only its last
       durable value, the value of a write invoked after it, or of an unknown
       write whose holder was alive after the durable point; anything else
       FAILS (an older value no open unknown explains, content no write
@@ -728,6 +729,20 @@ def killed(inv, comp):
     return inv['verb'] == 'kill' and (comp is None or comp['outcome'] != 'refused')
 
 
+def kill_scope(inv):
+    """The volumes a kill reaches on the data path: a holder kill names its
+    volume in args.volume (the record's own volume stays ""), and reaches
+    that volume only; a kill of the master (process blockmaster) reaches no
+    holder, so no volume; a kill naming no volume (an older history, or a
+    process the runner could not map) reaches every volume, None."""
+    args = inv.get('args') or {}
+    if args.get('volume'):
+        return {args['volume']}
+    if args.get('process') == 'blockmaster':
+        return set()
+    return None
+
+
 @unknown_on_overlap
 def dur(recs):
     """Durability with flush. Per volume and block:
@@ -743,15 +758,18 @@ def dur(recs):
                 after a later durable write.
       may hold  what a read may return: C1's shadow (an ok write its value
                 only, an unknown write adds its value), with open unknowns.
-    A kill (verb kill, outcome not refused, applied at its invoke) makes the
-    holder known dead. The history does not map processes to volumes, so a
-    kill counts as the kill of every volume's holder. That implies: (1) a kill
-    of the master, or of another volume's holder, also lets each volume lose
-    its unflushed writes (more is allowed than the process killed explains);
-    and (2) it also SETTLES every open unknown, so an unknown whose holder in
-    fact survived and lands later is reported (a value change, or an older
-    value) although the product may be right. Such a finding names the kill;
-    check the process it killed before blaming the product.
+    A kill (verb kill, outcome not refused, applied at its invoke) reaches
+    the volumes kill_scope() names. A holder kill (args.volume) makes that
+    volume's holder known dead: it may lose that volume's unflushed writes
+    and settles that volume's open unknowns, and no other volume's. A kill of
+    the master reaches no holder: it loses nothing and settles nothing (the
+    data path is the holders'), so a run whose only kills are the master's
+    is judged as a run without a kill. A kill naming no volume is applied to
+    every volume, and a note says so: there it allows each volume to lose
+    unflushed writes the killed process may not explain, and settles every
+    open unknown, so an unknown whose holder in fact survived and lands
+    later is reported although the product may be right; every finding
+    after such a kill says that it was applied to every volume.
     At a kill each block may hold durable | volatile | open: the last durable
     value, any write invoked after it, or any unknown write whose holder was
     alive after the durable point. Then the unknowns are settled: the first
@@ -770,10 +788,12 @@ def dur(recs):
     unflushed write: FAIL, not exercised."""
     ops_ = operations(recs)
     comp_of = {inv['seq']: comp for inv, comp in ops_}
-    nkills = sum(1 for inv, comp in ops_ if killed(inv, comp))
+    # Kills that reach a holder; a master kill reaches none.
+    nkills = sum(1 for inv, comp in ops_ if killed(inv, comp) and kill_scope(inv) != set())
+    unscoped = []   # seqs of kills applied to every volume
     nunflushed = sum(1 for inv, _ in ops_ if inv['verb'] == 'write' and not flushed(inv.get('args') or {}))
     if not nkills and not nunflushed:
-        return verdict(['no kill and no unflushed write in the history: DUR not exercised'])
+        return verdict(['no kill of a holder and no unflushed write in the history: DUR not exercised'])
     _, _, images = replay(recs)
     base = {}    # volume -> {lba: set}, a restore target's initial content
     st = {}      # (volume, lba) -> block state
@@ -802,8 +822,13 @@ def dur(recs):
     for i, r in enumerate(recs):
         if r['kind'] == 'invoke':
             inv_of[r['seq']] = r
-            if killed(r, comp_of.get(r['seq'])):
-                for b in st.values():
+            scope = kill_scope(r) if killed(r, comp_of.get(r['seq'])) else set()
+            if scope is None:
+                unscoped.append(r['seq'])
+            if scope != set():
+                for (kv, _), b in st.items():
+                    if scope is not None and kv not in scope:
+                        continue
                     drop_kill(b)
                     vals = {s for s, _ in b['volatile']}
                     early = b['open'] - b['durable'] - vals   # unknowns invoked before the durable point
@@ -852,8 +877,9 @@ def dur(recs):
             k, settled = b['kill'], b['settled']
             if got not in allowed:
                 if settled is not None:
-                    f.append('read %s lba %d seq %d returned %s, but the read at seq %d after the kill at seq %d returned %s, with no write in between: the value changed after the unknowns were settled'
-                             % (vol, lba, inv['seq'], got, settled[1], settled[0], settled[2]))
+                    f.append('read %s lba %d seq %d returned %s, but the read at seq %d after the kill at seq %d%s returned %s, with no write in between: the value changed after the unknowns were settled'
+                             % (vol, lba, inv['seq'], got, settled[1], settled[0],
+                                ' (a kill naming no volume, applied to every volume)' if settled[0] in unscoped else '', settled[2]))
                 elif k is None:
                     f.append('read %s lba %d seq %d returned %s, not one of %s' % (vol, lba, inv['seq'], got, sorted(allowed)))
                 else:
@@ -863,7 +889,8 @@ def dur(recs):
                         why = 'content no write produced'
                     else:
                         why = 'an older value than the last durable one that no open unknown explains'
-                    f.append('after the kill at seq %d, read %s lba %d seq %d returned %s: %s (allowed %s)' % (k[0], vol, lba, inv['seq'], got, why, sorted(allowed)))
+                    f.append('after the kill at seq %d%s, read %s lba %d seq %d returned %s: %s (allowed %s)' % (
+                        k[0], ' (a kill naming no volume, applied to every volume)' if k[0] in unscoped else '', vol, lba, inv['seq'], got, why, sorted(allowed)))
             elif k is not None:
                 _, kdur, vlist, early, _ = k
                 if got in early and got not in kdur and got not in {s for s, _ in vlist}:
@@ -896,6 +923,8 @@ def dur(recs):
         if unread:
             f.append('written, never read afterwards: %d (%s)' % (len(unread), ', '.join('%s lba %d' % key for key in unread[:8])))
     notes = ['acknowledged, not flushed, lost: %d' % lost, 'unknown write landed after a later durable write: %d' % landed]
+    if unscoped:
+        notes.append('kill(s) naming no volume, applied to every volume: seq %s' % ', '.join(str(x) for x in unscoped))
     if unread_after_kill:
         notes.append('acknowledged, not flushed, not read after the kill: %d block(s)' % unread_after_kill)
     return {'verdict': 'FAIL' if f else 'PASS', 'findings': f + notes}
