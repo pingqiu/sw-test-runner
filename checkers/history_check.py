@@ -375,7 +375,9 @@ def c3(recs):
     """Independence after a restore, both ways. A direction is exercised only
     by the LATEST write on one side at a block being acknowledged (ok) and of
     a content the other side may not already hold there, followed by an ok read
-    of the SAME block on the other side; an overwritten value counts for nothing. A write that cannot tell propagation from
+    of the SAME block on the other side, with no write by the reading side to
+    that block after it (the reader's own write masks it); an overwritten value
+    counts for nothing. A write that cannot tell propagation from
     isolation (the other side may hold the same content anyway), an unknown or
     refused write, a read before the write, or a read of another block
     exercises nothing. A direction not exercised is a FAIL: C3 judged nothing."""
@@ -386,7 +388,7 @@ def c3(recs):
     for target, source, snap, at in restores(recs):
         image = images.get(at) or {}
         written = {source: {}, target: {}}   # volume -> lba -> {sha: completion seq} after the restore (ok or unknown)
-        latest = {source: {}, target: {}}    # volume -> lba -> its LATEST write's value if acknowledged, else None
+        latest = {source: {}, target: {}}    # volume -> lba -> (value if acknowledged else None, completion seq) of its LATEST write
         exercised = {source: False, target: False}   # keyed by the WRITTEN side
         for ev in events:
             if ev[0] not in ('read', 'write') or ev[2]['seq'] <= at or ev[1].get('volume') not in written:
@@ -397,12 +399,17 @@ def c3(recs):
                 written[vol].setdefault(lba, {})[ev[1]['args']['sha256']] = ev[2]['seq']
                 # Only the latest write counts: an earlier value was overwritten;
                 # an unknown latest write leaves the content ambiguous.
-                latest[vol][lba] = ev[1]['args']['sha256'] if ev[2]['outcome'] == 'ok' else None
+                latest[vol][lba] = (ev[1]['args']['sha256'] if ev[2]['outcome'] == 'ok' else None, ev[2]['seq'])
             elif ev[0] == 'read':
                 got = (ev[2].get('result') or {}).get('sha256')
                 # ev[3]: what the reading volume may hold here by its own history.
-                if latest[other].get(lba) is not None and latest[other][lba] not in ev[3]:
-                    exercised[other] = True   # the other side's latest write is acknowledged and distinguishable here
+                # The witness is UNMASKED only if it completed after the reader's own
+                # last write at this block: a later own write overwrites anything
+                # the witness could have propagated.
+                w_sha, w_seq = latest[other].get(lba, (None, 0))
+                own_seq = latest[vol].get(lba, (None, 0))[1]
+                if w_sha is not None and w_seq > own_seq and w_sha not in ev[3]:
+                    exercised[other] = True   # acknowledged, unmasked and distinguishable here
                 foreign = set(written[other].get(lba, {})) - (image.get(lba, set()) if vol == target else set())
                 if got in foreign:
                     if vol == target:
