@@ -190,6 +190,10 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 			}
 			s.Env["rf"] = rf
 			s.Env["run_id"] = "test-run"
+			controller := s.Topology.Nodes["controller"]
+			if !controller.IsNative || controller.IsLocal {
+				t.Fatal("Linux cloud controller must execute natively, not via wsl")
+			}
 			for _, p := range s.Phases {
 				if p.Name == "hold" && (!p.Parallel || len(p.Actions) != 2) {
 					t.Fatal("survivors must be observed concurrently")

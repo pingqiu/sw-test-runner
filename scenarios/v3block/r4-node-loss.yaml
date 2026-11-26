@@ -95,7 +95,7 @@ env:
 
 topology:
   nodes:
-    controller: { is_local: true }
+    controller: { is_native: true }
     node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
     node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
     node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
