@@ -20,7 +20,7 @@ import (
 // every written block before the deletes), and teardown runs when a step
 // fails. It proves the wiring, not the product.
 func TestM0ScenarioWiring(t *testing.T) {
-	for _, fail := range []string{"", "v3_op_move"} {
+	for _, fail := range []string{"", "v3_op_move", "master-spawn"} {
 		t.Run("fail="+fail, func(t *testing.T) {
 			s, err := tr.ParseFile("../../scenarios/v3block/m0-sequence.yaml")
 			if err != nil {
@@ -59,6 +59,12 @@ func TestM0ScenarioWiring(t *testing.T) {
 				if a.Action == "v3_start_blockmaster" {
 					actx.Vars["bm_pid"] = "4242"
 				}
+				if fail == "master-spawn" && a.Action == "exec" && strings.Contains(a.Params["cmd"], " spawn ") && strings.Contains(a.Params["cmd"], "blockmaster") {
+					return nil, fmt.Errorf("injected: port already listens")
+				}
+				if a.Action == "v3_start_blockmaster" {
+					bad = append(bad, "the master starts outside the owned spawn")
+				}
 				if a.Action == fail {
 					return nil, fmt.Errorf("injected")
 				}
@@ -86,10 +92,16 @@ func TestM0ScenarioWiring(t *testing.T) {
 			if first := steps[0]; !strings.HasPrefix(first, "exec ") {
 				t.Errorf("the run does not start by claiming its work directory: %q", first)
 			}
+			order := strings.Join(steps, "\n")
+			if fail == "master-spawn" {
+				if strings.Contains(order, "v3_op_create") {
+					t.Error("a typed create ran after the master's owned start failed")
+				}
+				return
+			}
 			if fail != "" {
 				return
 			}
-			order := strings.Join(steps, "\n")
 			for _, before := range [][2]string{
 				{"v3_op_restore v1 ", "v3_op_read v2 0 2048 4095"},
 				{"v3_op_read v1 written", "v3_op_delete v2 "},

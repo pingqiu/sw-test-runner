@@ -3,6 +3,7 @@
 package v3block
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,14 +139,26 @@ func TestOwnTeardownDeletesOnlyItsOwnPrefixAndStopsOnlyItsOwnProcesses(t *testin
 	f, _ := os.OpenFile(filepath.Join(work, "owned"), os.O_APPEND|os.O_WRONLY, 0o644)
 	_, _ = f.WriteString(strconv.Itoa(recycled) + " 1 an-earlier-process\n")
 	_ = f.Close()
-	// The controller of our prefix disappears once deleted, as the kernel does.
+	// The controller of our prefix disappears once deleted, as the kernel
+	// does: ONLY after its delete marker was observed. Without a delete it
+	// stays, so a teardown that skips the delete cannot pass by the fixture
+	// removing the evidence itself.
+	sawDelete := make(chan bool, 1)
 	go func() {
-		for i := 0; i < 50 && !deleted(t, ours); i++ {
+		for i := 0; i < 100; i++ {
+			if deleted(t, ours) {
+				_ = os.RemoveAll(filepath.Dir(ours))
+				sawDelete <- true
+				return
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		_ = os.RemoveAll(filepath.Dir(ours))
+		sawDelete <- false
 	}()
 	out, code := own(t, []string{"NVME_SYSFS=" + sys}, "teardown", work, tok, "nqn.2026-11.io.seaweedfs:op-run-1-")
+	if !<-sawDelete {
+		t.Fatalf("teardown never wrote the delete marker of this run's controller: %q", out)
+	}
 	if code != 0 {
 		t.Fatalf("teardown: exit %d %q", code, out)
 	}
@@ -158,6 +171,74 @@ func TestOwnTeardownDeletesOnlyItsOwnPrefixAndStopsOnlyItsOwnProcesses(t *testin
 	}
 	if !running(recycled) || !strings.Contains(out, "recycled: untouched") {
 		t.Errorf("a recorded pid with another start time was stopped: %q", out)
+	}
+}
+
+// An unreadable identity, or an unreadable ownership list, is not cleanup:
+// teardown fails instead of reporting the process gone or stopped.
+func TestOwnTeardownDoesNotCertifyWhatItCannotRead(t *testing.T) {
+	needLinux(t)
+	if os.Getuid() == 0 {
+		t.Skip("root reads unreadable files")
+	}
+	dir := t.TempDir()
+	work, proc := filepath.Join(dir, "work"), filepath.Join(dir, "proc")
+	tok, _ := own(t, nil, "claim", work)
+	tok = strings.TrimSpace(tok)
+	// A recorded process whose stat exists but cannot be read.
+	if err := os.MkdirAll(filepath.Join(proc, "999999"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stat := filepath.Join(proc, "999999", "stat")
+	_ = os.WriteFile(stat, []byte(statLine("999999", "x", "1", "42")), 0o644)
+	_ = os.Chmod(stat, 0)
+	_ = os.WriteFile(filepath.Join(work, "owned"), []byte("999999 42 unreadable-one\n"), 0o644)
+	out, code := own(t, []string{"PROC=" + proc, "NVME_SYSFS=" + filepath.Join(dir, "sys")}, "teardown", work, tok, "nqn.2026-11.io.seaweedfs:op-run-1-")
+	if code == 0 || strings.Contains(out, "stopped") || strings.Contains(out, "already gone") {
+		t.Fatalf("an unreadable identity was certified: exit %d %q", code, out)
+	}
+	// An ownership list that cannot be read.
+	_ = os.Chmod(filepath.Join(work, "owned"), 0)
+	out, code = own(t, []string{"PROC=" + proc, "NVME_SYSFS=" + filepath.Join(dir, "sys")}, "teardown", work, tok, "nqn.2026-11.io.seaweedfs:op-run-1-")
+	if code == 0 || !strings.Contains(out, "not certified") {
+		t.Fatalf("an unreadable ownership list was certified: exit %d %q", code, out)
+	}
+}
+
+// A port that already listens (a master of another run, a leftover) refuses
+// the spawn: nothing is started, nothing recorded, and the existing process
+// receives no signal.
+func TestOwnSpawnRefusesAnOccupiedPortAndSignalsNothing(t *testing.T) {
+	needLinux(t)
+	if _, err := exec.LookPath("ss"); err != nil {
+		t.Skip("ss not installed")
+	}
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	tok, _ := own(t, nil, "claim", work)
+	tok = strings.TrimSpace(tok)
+	_ = os.MkdirAll(filepath.Join(work, "log"), 0o755)
+	l, err := net.Listen("tcp", "127.0.0.1:0") // the existing master
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	marker := filepath.Join(dir, "started")
+	out, code := own(t, nil, "spawn", work, tok, "blockmaster", port, "--", "sh", "-c", "touch "+marker+"; sleep 30")
+	if code == 0 || !strings.Contains(out, "already listens") {
+		t.Fatalf("spawn on an occupied port: exit %d %q", code, out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the new process was started although its port was taken")
+	}
+	if b, _ := os.ReadFile(filepath.Join(work, "owned")); len(strings.TrimSpace(string(b))) != 0 {
+		t.Errorf("something was recorded as owned: %q", b)
+	}
+	if c, err := net.Dial("tcp", l.Addr().String()); err != nil {
+		t.Errorf("the existing listener is gone: %v", err)
+	} else {
+		c.Close()
 	}
 }
 

@@ -215,8 +215,7 @@ func procStart(ctx context.Context, node runner, pid string) (string, string) {
 	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return "", procGone
 	}
-	cmd := fmt.Sprintf(`if [ -e /proc/%[1]s ]; then s=$(cat /proc/%[1]s/stat) || exit 3; s=${s##*) }; set -- $s; echo "start $20"; else echo absent; fi`, pid)
-	stdout, _, code, err := node.Run(ctx, cmd)
+	stdout, _, code, err := node.Run(ctx, procStartCmd("/proc", pid))
 	out := strings.TrimSpace(stdout)
 	switch {
 	case err != nil || code != 0:
@@ -227,6 +226,16 @@ func procStart(ctx context.Context, node runner, pid string) (string, string) {
 		return out[6:], procRunning
 	}
 	return "", procUnreadable
+}
+
+// procStartCmd is the shell that reads a pid's start time: field 22 of
+// PROC/PID/stat. The command name (field 2) may hold spaces and parentheses,
+// so the text is cut after the LAST ')'; the start time is then the 20th
+// remaining field, which the shell must write ${20} ($20 is ${2} then "0").
+// It prints "start N", "absent" for no such pid, or fails (exit 3) when the
+// pid exists but its stat cannot be read.
+func procStartCmd(proc, pid string) string {
+	return fmt.Sprintf(`if [ -e %[1]s/%[2]s ]; then s=$(cat %[1]s/%[2]s/stat) || exit 3; s=${s##*) }; set -- $s; [ -n "${20}" ] || exit 3; echo "start ${20}"; else echo absent; fi`, proc, pid)
 }
 
 // procState says whether the process (pid, start) still runs.

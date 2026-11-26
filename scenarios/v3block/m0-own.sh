@@ -33,14 +33,30 @@ start_of() {
   echo "${20}"
 }
 
+# proc_state PID START: running (that pid runs with that start time), gone
+# (no such pid, or another process now holds it), or unreadable (it exists
+# but its identity cannot be read: nothing may be concluded).
+proc_state() {
+  local s
+  [ -e "$PROC/$1" ] || { echo gone; return; }
+  s=$(cat "$PROC/$1/stat" 2>/dev/null) || { echo unreadable; return; }
+  s=${s##*) }
+  set -- $s
+  [ -n "${20:-}" ] || { echo unreadable; return; }
+  [ "${20}" = "$2" ] && echo running || echo gone
+}
+
 owned() { # WORK TOKEN
   case "$2" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#2}" = 32 ] || return 1
   [ "$(cat "$1/.owner" 2>/dev/null)" = "$2" ]
 }
 
-listening() { # PORT -> the pids holding a listener on it, or nothing
-  ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+listening() { # PORT -> the pids holding a listener on it, or nothing; fails if ss cannot be read
+  local out
+  out=$(ss -Hltnp "sport = :$1") || return 2
+  printf '%s\n' "$out" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+  return 0
 }
 
 case "${1:-}" in
@@ -59,7 +75,8 @@ spawn)
   while [ $# -gt 0 ] && [ "$1" != -- ]; do ports+=("$1"); shift; done
   [ "${1:-}" = -- ] || die "spawn needs -- before the command"; shift
   for p in "${ports[@]}"; do
-    [ -z "$(listening "$p")" ] || die "port $p already listens (pids $(listening "$p" | tr '\n' ' ')): $name not started"
+    held=$(listening "$p") || die "cannot read the listeners of port $p: $name not started"
+    [ -z "$held" ] || die "port $p already listens (pids $(echo $held)): $name not started"
   done
   setsid "$@" > "$w/log/$name.log" 2>&1 < /dev/null &
   pid=$!
@@ -68,7 +85,7 @@ spawn)
   for i in $(seq 1 240); do
     [ "$(start_of "$pid" 2>/dev/null)" = "$st" ] || die "$name (pid $pid) exited before it listened (see $w/log/$name.log)"
     all=1
-    for p in "${ports[@]}"; do listening "$p" | grep -qx "$pid" || all=0; done
+    for p in "${ports[@]}"; do held=$(listening "$p") && printf '%s\n' "$held" | grep -qx "$pid" || all=0; done
     [ $all = 1 ] && { echo "$pid"; exit 0; }
     sleep 0.5
   done
@@ -90,15 +107,23 @@ teardown)
     case "$q" in "$prefix"*) echo 1 > "$d/delete_controller" || { echo "m0-own: delete of $d failed" >&2; rc=1; } ;; esac
   done
   # Newest first: the run's own processes before the store they depend on.
-  tac "$w/owned" 2>/dev/null | while read -r pid st name; do
+  # The list is read once; an unreadable list certifies nothing.
+  list=$(tac "$w/owned") || { echo "m0-own: cannot read $w/owned: cleanup not certified" >&2; exit 1; }
+  while read -r pid st name; do
     [ -n "$pid" ] || continue
-    if [ "$(start_of "$pid" 2>/dev/null)" != "$st" ]; then echo "m0-own: $name (pid $pid) already gone or recycled: untouched"; continue; fi
+    case "$(proc_state "$pid" "$st")" in
+      gone) echo "m0-own: $name (pid $pid) already gone or recycled: untouched"; continue ;;
+      unreadable) echo "m0-own: identity of $name (pid $pid) unreadable: not certified" >&2; rc=1; continue ;;
+    esac
     kill "$pid" 2>/dev/null
-    for i in $(seq 1 60); do [ "$(start_of "$pid" 2>/dev/null)" = "$st" ] || break; sleep 0.5; done
-    [ "$(start_of "$pid" 2>/dev/null)" = "$st" ] && kill -9 "$pid" 2>/dev/null && sleep 1
-    [ "$(start_of "$pid" 2>/dev/null)" = "$st" ] && { echo "m0-own: $name (pid $pid) still running" >&2; exit 1; }
-    echo "m0-own: stopped $name (pid $pid)"
-  done || rc=1
+    for i in $(seq 1 60); do [ "$(proc_state "$pid" "$st")" = running ] || break; sleep 0.5; done
+    [ "$(proc_state "$pid" "$st")" = running ] && kill -9 "$pid" 2>/dev/null && sleep 1
+    case "$(proc_state "$pid" "$st")" in
+      gone) echo "m0-own: stopped $name (pid $pid)" ;;
+      running) echo "m0-own: $name (pid $pid) still running" >&2; rc=1 ;;
+      *) echo "m0-own: $name (pid $pid): its state after the stop is unreadable: not certified" >&2; rc=1 ;;
+    esac
+  done <<< "$list"
   # The kernel removes a deleted controller asynchronously: wait (bounded)
   # until none of this run's prefix is left before calling one a leftover.
   left=""
