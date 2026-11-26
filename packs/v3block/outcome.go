@@ -5,6 +5,10 @@ package v3block
 // a log line. "refused" means nothing changed, so it is used only where the
 // product states that; anything else that is not ok is unknown, for a read
 // of the state to decide.
+//
+// Product citations (path:line) are read at seaweed-block
+// 14dff69b0f7cc139f9bde7849dec6ab34063c947; re-read them when the runner's
+// product pin moves.
 
 import (
 	"encoding/json"
@@ -65,7 +69,7 @@ const (
 // opRefusals are the codes refused for one operation only: the same code
 // comes from other operations, or from other paths of this one, after a
 // state change, and is unknown there. A rule sees the error message; nil
-// means every answer with the code. Product paths are on branch m1-product.
+// means every answer with the code.
 //
 // Kept unknown on purpose (each can follow a change):
 //   - snapshot: every refusal. The name rides on a cut that commits first,
@@ -84,7 +88,7 @@ const (
 //     ErrExists), and the target name stays bound.
 //   - release: conflict. A target without HEAD gets its tombstone first;
 //     only then can the source's update lose (layout/delete.go:243-259).
-//   - snapshot_exists, snapshot_deleting: no product code on m1-product
+//   - snapshot_exists, snapshot_deleting: no product code at the pinned commit
 //     emits them (only core/frontend/chunkstore/control_types.go:44,46
 //     defines them), so there is no path to show they change nothing.
 var opRefusals = map[string]map[string]func(message string) bool{
@@ -172,13 +176,40 @@ func chunkOutcome(op, stdout string, code int) (string, string) {
 	return "unknown", e.Code + ": " + e.Message
 }
 
-// wsOutcome maps `sw-block ops workspace` exit codes: 0 ok; 1, 2, 5 refused;
-// 3 and 4 (and anything else) unknown.
-func wsOutcome(code int) string {
-	switch code {
-	case 0:
+// The runner operations that issue `sw-block ops workspace` commands.
+const (
+	wsStop = "stop" // revoke, inside the planned stop (handOver)
+	wsMove = "move" // revoke inside handOver, then move --clean
+)
+
+// wsRefusals are the `sw-block ops workspace` exits refused per runner
+// operation. The CLI's own exits say its one command did nothing: 1 "the
+// master refused; nothing moved", 2 "bad usage or confirmation; no RPC was
+// sent", 5 "blockmaster did not accept this caller; nothing was done"
+// (cmd/sw-block/workspace.go:17-22). But no runner operation is that one
+// command: both run the planned hand-over first (handOver in ops.go: guest
+// disconnect, then `ops chunk detach --plain`, which seals HEAD and answers
+// the sealed generation (cmd/sw-block/chunk_plain.go:35; core/frontend/
+// durable/provider_chunk.go:1209-1221), then the revoke). So:
+//   - stop: a revoke exit 1, 2 or 5 comes after the seal: unknown.
+//   - move: a revoke exit comes after the seal, and a move --clean exit
+//     after the seal, the revoke, the holder's exit and the recorded ACK
+//     (the planned order, workspace.go:46-48): unknown.
+//
+// The sets are empty on purpose. An operation that issues a workspace command
+// as its first write would add its exits here, with that evidence.
+var wsRefusals = map[string]map[int]bool{
+	wsStop: {},
+	wsMove: {},
+}
+
+// wsOutcome maps one runner operation's `sw-block ops workspace` exit: 0 ok;
+// an exit in the operation's wsRefusals refused; anything else unknown.
+func wsOutcome(op string, code int) string {
+	if code == 0 {
 		return "ok"
-	case 1, 2, 5:
+	}
+	if wsRefusals[op][code] {
 		return "refused"
 	}
 	return "unknown"

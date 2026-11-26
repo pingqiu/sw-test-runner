@@ -699,7 +699,7 @@ func v3OpRelease(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 // --plain, revoke with the sealed generation, wait for the holder to exit by
 // itself, and wait for the master's recorded ACK of (replica, epoch). It
 // returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[string]any, string) {
+func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
 	res := map[string]any{"epoch": v.Epoch}
 	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
 		return res, why
@@ -718,7 +718,7 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[stri
 	}
 	res["sealed_gen"] = gen
 	out, errOut, code, err := e.workspace(ctx, node, v.Name, "revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-	if err != nil || wsOutcome(code) != tr.OutcomeOK {
+	if err != nil || wsOutcome(op, code) != tr.OutcomeOK {
 		res["revoke_exit"] = code
 		return res, "revoke: " + firstLine(out+" "+errOut)
 	}
@@ -751,7 +751,7 @@ func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	}
 	defer saveVolume(actx, v)
 	return record(actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v)
+		res, why := e.handOver(ctx, node, v, wsStop)
 		if why != "" {
 			res["detail"] = why
 			return tr.OutcomeUnknown, res
@@ -777,7 +777,7 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
 	defer saveVolume(actx, v)
 	return record(actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v)
+		res, why := e.handOver(ctx, node, v, wsMove)
 		if why != "" {
 			res["detail"] = "stop: " + why
 			return tr.OutcomeUnknown, res
@@ -788,7 +788,9 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			return fail(err.Error())
 		}
 		res["exit"] = code
-		if r := wsOutcome(code); r != tr.OutcomeOK {
+		// Never refused: the hand-over above already sealed and revoked
+		// (wsRefusals). The exit is recorded for the reader.
+		if r := wsOutcome(wsMove, code); r != tr.OutcomeOK {
 			res["detail"] = firstLine(out + " " + errOut)
 			return r, res
 		}

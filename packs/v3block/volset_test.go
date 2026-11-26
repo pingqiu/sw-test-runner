@@ -64,7 +64,8 @@ func TestVolumeSetChunkOutcome(t *testing.T) {
 }
 
 func TestVolumeSetWsOutcome(t *testing.T) {
-	want := map[int]string{0: "ok", 1: "refused", 2: "refused", 3: "unknown", 4: "unknown", 5: "refused", 9: "unknown", -1: "unknown"}
+	// Red control: 1, 2 and 5 stay unknown; the move sealed HEAD before them.
+	want := map[int]string{0: "ok", 1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 5: "unknown", 9: "unknown", -1: "unknown"}
 	for code, w := range want {
 		if got := setWsOutcome(code); got != w {
 			t.Errorf("exit %d: %s, want %s", code, got, w)

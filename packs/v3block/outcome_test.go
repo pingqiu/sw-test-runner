@@ -166,11 +166,37 @@ func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
 	}
 }
 
+// Per runner operation. Red control: the CLI's "nothing done" exits 1, 2 and
+// 5 stay unknown for stop and move, which sealed HEAD before the command.
 func TestWsOutcome(t *testing.T) {
-	want := map[int]string{0: "ok", 1: "refused", 2: "refused", 3: "unknown", 4: "unknown", 5: "refused", 9: "unknown", -1: "unknown"}
-	for code, w := range want {
-		if got := wsOutcome(code); got != w {
-			t.Errorf("exit %d: %s, want %s", code, got, w)
+	want := map[int]string{0: "ok", 1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 5: "unknown", 9: "unknown", -1: "unknown"}
+	for _, op := range []string{wsStop, wsMove, "", "other"} {
+		for code, w := range want {
+			if got := wsOutcome(op, code); got != w {
+				t.Errorf("%q exit %d: %s, want %s", op, code, got, w)
+			}
+		}
+	}
+}
+
+// The delete sentinel fails safe: any change to the product's text makes the
+// answer unknown, never refused.
+func TestDeleteSentinelFailsSafe(t *testing.T) {
+	const prefix = "layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: "
+	body := func(msg string) string { return `{"code":"not_admitted","message":"` + msg + `","retryable":false}` }
+	if got, _ := chunkOutcome(chunkVolumeDelete, body(prefix+refusedBeforeChange+": live until T"), 1); got != tr.OutcomeRefused {
+		t.Fatalf("the sentinel as the product writes it: %s, want refused", got)
+	}
+	for _, changed := range []string{
+		"workspace: deletion refused before persisting",
+		"workspace: Deletion refused before persistence",
+		"workspace:  deletion refused before persistence",
+		"workspace: deletion was refused before persistence",
+		"deletion refused before persistence", // without its "workspace: " prefix
+		"",
+	} {
+		if got, _ := chunkOutcome(chunkVolumeDelete, body(prefix+changed+": live until T"), 1); got != tr.OutcomeUnknown {
+			t.Errorf("changed text %q: %s, want unknown", changed, got)
 		}
 	}
 }
