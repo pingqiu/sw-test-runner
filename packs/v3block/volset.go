@@ -14,6 +14,8 @@ package v3block
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,7 +50,8 @@ type vsVolume struct {
 	Cur      int               `json:"cur"`   // index of the host serving now
 	PID      string            `json:"pid,omitempty"`
 	Epoch    uint64            `json:"epoch,omitempty"`
-	Expect   map[string]string `json:"expect,omitempty"` // lba -> sha256 of the last acknowledged write
+	Expect   map[string][]string `json:"expect,omitempty"`  // lba -> the sha256 values the block may hold
+	Deleted  map[string]bool     `json:"deleted,omitempty"` // snapshots deleted by an earlier step
 	Moved    bool              `json:"moved,omitempty"`
 }
 
@@ -506,10 +509,23 @@ func lbas(blocks uint64) []uint64 {
 	return []uint64{0, blocks / 2, blocks - 1}
 }
 
+// zeroBlockSHA is the sha256 of a 4096-byte zero block: a new volume's content.
+const zeroBlockSHA = "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
+
+// blockSHA is the sha256 of the block a write of tag puts down, computed here
+// so a write whose outcome is unknown still names the value it attempted.
+func blockSHA(tag string) string {
+	b := []byte(strings.Repeat(tag, 4096/len(tag)+1))[:4096]
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // v3VsWrite writes one round of blocks to every volume through its kernel
-// block device (O_DIRECT + fsync: exit 0 means acknowledged and flushed) and
-// records each block's sha256 as expected. A write that fails is unknown: the
-// block may hold either value, so its expectation is dropped. Required: round.
+// block device (O_DIRECT + fsync: exit 0 means acknowledged and flushed). An
+// acknowledged write makes its value the only one the block may hold. A write
+// that fails is unknown: the block may then hold any value it could hold
+// before, or the attempted one, and nothing else (the spec's shadow rule).
+// Required: round.
 func v3VsWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, s, err := vsBegin(actx, act, "v3_vs_write")
 	if err != nil {
@@ -525,7 +541,7 @@ func v3VsWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 			return outcome{Result: "unknown", Detail: why}
 		}
 		if v.Expect == nil {
-			v.Expect = map[string]string{}
+			v.Expect = map[string][]string{}
 		}
 		for _, lba := range lbas(s.Blocks) {
 			tag := blockTag(v.Name, round, lba)
@@ -533,12 +549,16 @@ func v3VsWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 			cmd := fmt.Sprintf("set -o pipefail; %s | tee >(sha256sum | cut -c1-64 >&2) | dd of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc iflag=fullblock status=none", gen, dev, lba)
 			_, stderr, code, err := node.RunRoot(ctx, "bash -c "+shellQuote(cmd))
 			key := strconv.FormatUint(lba, 10)
-			sum := strings.TrimSpace(stderr)
-			if err != nil || code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
-				delete(v.Expect, key)
+			want := blockSHA(tag)
+			if err != nil || code != 0 {
+				v.Expect[key] = unknownWrite(v.Expect[key], want)
 				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: code %d %s", lba, code, firstLine(stderr))}
 			}
-			v.Expect[key] = sum
+			if sum := strings.TrimSpace(stderr); sum != want {
+				v.Expect[key] = unknownWrite(v.Expect[key], want)
+				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: the generator wrote %s, not %s", lba, firstLine(sum), want)}
+			}
+			v.Expect[key] = []string{want}
 		}
 		return outcome{Result: "ok"}
 	})
@@ -572,8 +592,8 @@ func v3VsVerify(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			if err != nil || code != 0 {
 				return outcome{Result: "unknown", Detail: fmt.Sprintf("read lba %s: %s", k, firstLine(stderr))}
 			}
-			if got := strings.TrimSpace(stdout); got != v.Expect[k] {
-				return outcome{Result: "refused", Detail: fmt.Sprintf("DATA lba %s sha256 %s, want %s", k, got[:min(16, len(got))], v.Expect[k][:16])}
+			if got := strings.TrimSpace(stdout); !contains(v.Expect[k], got) {
+				return outcome{Result: "refused", Detail: fmt.Sprintf("DATA lba %s sha256 %s, want one of %v", k, got, v.Expect[k])}
 			}
 		}
 		return outcome{Result: "ok"}
@@ -581,9 +601,45 @@ func v3VsVerify(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	return report(actx, act, "v3_vs_verify", outs)
 }
 
+// unknownWrite is what a block may hold after a write of want whose outcome
+// is unknown: whatever it could hold before (zero for a block never written)
+// or want.
+func unknownWrite(before []string, want string) []string {
+	if len(before) == 0 {
+		before = []string{zeroBlockSHA}
+	}
+	if contains(before, want) {
+		return before
+	}
+	return append(append([]string(nil), before...), want)
+}
+
+func contains(set []string, v string) bool {
+	for _, x := range set {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// chunkRefusals are the `sw-block ops chunk` error codes the product states
+// change nothing. The `retryable` flag is about retrying, not about effect
+// (detach_aborted is retryable and applied nothing; outcome_unknown is
+// retryable and may have applied), so it decides nothing here.
+var chunkRefusals = map[string]bool{
+	// core/host/volume/chunk_control.go chunkErrorCode, ErrDetachAborted:
+	// "nothing was published and serving resumed here".
+	"detach_aborted": true,
+	// cmd/sw-block/chunk.go: bad usage or a local start check, answered
+	// before the operation is sent (chunkFail with VolumeStatusExitInvalid).
+	"bad_request": true,
+}
+
 // chunkOutcome maps an `sw-block ops chunk` exit and its JSON error body to
-// an outcome: exit 0 ok; a non-retryable error body refused; a retryable
-// one, an unreadable body, or no answer unknown.
+// an outcome: exit 0 ok; a code in chunkRefusals refused; every other answer,
+// outcome_unknown included whatever its flag says, unknown, for a read of the
+// state to decide.
 func chunkOutcome(stdout string, code int) (string, string) {
 	if code == 0 {
 		return "ok", ""
@@ -596,10 +652,10 @@ func chunkOutcome(stdout string, code int) (string, string) {
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
 		return "unknown", fmt.Sprintf("exit %d without an error body", code)
 	}
-	if e.Retryable {
-		return "unknown", e.Code + ": " + e.Message
+	if chunkRefusals[e.Code] {
+		return "refused", e.Code + ": " + e.Message
 	}
-	return "refused", e.Code + ": " + e.Message
+	return "unknown", e.Code + ": " + e.Message
 }
 
 // v3VsSnapshot takes a named snapshot of every volume. Required: name.
@@ -636,16 +692,34 @@ func v3VsSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		return nil, errors.New("v3_vs_snapshot_delete: name is required")
 	}
 	outs := s.forEach(ctx, s.selectVolumes(act), func(ctx context.Context, v *vsVolume) outcome {
-		cmd := fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
-			shellQuote(v.Name), shellQuote(name), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath))
-		stdout, _, code, err := node.Run(ctx, cmd)
-		if err != nil {
-			return outcome{Result: "unknown", Detail: err.Error()}
+		if v.Deleted[name] {
+			return outcome{Result: "ok", Detail: "deleted by an earlier step"}
 		}
-		r, d := chunkOutcome(stdout, code)
+		r, d := s.snapshotDelete(ctx, node, v, name)
 		return outcome{Result: r, Detail: d}
 	})
+	s.save(actx)
 	return report(actx, act, "v3_vs_snapshot_delete", outs)
+}
+
+// snapshotDelete is one `ops chunk snapshot-delete`: an operator write of
+// HEAD (MoveAdmission.OpWrite). It reaches the store directly, so it works
+// while the volume is stopped.
+func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, name string) (string, string) {
+	cmd := fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
+		shellQuote(v.Name), shellQuote(name), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath))
+	stdout, _, code, err := node.Run(ctx, cmd)
+	if err != nil {
+		return "unknown", err.Error()
+	}
+	r, d := chunkOutcome(stdout, code)
+	if r == "ok" {
+		if v.Deleted == nil {
+			v.Deleted = map[string]bool{}
+		}
+		v.Deleted[name] = true
+	}
+	return r, d
 }
 
 // layoutVolumeDir is the volume's directory in the filer: <name>-<id8>.
@@ -881,7 +955,14 @@ func parseDetach(stdout, stderr, vol string, epoch uint64) (uint64, error) {
 }
 
 // showsAck reports whether `ops workspace show` reports the recorded ACK of
-// r1 at epoch for generation gen.
+// r1 at epoch for generation gen, the generation the source sealed. The ACK
+// is the source's own report of its seal, so a later operator write of HEAD
+// does not change it.
+//
+// Valid for this scripted hand-over only: binding steps by a HEAD generation
+// holds while nothing else writes HEAD between them, which the product itself
+// does not rely on (the master admits a clean move by epoch, holder and
+// position). Do not reuse showsAck or parseMoved in a generator.
 func showsAck(out string, epoch, gen uint64) bool {
 	want := fmt.Sprintf("recorded ACK: r1@%d HEAD generation %d", epoch, gen)
 	for _, l := range strings.Split(out, "\n") {
@@ -893,18 +974,48 @@ func showsAck(out string, epoch, gen uint64) bool {
 }
 
 // parseMoved reads the new epoch from a clean move's first line, bound to the
-// volume, its request, the old epoch, the target and the sealed generation.
-func parseMoved(out, vol, request string, epoch, gen uint64, target string) (uint64, error) {
+// volume, its request, the old epoch and the target. The generation it names
+// is HEAD's at the move: the sealed one, or a later one when an operator
+// write (a snapshot delete, a cleaning) moved HEAD after the stop. So it must
+// be at least the sealed generation, and the answer must also equal what
+// `ops chunk show` reads of HEAD just before the move (headGen); see showsAck
+// for the limits of binding by generation.
+func parseMoved(out, vol, request string, epoch, sealedGen, headGen uint64, target string) (uint64, error) {
 	first, _, _ := strings.Cut(out, "\n")
 	m := reMoved.FindStringSubmatch(strings.TrimRight(first, "\r"))
-	if m == nil || m[1] != vol || m[2] != request || m[3] != strconv.FormatUint(epoch, 10) || m[5] != target || m[6] != strconv.FormatUint(gen, 10) {
-		return 0, fmt.Errorf("clean move answer %q does not confirm %s %s r1@%d gen %d -> %s", firstLine(out), vol, request, epoch, gen, target)
+	if m == nil || m[1] != vol || m[2] != request || m[3] != strconv.FormatUint(epoch, 10) || m[5] != target {
+		return 0, fmt.Errorf("clean move answer %q does not confirm %s %s r1@%d -> %s", firstLine(out), vol, request, epoch, target)
+	}
+	g, _ := strconv.ParseUint(m[6], 10, 64)
+	if g < sealedGen || g != headGen {
+		return 0, fmt.Errorf("clean move names HEAD gen %d; want HEAD's gen %d read before the move, at least the sealed %d", g, headGen, sealedGen)
 	}
 	e2, _ := strconv.ParseUint(m[4], 10, 64)
 	if e2 <= epoch {
 		return 0, fmt.Errorf("clean move to epoch %d, not above %d", e2, epoch)
 	}
 	return e2, nil
+}
+
+// headGen reads HEAD's generation with `ops chunk show` (store direct).
+func (s *vsSet) headGen(ctx context.Context, node runner, vol string) (uint64, string) {
+	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
+		shellQuote(vol), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath)))
+	if err != nil {
+		return 0, err.Error()
+	}
+	if r, d := chunkOutcome(stdout, code); r != "ok" {
+		return 0, "show " + r + ": " + d
+	}
+	var body struct {
+		Head *struct {
+			Gen uint64 `json:"Gen"`
+		} `json:"head"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) != nil || body.Head == nil || body.Head.Gen == 0 {
+		return 0, "show answer has no HEAD generation"
+	}
+	return body.Head.Gen, ""
 }
 
 // wsOutcome maps `sw-block ops workspace` exit codes: 0 ok; 1, 2, 5 refused;
@@ -924,6 +1035,10 @@ func wsOutcome(code int) string {
 // --plain; revoke with the sealed generation; wait for the source to exit by
 // itself; show until the recorded ACK; move --clean; start on the target and
 // connect. The freeze is from the detach to the target serving.
+//
+// Optional: op_write_snapshot names a snapshot that the FIRST moved volume
+// deletes after its ACK and before its move (an operator write of HEAD
+// between the stop and the clean move).
 func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, s, err := vsBegin(actx, act, "v3_vs_move")
 	if err != nil {
@@ -932,8 +1047,10 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if optionalParam(act, "first") == "" {
 		act.Params["first"] = "10"
 	}
+	opWrite := optionalParam(act, "op_write_snapshot")
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 90)) * time.Second
-	outs := s.forEach(ctx, s.selectVolumes(act), func(ctx context.Context, v *vsVolume) outcome {
+	sel := s.selectVolumes(act)
+	outs := s.forEach(ctx, sel, func(ctx context.Context, v *vsVolume) outcome {
 		if v.Moved || v.Cur != 0 {
 			return outcome{Result: "refused", Detail: "already moved"}
 		}
@@ -971,13 +1088,27 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if !acked {
 			return outcome{Result: "unknown", Detail: fmt.Sprintf("no recorded ACK of r1@%d gen %d", v.Epoch, gen)}
 		}
+		// An operator write of HEAD between the stop and the move: the clean
+		// move must still be admitted (MoveAdmission.WitCleanAfterOpWrite).
+		if opWrite != "" && v.Name == s.Volumes[sel[0]].Name {
+			if r, d := s.snapshotDelete(ctx, node, v, opWrite); r != "ok" {
+				return outcome{Result: r, Detail: "snapshot delete between the stop and the move: " + d}
+			}
+		}
+		hg, why := s.headGen(ctx, node, v.Name)
+		if why != "" {
+			return outcome{Result: "unknown", Detail: why}
+		}
+		if opWrite != "" && v.Name == s.Volumes[sel[0]].Name && hg <= gen {
+			return outcome{Result: "unknown", Detail: fmt.Sprintf("the snapshot delete did not move HEAD past the sealed gen %d (HEAD gen %d)", gen, hg)}
+		}
 		req := v.Name + "-move-1"
 		stdout, stderr, code, err = ws("move", "--clean", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10),
 			"--target-host", dst.Server, "--target-data", dst.Data, "--target-ctrl", dst.Ctrl, "--request-id", req)
 		if err != nil || wsOutcome(code) != "ok" {
 			return outcome{Result: wsOutcomeOr(err, code), Detail: "move: " + firstLine(stdout+" "+stderr)}
 		}
-		e2, perr := parseMoved(stdout, v.Name, req, v.Epoch, gen, dst.Server)
+		e2, perr := parseMoved(stdout, v.Name, req, v.Epoch, gen, hg, dst.Server)
 		if perr != nil {
 			return outcome{Result: "unknown", Detail: perr.Error()}
 		}

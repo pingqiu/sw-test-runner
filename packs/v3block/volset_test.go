@@ -40,11 +40,17 @@ func TestChunkOutcome(t *testing.T) {
 		want      string
 	}{
 		{"ok", `{"name":"s1"}`, 0, "ok"},
-		{"refused", `{"code":"snapshot_has_dependents","message":"x","retryable":false}`, 1, "refused"},
-		{"retryable is unknown", `{"code":"remote_unavailable","message":"x","retryable":true}`, 1, "unknown"},
+		// Refused only where the product states nothing was applied.
+		{"detach aborted, retryable, applied nothing", `{"code":"detach_aborted","message":"x","retryable":true}`, 1, "refused"},
+		{"usage, before the request", `{"code":"bad_request","message":"x","retryable":false}`, 2, "refused"},
+		// The product's own unknown stays unknown whatever its flag says.
+		{"outcome unknown, retryable", `{"code":"outcome_unknown","message":"x","retryable":true}`, 1, "unknown"},
+		{"outcome unknown, not retryable", `{"code":"outcome_unknown","message":"x","retryable":false}`, 1, "unknown"},
+		// No stated "not applied": unknown, a read of the state decides.
+		{"non-retryable without a guarantee", `{"code":"layout_refused","message":"x","retryable":false}`, 1, "unknown"},
+		{"retryable", `{"code":"remote_unavailable","message":"x","retryable":true}`, 1, "unknown"},
 		{"no body", ``, 1, "unknown"},
 		{"body without a code", `{"message":"x"}`, 1, "unknown"},
-		{"usage exit", `{"code":"bad_request","message":"x","retryable":false}`, 2, "refused"},
 	} {
 		if got, _ := chunkOutcome(c.out, c.code); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
@@ -97,25 +103,51 @@ func TestShowsAck(t *testing.T) {
 
 func TestParseMoved(t *testing.T) {
 	line := "clean move issued: volume v001 request v001-move-1: r1@2 -> r1@3 on b-v001 (sealed HEAD gen 7, remote LSN 4)\nnext: start volume v001 on b-v001\n"
-	if e, err := parseMoved(line, "v001", "v001-move-1", 2, 7, "b-v001"); err != nil || e != 3 {
+	if e, err := parseMoved(line, "v001", "v001-move-1", 2, 7, 7, "b-v001"); err != nil || e != 3 {
 		t.Fatalf("good move: %d %v", e, err)
 	}
+	// An operator write after the stop moved HEAD from 7 to 8: the move names
+	// HEAD's generation at the move and is still a clean move.
+	afterOpWrite := strings.Replace(line, "gen 7", "gen 8", 1)
+	if e, err := parseMoved(afterOpWrite, "v001", "v001-move-1", 2, 7, 8, "b-v001"); err != nil || e != 3 {
+		t.Fatalf("move after an operator write: %d %v", e, err)
+	}
 	for name, args := range map[string]struct {
-		vol, req, target string
-		epoch, gen       uint64
+		vol, req, target    string
+		epoch, sealed, head uint64
 	}{
-		"another volume":  {"v002", "v001-move-1", "b-v001", 2, 7},
-		"another request": {"v001", "x", "b-v001", 2, 7},
-		"another target":  {"v001", "v001-move-1", "a-v001", 2, 7},
-		"another epoch":   {"v001", "v001-move-1", "b-v001", 1, 7},
-		"another gen":     {"v001", "v001-move-1", "b-v001", 2, 6},
+		"another volume":             {"v002", "v001-move-1", "b-v001", 2, 7, 7},
+		"another request":            {"v001", "x", "b-v001", 2, 7, 7},
+		"another target":             {"v001", "v001-move-1", "a-v001", 2, 7, 7},
+		"another epoch":              {"v001", "v001-move-1", "b-v001", 1, 7, 7},
+		"below the sealed gen":       {"v001", "v001-move-1", "b-v001", 2, 8, 7},
+		"not HEAD's gen at the move": {"v001", "v001-move-1", "b-v001", 2, 7, 8},
 	} {
-		if _, err := parseMoved(line, args.vol, args.req, args.epoch, args.gen, args.target); err == nil {
+		if _, err := parseMoved(line, args.vol, args.req, args.epoch, args.sealed, args.head, args.target); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := parseMoved(strings.Replace(line, "r1@3", "r1@2", 1), "v001", "v001-move-1", 2, 7, "b-v001"); err == nil {
+	if _, err := parseMoved(strings.Replace(line, "r1@3", "r1@2", 1), "v001", "v001-move-1", 2, 7, 7, "b-v001"); err == nil {
 		t.Error("a move to the same epoch was accepted")
+	}
+}
+
+// A write whose outcome is unknown leaves the block's earlier values or the
+// attempted one, nothing else; an acknowledged write leaves only its value.
+func TestUnknownWriteKeepsTheSet(t *testing.T) {
+	a, b := blockSHA("v001|r1|0|"), blockSHA("v001|r2|0|")
+	if got := unknownWrite(nil, a); len(got) != 2 || got[0] != zeroBlockSHA || got[1] != a {
+		t.Fatalf("first write unknown: %v", got)
+	}
+	got := unknownWrite([]string{a}, b)
+	if !contains(got, a) || !contains(got, b) || contains(got, zeroBlockSHA) || len(got) != 2 {
+		t.Fatalf("after an acknowledged write, an unknown one: %v", got)
+	}
+	if contains(got, blockSHA("garbage")) {
+		t.Fatal("another content is allowed")
+	}
+	if z := blockSHA(strings.Repeat("\x00", 8)); z != zeroBlockSHA {
+		t.Fatalf("zeroBlockSHA %s, a zero block hashes to %s", zeroBlockSHA, z)
 	}
 }
 

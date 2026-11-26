@@ -198,9 +198,12 @@ phases:
 
   - name: planned-moves
     actions:
+      # The first moved volume deletes snapshot s1 between its stop and its
+      # clean move: an operator write of HEAD the move must still admit.
       - action: v3_vs_move
         node: host
         first: "{{ move_count }}"
+        op_write_snapshot: s1
         save_as: freeze
         ready_seconds: "120"
       - action: v3_vs_serving
