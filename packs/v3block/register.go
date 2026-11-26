@@ -65,6 +65,8 @@ func RegisterPack(r *tr.Registry) {
 		"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,
 		"v3_op_release": v3OpRelease, "v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete,
 		"v3_op_observe": v3OpObserve,
+		// Process faults (faults.go): kill and restart by recorded identity, and the healthy observation.
+		"v3_op_kill": v3OpKill, "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	} {
 		r.RegisterFunc(name, tr.TierBlock, f)
 	}

@@ -120,30 +120,9 @@ func opParam(act tr.Action, actx *tr.ActionContext, k string) string {
 // opBegin reads the shared configuration and the volume, and refuses to run
 // without a history to record into.
 func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv, *opVolume, error) {
-	if actx.History == nil {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
-	}
-	node, err := actions.GetNode(actx, act.Node)
+	node, e, err := opConfig(actx, act, name)
 	if err != nil {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: %w", name, err)
-	}
-	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
-		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
-		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
-		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
-	if e.expect != "" && e.expect != tr.OutcomeRefused {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
-	}
-	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
-		if strings.Contains(f, "{{") {
-			return nil, opEnv{}, nil, fmt.Errorf("%s: unresolved configuration %q", name, f)
-		}
-	}
-	if e.client == "" {
-		e.client = "c1"
-	}
-	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
+		return nil, opEnv{}, nil, err
 	}
 	vol := requireParam(act, actx, "volume")
 	if vol == "" {
@@ -154,6 +133,37 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 		return nil, opEnv{}, nil, fmt.Errorf("%s: %w", name, err)
 	}
 	return node, e, v, nil
+}
+
+// opConfig is opBegin without a volume: the node and the shared configuration,
+// for the operations on a process rather than a volume (faults.go).
+func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv, error) {
+	if actx.History == nil {
+		return nil, opEnv{}, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
+	}
+	node, err := actions.GetNode(actx, act.Node)
+	if err != nil {
+		return nil, opEnv{}, fmt.Errorf("%s: %w", name, err)
+	}
+	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
+		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
+		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
+		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
+	if e.expect != "" && e.expect != tr.OutcomeRefused {
+		return nil, opEnv{}, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
+	}
+	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
+		if strings.Contains(f, "{{") {
+			return nil, opEnv{}, fmt.Errorf("%s: unresolved configuration %q", name, f)
+		}
+	}
+	if e.client == "" {
+		e.client = "c1"
+	}
+	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
+		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
+	}
+	return node, e, nil
 }
 
 // record runs one operation between its invoke and complete records.
@@ -240,6 +250,8 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		fmt.Fprintf(&vols, "  - id: %s\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", name, v.Hosts[0].Server)
 		saveVolume(actx, v)
 	}
+	// The spec's order: blockvolume:<i> of the process faults is volume i here.
+	actx.Vars[specOrderVar] = strings.Join(names, " ")
 	cmd := fmt.Sprintf("mkdir -p %s && cat > %s <<'V3OP_SPEC_EOF'\nnodes:\n%svolumes:\n%sV3OP_SPEC_EOF\n", shellQuote(dirOf(path)), shellQuote(path), nodes.String(), vols.String())
 	if _, stderr, code, err := node.Run(ctx, cmd); err != nil || code != 0 {
 		return nil, fmt.Errorf("v3_op_spec: write %s: %s %v", path, firstLine(stderr), err)
@@ -360,6 +372,15 @@ func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
 //     recorded epoch, AND the status and NVMe listeners are held by it;
 //   - only then is the kernel host connected, to this run's NQN.
 func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
+	return e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
+}
+
+// launchHolder is startHolder with the command line given. A restart
+// (faults.go: the command line of a killed holder, as it ran) is ready at the
+// recorded epoch or above, and connects the kernel host only when no
+// controller of the volume's NQN is left: the kernel reconnects the one a
+// killed holder left behind by itself.
+func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsHost, argv []string, bound time.Duration, restart bool) (string, map[string]any) {
 	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
 	held, err := listenerPIDs(ctx, node, ports)
 	if err != nil {
@@ -378,7 +399,7 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 		return fail("mkdir")
 	}
 	logPath := fmt.Sprintf("%s/%s.%d.log", e.root, h.Server, time.Now().UnixNano())
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s %s >%s 2>&1 </dev/null & echo $!", shellQuote(e.bin+"/blockvolume"), strings.Join(quoteAll(e.volumeArgs(v, h, blocks)), " "), shellQuote(logPath)))
+	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s >%s 2>&1 </dev/null & echo $!", strings.Join(quoteAll(argv), " "), shellQuote(logPath)))
 	pid := strings.TrimSpace(stdout)
 	if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return fail("start: " + firstLine(stderr))
@@ -401,14 +422,25 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 			res["detail"] = "blockvolume exited before serving"
 			return tr.OutcomeUnknown, res
 		case procRunning:
-			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && st.Epoch > v.Epoch {
+			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && (st.Epoch > v.Epoch || restart && st.Epoch == v.Epoch) {
 				owners, err := listenerPIDs(ctx, node, []string{portOf(h.Status), portOf(h.NVMe)})
 				if err == nil && contains(owners[portOf(h.Status)], pid) && contains(owners[portOf(h.NVMe)], pid) {
 					v.Epoch, res["epoch"] = st.Epoch, st.Epoch
+					connect := true
+					if restart {
+						state, _, why := nvmeScan(ctx, node, v.NQN)
+						if state == nvmeUnreadable {
+							res["detail"] = why
+							return tr.OutcomeUnknown, res
+						}
+						connect = state == nvmeAbsent
+					}
 					host, port, _ := strings.Cut(h.NVMe, ":")
-					if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
-						res["detail"] = why
-						return tr.OutcomeUnknown, res
+					if connect {
+						if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
+							res["detail"] = why
+							return tr.OutcomeUnknown, res
+						}
 					}
 					dev, why := deviceOf(ctx, node, v.NQN, 20*time.Second)
 					if why != "" {
