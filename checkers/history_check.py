@@ -58,6 +58,16 @@ code is 0 only when every checker passes.
       a missing HEAD (the tombstone keeps a later volume of the same name out
       of this directory). In v1 a create of that name afterwards is refused
       (FailedPrecondition: the master keeps the name's deletion reservation).
+  DUR durability with flush: a write is durable once acknowledged with its
+      fsync (a write record without "flush": false), or once a later flush
+      of its volume is acknowledged; a flush with outcome unknown makes
+      nothing durable. After a process kill (verb kill, not refused) a block
+      may read only its last durable value or the value of a write invoked
+      after it up to the kill; anything else FAILS (an older value, content
+      no write produced, ZERO when a durable write exists). A lost
+      acknowledged unflushed write is a PASS, counted ("acknowledged, not
+      flushed, lost: n"). Without a kill, C1's rule judged the same way.
+      No kill and no unflushed write: FAIL (not exercised)
 
 A fault is an operation of module Runner (verbs fault_apply and fault_restore,
 args fault_key, resource, vm_id), never a record kind of its own. A fault is
@@ -665,7 +675,157 @@ def c5(recs):
     return {'verdict': 'PASS', 'findings': report + notes}
 
 
-CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C7': c7}
+def flushed(args):
+    """A write record without a flush key, or with "flush": true, was issued
+    with the fsync; "flush": false was not. Anything else is not a record the
+    runner writes."""
+    f = args.get('flush', True)
+    if f is not True and f is not False:
+        raise TypeError('write flush %r' % (f,))
+    return f
+
+
+def killed(inv, comp):
+    """A process kill counts unless it was refused (an unknown kill may have
+    killed)."""
+    return inv['verb'] == 'kill' and (comp is None or comp['outcome'] != 'refused')
+
+
+@unknown_on_overlap
+def dur(recs):
+    """Durability with flush. Per volume and block:
+      durable   the values the last durable write may have left: a flushed
+                write acknowledged (ok), or the writes since the previous
+                durable state once a flush of the same volume is acknowledged
+                (from the last acknowledged write on; with none acknowledged,
+                added to the previous durable values). A flush with outcome
+                unknown or refused makes nothing durable.
+      volatile  every write completed (ok or unknown) since the durable state.
+      may hold  what a read may return, C1's shadow: an ok write its value
+                only, an unknown write adds its value for good.
+    A kill (verb kill, outcome not refused, applied at its invoke; it is not
+    mapped to volumes, so it applies to every volume) sets each block's may
+    hold, and its durable values, to durable | volatile: the last durable
+    value or any write invoked after it up to the kill. A read outside its
+    block's may hold FAILS; after a kill the finding says which: ZERO although
+    a durable write exists, content no write produced, or an older value than
+    the last durable one. On the first read of a block after a kill, every
+    acknowledged unflushed write after the value read is counted lost (a PASS,
+    reported). Without a kill this is C1's rule, judged the same way here: and
+    every written block is read after its last write. No kill and no
+    unflushed write: FAIL, not exercised."""
+    ops_ = operations(recs)
+    comp_of = {inv['seq']: comp for inv, comp in ops_}
+    nkills = sum(1 for inv, comp in ops_ if killed(inv, comp))
+    nunflushed = sum(1 for inv, _ in ops_ if inv['verb'] == 'write' and not flushed(inv.get('args') or {}))
+    if not nkills and not nunflushed:
+        return verdict(['no kill and no unflushed write in the history: DUR not exercised'])
+    _, _, images = replay(recs)
+    base = {}    # volume -> {lba: set}, a restore target's initial content
+    st = {}      # (volume, lba) -> block state
+    inv_of = {}
+    f, lost, unread_after_kill, judged_after_kill = [], 0, 0, 0
+    last_write, last_read = {}, {}
+
+    def block(vol, lba):
+        b = st.get((vol, lba))
+        if b is None:
+            init = set(base.get(vol, {}).get(lba, {ZERO}))
+            b = st[(vol, lba)] = {'durable': init, 'volatile': [], 'cur': set(init), 'pending': set(),
+                                  'produced': set(init), 'kill': None}
+        return b
+
+    def drop_kill(b):
+        # A block whose kill was never resolved by a read: its acknowledged
+        # unflushed writes are neither lost nor kept as far as the history shows.
+        nonlocal unread_after_kill
+        if b['kill'] is not None and any(ack for _, ack in b['kill'][2]):
+            unread_after_kill += 1
+        b['kill'] = None
+
+    for i, r in enumerate(recs):
+        if r['kind'] == 'invoke':
+            inv_of[r['seq']] = r
+            if killed(r, comp_of.get(r['seq'])):
+                for b in st.values():
+                    drop_kill(b)
+                    allowed = b['durable'] | {s for s, _ in b['volatile']}
+                    b['kill'] = (r['seq'], set(b['durable']), list(b['volatile']))
+                    b['cur'], b['pending'], b['durable'], b['volatile'] = set(allowed), set(), set(allowed), []
+            continue
+        if r['kind'] != 'complete':
+            continue
+        inv = inv_of[r['of']]
+        verb, out, vol, args = inv['verb'], r['outcome'], inv.get('volume'), inv.get('args') or {}
+        if verb == 'write' and out in ('ok', 'unknown'):
+            sha, fl = args['sha256'], flushed(args)
+            b = block(vol, args['lba'])
+            drop_kill(b)
+            b['produced'].add(sha)
+            if out == 'ok':
+                b['cur'] = {sha}
+            else:
+                b['cur'].add(sha)
+                b['pending'].add(sha)
+            if fl and out == 'ok':
+                b['durable'], b['volatile'] = {sha}, []
+            else:
+                b['volatile'].append((sha, out == 'ok'))   # ok here is acknowledged and NOT flushed
+            last_write[(vol, args['lba'])] = i
+        elif verb == 'flush' and out == 'ok':
+            for (v, _), b in st.items():
+                if v != vol or not b['volatile']:
+                    continue
+                vals = [s for s, _ in b['volatile']]
+                acked = [k for k, (_, ack) in enumerate(b['volatile']) if ack]
+                b['durable'] = set(vals[acked[-1]:]) if acked else b['durable'] | set(vals)
+                b['volatile'] = []
+        elif verb == 'restore' and out == 'ok':
+            base[vol] = images.get(r['seq']) or {}
+            for key in [k for k in st if k[0] == vol]:
+                del st[key]
+        elif verb == 'read' and out == 'ok':
+            lba = args['lba']
+            b = block(vol, lba)
+            got = (r.get('result') or {}).get('sha256')
+            allowed = b['cur'] | b['pending']
+            k = b['kill']
+            if got not in allowed:
+                if k is None:
+                    f.append('read %s lba %d seq %d returned %s, not one of %s' % (vol, lba, inv['seq'], got, sorted(allowed)))
+                else:
+                    if got == ZERO:
+                        why = 'ZERO although a durable write exists'
+                    elif got not in b['produced']:
+                        why = 'content no write produced'
+                    else:
+                        why = 'an older value than the last durable one'
+                    f.append('after the kill at seq %d, read %s lba %d seq %d returned %s: %s (allowed %s)' % (k[0], vol, lba, inv['seq'], got, why, sorted(allowed)))
+            elif k is not None:
+                vlist = k[2]
+                at = max((n for n, (s, _) in enumerate(vlist) if s == got), default=-1)
+                lost += sum(1 for _, ack in vlist[at + 1:] if ack)
+            if k is not None:
+                judged_after_kill += 1
+                b['kill'] = None
+            last_read[(vol, lba)] = i
+    for b in st.values():
+        drop_kill(b)
+    if nkills:
+        if not judged_after_kill:
+            f.append('%d kill(s), no block read after any of them: the durability rule judged nothing' % nkills)
+    else:
+        # C1's rule without a kill: every written block is read after its last write.
+        unread = sorted(key for key, w in last_write.items() if last_read.get(key, -1) < w)
+        if unread:
+            f.append('written, never read afterwards: %d (%s)' % (len(unread), ', '.join('%s lba %d' % key for key in unread[:8])))
+    notes = ['acknowledged, not flushed, lost: %d' % lost]
+    if unread_after_kill:
+        notes.append('acknowledged, not flushed, not read after the kill: %d block(s)' % unread_after_kill)
+    return {'verdict': 'FAIL' if f else 'PASS', 'findings': f + notes}
+
+
+CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C7': c7, 'DUR': dur}
 
 
 def check(lines):

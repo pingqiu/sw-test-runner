@@ -31,7 +31,8 @@ var opIDs = map[string]string{
 	"create":          "VolumeCreate.MarkReady",
 	"attach":          "HolderInterface.Start",
 	"write":           "HolderInterface.Write",
-	"read":            "Guest.Read", // a read changes no state; no model has an action for it
+	"read":            "Guest.Read",  // a read changes no state; no model has an action for it
+	"flush":           "Guest.Flush", // the guest's fsync of the device; no model has an action for it yet
 	"snapshot":        "SnapshotRemoval.Commit",
 	"snapshot_delete": "SnapshotRemoval.DeleteSnap",
 	"restore":         "RestoreTarget.CreateHead",
@@ -514,10 +515,48 @@ func parseLBAs(v *opVolume, s string) ([]uint64, error) {
 	return out, nil
 }
 
+// writeCmd is the device write of one block: O_DIRECT, and with flush also
+// conv=fsync (the kernel sends the device a cache flush before dd exits), so
+// exit 0 is acknowledged and flushed. Without flush exit 0 is acknowledged
+// only: the block reached the device, which may still hold it volatile.
+func writeCmd(blk, dev string, lba uint64, flush bool) string {
+	conv := "notrunc"
+	if flush {
+		conv = "fsync,notrunc"
+	}
+	return fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=%s status=none", shellQuote(blk), dev, lba, conv)
+}
+
+// writeArgs is a write's invocation: a write issued without the fsync says
+// so ("flush": false); a flushed write's record is today's, without the key.
+func writeArgs(lba uint64, sha, round string, flush bool) map[string]any {
+	a := map[string]any{"lba": lba, "sha256": sha, "round": round}
+	if !flush {
+		a["flush"] = false
+	}
+	return a
+}
+
+// writeBlock writes the generated block blk at lba of v's device: ok on dd's
+// exit 0, unknown otherwise.
+func writeBlock(ctx context.Context, node runner, v *opVolume, blk string, lba uint64, flush bool) (string, map[string]any) {
+	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
+	if why != "" {
+		return fail(why)
+	}
+	_, stderr, code, err := node.RunRoot(ctx, writeCmd(blk, dev, lba, flush))
+	if err != nil || code != 0 {
+		return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
+	}
+	return tr.OutcomeOK, nil
+}
+
 // v3OpWrite writes one block per lba through the kernel block device (O_DIRECT
 // + fsync: exit 0 is acknowledged and flushed), each its own operation
 // (HolderInterface.Write). The record carries the sha256 of the attempted
-// block; the outcome is ok or unknown. Params: lbas, round.
+// block; the outcome is ok or unknown. Params: lbas, round, flush ("true",
+// the default; "false" issues the write without the fsync and records
+// "flush": false, so it is durable only after a later acknowledged flush).
 func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, e, v, err := opBegin(actx, act, "v3_op_write")
 	if err != nil {
@@ -526,6 +565,14 @@ func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 	round := requireParam(act, actx, "round")
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`).MatchString(round) {
 		return nil, errors.New("v3_op_write: round (1-16 of [A-Za-z0-9_-]) is required")
+	}
+	flush := true
+	switch f := optionalParam(act, "flush"); f {
+	case "", "true":
+	case "false":
+		flush = false
+	default:
+		return nil, fmt.Errorf("v3_op_write: flush %q; want true or false", f)
 	}
 	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
 	if err != nil {
@@ -552,22 +599,49 @@ func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
 		}
 		v.Written[strconv.FormatUint(lba, 10)] = true
-		last, err = record(actx, e, "write", v.Name, map[string]any{"lba": lba, "sha256": want, "round": round}, func() (string, map[string]any) {
-			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-			if why != "" {
-				return fail(why)
-			}
-			_, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc status=none", shellQuote(blk), dev, lba))
-			if err != nil || code != 0 {
-				return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
-			}
-			return tr.OutcomeOK, nil
+		last, err = record(actx, e, "write", v.Name, writeArgs(lba, want, round, flush), func() (string, map[string]any) {
+			return writeBlock(ctx, node, v, blk, lba, flush)
 		})
 		if err != nil {
 			return nil, err
 		}
 	}
 	return last, nil
+}
+
+// flushCmd is fsync(2) of the device: on a block device the kernel sends the
+// device a cache flush and returns only once it is acknowledged. python3 is
+// on the host already (the block generator); exit 0 only after fsync returns.
+func flushCmd(dev string) string {
+	return fmt.Sprintf(`python3 -I -c 'import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)' %s`, dev)
+}
+
+// flushDevice fsyncs v's device: ok on exit 0, unknown otherwise (a failed
+// or unanswered fsync may or may not have flushed; the product has no
+// refusal for it).
+func flushDevice(ctx context.Context, node runner, v *opVolume) (string, map[string]any) {
+	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
+	if why != "" {
+		return fail(why)
+	}
+	_, stderr, code, err := node.RunRoot(ctx, flushCmd(dev))
+	if err != nil || code != 0 {
+		return fail(fmt.Sprintf("fsync exit %d: %s", code, firstLine(stderr)))
+	}
+	return tr.OutcomeOK, map[string]any{"device": dev}
+}
+
+// v3OpFlush flushes the volume through the kernel block device (fsync of the
+// device), its own operation: an acknowledged flush makes every earlier write
+// of the volume durable. No params beyond the volume.
+func v3OpFlush(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	node, e, v, err := opBegin(actx, act, "v3_op_flush")
+	if err != nil {
+		return nil, err
+	}
+	return record(actx, e, "flush", v.Name, map[string]any{}, func() (string, map[string]any) {
+		return flushDevice(ctx, node, v)
+	})
 }
 
 // v3OpRead reads one block per lba through the kernel block device and
