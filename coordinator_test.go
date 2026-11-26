@@ -72,53 +72,53 @@ func TestCoordinator_WaitForAgents_NoExpected(t *testing.T) {
 }
 
 func TestCoordinator_BuildNodeAgentMap(t *testing.T) {
-	c := newTestCoordinator(t, map[string]string{"tp01": "host:9100"})
-	c.RegisterAgent("tp01", "host:9100")
+	c := newTestCoordinator(t, map[string]string{"agent-a": "host:9100"})
+	c.RegisterAgent("agent-a", "host:9100")
 
 	s := &Scenario{
 		Topology: Topology{
-			Agents: map[string]string{"tp01": "host:9100"},
+			Agents: map[string]string{"agent-a": "host:9100"},
 			Nodes: map[string]NodeSpec{
-				"node1": {Host: "host", Agent: "tp01"},
+				"node1": {Host: "host", Agent: "agent-a"},
 				"node2": {Host: "host2"},
 			},
 		},
 	}
 
 	m := c.buildNodeAgentMap(s)
-	if m["node1"] != "tp01" {
-		t.Errorf("node1 → %q, want tp01", m["node1"])
+	if m["node1"] != "agent-a" {
+		t.Errorf("node1 → %q, want agent-a", m["node1"])
 	}
 }
 
 func TestCoordinator_ResolveActionAgent(t *testing.T) {
-	c := newTestCoordinator(t, map[string]string{"tp01": "h:9100", "m01": "h:9200"})
-	c.RegisterAgent("tp01", "h:9100")
+	c := newTestCoordinator(t, map[string]string{"agent-a": "h:9100", "m01": "h:9200"})
+	c.RegisterAgent("agent-a", "h:9100")
 	c.RegisterAgent("m01", "h:9200")
 
 	s := &Scenario{
 		Targets: map[string]TargetSpec{
-			"primary": {Node: "node_tp01"},
+			"primary": {Node: "node_a"},
 		},
 		Topology: Topology{
 			Nodes: map[string]NodeSpec{
-				"node_tp01": {Agent: "tp01"},
+				"node_a": {Agent: "agent-a"},
 				"node_m01":  {Agent: "m01"},
 			},
 		},
 	}
-	nodeToAgent := map[string]string{"node_tp01": "tp01", "node_m01": "m01"}
+	nodeToAgent := map[string]string{"node_a": "agent-a", "node_m01": "m01"}
 
 	// By node.
-	agent := c.resolveActionAgent(s, Action{Node: "node_tp01"}, nodeToAgent)
-	if agent != "tp01" {
-		t.Errorf("by node: got %q, want tp01", agent)
+	agent := c.resolveActionAgent(s, Action{Node: "node_a"}, nodeToAgent)
+	if agent != "agent-a" {
+		t.Errorf("by node: got %q, want agent-a", agent)
 	}
 
 	// By target.
 	agent = c.resolveActionAgent(s, Action{Target: "primary"}, nodeToAgent)
-	if agent != "tp01" {
-		t.Errorf("by target: got %q, want tp01", agent)
+	if agent != "agent-a" {
+		t.Errorf("by target: got %q, want agent-a", agent)
 	}
 
 	// Fallback.

@@ -47,7 +47,7 @@ func TestChaosPerOpExcusal(t *testing.T) {
 			}
 		})
 	}
-	// A load that never ACKs one protocol is NOT_COVERED (Claude01 6ae74dfb).
+	// A load that never ACKs one protocol is NOT_COVERED (the coordinator 6ae74dfb).
 	for _, kind := range []string{"kv_set", "s3_put"} {
 		ops := attrOps(160, func(int, float64) bool { return false })
 		for i := range ops {

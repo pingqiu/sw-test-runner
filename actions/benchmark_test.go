@@ -9,7 +9,7 @@ func TestExtractHost(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"192.168.1.184:18400", "192.168.1.184"},
+		{"198.51.100.184:18400", "198.51.100.184"},
 		{"10.0.0.3:4420", "10.0.0.3"},
 		{":3299", ""},
 		{"0.0.0.0:3299", "0.0.0.0"},
@@ -28,15 +28,15 @@ func TestExtractHost(t *testing.T) {
 
 func TestBenchmarkReportHeader_CrossMachineDetection(t *testing.T) {
 	// Cross-machine: different IPs.
-	p := extractHost("192.168.1.184:18400")
-	r := extractHost("192.168.1.181:18401")
+	p := extractHost("198.51.100.184:18400")
+	r := extractHost("198.51.100.181:18401")
 	if p == r {
 		t.Fatal("expected different IPs for cross-machine")
 	}
 
 	// Same-host: same IP different port.
-	p2 := extractHost("192.168.1.184:18400")
-	r2 := extractHost("192.168.1.184:18401")
+	p2 := extractHost("198.51.100.184:18400")
+	r2 := extractHost("198.51.100.184:18401")
 	if p2 != r2 {
 		t.Fatal("expected same IP for same-host")
 	}
@@ -72,7 +72,7 @@ func TestPreflightAddressCheck(t *testing.T) {
 	}
 
 	// These should pass.
-	goodAddrs := []string{"192.168.1.181:5099", "10.0.0.3:4420"}
+	goodAddrs := []string{"198.51.100.181:5099", "10.0.0.3:4420"}
 	for _, addr := range goodAddrs {
 		host := extractHost(addr)
 		if host == "" || host == "0.0.0.0" || host == "::" {

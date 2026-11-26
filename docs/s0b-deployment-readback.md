@@ -42,7 +42,7 @@ Initial provider prerequisites:
   response. No partial or oversized transcript can qualify.
 
 CPU controls run real encrypted loopback SSH in local Linux/WSL. Test-owned
-files under an exact `/opt/codex03-readback-test-*` root are root-owned; read
+files under an exact `/opt/readback-test-*` root are root-owned; read
 commands run as UID 1000. They cover fresh successful readbacks, same-size
 replacements, exact native set, boot/identity, modes/ownership, symlinks,
 capabilities, and a bounded cancellation using a test-owned FIFO. No lab host,

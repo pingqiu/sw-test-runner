@@ -7,7 +7,7 @@ Owner ruling 6ae3b7bd9c9fd1ba9ca5275b: S0a hard 900 production Go lines;
 NEED-1/2/3 are correctness, Wait and witnessed Kill are mandatory. NEED-6/7
 are not implemented here and stay with the packs unless separately repriced.
 This supersedes the earlier full-S0 reprice in s0-run-safety.md. Source starts
-at 11ea436; accepted baseline remains c6462193. Worktree is Codex01's private
+at 11ea436; accepted baseline remains c6462193. Worktree is the reviewer's private
 `C:/work/rdma/worktrees/sw-test-runner-s0`, not the shared runner checkout.
 
 ## Corrected Scope
@@ -99,7 +99,7 @@ shell/native framework. No safety compression or weaker proof is proposed.
 Owner decision needed at this cut line: explicitly revise/resequence the
 remaining S0a work or supply a reviewed existing owned-process primitive to
 reuse. The old 1,100-1,650 full-S0 request remains withdrawn. S0b stays unapproved.
-Claude02 can independently review this Scope correction while that decision is
+A reviewer can independently review this Scope correction while that decision is
 pending. No more production features are added under the current budget.
 
 ## Verification Scope

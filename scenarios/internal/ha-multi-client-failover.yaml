@@ -22,11 +22,11 @@ env:
 topology:
   nodes:
     target_node:
-      host: "192.168.1.184"
+      host: "198.51.100.184"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
     client_node:
-      host: "192.168.1.181"
+      host: "198.51.100.181"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
 

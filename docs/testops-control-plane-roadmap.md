@@ -30,8 +30,8 @@ The same foundation should support two uses:
 | Scenario runner | Exists. `sw-test-runner`, `swblock`, `sweeds3`, and `sweedrdma` run YAML scenarios. |
 | SSH executor | Exists. It is the current default for M01/M02 and is good for bootstrap/debug. |
 | Agent mode | Exists as a foundation. It has coordinator/agent commands, persistent registration, token auth, `/run`, `/exec`, and `/artifacts`. |
-| Dashboard/controller | Exists at `http://192.168.1.181:9099/`. It scans shared result bundles; on M01 it can also expose the RDMA queue submit/status panel. |
-| Shared results | Exists under `/mnt/smb/work/share/testops/results`. |
+| Dashboard/controller | Exists at `http://198.51.100.181:9099/`. It scans shared result bundles; on M01 it can also expose the RDMA queue submit/status panel. |
+| Shared results | Exists under `/mnt/share/testops/results`. |
 | M01 CI | Exists as a lab runner for RDMA gates. `testops-controller` can submit runs to the M01 queue; the worker executes them under the lab lock. |
 | Binary store | Not standardized yet. Lab runs still mix build-in-place, copied binaries, and product-specific scripts. |
 | Queue / lease | Exists for RDMA M01/M02 gates. Other products still need the same pattern. |
@@ -76,7 +76,7 @@ a manifest, and make nodes fetch by checksum.
 Local lab:
 
 ```text
-/mnt/smb/work/share/testops/
+/mnt/share/testops/
   bin/
     seaweed-mono/<git_sha>/<target>/<binary>
     sw-test-runner/<git_sha>/<target>/<binary>
@@ -318,8 +318,8 @@ first real team workflow.
 
 3. **Standardize RDMA gate publication.**
    - Use `scripts/run-rdma-ci.sh` for team-visible M01 runs.
-   - Results go to `/mnt/smb/work/share/testops/results/rdma-ci` or
-     `/mnt/smb/work/share/testops/results/rdma-dev`.
+   - Results go to `/mnt/share/testops/results/rdma-ci` or
+     `/mnt/share/testops/results/rdma-dev`.
    - The wrapper runs `sweedrdma`, tags the run with metadata, and validates
      the completed bundle.
    - Verify: dashboard shows the run with `test_id`, `branch`, `commit`, and

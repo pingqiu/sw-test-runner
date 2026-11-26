@@ -44,15 +44,15 @@ is how the whole team works in parallel without stepping on each other
 
 | Node | IP | Role |
 |---|---|---|
-| m01 | 192.168.1.181 | k3s worker, benchmark client, RDMA 10.0.0.1 |
-| m02 | 192.168.1.184 | k3s control-plane + build host, RDMA 10.0.0.3 |
-| tp01 | 192.168.1.188 | k3s worker (currently NotReady — restore before RF=3 work) |
+| m01 | 198.51.100.181 | k3s worker, benchmark client, RDMA 10.0.0.1 |
+| m02 | 198.51.100.184 | k3s control-plane + build host, RDMA 10.0.0.3 |
+| the test host | 198.51.100.188 | k3s worker (currently NotReady — restore before RF=3 work) |
 | swdev | (Debian box) | VFS kernel-module build/mount host |
 
 - **SSH user**: `testdev`. **SSH key**: `C:\work\dev_server\testdev_key`
   (`/c/work/dev_server/testdev_key` from Git Bash).
   ```bash
-  ssh -i /c/work/dev_server/testdev_key testdev@192.168.1.184   # m02
+  ssh -i /c/work/dev_server/testdev_key testdev@198.51.100.184   # m02
   ```
 - **KUBECONFIG** (block / k3s): `/etc/rancher/k3s/k3s.yaml` on m02. Export it for
   any `kubectl`/`helm` command:
@@ -61,9 +61,9 @@ is how the whole team works in parallel without stepping on each other
   ```
 - **Product source on the lab**: synced to `/tmp/seaweed_block` on m02 (block) and
   the mono repo for S3/VFS. Scenarios take it as `product_root`.
-- **Shared evidence/scratch (SMB)**: `V:/share` (Windows) = `/mnt/smb/work/share`
+- **Shared evidence/scratch (SMB)**: `/mnt/share`
   (Linux). Block scenarios stage artifacts under
-  `/mnt/smb/work/share/g15d-k8s/<run-id>-*`.
+  `/mnt/share/g15d-k8s/<run-id>-*`.
 
 > **Disk hygiene (m02):** keep `/` below ~80%. Above k3s's 85% image-GC threshold,
 > k3s prunes local `:local` images mid-install and installs hang. `sudo docker
@@ -136,7 +136,7 @@ by project/team):
 ```bash
 swblock run -env product_root=/tmp/seaweed_block \
   -meta project=block-qa -meta run_by="$(whoami)" -meta team=block \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -results-dir /mnt/share/testops/results/block-qa \
   testops/scenarios/<scenario>.yaml
 ```
 
@@ -196,7 +196,7 @@ vfs-rdma-qa, s3-qa…) and their reports in one place, use the read-only dashboa
 over the shared results root:
 
 ```bash
-testops-dashboard -root /mnt/smb/work/share/testops/results -port 9099
+testops-dashboard -root /mnt/share/testops/results -port 9099
 # browser → http://<lab-host>:9099   project · scenario · status · commit + result.html links
 ```
 
@@ -266,7 +266,7 @@ env:
 topology:
   nodes:
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "{{ ssh_key }}"
 phases:
@@ -329,7 +329,7 @@ swblock.exe run \
 
 Needs the RoCE lab (M01 10.0.0.1 / M02 10.0.0.3) and `sudo -n` on M01 for
 insmod/mount/rmmod. The mono source is staged from
-`/mnt/smb/work/share/rdma-source/...`. FUSE smoke + pjdfstest are the lighter
+`/mnt/share/rdma-source/...`. FUSE smoke + pjdfstest are the lighter
 variants. Reference: the standard §5 (VFS column) + §8.
 
 ## 10. Rules of the road (don't modify each other's tools)
@@ -386,6 +386,6 @@ swblock console --port 9090 --scenarios-dir testops/scenarios   # web UI
 swblock validate-bundle --profile beta-hardening --expect-commit <sha> results/<run>
 
 # lab
-ssh -i /c/work/dev_server/testdev_key testdev@192.168.1.184      # m02
+ssh -i /c/work/dev_server/testdev_key testdev@198.51.100.184      # m02
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```

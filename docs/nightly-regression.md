@@ -2,7 +2,7 @@
 
 This is an operator-staged nightly job, not a credentialed main poller. No cron
 is installed by the repository. Qualify the existing systemd image and one full
-eleven-cell sweep on tp01 before enabling it; reserve a suitable test slot.
+eleven-cell sweep on the test host before enabling it; reserve a suitable test slot.
 The script changes no scenario/provider/oracle. No lab hosts or cloud are used.
 
 ## Workstation: prepare the night's latest main
@@ -15,7 +15,7 @@ the two nightly scripts. Supply the already qualified native Python bridge
 archive as `native.tar`. Record its source revision separately if older than
 the product; requalify on ABI changes. No credentials go into these archives.
 
-Stage these four files in the tp01 job root's `inbox/`, under the same `lock`
+Stage these four files in the test host's job root's `inbox/`, under the same `lock`
 used by the worker, publishing only a complete input. `input.json` is:
 
 ```json
@@ -31,7 +31,7 @@ used by the worker, publishing only a complete input. `input.json` is:
 The date is the UTC night being run. Source discovery/staging is the workstation
 operator's responsibility; absent/stale input is an input refusal, not proof
 that latest main ran. Use the existing workstation SSH access; do not copy its
-key, GitHub token, Huly token or CIFS credentials to tp01. Import the existing
+key, GitHub token, Huly token or CIFS credentials to the test host. Import the existing
 qualified image first; the job never pulls an image.
 
 A host-wide `docker system prune -a` can delete the qualified image between
@@ -44,7 +44,7 @@ Otherwise it refuses as ENVIRONMENT with a named reason in
 `image-inspect.stderr`: `IMAGE_ARCHIVE_MISSING`, `IMAGE_ARCHIVE_SHA_MISMATCH`,
 `IMAGE_LOAD_FAILED` or `IMAGE_DIGEST_MISMATCH`. It never runs another image.
 
-## tp01: one local result per changed head/night
+## The test host: one local result per changed head/night
 
 Choose an owned NVMe root, e.g. `/data/nvme/seats/<seat>/main-regression`.
 Set PATH to `/opt/work/go/bin`, the installed Rust toolchain's bin, `/usr/bin`
@@ -92,7 +92,7 @@ Do not delete that marker or work until the owned-container postflight is clean.
 ## Workstation: collect, archive and report
 
 Fetch the completed result directory over existing SSH, check EXIT and verify
-SHA256SUMS locally. Archive it to `V:/share/rdma/main-regression/<mono-sha>/`;
+SHA256SUMS locally. Archive it to the run's share folder;
 throttle copies >200MB and compare local hashes with the share's sums rather
 than hashing payloads back. Then post TABLE.md on mono #998 with overall job
 status, versions, coverage qualifications and archive path. Do not repeat a
@@ -111,4 +111,4 @@ finding, not eleven product failures. List **all** open mono issues labelled
 create one with `stability` + `found:regression`. Provision that label once if
 missing. Include SHA, first failure, raw path and classification pending.
 No hidden fingerprints, automatic close/reopen, test retries or credentials on
-tp01. The operator reconciles an ambiguous GitHub write before trying again.
+the test host. The operator reconciles an ambiguous GitHub write before trying again.

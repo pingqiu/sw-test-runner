@@ -64,7 +64,7 @@ Nothing here generates GO exports or auto-approves a queue submission.
 acquire, cadence <=600 s and TTL <1800 s; release absence before and after.
 It acquires/renews nothing. The acquire `host` is the broker, not an allowed
 host set. The independently approved lab profile must name the existing
-`/mnt/smb/work/share/testops/locks/rdma-lab.lock.ledger` resource and explicit
+`/mnt/share/testops/locks/rdma-lab.lock.ledger` resource and explicit
 M01/M02 hosts. Azure requires its own separately approved existing authority
 and ledger path. Flock alone is never authority.
 
@@ -181,7 +181,7 @@ Legacy non-approved clearing keeps its existing retry disposition.
 
 ## Protected worker-owned lease mode (profile review correction)
 
-A service bootstrap may opt into `"worker_lease":{"lock_file":"/mnt/smb/work/share/testops/locks/rdma-lab.lock"}` with the existing matching `ledger_dir` (`lock_file + ".ledger"`). This field is protected service configuration, never queue data or a submitted held-lock bit. The default external-ledger mode is unchanged.
+A service bootstrap may opt into `"worker_lease":{"lock_file":"/mnt/share/testops/locks/rdma-lab.lock"}` with the existing matching `ledger_dir` (`lock_file + ".ledger"`). This field is protected service configuration, never queue data or a submitted held-lock bit. The default external-ledger mode is unchanged.
 
 The strict entry first validates the claimed UID/bytes and independent GO, complete policy/artifact/inventory/host/script binding and original deadlines. A worker-owned lifetime is at most ten minutes. It then verifies inherited FD9 against the canonical path's device/inode and establishes nonblocking exclusive ownership; a separate open description must observe exclusion. It never opens a new holder, recursively waits on flock, unlocks FD9, changes the worker script or mints GO. The unchanged worker retains canonical flock across claim, strict execution, evidence and exit. The ledger directory must already exist. Any unreleased acquire (including stale/unknown records), or any prior record for the exact GO lease ID, refuses; no takeover or overwrite.
 

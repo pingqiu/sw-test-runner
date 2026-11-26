@@ -122,7 +122,7 @@ env:
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "{{ ssh_key }}"
 phases:
@@ -237,7 +237,7 @@ results, and bundle validation are consistent:
 TESTOPS_MONO_REF=main ./scripts/run-rdma-ci.sh
 ```
 
-The wrapper writes to `/mnt/smb/work/share/testops/results/rdma-ci`, tags the
+The wrapper writes to `/mnt/share/testops/results/rdma-ci`, tags the
 run with `project/team/run_by/test_id/branch/commit`, validates the completed
 bundle, and points reviewers at the dashboard.
 

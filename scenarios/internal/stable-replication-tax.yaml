@@ -8,17 +8,17 @@ timeout: 10m
 # Answers: what does replication cost in IOPS?
 
 env:
-  master_url: "http://192.168.1.184:9433"
+  master_url: "http://198.51.100.184:9433"
   vol_size: "1073741824"
 
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "/opt/work/testdev_key"
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -50,15 +50,15 @@ phases:
         port: "18480"
         master: "localhost:9433"
         dir: /tmp/sw-tax-vs1
-        extra_args: "-block.dir=/tmp/sw-tax-vs1/blocks -block.listen=:3295 -ip=192.168.1.184"
+        extra_args: "-block.dir=/tmp/sw-tax-vs1/blocks -block.listen=:3295 -ip=198.51.100.184"
         save_as: vs1_pid
 
       - action: start_weed_volume
         node: m01
         port: "18480"
-        master: "192.168.1.184:9433"
+        master: "198.51.100.184:9433"
         dir: /tmp/sw-tax-vs2
-        extra_args: "-block.dir=/tmp/sw-tax-vs2/blocks -block.listen=:3295 -ip=192.168.1.181"
+        extra_args: "-block.dir=/tmp/sw-tax-vs2/blocks -block.listen=:3295 -ip=198.51.100.181"
         save_as: vs2_pid
 
       - action: sleep

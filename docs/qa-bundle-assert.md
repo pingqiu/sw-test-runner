@@ -18,7 +18,7 @@ Then it applies one product profile, such as RDMA or block.
 
 ```bash
 scripts/qa-assert.sh \
-  /mnt/smb/work/share/testops/results/rdma-ci/<run-id> \
+  /mnt/share/testops/results/rdma-ci/<run-id> \
   --ref <branch-or-sha> \
   --profile docs/qa-profiles/rdma.expect
 ```
@@ -29,7 +29,7 @@ The RDMA profile currently checks the RC/DC push floors and basic loader rows.
 
 ```bash
 scripts/qa-assert.sh \
-  /mnt/smb/work/share/testops/results/block-ci/<run-id> \
+  /mnt/share/testops/results/block-ci/<run-id> \
   --ref <branch-or-sha> \
   --profile docs/qa-profiles/block.expect
 ```

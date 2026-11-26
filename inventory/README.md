@@ -37,7 +37,7 @@ one resource ID. One host may have several roles. Inventory validates the
 roles it declares; scenario-specific role counts are the shared pack's job.
 Credential references are logical names, never private-key paths or tokens.
 Real cloud credentials, SSH private keys, Terraform state and raw outputs stay
-private on the Linux controller, never on tp01 or guests. Public host-key pins
+private on the Linux controller, never on the test host or guests. Public host-key pins
 must be canonical `algorithm base64` keys without options/comments.
 
 ## Transport and disks

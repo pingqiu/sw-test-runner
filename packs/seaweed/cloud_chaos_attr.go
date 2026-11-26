@@ -27,7 +27,7 @@ type chaosWindows struct {
 	ReadyMono   float64
 }
 
-// checkChaosOps is the stage 2 per-op excusal (Claude01 6ae6e92a, Q1/Q2/Q6).
+// checkChaosOps is the stage 2 per-op excusal (the coordinator 6ae6e92a, Q1/Q2/Q6).
 // A failed op is excused only if, for the latest marker P <= its start, it
 // ends by P+60 and a same-kind exact op completes after it, also by P+60.
 // A C5 key whose both copies were on the killed pair may instead fail from
@@ -49,12 +49,12 @@ func checkChaosOps(ops []chaosOp, w chaosWindows) error {
 		}
 	}
 	// The load must span the fault on this client's own clock: running before
-	// the first action and still issuing ops after the last (codex01 #49 R2).
+	// the first action and still issuing ops after the last (the reviewer #49 R2).
 	if ops[0].Started >= marks[0] || ops[len(ops)-1].Started <= marks[len(marks)-1] {
 		return errors.New("NOT_COVERED: load does not span the fault actions")
 	}
 	// Every client must exercise both protocols: zero KV or zero S3 ACKs is
-	// NOT_COVERED, never PASS (Claude01 6ae74dfb).
+	// NOT_COVERED, never PASS (the coordinator 6ae74dfb).
 	acked := map[string]bool{}
 	for _, o := range ops {
 		acked[o.Kind] = acked[o.Kind] || o.Exact

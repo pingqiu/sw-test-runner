@@ -106,7 +106,7 @@ func pauseAndAck(ctx context.Context, ops soakOps, clk *soakClock, f SoakFault) 
 	if err = errors.Join(err, nerr, actx.Err()); err != nil {
 		return a, err
 	}
-	if now-pause > AckWait.Seconds() { // a late ack never earns a Kill (codex01 R3)
+	if now-pause > AckWait.Seconds() { // a late ack never earns a Kill (the reviewer R3)
 		return a, errors.New("soak: fault-window ack later than AckWait; no Kill")
 	}
 	seen := map[string]bool{}
@@ -137,7 +137,7 @@ type FaultRecord struct {
 }
 
 // ReadyRef is the exact receipt reference of one fault READY probe, kept
-// even when the probe or its validation fails (codex01 R4).
+// even when the probe or its validation fails (the reviewer R4).
 type ReadyRef struct {
 	Job          string `json:"job"`
 	Host         string `json:"host"`
@@ -157,7 +157,7 @@ func checkedMono(ops soakOps) (float64, error) {
 }
 
 // soakClock refuses a controller clock that steps back from the last
-// validated read (codex01: a finite, positive 1001 -> 1000 regression after a
+// validated read (the reviewer: a finite, positive 1001 -> 1000 regression after a
 // timer still dispatched faults). It claims no more than that.
 type soakClock struct {
 	ops  soakOps
@@ -267,7 +267,7 @@ func runSoak(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, victims
 		return nil, exit, fmt.Errorf("soak: load-start witness: %w", err)
 	}
 	// The witness must lie inside this boot's enrollment/acquisition bracket
-	// (codex01 R1): written after the task was enrolled, read back no later
+	// (the reviewer R1): written after the task was enrolled, read back no later
 	// than now. Anything else, MaxFloat64 included, is refused.
 	acquired, err := clk.now()
 	if err != nil {
@@ -414,7 +414,7 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 		binary = "weed-volume"
 	}
 	// One shared 45 s READY stage for all probes of this fault, inside the
-	// fault budget (codex01 R4), not the whole fault budget per probe.
+	// fault budget (the reviewer R4), not the whole fault budget per probe.
 	rctx, rcancel := context.WithTimeout(fctx, ReadyBound)
 	defer rcancel()
 	for _, step := range p.Soak.FaultReady {
@@ -437,7 +437,7 @@ func runFault(ctx context.Context, ops soakOps, p Plan, in tr.PackInputs, f Soak
 		}
 		if step.Host == "m01" {
 			// K7 is measured from the actual successful observation, not the
-			// probe entry (codex01): the Assign's own time after a master
+			// probe entry (the reviewer): the Assign's own time after a master
 			// fault, the all-gates-passed time otherwise.
 			rec.ReadyMono = ready.ReadyMono
 			if f.Role == "master" {

@@ -92,7 +92,7 @@ class Publish(unittest.TestCase):
         self.assertEqual(json.loads((root / 'a.json').read_text()), dict(x=1))
 
 
-class ReadBound(unittest.TestCase):  # codex01 R4
+class ReadBound(unittest.TestCase):  # the reviewer R4
     def test_oversized_file_is_refused_not_truncated(self):
         import tempfile
         from pathlib import Path
@@ -215,7 +215,7 @@ class FaultWindowWorker(unittest.TestCase):
         self.assertEqual((last['action'], last['row']['ok'], last['row']['error']), ('get', False, ''))
 
     def test_an_rc_not_found_records_a_miss_and_its_status_10_stops_the_run(self):
-        # #999 (codex01 on #114): the RC fetch's NOT_FOUND is a miss through the real pump and op events.
+        # #999 (the reviewer on #114): the RC fetch's NOT_FOUND is a miss through the real pump and op events.
         (self.root / 'fake-status1').write_text(MissShape.RC)
         self.toggle('fake-status1', 1.0, 1.5)
         summary = soak_load.run(self.config)
@@ -257,7 +257,7 @@ class FaultWindowWorker(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding differs'):
             soak_load.run(self.config)
 
-    def malformed_close(self, row):  # codex01 R1: a malformed close fails, it never resumes
+    def malformed_close(self, row):  # the reviewer R1: a malformed close fails, it never resumes
         self.controller(1.0, close_row=row)
         with self.assertRaises(ValueError):
             soak_load.run(self.config)
@@ -274,12 +274,12 @@ class FaultWindowWorker(unittest.TestCase):
     def test_a_close_before_the_ack_fails(self):
         self.malformed_close(dict(episode='E1', role='volume', end_mono=1.0))
 
-    def test_a_non_transient_error_on_an_acked_get_ends_the_load(self):  # codex01 R2
+    def test_a_non_transient_error_on_an_acked_get_ends_the_load(self):  # the reviewer R2
         self.controller(1.0, fail_after_ack=True, error='permission denied')
         with self.assertRaisesRegex(soak_load.OracleError, 'unexpected GET error'):
             soak_load.run(self.config)
 
-    def test_a_future_pause_is_refused(self):  # codex01 R1 remainder: pause <= observed
+    def test_a_future_pause_is_refused(self):  # the reviewer R1 remainder: pause <= observed
         def future():
             while not (self.root / 'soak-load-start.json').exists():
                 time.sleep(0.01)

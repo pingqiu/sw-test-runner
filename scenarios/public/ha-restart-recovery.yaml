@@ -16,7 +16,7 @@
 #   6. Write more data, wait for replica catch-up, verify new data too
 #
 # Priority: P1
-# Infra: m01 (client 192.168.1.181) + M02 (target 192.168.1.184)
+# Infra: m01 (client 198.51.100.181) + M02 (target 198.51.100.184)
 
 name: ha-restart-recovery
 timeout: 10m
@@ -26,11 +26,11 @@ env:
 topology:
   nodes:
     target_node:
-      host: "192.168.1.184"
+      host: "198.51.100.184"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
     client_node:
-      host: "192.168.1.181"
+      host: "198.51.100.181"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
 

@@ -2,7 +2,7 @@
 
 package testrunner
 
-// Soak clock-bracket step 1 (claude01 6ae9d04b; plan r2 9f8fca40, accepted by codex01 6ae9d02c).
+// Soak clock-bracket step 1 (the coordinator 6ae9d04b; plan r2 9f8fca40, accepted by the reviewer 6ae9d02c).
 // Measurement only, never run in CI: it is skipped unless S0B_CLOCK_DECOMPOSE names a JSON config.
 //
 // It times one approved-style M02 job through the real RunScope -> SSHJobs -> owned-custodian path over a real

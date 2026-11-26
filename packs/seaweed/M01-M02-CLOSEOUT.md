@@ -26,9 +26,9 @@ postflight found no owned process or active private listener, an inactive worker
 empty queue/running set and a free canonical flock. Evidence roots remain.
 
 Terminal packet:
-`V:/share/rdma/codex03-cm-ready-r8-terminal-pass-20261031/`, manifest
+the run's share folder, manifest
 `f9ccc331adc4b39fc8ae6391bf51ba128966487ee928fb0dbe32a9ad65c458f2`.
-Codex01 independently accepted this scoped smoke in `6ae563a3` after rehashing
+The reviewer independently accepted this scoped smoke in `6ae563a3` after rehashing
 126/126 files and regenerating payloads. Server committed-write equality was
 **NOT_OBSERVED**; resource/soak gates were **NOT_ASSESSED**. This does not qualify
 current main or authorize another run. PR #21 stays Draft; further host action

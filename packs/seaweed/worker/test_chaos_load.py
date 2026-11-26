@@ -168,7 +168,7 @@ class ChaosLoadControls(unittest.TestCase):
         self.assertEqual(sum(x['event'] == 'SUBMIT' for x in rows), 22)
 
     def test_ack_stands_when_its_fid_lookup_fails(self):
-        # From claude03's #48 review: C4 restarts the filer under load.
+        # From a reviewer's #48 review: C4 restarts the filer under load.
         r = Rig()
         calls = [0]
         def fids(c, p):
@@ -186,7 +186,7 @@ class ChaosLoadControls(unittest.TestCase):
         self.assertEqual(sum(x['fids'] is None for x in rows), 1)
 
     def test_trickling_s3_response_over_30s_is_fatal(self):
-        # From claude03's #48 review: a real server sends 35 bytes, one per
+        # From a reviewer's #48 review: a real server sends 35 bytes, one per
         # second; no single socket read waits 30 s, but the GET does.
         class Trickle(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

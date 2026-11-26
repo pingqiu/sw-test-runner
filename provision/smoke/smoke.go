@@ -57,7 +57,7 @@ type Config struct {
 	PackName string    `json:"pack,omitempty"`
 	PackExec *ExecPack `json:"pack_exec,omitempty"`
 	// MaxHardMinutes raises how far ahead `run` admits the hard deadline. Unset
-	// keeps the default 75 min (60 work + 15 cleanup reserve; Claude01, run 7).
+	// keeps the default 75 min (60 work + 15 cleanup reserve; the coordinator, run 7).
 	// A value is honoured only for the exec pack and only up to 360; the cost cap
 	// (hourly_usd until the hard deadline <= budget_usd) and the watchdog still apply.
 	MaxHardMinutes int `json:"max_hard_minutes,omitempty"`
@@ -546,7 +546,7 @@ func stamp(name, text string) error {
 func transportOnly(raw []byte) bool {
 	endpoint := `https://management\.azure\.com/[A-Za-z0-9/_?=.%:-]+`
 	transport := `(?:ECONNRESET|ConnectionResetError(?: 104|\(104, 'Connection reset by peer'\))?|connection reset by peer|HTTP response was nil(?:; connection may have been reset)?|EOF before response|(?:Put|Get) "` + endpoint + `": EOF|TLS handshake: connection reset(?: by peer)?|\('Connection aborted\.', ConnectionResetError\(104, 'Connection reset by peer'\)\))`
-	// Create/PUT forms come only from moduleTypes (one path, codex01 #55);
+	// Create/PUT forms come only from moduleTypes (one path, the reviewer #55);
 	// every Delete goes through deleteResets' re-read rule.
 	message := `(?:` + transport + `|` + lostCreateForms() + `)`
 	whole := `\A(?:` + message + `|Error: ` + message + `(?:\s+Error: ` + message + `)*)\z`
@@ -563,7 +563,7 @@ func transportOnly(raw []byte) bool {
 func settleCreates(ctx context.Context, call func(context.Context, string, ...string) ([]byte, error), raw []byte, subscription, group, run string) ([]string, error) {
 	// Route by "names an ARM resource ID", whatever the accepted form: the
 	// CreateOrUpdate envelope with or without its "Error: " prefix, or the
-	// standalone `Put "<URL>": EOF` (codex01 #52 R1). A Put naming no ARM
+	// standalone `Put "<URL>": EOF` (the reviewer #52 R1). A Put naming no ARM
 	// resource ID is a generic form and keeps the plain retry.
 	put := regexp.MustCompile(`Put "https://management\.azure\.com(/subscriptions/[^"?]+)[^"]*"`)
 	address := regexp.MustCompile(`\n  with (module\.run\.(azurerm_[a-z_]+)\.[a-z_]+(?:\["[a-z0-9-]+"\])?),`)
@@ -593,7 +593,7 @@ func settleCreates(ctx context.Context, call func(context.Context, string, ...st
 		}
 		// The sweep's own ownership check: unambiguous decision keys (one exact
 		// seaweed_run, no duplicate or case-aliased keys), this run's tag, this
-		// subscription/RG and a supported type (codex01 #52 R2).
+		// subscription/RG and a supported type (the reviewer #52 R2).
 		if owned, e := orphanIDs(append(append([]byte("["), b...), ']'), subscription, group, run); e != nil || len(owned) != 1 || !strings.EqualFold(owned[0], id) {
 			return imported, fmt.Errorf("created %s is not provably this run's: %v", id, e)
 		}
@@ -607,7 +607,7 @@ func settleCreates(ctx context.Context, call func(context.Context, string, ...st
 
 // planDecisionKeys is resourceDecisionKeys for a plan: before the typed
 // decode, a duplicate or case-aliased decision field anywhere refuses, since
-// Go's decoder would keep the last duplicate (codex01 #52 R3).
+// Go's decoder would keep the last duplicate (the reviewer #52 R3).
 func planDecisionKeys(d *json.Decoder) error {
 	t, e := d.Token()
 	if e != nil || (t != json.Delim('{') && t != json.Delim('[')) {
@@ -654,7 +654,7 @@ func keepsImported(ctx context.Context, call func(context.Context, string, ...st
 		return errors.Join(e, errors.New("re-plan after import is unreadable"))
 	}
 	// Every import must appear with known actions; only an explicit plan that
-	// keeps it counts as proof (codex01 #52 R3). A no-op plan is fine.
+	// keeps it counts as proof (the reviewer #52 R3). A no-op plan is fine.
 	known := []string{"no-op", "read", "update", "create", "delete"}
 	for _, address := range imported {
 		found := false
@@ -1023,7 +1023,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	}
 	if mode == "run" {
 		remaining := time.Until(d.Run.Hard)
-		// Default: at most 60 min of work plus the 15 min cleanup reserve (Claude01, run 7).
+		// Default: at most 60 min of work plus the 15 min cleanup reserve (the coordinator, run 7).
 		limit, e := maxHard(c)
 		if e != nil || remaining <= time.Duration(d.Run.Reserve)*time.Second || remaining > limit || !time.Now().Before(d.Run.Work) {
 			out.Code = "DEADLINE_REFUSED"

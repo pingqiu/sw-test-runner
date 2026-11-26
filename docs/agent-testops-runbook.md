@@ -11,7 +11,7 @@ a TestOps scenario already exists.
 RDMA agent:
 
 ```bash
-ssh testdev@192.168.1.181
+ssh testdev@198.51.100.181
 cd /opt/rdma-lab-ci/sw-test-runner
 TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 ```
@@ -19,7 +19,7 @@ TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 If the dashboard is running with controller enabled, API submit is equivalent:
 
 ```bash
-curl -X POST http://192.168.1.181:9099/api/rdma/submit \
+curl -X POST http://198.51.100.181:9099/api/rdma/submit \
   -H 'Content-Type: application/json' \
   -d '{"mono_ref":"<branch-or-sha>","run_by":"<agent-name>"}'
 ```
@@ -30,14 +30,14 @@ block is registered but stays disabled until the block worker adapter is added.
 Then watch:
 
 ```text
-http://192.168.1.181:9099/?project=rdma-ci
+http://198.51.100.181:9099/?project=rdma-ci
 ```
 
 Block agent:
 
 ```bash
 swblock run <scenario.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -results-dir /mnt/share/testops/results/block-qa \
   -meta project=block-qa \
   -meta team=block \
   -meta run_by=<agent-name> \
@@ -50,7 +50,7 @@ S3/VFS agent:
 
 ```bash
 sweeds3 run <scenario.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/s3-qa \
+  -results-dir /mnt/share/testops/results/s3-qa \
   -meta project=s3-qa \
   -meta team=s3 \
   -meta run_by=<agent-name> \
@@ -79,22 +79,22 @@ assertion if the run fails.
 Open:
 
 ```text
-http://192.168.1.181:9099/
+http://198.51.100.181:9099/
 ```
 
 The result view is read-only. On M01, the same dashboard may also show a small
 RDMA queue submit/status panel. Result bundles live under:
 
 ```text
-/mnt/smb/work/share/testops/results
+/mnt/share/testops/results
 ```
 
 Useful filters:
 
 ```text
-http://192.168.1.181:9099/?project=rdma-ci
-http://192.168.1.181:9099/?project=block-qa
-http://192.168.1.181:9099/?team=rdma
+http://198.51.100.181:9099/?project=rdma-ci
+http://198.51.100.181:9099/?project=block-qa
+http://198.51.100.181:9099/?team=rdma
 ```
 
 ## RDMA Hardware Gate
@@ -102,7 +102,7 @@ http://192.168.1.181:9099/?team=rdma
 Use this for normal RDMA PR/lab validation:
 
 ```bash
-ssh testdev@192.168.1.181
+ssh testdev@198.51.100.181
 cd /opt/rdma-lab-ci/sw-test-runner
 TESTOPS_MONO_REF=<branch-or-sha> ./scripts/testops-ci-submit.sh
 ```
@@ -113,32 +113,32 @@ publish the result.
 Watch:
 
 ```text
-http://192.168.1.181:9099/?project=rdma-ci
+http://198.51.100.181:9099/?project=rdma-ci
 ```
 
 Status:
 
 ```bash
-curl http://192.168.1.181:9099/api/controller/status?suite=rdma
-ls -lt /mnt/smb/work/share/testops/state/rdma-ci/status
-test -f /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json && \
-  cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
+curl http://198.51.100.181:9099/api/controller/status?suite=rdma
+ls -lt /mnt/share/testops/state/rdma-ci/status
+test -f /mnt/share/testops/state/rdma-ci/status/last-run.json && \
+  cat /mnt/share/testops/state/rdma-ci/status/last-run.json
 ```
 
 Logs:
 
 ```bash
-ls -lt /mnt/smb/work/share/testops/logs/rdma-ci
-tail -100 /mnt/smb/work/share/testops/logs/rdma-ci/<request>.log
+ls -lt /mnt/share/testops/logs/rdma-ci
+tail -100 /mnt/share/testops/logs/rdma-ci/<request>.log
 ```
 
 Queue/state:
 
 ```bash
-find /mnt/smb/work/share/testops/queue/rdma-ci -maxdepth 1 -type f
-find /mnt/smb/work/share/testops/state/rdma-ci/running -maxdepth 1 -type f
-find /mnt/smb/work/share/testops/state/rdma-ci/done -maxdepth 1 -type f | tail
-find /mnt/smb/work/share/testops/state/rdma-ci/failed -maxdepth 1 -type f | tail
+find /mnt/share/testops/queue/rdma-ci -maxdepth 1 -type f
+find /mnt/share/testops/state/rdma-ci/running -maxdepth 1 -type f
+find /mnt/share/testops/state/rdma-ci/done -maxdepth 1 -type f | tail
+find /mnt/share/testops/state/rdma-ci/failed -maxdepth 1 -type f | tail
 ```
 
 Direct debug only:
@@ -146,7 +146,7 @@ Direct debug only:
 ```bash
 sweedrdma run scenarios/rdma-unified-lab-gate.yaml \
   -env mono_ref=<branch-or-sha> \
-  -results-dir /mnt/smb/work/share/testops/results/rdma-dev \
+  -results-dir /mnt/share/testops/results/rdma-dev \
   -meta project=rdma-dev \
   -meta team=rdma \
   -meta run_by=<agent-name> \
@@ -165,14 +165,14 @@ Use `swblock`.
 Default result project:
 
 ```text
-/mnt/smb/work/share/testops/results/block-qa
+/mnt/share/testops/results/block-qa
 ```
 
 Example:
 
 ```bash
 swblock run <scenario.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa \
+  -results-dir /mnt/share/testops/results/block-qa \
   -meta project=block-qa \
   -meta team=block \
   -meta run_by=<agent-name> \
@@ -191,14 +191,14 @@ Use `sweeds3`.
 Default result project:
 
 ```text
-/mnt/smb/work/share/testops/results/s3-qa
+/mnt/share/testops/results/s3-qa
 ```
 
 Example:
 
 ```bash
 sweeds3 run scenarios/s3-smoke-chain.yaml \
-  -results-dir /mnt/smb/work/share/testops/results/s3-qa \
+  -results-dir /mnt/share/testops/results/s3-qa \
   -meta project=s3-qa \
   -meta team=s3 \
   -meta run_by=<agent-name> \
@@ -242,8 +242,8 @@ branch: rdma/lab-gate-runner-tools
 RC push: 11645.4 MiB/s
 RC pull: 5492.2 MiB/s
 DC push: 9872.0 MiB/s
-bundle: /mnt/smb/work/share/testops/results/rdma-ci/20260629-211837-07e9
-dashboard: http://192.168.1.181:9099/?project=rdma-ci
+bundle: /mnt/share/testops/results/rdma-ci/20260629-211837-07e9
+dashboard: http://198.51.100.181:9099/?project=rdma-ci
 ```
 
 Bad example:
@@ -266,10 +266,10 @@ When a run fails:
 For RDMA CI worker failures, check:
 
 ```bash
-ls -lt /mnt/smb/work/share/testops/state/rdma-ci/status
-test -f /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json && \
-  cat /mnt/smb/work/share/testops/state/rdma-ci/status/last-run.json
-tail -100 /mnt/smb/work/share/testops/logs/rdma-ci/<request>.log
+ls -lt /mnt/share/testops/state/rdma-ci/status
+test -f /mnt/share/testops/state/rdma-ci/status/last-run.json && \
+  cat /mnt/share/testops/state/rdma-ci/status/last-run.json
+tail -100 /mnt/share/testops/logs/rdma-ci/<request>.log
 systemctl status testops-rdma-ci-worker.service
 ```
 

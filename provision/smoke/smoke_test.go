@@ -266,7 +266,7 @@ func TestPinAndDeadlineRefuseBeforeContact(t *testing.T) {
 	}
 }
 
-// Claude01's run 7 ruling: hard end may be up to 75 min away (60 work + 15
+// The coordinator's run 7 ruling: hard end may be up to 75 min away (60 work + 15
 // cleanup reserve); the reserve is not cut. More than 75 refuses.
 func TestHardDeadlineUpTo75Minutes(t *testing.T) {
 	for _, tc := range []struct {

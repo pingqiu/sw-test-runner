@@ -16,7 +16,7 @@ import (
 	"github.com/pingqiu/sw-test-runner/inventory"
 )
 
-// Stage 2 (contract claude01 7c52e26a, rulings 6ae6e92a): replication 001,
+// Stage 2 (contract the coordinator 7c52e26a, rulings 6ae6e92a): replication 001,
 // mixed chaos_load.py on three clients, a marker on every client's own clock
 // before each fault action, per-op excusal, then exact read-back of every ACK.
 type chaos2Case struct {
@@ -50,7 +50,7 @@ func chaosPartitionScript(timer string) string {
 }
 
 // Only a successful, complete rule listing can prove the chain absent; a
-// failed listing is UNKNOWN and refuses (codex01 #49 R3).
+// failed listing is UNKNOWN and refuses (the reviewer #49 R3).
 func chaosPartitionHealScript() string {
 	return `sudo -n sh -c ` + cloudQuote(chaosHeal) + `; rules=$(sudo -n iptables -S) || exit 1; if printf '%s\n' "$rules" | grep -q SWCHAOS; then exit 1; fi; echo HEALED`
 }
@@ -77,7 +77,7 @@ func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) er
 		return err
 	}
 	defer release()
-	// Read-only probe so run B knows before C6 whether netem exists (Claude01
+	// Read-only probe so run B knows before C6 whether netem exists (the coordinator
 	// 6ae71cae): kernel version and a dry-run modprobe; never installs, never fails.
 	if c.ChaosSet == "A" {
 		dir := filepath.Join(c.Output, "chaos", "netem-probe")
@@ -103,7 +103,7 @@ func runCloudChaos2(ctx context.Context, d inventory.Document, c CloudConfig) er
 
 // chaosGens tracks each host/role's live unit generation (1 = deploy's unit)
 // and the last kill witness. C5 kills two hosts in parallel, so every access
-// takes the lock (codex01 #49 R4).
+// takes the lock (the reviewer #49 R4).
 type chaosGens struct {
 	mu      sync.Mutex
 	gens    map[string]int
@@ -203,7 +203,7 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 		cancelLoad()
 	}
 	loads, loadErr := waitLoad()
-	// A failed load and a failed save both reach the error (codex01 #56); the
+	// A failed load and a failed save both reach the error (the reviewer #56); the
 	// run-level failure capture keeps each client's chaos journal.
 	if e := errors.Join(faultErr, loadErr, r.save("markers.json", map[string]any{"marks": f.marks, "ready": f.ready}), r.save("fault.json", f.witness), r.save("placement.json", placement)); e != nil {
 		return e
@@ -289,7 +289,7 @@ func runChaos2Case(ctx context.Context, d inventory.Document, x chaos2Case, host
 
 // chaos2Fault runs one case's fault actions in strict order. Every step is
 // checked before the next is sent, so a failed marker or kill stops the case
-// before any later action (codex01 #49 R1). Only the independent victims of
+// before any later action (the reviewer #49 R1). Only the independent victims of
 // one action run in parallel, after their marker succeeded.
 type chaos2Fault struct {
 	r       *chaosRun

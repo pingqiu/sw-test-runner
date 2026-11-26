@@ -175,11 +175,11 @@ env:
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "{{ ssh_key }}"
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "{{ ssh_key }}"
 
@@ -201,7 +201,7 @@ phases:
         env.RDMA_LOG_LEVEL: "info"
       - action: exec
         node: m01
-        cmd: "cd {{ product_root }} && ./bin/rdma-bench --target 192.168.1.184:50051 --duration 30s"
+        cmd: "cd {{ product_root }} && ./bin/rdma-bench --target 198.51.100.184:50051 --duration 30s"
         timeout: 1m
         save_as: bench_output
 
@@ -227,7 +227,7 @@ phases:
 Run from a Windows controller (or from m02 directly):
 
 ```powershell
-swblock run rdma-loopback-smoke.yaml -results-dir V:/share/lab-runs/rdma
+swblock run rdma-loopback-smoke.yaml -results-dir /mnt/share/lab-runs/rdma
 ```
 
 Important details:
@@ -254,8 +254,8 @@ For long runs, status is checkable from a separate shell:
 
 ```bash
 swblock status                                # latest run, default results dir
-swblock status -results-dir V:/share/runs    # latest under a specific root
-swblock status -results-dir V:/share/runs <run_id>
+swblock status -results-dir /mnt/share/runs    # latest under a specific root
+swblock status -results-dir /mnt/share/runs <run_id>
 swblock status -json [...]                    # machine-readable
 ```
 
@@ -268,7 +268,7 @@ state:         running
 phases:        2/4
 current_phase: bringup
 started_at:    2026-05-10T18:00:00Z
-artifact_dir:  V:\share\runs\20260510-180000-abcd
+artifact_dir:  /mnt/share/runs/20260510-180000-abcd
 phase_results:
   [pass]     pre_clean
   [running]  bringup
@@ -277,8 +277,8 @@ phase_results:
 Other run-control commands:
 
 ```bash
-swblock list-runs -results-dir V:/share/runs   # one line per run, * marks latest
-swblock cancel    -results-dir V:/share/runs   # writes control/cancel; engine stops at next phase boundary
+swblock list-runs -results-dir /mnt/share/runs   # one line per run, * marks latest
+swblock cancel    -results-dir /mnt/share/runs   # writes control/cancel; engine stops at next phase boundary
 ```
 
 `status` exit codes: `0` = pass, `1` = running/fail/cancelled/error,
@@ -309,7 +309,7 @@ scenarios:
 Run:
 
 ```bash
-swblock suite -results-dir V:/share/runs \
+swblock suite -results-dir /mnt/share/runs \
   --env ssh_key=C:/work/dev_server/testdev_key \
   --env product_root=/tmp/rdma-runtime \
   rdma-release-gate.yaml
@@ -328,7 +328,7 @@ swblock validate-bundle \
   --expect-scenario rdma-release-gate \
   --expect-commit a1b2c3d \
   --children rdma-loopback-smoke,rdma-cross-host,rdma-fault-link-flap \
-  V:/share/runs/<suite-run-id>
+  /mnt/share/runs/<suite-run-id>
 ```
 
 Or use a named profile (after you register one in

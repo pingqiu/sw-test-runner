@@ -1,16 +1,16 @@
 # No real provider instance: schema-backed values are entirely mocked.
 mock_provider "azurerm" {
-  mock_resource "azurerm_resource_group" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120" } }
-  mock_resource "azurerm_virtual_network" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Network/virtualNetworks/box" } }
-  mock_resource "azurerm_subnet" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Network/virtualNetworks/box/subnets/box" } }
-  mock_resource "azurerm_network_security_group" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Network/networkSecurityGroups/box" } }
-  mock_resource "azurerm_public_ip" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Network/publicIPAddresses/box", ip_address = "192.0.2.20" } }
-  mock_resource "azurerm_network_interface" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Network/networkInterfaces/box" } }
-  mock_resource "azurerm_linux_virtual_machine" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Compute/virtualMachines/box", os_disk = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-claude04-standing-20261120/providers/Microsoft.Compute/disks/os" } } }
+  mock_resource "azurerm_resource_group" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120" } }
+  mock_resource "azurerm_virtual_network" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Network/virtualNetworks/box" } }
+  mock_resource "azurerm_subnet" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Network/virtualNetworks/box/subnets/box" } }
+  mock_resource "azurerm_network_security_group" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Network/networkSecurityGroups/box" } }
+  mock_resource "azurerm_public_ip" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Network/publicIPAddresses/box", ip_address = "192.0.2.20" } }
+  mock_resource "azurerm_network_interface" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Network/networkInterfaces/box" } }
+  mock_resource "azurerm_linux_virtual_machine" { defaults = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Compute/virtualMachines/box", os_disk = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-box-standing-20261120/providers/Microsoft.Compute/disks/os" } } }
 }
 variables {
   subscription_id     = "00000000-0000-0000-0000-000000000000"
-  resource_group_name = "rg-claude04-standing-20261120"
+  resource_group_name = "rg-box-standing-20261120"
   name                = "c04-standing"
   operator_cidr       = "192.0.2.1/32"
   ssh_public_key      = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKipVtAhJcCsY55aFCnXJhgbsCM2HTDIOF2GgvLbAVcg test-fixture"
@@ -43,7 +43,7 @@ run "spot_box_shape" {
     error_message = "a deny-all inbound rule after the SSH allow, and no other rule"
   }
   assert {
-    condition     = output.box.public_ip == "192.0.2.20" && output.box.resource_group_name == "rg-claude04-standing-20261120"
+    condition     = output.box.public_ip == "192.0.2.20" && output.box.resource_group_name == "rg-box-standing-20261120"
     error_message = "output carries the address and RG"
   }
   assert {
@@ -55,7 +55,7 @@ run "existing_rg" {
   command = apply
   variables { create_resource_group = false }
   assert {
-    condition     = length(azurerm_resource_group.box) == 0 && azurerm_linux_virtual_machine.box.resource_group_name == "rg-claude04-standing-20261120"
+    condition     = length(azurerm_resource_group.box) == 0 && azurerm_linux_virtual_machine.box.resource_group_name == "rg-box-standing-20261120"
     error_message = "create_resource_group = false must use the given RG and create none"
   }
 }
@@ -66,7 +66,7 @@ run "rejects_open_ssh" {
 }
 run "rejects_shared_rg" {
   command = plan
-  variables { resource_group_name = "rg-codex02-azure-test-20261029" }
+  variables { resource_group_name = "rg-runner-azure-test-20261029" }
   expect_failures = [var.resource_group_name]
 }
 run "on_demand" {

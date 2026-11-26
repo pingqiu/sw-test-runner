@@ -272,7 +272,7 @@ class NightlyCommand(unittest.TestCase):
         self.assert_named_refusal('image-gone-load-fails', 'IMAGE_LOAD_FAILED', 1)
 
     # errexit is off inside the restore's OR-list: a failing hash or pin read must refuse even when it printed the
-    # matching value (codex01, #133 r1).
+    # matching value (the reviewer, #133 r1).
     def test_failing_hash_command_with_matching_output_is_named_and_never_loaded(self):
         self.pin_archive()
         self.assert_named_refusal('image-gone-hash-fails', 'IMAGE_ARCHIVE_UNREADABLE', 0)

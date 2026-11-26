@@ -152,7 +152,7 @@ Coordinator flags:
 
 Agent flags:
   -port <port>         Listen port (default: 9100)
-  -coordinator <url>   Coordinator URL (e.g. http://192.168.1.100:9000)
+  -coordinator <url>   Coordinator URL (e.g. http://198.51.100.100:9000)
   -token <token>       Auth token for coordinator communication
   -nodes <names>       Comma-separated node names this agent handles
   -allow-exec          Enable /exec endpoint for ad-hoc commands
@@ -1518,7 +1518,7 @@ func coordinatorCmd(args []string) {
 func agentCmd(args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	port := fs.Int("port", 9100, "Listen port")
-	coordURL := fs.String("coordinator", "", "Coordinator URL (e.g. http://192.168.1.100:9000)")
+	coordURL := fs.String("coordinator", "", "Coordinator URL (e.g. http://198.51.100.100:9000)")
 	token := fs.String("token", "", "Auth token")
 	nodes := fs.String("nodes", "", "Comma-separated node names this agent handles")
 	allowExec := fs.Bool("allow-exec", false, "Enable /exec endpoint")

@@ -17,7 +17,7 @@ env:
 topology:
   nodes:
     node1:
-      host: "192.168.1.1"
+      host: "198.51.100.1"
       user: testdev
       key: "/tmp/key"
 
@@ -219,25 +219,25 @@ func TestParse_AgentTopology_Valid(t *testing.T) {
 name: agent-topo
 topology:
   agents:
-    tp01: "192.168.1.188:9100"
-    m01: "192.168.1.181:9100"
+    agent-a: "198.51.100.188:9100"
+    m01: "198.51.100.181:9100"
   nodes:
-    tp01_node:
-      host: "192.168.1.188"
-      agent: tp01
+    a_node:
+      host: "198.51.100.188"
+      agent: agent-a
     m01_node:
-      host: "192.168.1.181"
+      host: "198.51.100.181"
       agent: m01
 targets:
   primary:
-    node: tp01_node
+    node: a_node
     iscsi_port: 3260
     iqn_suffix: primary
 phases:
   - name: test
     actions:
       - action: exec
-        node: tp01_node
+        node: a_node
         cmd: "echo"
 `
 	s, err := Parse([]byte(yaml))
@@ -247,8 +247,8 @@ phases:
 	if len(s.Topology.Agents) != 2 {
 		t.Errorf("agents = %d, want 2", len(s.Topology.Agents))
 	}
-	if s.Topology.Nodes["tp01_node"].Agent != "tp01" {
-		t.Error("tp01_node should have agent=tp01")
+	if s.Topology.Nodes["a_node"].Agent != "agent-a" {
+		t.Error("a_node should have agent=agent-a")
 	}
 }
 
@@ -257,10 +257,10 @@ func TestParse_AgentTopology_InvalidAgentRef(t *testing.T) {
 name: bad-agent-ref
 topology:
   agents:
-    tp01: "192.168.1.188:9100"
+    agent-a: "198.51.100.188:9100"
   nodes:
     node1:
-      host: "192.168.1.181"
+      host: "198.51.100.181"
       agent: nonexistent
 phases:
   - name: test

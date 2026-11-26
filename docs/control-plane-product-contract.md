@@ -116,7 +116,7 @@ returns that suite's queue/running/done/failed.
 **Shared filesystem layout** (every suite, only `<project>` differs):
 
 ```text
-/mnt/smb/work/share/testops/
+/mnt/share/testops/
   queue/<project>/<request_id>.env          # submitted
   state/<project>/{running,done,failed}/<request_id>.env
   results/<project>/<run_id>/...            # the bundle

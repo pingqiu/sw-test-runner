@@ -13,11 +13,11 @@ make build-swblock           # or: go build ./cmd/swblock
 
 # smoke
 swblock run scenarios/public/smoke-iscsi.yaml -env <env.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa
+  -results-dir /mnt/share/testops/results/block-qa
 
 # end-to-end
 swblock run scenarios/public/e2e-block.yaml -env <env.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa
+  -results-dir /mnt/share/testops/results/block-qa
 ```
 
 ## What you can exercise

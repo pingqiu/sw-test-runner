@@ -19,7 +19,7 @@ env:
   root: "/tmp/sw-vfs-xa"
   weed_bin: "/tmp/sw-vfs-xa/bin/weed"
   smb_weed: "/mnt/smb/work/share/testops/tmp/vfs-weed/weed"
-  m02_ip: "192.168.1.184"
+  m02_ip: "198.51.100.184"
   s3_port: "8333"
   filer_port: "8888"
   mnt: "/tmp/sw-vfs-xa/mnt"
@@ -28,11 +28,11 @@ env:
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "{{ ssh_key }}"
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "{{ ssh_key }}"
 

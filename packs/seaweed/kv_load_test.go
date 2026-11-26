@@ -110,12 +110,12 @@ func TestDatasetBytesBoundEveryPossibleWrite(t *testing.T) {
 	if got, want := p.datasetBytes(), int64(2*(4096+480000)*(64<<10)); got != want {
 		t.Fatalf("with a mixed phase: %d, want %d", got, want)
 	}
-	// codex01's fixed-seed case: one 64 KiB key, read 297 s, then mixed 30 s
+	// The reviewer's fixed-seed case: one 64 KiB key, read 297 s, then mixed 30 s
 	// at 0.98 emitted 327680 payload bytes; the expected-write bound gave 262144.
 	one := &LoadPattern{Clients: 1, Transport: "dc", Keys: 1, Distribution: "uniform", ObjectBytes: 64 << 10, RatePerClient: 10,
 		Phases: []LoadPhase{{Kind: "write_once"}, {Kind: "read", DurationS: 297}, {Kind: "mixed", DurationS: 30, ReadRatio: 0.98}}}
 	if got := one.datasetBytes(); got < 327680 {
-		t.Fatalf("codex01's case bound %d, below the 327680 bytes it emitted", got)
+		t.Fatalf("the reviewer's case bound %d, below the 327680 bytes it emitted", got)
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 	"testing/synctest"
 )
 
-// Claude01 ruling 6ae76c16: the create re-read and the sweep take their type
+// The coordinator ruling 6ae76c16: the create re-read and the sweep take their type
 // coverage from moduleTypes, and moduleTypes is exactly the module's types.
 func TestModuleTypesAreTheModulesTypes(t *testing.T) {
 	src, err := os.ReadFile("../terraform/azure/main.tf")
@@ -68,7 +68,7 @@ func TestLostVMCreateIsATransportForm(t *testing.T) {
 		{"other-failure", strings.Replace(lost, "HTTP response was nil; connection may have been reset", "unexpected status 409", 1), false},
 		{"trailing-error", lost + "\n\nError: quota exceeded", false},
 		{"other-verb", strings.Replace(lost, "creating Linux", "updating Linux", 1), false},
-		// codex01 #55: the with address, the in-resource line and the source
+		// The reviewer #55: the with address, the in-resource line and the source
 		// line must all name the same module resource.
 		{"in-resource-name-differs", strings.Replace(lost, `in resource "azurerm_linux_virtual_machine" "node"`, `in resource "azurerm_linux_virtual_machine" "other"`, 1), false},
 		{"source-name-differs", strings.Replace(lost, `88: resource "azurerm_linux_virtual_machine" "node"`, `88: resource "azurerm_linux_virtual_machine" "other"`, 1), false},
@@ -106,7 +106,7 @@ func TestLostVMCreateRereadsAndImports(t *testing.T) {
 		{"absent-retries", func() ([]byte, error) { return absentShow(id), errors.New("az: exit status 3") }, "CREATE_UNRESOLVED", 2, 0},
 		{"foreign-tag-refuses", object(vm, "someone-else"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 		{"wrong-type-refuses", object("Microsoft.Network/networkInterfaces", "output"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
-		// codex01 #55 control: only the in-resource name differs; no retry, no import.
+		// The reviewer #55 control: only the in-resource name differs; no retry, no import.
 		{"contradictory-names-refuse", object(vm, "output"), "APPLY_FAILED_OR_UNKNOWN", 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

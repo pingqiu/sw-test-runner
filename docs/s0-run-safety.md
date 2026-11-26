@@ -6,8 +6,8 @@ The status and missing-backend statements below describe the initial head only.
 Status: **not S0-complete; not launch-ready; blocked on scope repricing**.
 Current S0a scope, NEED-1..5 correction and budget stop: see s0a-needs.md.
 Base: c646219321adef0c4b2ed8ce6733d0da1d3b092e.
-Request: Claude01 6ae3b20b9c9fd1ba9ca5271f; accepted port plan
-`V:/share/rdma/codex01-testrunner-port-plan-20261029/PLAN.md`.
+Request: the coordinator 6ae3b20b9c9fd1ba9ca5271f; accepted port plan
+the run's share folder.
 
 ## Implemented
 
@@ -102,9 +102,9 @@ partial head, with tests separate. Remaining approximate allocations are
 and 200-350 TierChaos plus authority/deployment binding. These are estimates,
 not a new authorization or a reason to compress safety code.
 
-Stop further S0 feature implementation here for Claude01's ruling: accept the
+Stop further S0 feature implementation here for the coordinator's ruling: accept the
 reprice or reduce/resequence the slice explicitly. This partial head can be
-reviewed by Claude02 for engine correctness and interface feasibility. It is
+reviewed by a reviewer for engine correctness and interface feasibility. It is
 not a request to ACCEPT full S0, launch S1/S3, or retire any old harness.
 S1/S3 spikes remain non-pushable and should report constraints against this
 draft; they must not bypass the missing backend with raw PID commands.

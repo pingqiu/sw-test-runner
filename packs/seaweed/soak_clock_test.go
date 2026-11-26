@@ -47,7 +47,7 @@ func TestClockEvidenceRefusesAnIncompleteCapture(t *testing.T) {
 	}
 }
 
-func TestClockAliasesAreRefused(t *testing.T) { // codex01 review b954b275
+func TestClockAliasesAreRefused(t *testing.T) { // review b954b275
 	for name, row := range map[string]string{
 		"clock": `{"clock":{"boot_id":"bad"},"Clock":{"boot_id":"m02","entry_epoch":1793610000.5,"exit_epoch":1793610010.5,"entry_mono":7000.5,"exit_mono":7010.5}}`,
 		"entry": `{"clock":{"boot_id":"m02","entry_epoch":1,"Entry_Epoch":1793610000.5,"exit_epoch":1793610010.5,"entry_mono":7000.5,"exit_mono":7010.5}}`,

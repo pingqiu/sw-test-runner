@@ -63,7 +63,7 @@ func TestApprovedExecutionRefusesPostAdmissionAuthorityLoss(t *testing.T) {
 			case "lease-release":
 				e = os.WriteFile(filepath.Join(f.dir, "ledger", f.binding.LeaseID+"-release.json"), []byte("{}"), 0600)
 			case "lease-stale":
-				raw, _ := json.Marshal(map[string]any{"lease_id": f.binding.LeaseID, "agent": "codex03", "renewed": float64(time.Now().Unix() - 601)})
+				raw, _ := json.Marshal(map[string]any{"lease_id": f.binding.LeaseID, "agent": "worker-a", "renewed": float64(time.Now().Unix() - 601)})
 				e = os.WriteFile(filepath.Join(f.dir, "ledger", f.binding.LeaseID+"-renew.json"), raw, 0600)
 			case "approval-permissions":
 				e = os.Chmod(filepath.Join(f.dir, "go.json"), 0666)

@@ -140,7 +140,7 @@ func TestApprovedAuthorizeStampSecondAuthorizePoisons(t *testing.T) {
 	}
 }
 
-// codex01 review 6ae9daff (red control, adopted): a caller-set Settled flag on a killed task, with no stored
+// Review 6ae9daff (red control, adopted): a caller-set Settled flag on a killed task, with no stored
 // terminal receipt, gets no stamp, and the refusal leaves the stamp in place.
 func TestApprovedAuthorizeStampNeedsTheStoredSettledReceipt(t *testing.T) {
 	f, node, _, _ := authorizeClockFixture(t)

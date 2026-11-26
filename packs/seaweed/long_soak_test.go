@@ -74,7 +74,7 @@ func TestRunSoakRunsATwoHourPlanOnlyUnderTheExecutorsHorizon(t *testing.T) {
 }
 
 // directSoakBudget refuses, before any deploy, an 8 h soak whose work deadline or --timeout can't hold it,
-// including its whole scaled assessor step (codex01 P2 on fe027da4).
+// including its whole scaled assessor step (the reviewer P2 on fe027da4).
 func TestDirectSoakBudgetSizesTheTimeoutAndTheWorkDeadline(t *testing.T) {
 	p, _ := soakTestPlan()
 	p.Soak.DurationS = 28800
@@ -126,7 +126,7 @@ func TestTrailingReserveCoversTheScaledAssessorOnlyForLongDirectSoaks(t *testing
 }
 
 // The assessor step covers its measured runtime with a 2x margin at both measured durations (#1002: offline on
-// tp01 with the real evidence and a clock bracket, 2 h 91 s, 8 h 1552 s; the miss join is ~quadratic), and keeps
+// the test host with the real evidence and a clock bracket, 2 h 91 s, 8 h 1552 s; the miss join is ~quadratic), and keeps
 // the 30-minute and 2 h steps unchanged.
 func TestAssessTimeoutCoversTheMeasuredMissJoinWithMargin(t *testing.T) {
 	for _, c := range []struct {
@@ -171,7 +171,7 @@ func TestSoakScaleCountsThirtyMinuteSpans(t *testing.T) {
 	}
 }
 
-// codex01 R2 on ab54b6d4: runSoak validates the plan before any arithmetic on it. A nil plan and
+// The reviewer R2 on ab54b6d4: runSoak validates the plan before any arithmetic on it. A nil plan and
 // out-of-range plans return the range error with no effect, on both executors, instead of panicking.
 func TestRunSoakRefusesNilAndOutOfRangePlansBeforeAnyArithmeticOrEffect(t *testing.T) {
 	for _, direct := range []bool{false, true} {

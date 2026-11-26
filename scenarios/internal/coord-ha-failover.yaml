@@ -5,15 +5,15 @@ env:
 
 topology:
   agents:
-    target_agent: "192.168.1.184:9100"
-    client_agent: "192.168.1.181:9100"
+    target_agent: "198.51.100.184:9100"
+    client_agent: "198.51.100.181:9100"
 
   nodes:
     target_node:
-      host: "192.168.1.184"
+      host: "198.51.100.184"
       agent: target_agent
     client_node:
-      host: "192.168.1.181"
+      host: "198.51.100.181"
       agent: client_agent
 
 targets:

@@ -43,7 +43,7 @@ func deploymentFixtureSession(t *testing.T, gate func(), rewrite func(string) st
 	if os.Geteuid() != 0 {
 		t.Skip("local Linux root needed to model a protected installation and unprivileged SSH child")
 	}
-	root, err := os.MkdirTemp("/opt", "codex03-readback-test-")
+	root, err := os.MkdirTemp("/opt", "readback-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestDeploymentReadbackVerifiesActualProtectedFilesThroughPinnedSSH(t *testi
 
 // Barrier after genuine find output models an independent privileged installation.
 func TestDeploymentReadbackRefusesEntryAddedAfterEnumeration(t *testing.T) {
-	scratch, mkErr := os.MkdirTemp("/opt", "codex01-readback-barrier-")
+	scratch, mkErr := os.MkdirTemp("/opt", "readback-barrier-")
 	if mkErr != nil {
 		t.Fatal(mkErr)
 	}

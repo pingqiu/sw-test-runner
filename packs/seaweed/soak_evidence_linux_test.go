@@ -10,7 +10,7 @@ import (
 	"github.com/pingqiu/sw-test-runner/infra"
 )
 
-// codex01 R2 on #118: the M02 evidence file is fetched through the real step path (cloudStep on a native node,
+// The reviewer R2 on #118: the M02 evidence file is fetched through the real step path (cloudStep on a native node,
 // as the direct path's ssh node runs it), bounded at the source. A 2 h (151 KB) and an 8 h (600 KB) file arrive
 // whole; a file over the 4 MiB bound is refused, and no more than the bound + 1 byte reaches memory or the journal.
 func TestM02EvidenceFetchThroughTheRealStepPathIsBounded(t *testing.T) {

@@ -15,11 +15,11 @@ env:
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "/opt/work/testdev_key"
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "/opt/work/testdev_key"
 

@@ -327,7 +327,7 @@ func TestApprovedWorkerOwnsCanonicalLeaseLifetime(t *testing.T) {
 					t.Fatalf("pack-judged soak envelope not admitted: started=%t released=%t: %s", started, released, logs)
 				}
 			case "soak-label-only", "soak-hook-refused", "soak-hook-over":
-				// A soak label without a pack judgement, a refused judgement (codex01's
+				// A soak label without a pack judgement, a refused judgement (the reviewer's
 				// composed control: approved_job first, late soak handler), or a
 				// judgement past SoakHorizon: refused at the envelope, before any
 				// acquire or job.

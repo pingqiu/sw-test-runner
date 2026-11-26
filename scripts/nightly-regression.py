@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free tp01 nightly; workstation stages inputs and publishes results."""
+"""Credential-free nightly; workstation stages inputs and publishes results."""
 import datetime
 import hashlib
 import json

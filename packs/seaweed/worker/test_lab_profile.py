@@ -384,7 +384,7 @@ class RotationConfig(unittest.TestCase):
                dict(self.ROTATION, low_watermark=0.3), dict(self.ROTATION, high_watermark=1.0),
                dict(self.ROTATION, min_age_minutes=True), dict(self.ROTATION, check_interval_seconds=0),
                dict(self.ROTATION, max_volumes_per_cycle='1'), 'enabled',
-               # Accepted by r1 but rejected or dropped by the product (claude03 P2-1):
+               # Accepted by r1 but rejected or dropped by the product (a reviewer P2-1):
                dict(self.ROTATION, min_remaining_volumes=0), dict(self.ROTATION, check_interval_seconds=2**63),
                dict(self.ROTATION, check_interval_seconds=86401), dict(self.ROTATION, min_age_minutes=10**6 + 1),
                dict(self.ROTATION, max_volumes_per_cycle=0), dict(self.ROTATION, min_remaining_volumes=10**6 + 1)]
@@ -664,7 +664,7 @@ class SoakCollect(unittest.TestCase):
         self.assertEqual(sorted((e['kind'], e['stamp']) for e in ev), [
             ('start', '1104 07:12:01.023456'), ('start', '1104 07:12:01.123456'), ('success', '1104 07:12:01.130001')])
 
-    def test_the_969_retiring_line_is_not_a_start_event(self):  # claude03 on #96: B only from #972's placement
+    def test_the_969_retiring_line_is_not_a_start_event(self):  # a reviewer on #96: B only from #972's placement
         old = 'I1104 07:12:01.123456 master_cache_volume_rotation.go:618 retiring non-replicated cache Volume 23 collection=lmcache\n'
         rotated = 'I1104 07:12:01.130001 master_cache_volume_rotation.go:279 rotated non-replicated cache Volume 23 collection=lmcache bytes=1\n'
         with (self.root / 'master.stderr').open('a') as f:
@@ -672,7 +672,7 @@ class SoakCollect(unittest.TestCase):
         ev = [e for e in profile.soak_collect(self.config)['events'] if e['vid'] == 23]
         self.assertEqual([e['kind'] for e in ev], ['success'])
 
-    # codex01 review db5d4589: each generation's own sources must be complete; another's cannot stand in.
+    # Review db5d4589: each generation's own sources must be complete; another's cannot stand in.
     def refused_collect(self):
         with self.assertRaises((ValueError, OSError)):
             profile.soak_collect(self.config)
@@ -710,7 +710,7 @@ class SoakCollect(unittest.TestCase):
         self.gen('master-generation.json', 4242, ['master.stdout', 'master.stderr'], boot_id='other')
         self.refused_collect()
 
-    # codex01 review 9d2eab42: a generation's capture is bound by the PRODUCT_EXEC row it printed there.
+    # Review 9d2eab42: a generation's capture is bound by the PRODUCT_EXEC row it printed there.
     def test_a_replacement_listing_the_originals_captures_fails_the_collect(self):
         self.gen('master-replacement-generation.json', 4343, ['master.stdout', 'master.stderr'], exec_row=False)
         self.refused_collect()

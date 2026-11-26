@@ -27,10 +27,10 @@ If you were handed this link to start testing, read in this order:
 
 Related local docs:
 
-- [Seaweed Block Engineering Wiki](http://192.168.1.135:8010/wiki/) -
+- [Seaweed Block Engineering Wiki](http://198.51.100.135:8010/wiki/) -
   Kubernetes block-storage, CSI, operation-layer, lifecycle, and
   storage-failure design.
-- [Seaweed RDMA Engineering Wiki](http://192.168.1.135:8011/wiki/) - Rust
+- [Seaweed RDMA Engineering Wiki](http://198.51.100.135:8011/wiki/) - Rust
   RDMA data path, native RC/DC, UCX, pull-RDMA, and future GPU-style
   destinations.
 
@@ -66,10 +66,10 @@ run shows up on the [live dashboard](dashboard.md).
 ```bash
 # block / kv / v3 block
 swblock run scenarios/public/e2e-block.yaml -env <env.yaml> \
-  -results-dir /mnt/smb/work/share/testops/results/block-qa
+  -results-dir /mnt/share/testops/results/block-qa
 # S3
 sweeds3 run scenarios/s3-smoke-chain.yaml \
-  -results-dir /mnt/smb/work/share/testops/results/s3-qa
+  -results-dir /mnt/share/testops/results/s3-qa
 ```
 
 ## Where things are
@@ -84,7 +84,7 @@ sweeds3 run scenarios/s3-smoke-chain.yaml \
 | [Scenarios](scenario-catalog.md) | The scenario catalog (public set) + how to list / validate / run. |
 | [Deploy & Operate](deploy.md) | Build, lab topology, nodes, the dashboard service, disk janitor. |
 | [Product Testing Guides](guides/block.md) | Per-product recipes: block, S3, VFS/RDMA. |
-| [Live Dashboard](dashboard.md) | The global run + docs view at `http://192.168.1.181:9099/`. |
+| [Live Dashboard](dashboard.md) | The global run + docs view at `http://198.51.100.181:9099/`. |
 
 ## Serve this wiki
 

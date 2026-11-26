@@ -34,9 +34,9 @@ markdown_extensions:
 nav:
   - Home: wiki/index.md
   - Wiki Links:
-      - Block Wiki: http://192.168.1.135:8010/wiki/
-      - RDMA Wiki: http://192.168.1.135:8011/wiki/
-      - TestOps Wiki: http://192.168.1.135:8012/wiki/
+      - Block Wiki: http://198.51.100.135:8010/wiki/
+      - RDMA Wiki: http://198.51.100.135:8011/wiki/
+      - TestOps Wiki: http://198.51.100.135:8012/wiki/
   - Start Here:
       - Unified TestOps: unified-testops.md
       - Submit & Author: wiki/submitting.md

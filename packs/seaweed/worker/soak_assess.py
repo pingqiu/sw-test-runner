@@ -187,7 +187,7 @@ def start_boundaries(events, begin, end, bounds):
 
 def vid_outcome(e, vid, ack, good, bounds, lo, hi, dat, hits, starts=None, vid_last_hit=None):
     """One chunk VID as this miss's retirement witness, every guard on that VID alone (never mixed with a sibling's):
-    'excused', 'undecidable' or 'unexcused'. Decision 3 revision (e45019f9 + codex01 8c56cca4): qualified observed
+    'excused', 'undecidable' or 'unexcused'. Decision 3 revision (e45019f9 + the reviewer 8c56cca4): qualified observed
     ordering under the stated limit, in M01 mono; not a retirement or durability proof and not parity. The stated
     limit, accepted by Ping: a real loss between the version's last exact read and S is excused. `hits` are exact
     GETs of this same version. Rule A (Ping, 2026-11-04): a GET submitted inside the clock bracket around B, i.e. in

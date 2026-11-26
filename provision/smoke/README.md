@@ -29,7 +29,7 @@ Terraform 1.17.1, Azure CLI and credentials stay on the Linux controller. Use th
 
 The released af8c native archive contains top-level `seaweedkv_native/`. Extract it unchanged into run_root and pass run_root as native_dir; do not repack it or add a native/ prefix. The cloud HTTP smoke uses the OS filesystem under the inventory run_root, with no disk formatting. The declared cache disk stays unformatted. This is an infrastructure smoke, not cache-disk performance or rotation qualification.
 
-The controller generates a fresh **server** ed25519 key before Terraform plan/apply, writes it in mode-0600 `host.auto.tfvars.json`, and uses its public half through infra.Node FixedHostKey for the first SSH. Cloud-init installs the private half only on that VM; it is also present in private Terraform plan/state. The client authentication private key never goes to the VM. Keep config/output/state/plan private, never V:/shared evidence. Do not print them. Terraform command output is withheld from command logs.
+The controller generates a fresh **server** ed25519 key before Terraform plan/apply, writes it in mode-0600 `host.auto.tfvars.json`, and uses its public half through infra.Node FixedHostKey for the first SSH. Cloud-init installs the private half only on that VM; it is also present in private Terraform plan/state. The client authentication private key never goes to the VM. Keep config/output/state/plan private, never shared evidence. Do not print them. Terraform command output is withheld from command logs.
 
 ## Commands
 
@@ -224,7 +224,7 @@ apply stays non-clean even if destroy/list are empty; notify the run owner.
 
 ## Cluster orphan cleanup contract
 
-`rg-codex02-azure-test-20261029` is dedicated to the runner Azure lane. The manager issues serialized run tokens: one run at a time, with no external writer or retagging in this RG. After same-state destroy, cluster cleanup sweeps only supported resources in this RG carrying the current run tag, in VM -> NIC -> public IP -> disk -> VNet -> NSG order (a VM created outside state holds its NIC; run 7e). The VM's detached OS disk goes as a disk. It journals and waits for each deletion, then runs the full RG and subscription scans. Unsupported or untagged residuals are reported, never deleted by this sweep.
+`rg-runner-azure-test-20261029` is dedicated to the runner Azure lane. The manager issues serialized run tokens: one run at a time, with no external writer or retagging in this RG. After same-state destroy, cluster cleanup sweeps only supported resources in this RG carrying the current run tag, in VM -> NIC -> public IP -> disk -> VNet -> NSG order (a VM created outside state holds its NIC; run 7e). The VM's detached OS disk goes as a disk. It journals and waits for each deletion, then runs the full RG and subscription scans. Unsupported or untagged residuals are reported, never deleted by this sweep.
 
 The fresh pre-delete tag read is a sanity check under that exclusive-writer contract; it is not atomic ownership proof and cannot protect against an external retag between show and delete. Show must return exactly one standalone JSON object; arrays, concatenated objects and trailing tokens refuse. No added read loop attempts to close that race. Sticky create uncertainty and any destroy failure remain non-clean even after the observed resources are gone.
 

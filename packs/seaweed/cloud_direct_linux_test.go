@@ -149,7 +149,7 @@ func TestDirectCleanupRunsAfterAFailedStart(t *testing.T) {
 	if collect < 0 || collect > stop {
 		t.Fatalf("a failed start's logs were not read before teardown: journal %d, stop %d", collect, stop)
 	}
-	// codex01 review c8a23688 R4: no later fetch overwrites the captured journal.
+	// Review c8a23688 R4: no later fetch overwrites the captured journal.
 	var captured struct {
 		Stdout string `json:"stdout"`
 	}
@@ -160,7 +160,7 @@ func TestDirectCleanupRunsAfterAFailedStart(t *testing.T) {
 	}
 }
 
-// codex01 review c8a23688 R1: a stalled journal capture is cut at its own
+// Review c8a23688 R1: a stalled journal capture is cut at its own
 // controller-side bound, on its own connection, and never spends the teardown.
 func TestDirectStalledJournalCannotSpendTheTeardown(t *testing.T) {
 	collect, teardown := directCollectBound, directTeardownBound
@@ -180,7 +180,7 @@ func TestDirectStalledJournalCannotSpendTheTeardown(t *testing.T) {
 	}
 }
 
-// codex01 review R1: a cancelled run's connection closes with its context, so
+// Review R1: a cancelled run's connection closes with its context, so
 // cleanup must reach the host on its own connection, never read as clean.
 func TestDirectCleanupReachesTheHostAfterCancellation(t *testing.T) {
 	h := &directHost{hangKV: 3 * time.Second}

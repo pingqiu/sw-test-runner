@@ -28,7 +28,7 @@ under `scenarios/`:
 <binary> list                          # registered actions (by tier)
 <binary> validate scenarios/public/e2e-block.yaml   # static check, no execution
 <binary> run scenarios/public/e2e-block.yaml -env <env.yaml> \
-    -results-dir /mnt/smb/work/share/testops/results/<project>
+    -results-dir /mnt/share/testops/results/<project>
 ```
 
 !!! note "flag order"

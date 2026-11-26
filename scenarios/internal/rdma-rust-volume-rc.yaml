@@ -8,7 +8,7 @@ env:
   weed_bin: "/opt/work/weed"
   bench_bin: "/tmp/sra-rdma-bench-integrated"
   run_dir: "/tmp/rv-rdma-current"
-  m02_host: "192.168.1.184"
+  m02_host: "198.51.100.184"
   m02_rdma_ip: "10.0.0.3"
   m02_key_from_m01: "/opt/work/testdev_key"
   master_port: "19334"
@@ -23,11 +23,11 @@ env:
 topology:
   nodes:
     m01:
-      host: 192.168.1.181
+      host: 198.51.100.181
       user: testdev
       key: "{{ ssh_key }}"
     m02:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key: "{{ ssh_key }}"
 

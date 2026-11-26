@@ -31,8 +31,8 @@ parses stable witness lines, and records the result as a normal TestOps bundle.
 
 | Node | Role |
 | --- | --- |
-| **M01** `192.168.1.181` | client / VFS mount / object loader / runner |
-| **M02** `192.168.1.184` | master + filer + RDMA-enabled Rust volume |
+| **M01** `198.51.100.181` | client / VFS mount / object loader / runner |
+| **M02** `198.51.100.184` | master + filer + RDMA-enabled Rust volume |
 | **RoCE** | M01 `10.0.0.1`, M02 `10.0.0.3` |
 
 The lab is the hardware gate. Software-RDMA/SIW CI remains in `artifactory`.

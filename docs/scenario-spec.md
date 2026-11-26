@@ -39,14 +39,14 @@ cluster:                       # optional, declares cluster requirements
     volumes:
       - { port: 8080, block_listen: ":3350", extra_args: "" }
     node: target_node
-    ip:   192.168.1.184
+    ip:   198.51.100.184
 
 topology:
   agents:                      # optional, coordinator-mode agent map
-    a01: 192.168.1.181:9990
+    a01: 198.51.100.181:9990
   nodes:
     target_node:
-      host: 192.168.1.184
+      host: 198.51.100.184
       user: testdev
       key:  /c/work/dev_server/testdev_key
       alt_ips: [10.0.0.3]      # optional, e.g. RDMA NIC
@@ -122,7 +122,7 @@ Notes on existing semantics:
   retry: 0                     # number of retries on failure
   timeout: 30s                 # per-action timeout, Go duration string
   # any remaining keys are passed inline as Action.Params (string→string)
-  master: "192.168.1.184:9333"
+  master: "198.51.100.184:9333"
   device: "/dev/sda"
 ```
 
@@ -282,7 +282,7 @@ env:
 
 topology:
   nodes:
-    target_node: { host: 192.168.1.184, user: testdev, key: /key }
+    target_node: { host: 198.51.100.184, user: testdev, key: /key }
 
 targets:
   primary:

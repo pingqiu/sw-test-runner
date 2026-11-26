@@ -144,7 +144,7 @@ func (f *fakeSoak) Ack(ctx context.Context, episode string) (SoakAck, error) {
 	}
 	pause := f.pauses[len(f.pauses)-1]
 	switch f.ackMode {
-	case "slow ack": // a valid ack, 6 s after the pause (codex01 R3)
+	case "slow ack": // a valid ack, 6 s after the pause (the reviewer R3)
 		f.advance(6 * time.Second)
 	case "expired ctx": // a valid ack returned only after the 5 s AckWait expired
 		<-ctx.Done()
@@ -345,7 +345,7 @@ func TestSoakExitGraceFitsThePhaseBudget(t *testing.T) {
 	}
 }
 
-// codex01 review feb52bed. A timer or completion notice is no proof of when the load ended: past the absolute
+// Review feb52bed. A timer or completion notice is no proof of when the load ended: past the absolute
 // endpoint, or once WORK is cancelled, a settled receipt is not accepted.
 func TestSoakLateCompletionAfterADelayedTimerIsRefused(t *testing.T) {
 	f := newFakeSoak(t)
@@ -502,7 +502,7 @@ func TestSoakLateOrForeignReadyStopsTheSchedule(t *testing.T) {
 			f := newFakeSoak(t)
 			set(f)
 			records, _, err := runFake(t, f)
-			// The exact READY receipt refs survive the failure (codex01 R4).
+			// The exact READY receipt refs survive the failure (the reviewer R4).
 			if last := records[len(records)-1]; len(last.Ready) == 0 || last.Ready[len(last.Ready)-1].StdoutSHA256 == "" {
 				t.Fatalf("partial record lost its READY refs: %+v", last)
 			}
@@ -517,7 +517,7 @@ func TestSoakLateOrForeignReadyStopsTheSchedule(t *testing.T) {
 	}
 }
 
-// codex01 R1: an at_s near MaxInt64 must be refused before any arithmetic or
+// The reviewer R1: an at_s near MaxInt64 must be refused before any arithmetic or
 // effect, also when runSoak is called directly (not through bind).
 func TestSoakHugeAtSRefusedBeforeAnyEffect(t *testing.T) {
 	for _, at := range []int{math.MaxInt64, math.MaxInt64 / 1000, 1801, 59, -1} {
@@ -531,7 +531,7 @@ func TestSoakHugeAtSRefusedBeforeAnyEffect(t *testing.T) {
 	}
 }
 
-// codex01 R4: all READY probes of one fault share one 45 s stage deadline.
+// The reviewer R4: all READY probes of one fault share one 45 s stage deadline.
 func TestSoakReadyProbesShareOneReadyBound(t *testing.T) {
 	f := newFakeSoak(t)
 	before := time.Now()
@@ -546,7 +546,7 @@ func TestSoakReadyProbesShareOneReadyBound(t *testing.T) {
 	}
 }
 
-// codex01 R1 (clock part): a witness outside the enrollment bracket, or a
+// The reviewer R1 (clock part): a witness outside the enrollment bracket, or a
 // non-finite controller clock, is refused before any Kill; no float can wrap
 // a duration conversion.
 func TestSoakWitnessOutsideBracketOrBadClockSendsNoKill(t *testing.T) {
@@ -581,7 +581,7 @@ func TestCheckedSpanBoundsEveryConversion(t *testing.T) {
 	}
 }
 
-// codex01 P2: a finite, positive clock that steps back after a timer must not
+// The reviewer P2: a finite, positive clock that steps back after a timer must not
 // reach a Kill.
 func TestSoakClockRegressionAfterTimerSendsNoKill(t *testing.T) {
 	f := newFakeSoak(t)
@@ -607,7 +607,7 @@ func TestSoakEarlyTimerNeverDispatchesBeforeDue(t *testing.T) {
 	}
 }
 
-// codex01's K7 condition: READY time = the actual successful observation.
+// The reviewer's K7 condition: READY time = the actual successful observation.
 func TestSoakReadyTimeIsTheSuccessfulObservation(t *testing.T) {
 	f := newFakeSoak(t)
 	records, _, err := runFake(t, f)

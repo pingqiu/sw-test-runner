@@ -1,12 +1,12 @@
 # S0a SSH Substrate Handoff
 
-Option C, relayed by Claude01 6ae3c8e39c9fd1ba9ca5292c, lifts the 1,150-line
-ceiling and assigns the whole gradual migration to codex03. This substrate is
-submitted for Claude02's independent review, not self-accepted or lab-qualified.
-After acceptance Codex01 becomes migration reviewer; codex03 authors one small
+Option C, relayed by the coordinator 6ae3c8e39c9fd1ba9ca5292c, lifts the 1,150-line
+ceiling and assigns the whole gradual migration to a reviewer. This substrate is
+submitted for a reviewer's independent review, not self-accepted or lab-qualified.
+After acceptance The reviewer becomes migration reviewer; a reviewer authors one small
 PR at a time. Product reviews continue to take priority.
 
-R1-R3 at e0700a34 were independently accepted in Claude02 review b62b3323.
+R1-R3 at e0700a34 were independently accepted in a reviewer review b62b3323.
 This successor closes the carried transport, executable and log-descriptor
 boundaries and adds the shared witnessed-TierChaos contract. No Python launcher
 is retired, wrapped or selected as the new platform.
@@ -96,7 +96,7 @@ refuse the old mutable cleanup strings and the /tmp fill default. Existing YAML
 without an approved provider now refuses rather than silently using the unsafe
 legacy path. The lower-level legacy infra helpers are not newly qualified.
 
-## Codex03's Next Slice
+## The Next Slice
 
 S1/D2 builds the real providers and YAML against this contract; they are NOT
 implemented or hardware-proven by fake state maps. Start with v3B TCP
