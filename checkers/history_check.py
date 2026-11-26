@@ -140,6 +140,40 @@ class Shadow:
         return {lba for (v, lba) in list(self.allowed) + list(self.pending) if v == vol} | set(self.base.get(vol, {}))
 
 
+def overlaps(recs):
+    """Volumes on which two operations were open at once. The data checkers
+    apply operations at their completion and freeze a snapshot as its
+    invoke set plus the writes completed during it: right only when the
+    operations on a volume never overlap (M0 issues them one at a time). On
+    an overlap they answer UNKNOWN rather than judge. A restore touches its
+    source and its target."""
+    open_on, found = {}, set()
+    for r in recs:
+        if r['kind'] == 'invoke':
+            vols = {r.get('volume')}
+            if r['verb'] == 'restore':
+                vols.add((r.get('args') or {}).get('source'))
+            vols.discard(None)
+            for v in vols:
+                if open_on.get(v):
+                    found.add(v)
+                open_on.setdefault(v, set()).add(r['seq'])
+        elif r['kind'] == 'complete':
+            for s in open_on.values():
+                s.discard(r['of'])
+    return found
+
+
+def unknown_on_overlap(fn):
+    def wrapped(recs):
+        o = overlaps(recs)
+        if o:
+            return {'verdict': 'UNKNOWN', 'findings': ['operations overlap on %s: this checker judges only one-at-a-time histories' % ', '.join(sorted(o))]}
+        return fn(recs)
+    wrapped.__name__, wrapped.__doc__ = fn.__name__, fn.__doc__
+    return wrapped
+
+
 def replay(recs):
     """Walk the history once and hand each event to the checkers that need it.
 
@@ -150,12 +184,12 @@ def replay(recs):
     sh = Shadow()
     events = []
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}
-    snap_open = {}
+    snap_open = {}       # invocation seq -> (volume, {lba: set}) of an open snapshot
     frozen = {}          # (volume, snapshot) -> {lba: set}
     for r in recs:
         if r['kind'] == 'invoke' and r['verb'] == 'snapshot':
             vol = r['volume']
-            snap_open[r['seq']] = {lba: sh.may_hold(vol, lba) for lba in sh.lbas(vol)}
+            snap_open[r['seq']] = (vol, {lba: sh.may_hold(vol, lba) for lba in sh.lbas(vol)})
             continue
         if r['kind'] != 'complete':
             if r['kind'] == 'observe':
@@ -166,16 +200,20 @@ def replay(recs):
         args, res = inv.get('args') or {}, r.get('result') or {}
         if verb == 'write':
             lba = args['lba']
-            for s in snap_open.values():
-                s.setdefault(lba, sh.may_hold(vol, lba))
-                s[lba] = s[lba] | {args['sha256']}
+            # A write completed while a snapshot of ITS volume was open may be
+            # in that snapshot; a refused write changed nothing.
+            if out in ('ok', 'unknown'):
+                for svol, s in snap_open.values():
+                    if svol == vol:
+                        s.setdefault(lba, sh.may_hold(vol, lba))
+                        s[lba] = s[lba] | {args['sha256']}
             sh.write(vol, lba, args['sha256'], out)
             events.append(('write', inv, r))
         elif verb == 'read':
             if out == 'ok':
                 events.append(('read', inv, r, sh.may_hold(vol, args['lba'])))
         elif verb == 'snapshot':
-            taken = snap_open.pop(r['of'])
+            _, taken = snap_open.pop(r['of'])
             if out == 'ok':
                 frozen[(vol, args['name'])] = taken
             events.append(('snapshot', inv, r))
@@ -190,6 +228,7 @@ def replay(recs):
     return sh, events, frozen
 
 
+@unknown_on_overlap
 def c1(recs):
     sh, events, _ = replay(recs)
     f = []
@@ -223,6 +262,7 @@ def restores(recs):
     return out
 
 
+@unknown_on_overlap
 def c2(recs):
     _, events, frozen = replay(recs)
     f, unknown = [], False
@@ -231,12 +271,20 @@ def c2(recs):
         if image is None:
             f.append('restore of %s from %s/%s: no completed snapshot of that name' % (target, source, snap))
             continue
-        first = {}
+        # The restored content of a block is seen only by a read of the
+        # target with no earlier write of the target at that block; a block
+        # written first is not checked here (C1 covers it).
+        first, written = {}, set()
         for ev in events:
-            if ev[0] == 'read' and ev[1]['volume'] == target and ev[2]['seq'] > at:
-                first.setdefault(ev[1]['args']['lba'], ev)
+            if ev[1].get('volume') != target or ev[0] not in ('read', 'write') or ev[2]['seq'] < at:
+                continue
+            lba = ev[1]['args']['lba']
+            if ev[0] == 'write' and ev[2]['outcome'] in ('ok', 'unknown'):
+                written.add(lba)
+            elif ev[0] == 'read' and lba not in written:
+                first.setdefault(lba, ev)
         if not first:
-            unknown = True   # nothing read: C2 proves nothing about this target
+            unknown = True   # no restored block was read: C2 proves nothing about this target
             continue
         for lba, ev in sorted(first.items()):
             got = (ev[2].get('result') or {}).get('sha256')
@@ -246,6 +294,7 @@ def c2(recs):
     return verdict(f, unknown)
 
 
+@unknown_on_overlap
 def c3(recs):
     _, events, frozen = replay(recs)
     f, unknown = [], False
@@ -271,6 +320,12 @@ def c3(recs):
                     reads_s += 1
                     if got in tgt_written.get(lba, set()):
                         f.append('%s lba %d seq %d holds a write to the target %s' % (source, lba, ev[1]['seq'], target))
+        # The directions are told apart by content: a hash written to both
+        # volumes at the same block makes them indistinguishable.
+        shared = sorted('lba %d' % lba for lba in set(src_after) & set(tgt_written) if src_after[lba] & tgt_written[lba])
+        if shared:
+            f.append('%s and %s were written the same content at %s: the directions cannot be told apart' % (source, target, ', '.join(shared[:4])))
+            return verdict([], unknown=True) | {'findings': f}
         if not (src_after and reads_t and tgt_written and reads_s):
             unknown = True   # one direction was not exercised: no claim about it
     return verdict(f, unknown)

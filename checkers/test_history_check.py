@@ -171,16 +171,93 @@ class C2(unittest.TestCase):
         moved = [dict(w_inv, mono_ns=s_inv['mono_ns']), dict(w_comp, mono_ns=s_inv['mono_ns'])]
         recs = renumber(rest[:at] + moved + rest[at:])
         lba = w_inv['args']['lba']
-        first = [p for p in ops(recs, 'read', 'v2') if p[0]['args']['lba'] == lba][0]
-        first[1]['result']['sha256'] = w_inv['args']['sha256']
-        self.assertEqual(verdicts(recs)['C2'], 'PASS', hc.check(dump(recs))['C2'])
+        # The checkers judge only one-at-a-time histories: this overlap is
+        # UNKNOWN for C1, C2 and C3, never a verdict.
+        v = verdicts(recs)
+        self.assertEqual((v['C1'], v['C2'], v['C3']), ('UNKNOWN', 'UNKNOWN', 'UNKNOWN'))
+        # The window rule itself, for when overlaps are judged: the frozen
+        # snapshot may hold the write that completed during it.
+        _, _, frozen = hc.replay(recs)
+        self.assertIn(w_inv['args']['sha256'], frozen[('v1', 's1')][lba])
 
+    def test_a_write_to_another_volume_or_refused_is_not_in_the_snapshot(self):
+        def rec(seq, kind, verb, vol, **kw):
+            r = {'seq': seq, 'kind': kind, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': seq}
+            r.update(kw)
+            return r
+        recs = [
+            rec(1, 'invoke', 'snapshot', 'v1', args={'name': 's1'}),
+            rec(2, 'invoke', 'write', 'vX', args={'lba': 0, 'sha256': 'c' * 64}),
+            rec(3, 'complete', 'write', 'vX', of=2, outcome='ok'),
+            rec(4, 'invoke', 'write', 'v1', args={'lba': 0, 'sha256': 'd' * 64}),
+            rec(5, 'complete', 'write', 'v1', of=4, outcome='refused'),
+            rec(6, 'complete', 'snapshot', 'v1', of=1, outcome='ok'),
+        ]
+        _, _, frozen = hc.replay(hc.read_history(dump(recs)))
+        held = frozen[('v1', 's1')].get(0, {hc.ZERO})
+        self.assertNotIn('c' * 64, held, 'a write to another volume')
+        self.assertNotIn('d' * 64, held, 'a refused write')
     def test_no_read_of_the_target_is_unknown_not_pass(self):
         recs = load()
         drop = {id(x) for p in ops(recs, 'read', 'v2') for x in p}
         recs = renumber([r for r in recs if id(r) not in drop])
         self.assertEqual(verdicts(recs)['C2'], 'UNKNOWN')
 
+
+def synth(*steps):
+    """A one-at-a-time history from (verb, volume, args, outcome, result) steps."""
+    recs = []
+    for verb, vol, args, outcome, result in steps:
+        n = len(recs)
+        recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
+        recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': n + 2, 'outcome': outcome, 'result': result})
+    return recs
+
+
+A, T, S = 'a' * 64, 't' * 64, 's' * 64
+RESTORED = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+            ('snapshot', 'v1', {'name': 's1'}, 'ok', {}),
+            ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok', {})]
+
+
+class Synthetic(unittest.TestCase):
+    def test_c2_does_not_judge_a_block_the_target_wrote_first(self):
+        recs = synth(*RESTORED,
+                     ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                     ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}))
+        self.assertEqual(verdicts(recs)['C2'], 'UNKNOWN', 'only a written block was read: nothing restored was seen')
+        recs = synth(*RESTORED,
+                     ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                     ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}),
+                     ('read', 'v2', {'lba': 1}, 'ok', {'sha256': hc.ZERO}))
+        self.assertEqual(verdicts(recs)['C2'], 'PASS', 'the unwritten block is checked')
+
+    def test_c3_cannot_tell_directions_apart_on_a_shared_hash(self):
+        recs = synth(*RESTORED,
+                     ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                     ('write', 'v2', {'lba': 0, 'sha256': S}, 'ok', {}),
+                     ('read', 'v2', {'lba': 0}, 'ok', {'sha256': S}),
+                     ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S}))
+        self.assertEqual(verdicts(recs)['C3'], 'UNKNOWN')
+
+    def test_an_overlap_is_unknown_for_the_data_checkers(self):
+        recs = synth(*RESTORED, ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}))
+        # Two operations on v1 open at once: the write invoked, a read
+        # invoked before the write completes.
+        w_inv, w_comp = recs[0], recs[1]
+        r_inv = {'seq': 0, 'kind': 'invoke', 'op': 'Guest.Read', 'verb': 'read', 'volume': 'v1', 'args': {'lba': 0}, 'mono_ns': 0}
+        r_comp = {'seq': 0, 'kind': 'complete', 'op': 'Guest.Read', 'verb': 'read', 'volume': 'v1', 'mono_ns': 0, 'outcome': 'ok', 'result': {'sha256': A}}
+        recs = [w_inv, r_inv, w_comp, r_comp] + recs[2:]
+        for i, r in enumerate(recs, 1):
+            r['seq'], r['mono_ns'] = i, i
+        w_comp['of'], r_comp['of'] = w_inv['seq'], r_inv['seq']
+        for r in recs[4:]:
+            if r['kind'] == 'complete':
+                r['of'] = r['seq'] - 1
+        self.assertEqual(hc.overlaps(hc.read_history(dump(recs))), {'v1'})
+        v = verdicts(recs)
+        self.assertEqual((v['C1'], v['C2'], v['C3']), ('UNKNOWN', 'UNKNOWN', 'UNKNOWN'), hc.check(dump(recs)))
+        self.assertEqual(hc.overlaps(hc.read_history(dump(load()))), set(), 'the real run is one-at-a-time')
 
 class C7(unittest.TestCase):
     def after_delete(self, recs, vol):
