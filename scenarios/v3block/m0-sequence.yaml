@@ -38,6 +38,7 @@ env:
   chunk_path: "/m0"
   lock_dirs_test_only: "true"
   lbas: "0 2048 4095"
+  expected_refusals: ""
   # Every typed operation reads these as vars.
   bin_dir: "{{ work }}/bin"
   master: "127.0.0.1:{{ master_port }}"
@@ -148,6 +149,9 @@ phases:
       - {action: v3_op_stop, node: host, volume: v1}
       - {action: v3_op_delete, node: host, volume: v1}
       - {action: v3_op_observe, node: host, volume: v1}
+      # The same name again: a new identity in another directory (C7).
+      - {action: v3_op_create, node: host, volume: v1}
+      - {action: v3_op_observe, node: host, volume: v1}
 
   - name: teardown
     always: true
@@ -173,3 +177,25 @@ phases:
             kill -0 "$pid" 2>/dev/null && { echo "pid $pid still running after KILL" >&2; rc=1; }
           done
           exit $rc
+
+  # After teardown, whatever happened: the daemons' logs into the bundle, then
+  # the checkers judge the history alone. Their verdicts decide the run.
+  - name: judge
+    always: true
+    actions:
+      - action: collect_path
+        node: host
+        path: "{{ work }}/log"
+        name: "daemon-logs"
+      - action: collect_path
+        node: host
+        path: "{{ work }}/vol"
+        name: "volume-logs"
+      - action: exec
+        node: host
+        timeout: 2m
+        env.HIST: "{{ bundle_dir }}/history.jsonl"
+        env.OUT: "{{ artifacts_dir }}/checks.json"
+        env.CHECK: "{{ runner_src }}/checkers/history_check.py"
+        env.EXPECTED: "{{ expected_refusals }}"
+        cmd: python3 -I "$CHECK" "$HIST" --expected-refusals "$EXPECTED" --json "$OUT"

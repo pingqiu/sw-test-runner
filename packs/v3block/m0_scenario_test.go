@@ -26,7 +26,8 @@ func TestM0ScenarioWiring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s.Env["product_src"], s.Env["runner_src"], s.Env["weed"], s.Env["bundle_dir"] = "/src", "/runner", "/bin/weed", "/bundle"
+			s.Env["product_src"], s.Env["runner_src"], s.Env["weed"] = "/src", "/runner", "/bin/weed"
+			s.Env["bundle_dir"], s.Env["artifacts_dir"] = "/bundle", "/bundle/artifacts" // set by the CLI in a bundled run
 			var mu sync.Mutex
 			var steps []string
 			var bad []string
@@ -56,7 +57,7 @@ func TestM0ScenarioWiring(t *testing.T) {
 				return map[string]string{"value": "ok"}, nil
 			}
 			r := tr.NewRegistry()
-			for _, name := range []string{"exec", "v3_start_blockmaster", "v3_op_spec", "v3_op_create", "v3_op_attach", "v3_op_write", "v3_op_read",
+			for _, name := range []string{"exec", "collect_path", "v3_start_blockmaster", "v3_op_spec", "v3_op_create", "v3_op_attach", "v3_op_write", "v3_op_read",
 				"v3_op_snapshot", "v3_op_snapshot_delete", "v3_op_restore", "v3_op_release", "v3_op_stop", "v3_op_move", "v3_op_delete", "v3_op_observe"} {
 				r.RegisterFunc(name, tr.TierCore, handler)
 			}
@@ -68,9 +69,11 @@ func TestM0ScenarioWiring(t *testing.T) {
 			for _, b := range bad {
 				t.Error(b)
 			}
-			last := steps[len(steps)-1]
-			if !strings.HasPrefix(last, "exec ") {
-				t.Errorf("teardown did not run last: %q", last)
+			// Teardown, then the judge (logs collected, the checkers run), even
+			// when the sequence failed.
+			n := len(steps)
+			if n < 4 || !strings.HasPrefix(steps[n-4], "exec ") || !strings.HasPrefix(steps[n-3], "collect_path ") || !strings.HasPrefix(steps[n-1], "exec ") {
+				t.Errorf("the run does not end with teardown, log collection and the checkers: %q", steps[max(0, n-4):])
 			}
 			if fail != "" {
 				return
