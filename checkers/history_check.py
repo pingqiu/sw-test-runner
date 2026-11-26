@@ -73,7 +73,12 @@ code is 0 only when every checker passes.
       against a bound an operator page states (BOUNDS, with its page and
       line); a verb without one is NOT JUDGED and listed ("no stated bound"),
       and so is an operation open while a process was down (the table holds
-      no per-fault bound). Unknowns: a resolution point is a `healthy`
+      no per-fault bound). Recovery: a holder (blockvolume) restart must be
+      followed by a healthy observation with healthy true within the pages'
+      recovery bound (RECOVERY, 95 s), measured on the history's clock from
+      the restart's completion; a blockmaster restart, for which the pages
+      state no bound, and a holder restart a master fault overlaps, are NOT
+      JUDGED and listed. Unknowns: a resolution point is a `healthy`
       observation with healthy true and no operation in flight, or the end
       record. Every operation whose outcome is unknown (or that never
       completed) is due at the first point after it, and must be RESOLVED by
@@ -860,11 +865,19 @@ def dur(recs):
 
 # C6 latency bounds: verb -> (seconds, the operator page and line stating it).
 # Only a bound a page states goes here, never an invented number. The pages
-# state recovery bounds of a restarted holder (the re-grant barrier and the
-# start wait, docs/volume-lifecycle.md "After a crash") but no bound on the
-# duration of any operation, so the table is empty and every verb is listed
-# as not judged.
+# state no bound on the duration of any operation, so the table is empty and
+# every verb is listed as not judged.
 BOUNDS = {}
+# C6 recovery bounds: fault -> (seconds, the page lines whose sum states it).
+# A bound on REACHING a healthy point, not the latency of an operation. A
+# holder (blockvolume) restarted after a crash is re-granted at most 65 s
+# after it stopped and then serves within the start wait of 30 s
+# (docs/volume-lifecycle.md "After a crash", product release 1). If the pages
+# change the numbers, this table changes with them, never the checker. The
+# pages state no restart bound for blockmaster: its restart is not judged.
+RECOVERY = {'holder restart': (95, 'docs/volume-lifecycle.md:352-356 (re-grant, 65 s) + :368-370 (start wait, 30 s)')}
+HOLDER_PREFIX = 'blockvolume'
+MASTER = 'blockmaster'
 RUNNER_VERBS = FAULT_VERBS + ('kill', 'restart')   # the environment's operations, not the product's
 PLACED_BY_OBSERVATION = ('write', 'snapshot', 'delete', 'move', 'restore')
 LIVE = {'HEAD', 'VOLUME'}   # a live volume's directory holds at least these
@@ -1009,6 +1022,47 @@ def _place_by_status(inv, obs, base):
     return 'third', 'holder %r at epoch %r: neither %s at a new epoch nor %s at %r' % (head.get('holder'), epoch, args.get('to'), args.get('from'), args.get('epoch'))
 
 
+def recovery_findings(recs, ops_, healthy):
+    """Recovery time on the history's one clock: from a holder restart's
+    completion to the first healthy observation with healthy true, against
+    RECOVERY. A blockmaster restart has no stated bound and is listed; so is
+    a holder restart whose recovery a blockmaster kill or restart overlaps
+    (the pages then move the re-grant to after the master's restart), and a
+    restart without a known completion (no moment to measure from)."""
+    f, notes = [], []
+    secs, where = RECOVERY['holder restart']
+    for inv, comp in ops_:
+        if inv['verb'] != 'restart':
+            continue
+        proc = str((inv.get('args') or {}).get('process', ''))
+        name = 'restart seq %d %s' % (inv['seq'], proc)
+        if proc == MASTER:
+            notes.append('recovery not judged: %s (no restart bound stated for the master)' % name)
+            continue
+        if not proc.startswith(HOLDER_PREFIX):
+            notes.append('recovery not judged: %s (not a holder)' % name)
+            continue
+        if comp is None or comp['outcome'] != 'ok':
+            notes.append('recovery not judged: %s (%s: no moment to measure from)' % (name, 'no completion' if comp is None else 'outcome ' + comp['outcome']))
+            continue
+        h = next((r for r in healthy if r['seq'] > comp['seq'] and (r.get('result') or {}).get('healthy') is True), None)
+        if h is None:
+            f.append('%s: never healthy afterwards (bound %g s, %s)' % (name, secs, where))
+            continue
+        # From the holder's stop (its latest kill before this restart) to its healthy point.
+        start = max([i2['seq'] for i2, _ in ops_ if i2['verb'] == 'kill' and i2['seq'] < inv['seq']
+                     and str((i2.get('args') or {}).get('process', '')) == proc] or [inv['seq']])
+        master = next((i2 for i2, _ in ops_ if i2['verb'] in ('kill', 'restart') and start < i2['seq'] < h['seq']
+                       and str((i2.get('args') or {}).get('process', '')) == MASTER), None)
+        if master is not None:
+            notes.append('recovery not judged: %s (blockmaster %s seq %d before its healthy point)' % (name, master['verb'], master['seq']))
+            continue
+        took = (h['mono_ns'] - comp['mono_ns']) / 1e9
+        if took > secs:
+            f.append('%s: healthy only after %.3f s (healthy seq %d), above the %g s recovery bound (%s)' % (name, took, h['seq'], secs, where))
+    return f, notes
+
+
 @unknown_on_overlap
 def c6(recs):
     """Bounds and "none stays unknown" (see the module docstring)."""
@@ -1048,6 +1102,9 @@ def c6(recs):
     if healthy and (healthy[-1].get('result') or {}).get('healthy') is not True:
         res = healthy[-1].get('result') or {}
         f.append('the run ended unhealthy: last healthy record seq %d: down %s, not serving %s' % (healthy[-1]['seq'], res.get('down'), res.get('not_serving')))
+    f_rec, n_rec = recovery_findings(recs, ops_, healthy)
+    f += f_rec
+    notes += n_rec
     # None stays unknown.
     for inv, comp in unknowns:
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))

@@ -1018,6 +1018,49 @@ class C6(unittest.TestCase):
     def test_red_a_kill_never_followed_by_a_healthy_point(self):
         self.assert_c6('FAIL', ('healthy', True), KILL, RESTART, contains='no healthy point after it')
 
+    # recovery bound
+    def healthy_after(self, secs, *steps):
+        """The history of steps, its first healthy=true record moved to `secs`
+        seconds after the last restart completion before it (later records with it)."""
+        recs = m2(*steps)
+        h = next(r for r in recs if r.get('verb') == 'healthy' and r['result']['healthy'])
+        rc = [r for r in recs if r['kind'] == 'complete' and r['verb'] == 'restart' and r['seq'] < h['seq']][-1]
+        delta = int(secs * 10**9) - (h['mono_ns'] - rc['mono_ns'])
+        for r in recs:
+            if r['seq'] >= h['seq']:
+                r['mono_ns'] += delta
+        return hc.check(dump(recs))['C6']
+
+    def test_the_recovery_bound_is_the_pages_sum(self):
+        secs, where = hc.RECOVERY['holder restart']
+        self.assertEqual(secs, 65 + 30)
+        self.assertIn('docs/volume-lifecycle.md', where)
+
+    def test_red_a_holder_healthy_96_s_after_its_restart(self):
+        v = self.healthy_after(96, KILL, RESTART, ('healthy', True))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('healthy only after 96.000 s', v['findings'][0])
+        self.assertIn('above the 95 s recovery bound', v['findings'][0])
+
+    def test_a_holder_healthy_94_s_after_its_restart_passes(self):
+        v = self.healthy_after(94, KILL, RESTART, ('healthy', False), ('healthy', True))
+        self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_red_a_holder_restart_never_healthy_again(self):
+        # healthy=true only before the restart; the run then ends unhealthy too
+        self.assert_c6('FAIL', KILL, ('healthy', True), KILL, RESTART, ('healthy', False), contains='never healthy afterwards')
+
+    def test_a_master_restart_is_not_judged_for_recovery(self):
+        mkill = ('kill', '', {'process': 'blockmaster', 'pid': 7, 'signal': 'KILL'}, 'ok', {})
+        mrestart = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
+        v = self.healthy_after(300, mkill, mrestart, ('healthy', True))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertTrue(any('recovery not judged: restart seq 3 blockmaster' in x for x in v['findings']), v)
+        # a holder restart a master fault overlaps is not judged either
+        v = self.healthy_after(300, KILL, mkill, mrestart, RESTART, ('healthy', True))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertTrue(any('blockmaster kill seq 3 before its healthy point' in x for x in v['findings']), v)
+
     def test_a_healthy_record_with_an_operation_in_flight_is_no_point(self):
         recs = m2(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('healthy', True))
         inv, comp, h = recs[0], recs[1], recs[2]
