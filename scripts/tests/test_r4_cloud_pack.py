@@ -96,20 +96,20 @@ class R4CloudPack(unittest.TestCase):
         for user in ("", "bad user", "root;command", "other-user"):
             with self.subTest(user=user):
                 self.hosts[0]["management"]["user"] = user
-                with self.assertRaises(AssertionError):
+                with self.assertRaises(ValueError):
                     self.run_pack()
                 self.assertEqual(self.calls, [])
 
     def test_missing_node_pin_refuses_before_ssh(self):
         del self.context["host_keys"]["node-2"]
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, "host keys must cover"):
             self.run_pack()
         self.assertEqual(self.calls, [])
 
     def test_uniform_invalid_user_refuses_before_ssh(self):
         for h in self.hosts:
             h["management"]["user"] = "bad user"
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, "invalid inventory SSH user"):
             self.run_pack()
         self.assertEqual(self.calls, [])
 
@@ -117,6 +117,31 @@ class R4CloudPack(unittest.TestCase):
         self.assertEqual(self.run_pack(first_scenario_exit=7), 7)
         self.assertEqual(len(self.calls), 4)
         self.assertIn("rf=3", self.calls[-1])
+
+    def test_manifest_must_cover_binary_and_source_pins(self):
+        for missing in ("swblock", "pins.json"):
+            with self.subTest(missing=missing):
+                manifest = {name: hashlib.sha256((self.root / name).read_bytes()).hexdigest()
+                            for name in ("pins.json", "swblock") if name != missing}
+                (self.root / "manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "manifest must include pins.json and swblock"):
+                    self.run_pack()
+                self.assertEqual(self.calls, [])
+
+    def test_changed_binary_is_refused_before_ssh(self):
+        (self.root / "swblock").write_bytes(b"unverified replacement")
+        with self.assertRaisesRegex(ValueError, "manifest digest mismatch: swblock"):
+            self.run_pack()
+        self.assertEqual(self.calls, [])
+
+    def test_pythonoptimize_environment_refuses_before_inputs(self):
+        env = dict(os.environ, PYTHONOPTIMIZE="1")
+        env.pop("SEAWEED_CLOUD_PACK_CONTEXT", None)
+        result = subprocess.run([sys.executable, str(Path(pack.__file__)), "missing-assets"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("R4 launcher refuses Python optimization", result.stderr)
+        self.assertNotIn("FileNotFoundError", result.stderr)
 
 
 if __name__ == "__main__":
