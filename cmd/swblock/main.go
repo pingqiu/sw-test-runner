@@ -17,6 +17,7 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
 	"github.com/pingqiu/sw-test-runner/cli"
+	"github.com/pingqiu/sw-test-runner/packs/cloud"
 	"github.com/pingqiu/sw-test-runner/packs/v3block"
 )
 
@@ -27,6 +28,7 @@ func main() {
 		actions.RegisterNVMeActions(r)
 		actions.RegisterK8sActions(r)
 		v3block.RegisterPack(r)
+		cloud.RegisterPack(r) // cloud VM power fault
 	}
 	os.Exit(cli.Run(register, os.Args[1:]))
 }
