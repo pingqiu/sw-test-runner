@@ -728,15 +728,37 @@ func v3VsSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	return report(actx, act, "v3_vs_snapshot_delete", outs)
 }
 
-// snapshotDelete is one `ops chunk snapshot-delete`: an operator write of
-// HEAD (MoveAdmission.OpWrite). It reaches the store directly, so it works
-// while the volume is stopped.
+// snapshotDelete deletes one snapshot: an operator write of HEAD
+// (MoveAdmission.OpWrite). While a holder serves the volume it goes through
+// that holder (POST /chunk/snapshot/delete), which runs the cleaning right
+// after it; the product's documentation says a delete through `sw-block ops
+// chunk` (store direct) is cleaned only at the next periodic pass, hourly by
+// default. A stopped volume has no holder, so its delete is store direct.
 func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, name string) (string, string) {
-	cmd := fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
-		shellQuote(v.Name), shellQuote(name), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath))
-	stdout, _, code, err := node.Run(ctx, cmd)
-	if err != nil {
-		return "unknown", err.Error()
+	var stdout string
+	var code int
+	var err error
+	if alive(ctx, node, v.PID) {
+		body, _ := json.Marshal(map[string]string{"volumeID": v.Name, "name": name})
+		// The body, then the HTTP status alone on the last line.
+		var out string
+		out, _, code, err = node.Run(ctx, fmt.Sprintf("curl -s -m 60 -X POST -H 'Content-Type: application/json' --data %s -w '\\n%%{http_code}' %s",
+			shellQuote(string(body)), shellQuote("http://"+v.host().Status+"/chunk/snapshot/delete")))
+		if err != nil || code != 0 {
+			return "unknown", fmt.Sprintf("holder not answering (curl exit %d)", code)
+		}
+		i := strings.LastIndex(strings.TrimRight(out, "\n"), "\n")
+		stdout, code = out[:max(i, 0)], 1
+		if strings.TrimSpace(out[i+1:]) == "200" {
+			code = 0
+		}
+	} else {
+		cmd := fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
+			shellQuote(v.Name), shellQuote(name), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath))
+		stdout, _, code, err = node.Run(ctx, cmd)
+		if err != nil {
+			return "unknown", err.Error()
+		}
 	}
 	r, d := chunkOutcome(stdout, code)
 	if r == "ok" {
@@ -919,6 +941,15 @@ func stopPID(ctx context.Context, node runner, pid, sig string, bound time.Durat
 	}
 	_, _, _, _ = node.Run(ctx, fmt.Sprintf("kill -%s %s 2>/dev/null", sig, pid))
 	return waitGone(ctx, node, pid, bound)
+}
+
+// alive reports whether the recorded pid still runs.
+func alive(ctx context.Context, node runner, pid string) bool {
+	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
+		return false
+	}
+	out, _, _, _ := node.Run(ctx, "kill -0 "+pid+" 2>/dev/null && echo alive")
+	return strings.TrimSpace(out) == "alive"
 }
 
 func waitGone(ctx context.Context, node runner, pid string, bound time.Duration) string {
