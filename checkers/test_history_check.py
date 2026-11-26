@@ -4,6 +4,7 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import history_check as hc
 
@@ -356,7 +357,7 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C7': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL'})
         writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
         self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
         reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
@@ -658,6 +659,170 @@ class C5(unittest.TestCase):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('not exercised', v['findings'][0])
+
+
+def m2(*steps):
+    """A one-at-a-time history with healthy points: ('healthy', bool) is a
+    healthy observation, ('obs', volume, result) a volume observation, any
+    other step (verb, volume, args, outcome, result) an invoke and its
+    complete. Closed by the end record."""
+    recs = []
+    for st in steps:
+        n = len(recs)
+        if st[0] == 'healthy':
+            recs.append({'seq': n + 1, 'kind': 'observe', 'client': 'runner', 'verb': 'healthy', 'volume': '', 'mono_ns': n + 1,
+                         'result': {'healthy': st[1], 'down': [] if st[1] else ['blockvolume:0'], 'not_serving': []}})
+        elif st[0] == 'obs':
+            recs.append({'seq': n + 1, 'kind': 'observe', 'client': 'c1', 'verb': 'observe', 'volume': st[1], 'mono_ns': n + 1, 'result': st[2]})
+        else:
+            verb, vol, args, outcome, result = st
+            recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
+            recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': n + 2, 'outcome': outcome, 'result': result})
+    recs.append({'seq': len(recs) + 1, 'kind': 'end', 'mono_ns': len(recs) + 1})
+    return recs
+
+
+def live(files=('HEAD', 'VOLUME'), holder='a-v1/r1', epoch=1, state=''):
+    return {'head': {'gen': 3, 'epoch': epoch, 'holder': holder, 'state': state}, 'files': list(files)}
+
+
+ROOT1, ROOT2 = 'root/' + '1' * 64, 'root/' + '2' * 64
+KILL = ('kill', '', {'process': 'blockvolume:0', 'pid': 42, 'signal': 'KILL'}, 'ok', {})
+RESTART = ('restart', '', {'process': 'blockvolume:0'}, 'ok', {})
+MOVE = {'from': 'a-v1', 'to': 'b-v1', 'epoch': 1, 'request': 'v1-move-1'}
+
+
+class C6(unittest.TestCase):
+    def c6(self, *steps):
+        return hc.check(dump(m2(*steps)))['C6']
+
+    def assert_c6(self, want, *steps, contains=None):
+        v = self.c6(*steps)
+        self.assertEqual(v['verdict'], want, v)
+        if contains:
+            self.assertTrue(any(contains in x for x in v['findings']), v)
+        return v
+
+    # writes
+    def test_an_unknown_write_read_back_either_way_after_a_healthy_point_passes(self):
+        for got in (A, hc.ZERO):
+            self.assert_c6('PASS', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                           ('read', 'v1', {'lba': 0}, 'ok', {'sha256': got}))
+
+    def test_red_an_unknown_write_reading_a_third_value(self):
+        self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}), ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}),
+                       KILL, RESTART, ('healthy', True), ('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}), contains='third state')
+
+    def test_red_an_unknown_write_read_only_before_the_healthy_point(self):
+        self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL,
+                       ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}), RESTART, ('healthy', True), contains='not resolved')
+
+    def test_red_an_unknown_write_overwritten_before_its_read(self):
+        self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                       ('write', 'v1', {'lba': 0, 'sha256': T}, 'ok', {}), ('read', 'v1', {'lba': 0}, 'ok', {'sha256': T}),
+                       contains='changed the block')
+
+    def test_an_unknown_write_without_a_fault_is_resolved_at_the_end(self):
+        self.assert_c6('PASS', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))
+        self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), contains='no ok read')
+
+    # snapshots
+    def test_an_unknown_snapshot_placed_by_its_roots_passes(self):
+        for after in ([ROOT1, ROOT2], [ROOT1]):
+            self.assert_c6('PASS', ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}),
+                           KILL, RESTART, ('healthy', True), ('obs', 'v1', live(['HEAD', 'VOLUME'] + after)))
+
+    def test_red_an_unknown_snapshot_that_lost_a_root(self):
+        self.assert_c6('FAIL', ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}),
+                       KILL, RESTART, ('healthy', True), ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT2])), contains='root objects lost')
+
+    def test_red_an_unknown_snapshot_without_an_observation_before_it(self):
+        self.assert_c6('FAIL', ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                       ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), contains='no clean observation')
+
+    # deletes
+    def test_an_unknown_delete_placed_by_status_and_listing_passes(self):
+        for after in (live(['HEAD', 'VOLUME'], state='deleted'), live(['HEAD', 'VOLUME', ROOT1])):
+            self.assert_c6('PASS', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after))
+
+    def test_red_an_unknown_delete_stuck_half_way(self):
+        for after, why in ((live(['HEAD', 'VOLUME'], state='deleting'), 'state deleting'),
+                           (live(['HEAD', 'VOLUME', ROOT1], state='deleted'), 'deleted but'),
+                           ({'show_error': {'exit': 1, 'code': 'volume_not_found'}}, 'absent instead')):
+            self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after),
+                           contains=why)
+
+    def test_red_an_unknown_delete_never_observed(self):
+        self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), ('obs', 'v1', live(state='deleted')), KILL, RESTART,
+                       ('healthy', True), contains='no observation of v1 after healthy point')
+
+    # moves
+    def test_an_unknown_move_placed_by_holder_and_epoch_passes(self):
+        for after in (live(holder='b-v1/r1', epoch=2), live(holder='a-v1/r1', epoch=1)):
+            self.assert_c6('PASS', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after))
+
+    def test_red_an_unknown_move_in_a_third_state(self):
+        for after in (live(holder='b-v1/r1', epoch=1), live(holder='a-v1/r1', epoch=2)):
+            self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after), contains='third state')
+
+    def test_red_an_unknown_move_and_a_later_move_before_the_observation(self):
+        self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                       ('move', 'v1', dict(MOVE, epoch=2), 'ok', {}), ('obs', 'v1', live(holder='b-v1/r1', epoch=3)), contains='changed v1')
+
+    # restores
+    def test_an_unknown_restore_placed_by_the_target_passes(self):
+        for after in (live(holder='a-v2/r1'), {'show_error': {'exit': 1, 'code': 'volume_not_found'}}):
+            self.assert_c6('PASS', ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                           ('obs', 'v2', after))
+
+    def test_red_an_unknown_restore_leaving_volume_without_head(self):
+        self.assert_c6('FAIL', ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                       ('obs', 'v2', {'show_error': {'exit': 1, 'code': 'volume_not_found'}, 'files': ['VOLUME']}), contains='no HEAD but objects')
+
+    # health
+    def test_a_kill_restored_to_health_passes(self):
+        self.assert_c6('PASS', KILL, ('healthy', False), RESTART, ('healthy', True))
+
+    def test_red_the_run_ends_unhealthy(self):
+        self.assert_c6('FAIL', KILL, RESTART, ('healthy', True), KILL, ('healthy', False), contains='ended unhealthy')
+
+    def test_red_a_kill_never_followed_by_a_healthy_point(self):
+        self.assert_c6('FAIL', ('healthy', True), KILL, RESTART, contains='no healthy point after it')
+
+    def test_a_healthy_record_with_an_operation_in_flight_is_no_point(self):
+        recs = m2(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('healthy', True))
+        inv, comp, h = recs[0], recs[1], recs[2]
+        recs[:3] = [inv, h, comp]
+        for i, r in enumerate(recs, 1):
+            r['seq'] = r['mono_ns'] = i
+        comp['of'] = inv['seq']
+        self.assertEqual(hc.healthy_points(hc.read_history(dump(recs))), [])
+        self.assertEqual(hc.healthy_points(hc.read_history(dump(m2(KILL, ('healthy', True))))), [3])
+
+    # verdict shape
+    def test_no_unknown_and_no_healthy_point_is_not_exercised(self):
+        v = self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('read', 'v1', {'lba': 0}, 'unknown', {}))
+        self.assertIn('not exercised', v['findings'][0])
+
+    def test_an_unknown_without_a_resolution_rule_is_unknown(self):
+        self.assert_c6('UNKNOWN', ('create', 'v1', {}, 'unknown', {}), contains='no resolution rule')
+
+    def test_no_stated_bound_is_listed_not_judged(self):
+        v = self.assert_c6('PASS', ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), KILL, RESTART, ('healthy', True))
+        self.assertIn('no stated bound: write (latency not judged)', v['findings'])
+        self.assertEqual(hc.BOUNDS, {}, 'no operator page states an operation bound: nothing invented')
+
+    def test_red_a_stated_bound_exceeded(self):
+        recs = m2(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('healthy', True))
+        recs[1]['mono_ns'], recs[2]['mono_ns'], recs[3]['mono_ns'] = 2 * 10**9, 2 * 10**9, 2 * 10**9
+        with mock.patch.dict(hc.BOUNDS, {'write': (1, 'page.md:1')}):
+            v = hc.check(dump(recs))['C6']
+            self.assertEqual(v['verdict'], 'FAIL', v)
+            self.assertIn('above the 1 s bound (page.md:1)', v['findings'][0])
+            # under a fault the fault-free bound is not applied
+            kv = hc.check(dump(m2(KILL, ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), RESTART, ('healthy', True))))['C6']
+            self.assertEqual(kv['verdict'], 'PASS', kv)
+            self.assertTrue(any('latency not judged' in x for x in kv['findings']), kv)
 
 
 if __name__ == '__main__':
