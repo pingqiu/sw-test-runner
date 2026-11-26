@@ -71,6 +71,72 @@ class Reader(unittest.TestCase):
         self.assert_unknown_everywhere(dump(orphan))
 
 
+def with_fault(recs, apply_outcome='ok', restore_outcome='ok', restore=True, at=None):
+    """The real run with a power fault spliced in before index `at` (default:
+    before the end record): apply invoke/complete, then restore invoke/complete."""
+    recs = copy.deepcopy(recs)
+    at = len(recs) - 1 if at is None else at
+    mono = recs[at - 1]['mono_ns']
+    args = {'fault_key': 'vm_power/n2', 'resource': '/subscriptions/x/vm/n2', 'vm_id': 'vmid-1', 'node': 'n2'}
+    new = [{'kind': 'invoke', 'seq': 0, 'op': 'Runner.VmPowerOff', 'verb': 'fault_apply', 'args': args, 'mono_ns': mono},
+           {'kind': 'complete', 'seq': 0, 'of': 'A', 'op': 'Runner.VmPowerOff', 'verb': 'fault_apply', 'outcome': apply_outcome, 'mono_ns': mono}]
+    if restore:
+        new += [{'kind': 'invoke', 'seq': 0, 'op': 'Runner.VmPowerOn', 'verb': 'fault_restore', 'args': args, 'mono_ns': mono},
+                {'kind': 'complete', 'seq': 0, 'of': 'R', 'op': 'Runner.VmPowerOn', 'verb': 'fault_restore', 'outcome': restore_outcome, 'mono_ns': mono}]
+    recs[at:at] = new
+    out = recs
+    # number everything; link the spliced completes to their invokes
+    seq_of = {}
+    for i, r in enumerate(out, 1):
+        old = r['seq']
+        r['seq'] = i
+        if r in new:
+            if r['kind'] == 'invoke':
+                seq_of['A' if r['verb'] == 'fault_apply' else 'R'] = i
+        else:
+            seq_of[old] = i
+    for r in out:
+        if r['kind'] == 'complete':
+            r['of'] = seq_of[r['of']]
+    return out
+
+
+class Faults(unittest.TestCase):
+    def test_an_applied_and_restored_fault_passes(self):
+        v = verdicts(with_fault(load()))
+        for name in ('C0', 'C1', 'C2', 'C3', 'C7'):
+            self.assertEqual(v[name], 'PASS', name)
+        w = hc.fault_windows(hc.read_history(dump(with_fault(load()))))
+        self.assertEqual(len(w), 1)
+        self.assertIsNotNone(w[0][3])
+
+    def test_a_history_that_ends_after_the_apply_is_fault_left_applied(self):
+        v = hc.check(dump(with_fault(load(), restore=False)))
+        self.assertEqual(v['C0']['verdict'], 'FAIL')
+        self.assertTrue(any(x.startswith('fault left applied: vm_power/n2') for x in v['C0']['findings']), v['C0'])
+
+    def test_a_restore_not_proven_is_fault_left_applied_and_a_runner_failure(self):
+        v = hc.check(dump(with_fault(load(), restore_outcome='unknown')))
+        self.assertEqual(v['C0']['verdict'], 'FAIL')
+        joined = ' | '.join(v['C0']['findings'])
+        self.assertIn('fault left applied', joined)
+        self.assertIn('RUNNER failure, not a product result: fault_restore', joined)
+
+    def test_an_unknown_fault_outcome_leaves_the_data_checkers_unknown(self):
+        v = hc.check(dump(with_fault(load(), apply_outcome='unknown')))
+        for name in ('C1', 'C2', 'C3'):
+            self.assertEqual(v[name]['verdict'], 'UNKNOWN', name)
+            self.assertIn('environment is not known', v[name]['findings'][0])
+        self.assertTrue(any('RUNNER failure, not a product result: fault_apply' in x for x in v['C0']['findings']))
+
+    def test_the_active_window_runs_from_the_apply_invoke_to_the_restore_complete(self):
+        recs = hc.read_history(dump(with_fault(load())))
+        (key, _, start, end), = hc.fault_windows(recs)
+        inv = [r for r in recs if r['kind'] == 'invoke' and r['verb'] == 'fault_apply'][0]
+        comp = [r for r in recs if r['kind'] == 'complete' and r['verb'] == 'fault_restore'][0]
+        self.assertEqual((start, end), (inv['seq'], comp['seq']))
+
+
 class C0(unittest.TestCase):
     def test_an_invocation_without_its_completion(self):
         recs = load()

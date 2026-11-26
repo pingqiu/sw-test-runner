@@ -118,8 +118,8 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if p.History == nil {
 			return 0
 		}
-		seq, err := p.History.Invoke(HistoryRecord{Client: p.Client, Op: op, Verb: verb, Volume: p.Node,
-			Args: map[string]any{"fault_key": key, "resource": p.Resource, "vm_id": vmID}})
+		seq, err := p.History.Invoke(HistoryRecord{Client: p.Client, Op: op, Verb: verb,
+			Args: map[string]any{"fault_key": key, "resource": p.Resource, "vm_id": vmID, "node": p.Node}})
 		if err != nil {
 			return 0
 		}

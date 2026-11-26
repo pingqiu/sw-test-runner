@@ -9,7 +9,11 @@ code is 0 only when every checker passes.
 
   C0  every invoke has its complete; no outcome is unknown; a refusal only
       where its own step declared it (args.expect = refused), never by verb;
-      a declared refusal answered ok is a finding (half of the spec's C6)
+      a declared refusal answered ok is a finding (half of the spec's C6);
+      every fault applied (outcome ok or unknown) is restored: a fault_restore
+      of the same fault_key completed ok later in the file, else 'fault left
+      applied'; a fault operation whose outcome is unknown is a RUNNER
+      failure (the environment is not known), never a product result
   C1  every acknowledged write is read back: each read returns a value the
       shadow allows; and no written block goes unread after its last write
       (a count that must be 0; a later delete does not excuse it)
@@ -24,6 +28,13 @@ code is 0 only when every checker passes.
       a missing HEAD (the tombstone keeps a later volume of the same name out
       of this directory). In v1 a create of that name afterwards is refused
       (FailedPrecondition: the master keeps the name's deletion reservation).
+
+A fault is an operation of module Runner (verbs fault_apply and fault_restore,
+args fault_key, resource, vm_id), never a record kind of its own. A fault is
+ACTIVE from its apply's INVOKE to its restore's COMPLETE, the widest interval:
+fault_windows() is that definition and every checker bound to faults uses it.
+After a fault operation whose outcome is unknown, C1 C2 C3 answer UNKNOWN: the
+history does not map volumes to resources, so no volume is judged.
 
 The shadow (spec S3): per volume and block, the set of values the block may
 hold. A new volume holds zeros. An acknowledged write makes its value the
@@ -96,6 +107,38 @@ def operations(recs):
     return [(r, comp.get(r['seq'])) for r in recs if r['kind'] == 'invoke']
 
 
+FAULT_VERBS = ('fault_apply', 'fault_restore')
+
+
+def fault_windows(recs):
+    """The faults of the history: (fault_key, resource, start, end), start the
+    seq of the apply's INVOKE, end the seq of the restore's COMPLETE with
+    outcome ok, or None while the fault was never proven restored. The fault
+    is active over [start, end]: the widest interval, so a checker never
+    takes a moment the fault may have covered for one it did not."""
+    out, open_ = [], {}
+    for inv, comp in operations(recs):
+        if inv['verb'] not in FAULT_VERBS:
+            continue
+        key = (inv.get('args') or {}).get('fault_key')
+        if inv['verb'] == 'fault_apply':
+            if comp is None or comp['outcome'] != 'refused':
+                open_[key] = len(out)
+                out.append([key, (inv.get('args') or {}).get('resource'), inv['seq'], None])
+        elif key in open_ and comp is not None and comp['outcome'] == 'ok':
+            out[open_.pop(key)][3] = comp['seq']
+    return [tuple(w) for w in out]
+
+
+def unknown_environment(recs):
+    """The seq of the first fault operation whose outcome is unknown (or that
+    never completed), or None."""
+    for inv, comp in operations(recs):
+        if inv['verb'] in FAULT_VERBS and (comp is None or comp['outcome'] == 'unknown'):
+            return inv['seq']
+    return None
+
+
 def verdict(findings, unknown=False):
     if findings:
         return {'verdict': 'FAIL', 'findings': findings}
@@ -110,6 +153,13 @@ def c0(recs):
         return verdict(['no operation in the history: nothing was exercised'])
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
+        if inv['verb'] in FAULT_VERBS:
+            if comp is None or comp['outcome'] != 'ok':
+                f.append('RUNNER failure, not a product result: %s %s seq %d %s: the environment is not known: %s' % (
+                    inv['verb'], (inv.get('args') or {}).get('fault_key', ''), inv['seq'],
+                    'never completed' if comp is None else 'outcome ' + comp['outcome'],
+                    '' if comp is None else (comp.get('result') or {}).get('detail', '')))
+            continue
         expected = (inv.get('args') or {}).get('expect') == 'refused'
         if comp is None:
             f.append('no completion: ' + name)
@@ -119,6 +169,9 @@ def c0(recs):
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'ok' and expected:
             f.append('declared refusal answered ok: ' + name)
+    for key, resource, start, end in fault_windows(recs):
+        if end is None:
+            f.append('fault left applied: %s on %s (applied at seq %d, no fault_restore completed ok after it)' % (key, resource, start))
     return verdict(f)
 
 
@@ -173,6 +226,9 @@ def overlaps(recs):
 
 def unknown_on_overlap(fn):
     def wrapped(recs):
+        u = unknown_environment(recs)
+        if u is not None:
+            return {'verdict': 'UNKNOWN', 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
         o = overlaps(recs)
         if o:
             return {'verdict': 'UNKNOWN', 'findings': ['operations overlap on %s: this checker judges only one-at-a-time histories' % ', '.join(sorted(o))]}
@@ -204,6 +260,9 @@ def replay(recs):
                 events.append(('observe', r, None))
             continue
         inv = inv_of[r['of']]
+        if inv['verb'] in FAULT_VERBS:   # an operation on a VM, not on a volume
+            events.append(('fault', inv, r))
+            continue
         vol, verb, out = inv['volume'], inv['verb'], r['outcome']
         args, res = inv.get('args') or {}, r.get('result') or {}
         if verb == 'write':
