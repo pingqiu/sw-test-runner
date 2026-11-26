@@ -69,6 +69,27 @@ code is 0 only when every checker passes.
       flushed, lost: n"). Without a kill, C1's rule judged the same way.
       No kill and no unflushed write: FAIL (not exercised)
 
+  C6  bounds and "none stays unknown". Latency: an operation is judged only
+      against a bound an operator page states (BOUNDS, with its page and
+      line); a verb without one is NOT JUDGED and listed ("no stated bound"),
+      and so is an operation open while a process was down (the table holds
+      no per-fault bound). Unknowns: a resolution point is a `healthy`
+      observation with healthy true and no operation in flight, or the end
+      record. Every operation whose outcome is unknown (or that never
+      completed) is due at the first point after it, and must be RESOLVED by
+      an observation after that point (after its completion when the point is
+      the end): a write by an ok read of the same block returning its value
+      (took effect) or a value the block allowed before it (did not); a
+      snapshot by the volume's root/ objects against the observation before
+      it (a new root: took effect; the same roots: did not); a delete, move
+      or restore by the status (HEAD) and the listing. FAIL on a third state,
+      on an unknown no clean observation places (none after the point, or the
+      volume or block changed in between), on a run whose last healthy
+      record is not healthy, and on a kill with no healthy point after it.
+      A read changes nothing and needs no placing; an unknown of another
+      verb has no rule and makes the verdict UNKNOWN. FAIL (not exercised)
+      if the history holds neither an unknown nor a healthy record.
+
 A fault is an operation of module Runner (verbs fault_apply and fault_restore,
 args fault_key, resource, vm_id), never a record kind of its own. A fault is
 ACTIVE from its apply's INVOKE to its restore's COMPLETE, the widest interval:
@@ -825,7 +846,219 @@ def dur(recs):
     return {'verdict': 'FAIL' if f else 'PASS', 'findings': f + notes}
 
 
-CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C7': c7, 'DUR': dur}
+
+# C6 latency bounds: verb -> (seconds, the operator page and line stating it).
+# Only a bound a page states goes here, never an invented number. The pages
+# state recovery bounds of a restarted holder (the re-grant barrier and the
+# start wait, docs/volume-lifecycle.md "After a crash") but no bound on the
+# duration of any operation, so the table is empty and every verb is listed
+# as not judged.
+BOUNDS = {}
+RUNNER_VERBS = FAULT_VERBS + ('kill', 'restart')   # the environment's operations, not the product's
+PLACED_BY_OBSERVATION = ('write', 'snapshot', 'delete', 'move', 'restore')
+LIVE = {'HEAD', 'VOLUME'}   # a live volume's directory holds at least these
+
+
+def healthy_points(recs):
+    """Seqs of the healthy observations with healthy true and no operation in flight."""
+    open_, out = set(), []
+    for r in recs:
+        if r['kind'] == 'invoke':
+            open_.add(r['seq'])
+        elif r['kind'] == 'complete':
+            open_.discard(r['of'])
+        elif r['kind'] == 'observe' and r.get('verb') == 'healthy' and (r.get('result') or {}).get('healthy') is True and not open_:
+            out.append(r['seq'])
+    return out
+
+
+def _volume_changed(recs, vol, lo, hi, lba=None):
+    """The first operation on `vol` invoked in (lo, hi) that may change what a
+    placement reads: any verb but read, and for a block (lba given) a write to
+    that block, a restore onto the volume or a delete. A refused one changed
+    nothing."""
+    for inv, comp in operations(recs):
+        if not lo < inv['seq'] < hi or inv.get('volume') != vol or inv['verb'] == 'read':
+            continue
+        if comp is not None and comp['outcome'] == 'refused':
+            continue
+        if lba is not None and not ((inv['verb'] == 'write' and (inv.get('args') or {}).get('lba') == lba) or inv['verb'] in ('restore', 'delete')):
+            continue
+        if lba is None and inv['verb'] == 'write':
+            continue   # a write moves no root, holder or state
+        return inv
+    return None
+
+
+def _place_write(recs, inv, done, after):
+    vol, lba, sha = inv['volume'], inv['args']['lba'], inv['args']['sha256']
+    prior = replay([r for r in recs if r['seq'] < inv['seq']])[0].may_hold(vol, lba)
+    for i2, c2 in operations(recs):
+        if i2['seq'] <= done or i2.get('volume') != vol:
+            continue
+        if i2['verb'] == 'read' and i2['args']['lba'] == lba and i2['seq'] > after and c2 is not None and c2['outcome'] == 'ok':
+            ch = _volume_changed(recs, vol, done, i2['seq'], lba)
+            if ch is not None:
+                return None, 'seq %d %s changed the block before the read seq %d' % (ch['seq'], ch['verb'], i2['seq'])
+            got = (c2.get('result') or {}).get('sha256')
+            if got == sha:
+                return 'took effect', 'read seq %d' % i2['seq']
+            if got in prior:
+                return 'did not', 'read seq %d' % i2['seq']
+            return 'third', 'read seq %d returned %s: neither its value %s nor a prior one %s' % (i2['seq'], got, sha, sorted(prior))
+    return None, 'no ok read of %s lba %d after seq %d' % (vol, lba, after)
+
+
+def _observation(recs, vol, after):
+    for r in recs:
+        if r['seq'] > after and r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume') == vol:
+            return r
+    return None
+
+
+def _baseline(recs, vol, before):
+    """The latest observation of `vol` before seq `before` with nothing that may
+    change it in between (C5's rule, writes aside)."""
+    best = None
+    for r in recs:
+        if r['seq'] >= before:
+            break
+        if r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume') == vol:
+            best = r
+    if best is None or _volume_changed(recs, vol, best['seq'], before) is not None:
+        return None
+    return best
+
+
+def _place_by_status(inv, obs, base):
+    """Placement of a snapshot, delete, move or restore from the observation
+    after it (and, for a snapshot, the one before it)."""
+    verb, args = inv['verb'], inv.get('args') or {}
+    res = obs.get('result') or {}
+    head, files = res.get('head'), res.get('files')
+    err = (res.get('show_error') or {}).get('code') if isinstance(res.get('show_error'), dict) else None
+    if verb == 'snapshot':
+        bfiles = (base.get('result') or {}).get('files')
+        if not isinstance(files, list) or not isinstance(bfiles, list):
+            return None, 'no listing before and after (observations seq %d, %d)' % (base['seq'], obs['seq'])
+        before = {f for f in bfiles if f.startswith('root/')}
+        now = {f for f in files if f.startswith('root/')}
+        if before - now:
+            return 'third', 'root objects lost: %s' % ', '.join(sorted(before - now)[:4])
+        return ('took effect' if now - before else 'did not'), 'roots %d -> %d' % (len(before), len(now))
+    if verb == 'restore':
+        if isinstance(head, dict):
+            if not isinstance(files, list):
+                return None, 'no listing (%s)' % res.get('listing_error', 'none recorded')
+            missing = sorted(LIVE - set(files))
+            return ('third', 'HEAD answers but %s missing' % ', '.join(missing)) if missing else ('took effect', 'HEAD and VOLUME present')
+        if err == 'volume_not_found':
+            if res.get('listing_error'):
+                return None, 'no listing (%s)' % res['listing_error']
+            return ('third', 'no HEAD but objects present: %s' % ', '.join(sorted(files)[:4])) if files else ('did not', 'no such volume')
+        return None, 'no status (%r)' % (head if head is not None else res.get('show_error'))
+    if not isinstance(head, dict):
+        if verb == 'delete' and err == 'volume_not_found':
+            return 'third', 'the volume is absent instead of its tombstone'
+        return None, 'no status (%r)' % (head if head is not None else res.get('show_error'))
+    if not isinstance(files, list):
+        return None, 'no listing (%s)' % res.get('listing_error', 'none recorded')
+    state = head.get('state')
+    if verb == 'delete':
+        if state == 'deleted':
+            if set(files) == TOMBSTONE:
+                return 'took effect', 'HEAD deleted, tombstone only'
+            return 'third', 'HEAD deleted but the directory holds %s' % ', '.join(sorted(set(files) ^ TOMBSTONE)[:4])
+        if state in ('deleting', 'purging'):
+            return 'third', 'HEAD in state %s' % state
+    if LIVE - set(files):
+        return 'third', 'HEAD in state %r but %s missing' % (state, ', '.join(sorted(LIVE - set(files))))
+    if verb == 'delete':
+        return 'did not', 'HEAD in state %r' % state
+    # move: the holder's server and the epoch tell the two outcomes apart
+    server, epoch = str(head.get('holder', '')).split('/')[0], head.get('epoch')
+    if server == args.get('to') and isinstance(epoch, int) and epoch > args.get('epoch'):
+        return 'took effect', 'holder %s at epoch %d' % (head.get('holder'), epoch)
+    if server == args.get('from') and epoch == args.get('epoch'):
+        return 'did not', 'holder %s at epoch %d' % (head.get('holder'), epoch)
+    return 'third', 'holder %r at epoch %r: neither %s at a new epoch nor %s at %r' % (head.get('holder'), epoch, args.get('to'), args.get('from'), args.get('epoch'))
+
+
+@unknown_on_overlap
+def c6(recs):
+    """Bounds and "none stays unknown" (see the module docstring)."""
+    f, notes, unruled = [], [], []
+    ops_ = operations(recs)
+    healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
+    unknowns = [(inv, comp) for inv, comp in ops_ if inv['verb'] not in RUNNER_VERBS and inv['verb'] != 'read'
+                and (comp is None or comp['outcome'] == 'unknown')]
+    if not unknowns and not healthy:
+        return {'verdict': 'FAIL', 'findings': ['no unknown outcome and no healthy point in the history: C6 not exercised']}
+    # Latency, only against a stated bound and never under a fault.
+    down = []   # (kill invoke seq, seq of the first healthy point after it or None)
+    points = healthy_points(recs)
+    for inv, comp in ops_:
+        if inv['verb'] == 'kill':
+            down.append((inv['seq'], next((p for p in points if p > inv['seq']), None)))
+    unbounded = set()
+    for inv, comp in ops_:
+        if inv['verb'] in RUNNER_VERBS or comp is None or comp['outcome'] == 'unknown':
+            continue
+        if inv['verb'] not in BOUNDS:
+            unbounded.add(inv['verb'])
+            continue
+        if any(k < comp['seq'] and (p is None or p > inv['seq']) for k, p in down):
+            notes.append('latency not judged: seq %d %s ran while a process was down (no per-fault bound)' % (inv['seq'], inv['verb']))
+            continue
+        secs, where = BOUNDS[inv['verb']]
+        took = (comp['mono_ns'] - inv['mono_ns']) / 1e9
+        if took > secs:
+            f.append('seq %d %s %s took %.3f s, above the %g s bound (%s)' % (inv['seq'], inv['verb'], inv.get('volume', ''), took, secs, where))
+    if unbounded:
+        notes.append('no stated bound: %s (latency not judged)' % ', '.join(sorted(unbounded)))
+    # Health: every kill is followed by a healthy point; the run ends healthy.
+    for k, p in down:
+        if p is None:
+            f.append('kill seq %d: no healthy point after it (never shown healthy again)' % k)
+    if healthy and (healthy[-1].get('result') or {}).get('healthy') is not True:
+        res = healthy[-1].get('result') or {}
+        f.append('the run ended unhealthy: last healthy record seq %d: down %s, not serving %s' % (healthy[-1]['seq'], res.get('down'), res.get('not_serving')))
+    # None stays unknown.
+    for inv, comp in unknowns:
+        name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+        if inv['verb'] not in PLACED_BY_OBSERVATION:
+            unruled.append(name)
+            continue
+        done = inv['seq'] if comp is None else comp['seq']
+        due = next((p for p in points if p > done), None)
+        after = done if due is None else due
+        at = 'the end' if due is None else 'healthy point seq %d' % due
+        if inv['verb'] == 'write':
+            how, why = _place_write(recs, inv, done, after)
+        else:
+            obs = _observation(recs, inv['volume'], after)
+            base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] == 'snapshot' else None
+            if obs is None:
+                how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
+            elif inv['verb'] == 'snapshot' and base is None:
+                how, why = None, 'no clean observation of %s before it' % inv['volume']
+            elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
+                ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
+                how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
+            else:
+                how, why = _place_by_status(inv, obs, base)
+        if how is None:
+            f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
+        elif how == 'third':
+            f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
+    if f:
+        return {'verdict': 'FAIL', 'findings': f + notes}
+    if unruled:
+        return {'verdict': 'UNKNOWN', 'findings': ['no resolution rule for an unknown: %s' % ', '.join(unruled)] + notes}
+    return {'verdict': 'PASS', 'findings': notes}
+
+
+CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur}
 
 
 def check(lines):
