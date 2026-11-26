@@ -32,7 +32,9 @@ def main():
     p.add_argument("run"); p.add_argument("rc_file")
     a = p.parse_args()
     try:
-        good = judge(json.loads(Path(a.report).read_text()), a.role, a.run, int(Path(a.rc_file).read_text()))
+        e = json.loads(Path(a.rc_file).read_text())
+        good = (e.get("run") == a.run and e.get("role") == a.role and type(e.get("rc")) is int
+                and judge(json.loads(Path(a.report).read_text()), a.role, a.run, e["rc"]))
     except (OSError, ValueError, TypeError):
         good = False
     print(json.dumps(dict(role=a.role, run=a.run, verdict="PASS" if good else "FAIL")))
