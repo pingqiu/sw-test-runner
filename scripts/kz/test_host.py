@@ -59,6 +59,18 @@ class HostTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"foreign run unit"):host.cleanup(c)
                 call.assert_not_called()
 
+
+    def test_ended_unit_without_receipt_is_bounded_failure(self):
+        with tempfile.TemporaryDirectory() as base:
+            root,c=self.fixture(base);(root/"out").mkdir();(root/"state.json").write_text(json.dumps(dict(config=c)))
+            def atomic(path,value): path.write_text(json.dumps(value))
+            with patch.object(host,"unit_field",return_value="not-found"),patch.object(host,"atomic",atomic),patch.object(host.time,"time",return_value=100):
+                with contextlib.redirect_stdout(io.StringIO()) as output:host.poll(c)
+                self.assertEqual(output.getvalue(),"RUNNING\n")
+            with patch.object(host,"unit_field",return_value="not-found"),patch.object(host.time,"time",return_value=130):
+                with contextlib.redirect_stdout(io.StringIO()) as output:host.poll(c)
+                self.assertEqual(output.getvalue(),"DONE rc=125\n")
+
     def test_archive_rejects_path_escape_and_symlink(self):
         for name,kind in (("../escape",tarfile.REGTYPE),("blockvolume",tarfile.SYMTYPE)):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as base:
