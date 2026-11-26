@@ -92,5 +92,7 @@ func (refusingJobs) Enroll(context.Context, string, RunAdmission, JobSpec) (Proc
 }
 func (refusingJobs) Authorize(context.Context, string, ProcessIdentity) error { return errNoJobs }
 func (refusingJobs) Settle(context.Context, string) error                     { return errNoJobs }
-func (refusingJobs) Wait(context.Context, string) (ExitInfo, error)          { return ExitInfo{}, errNoJobs }
-func (refusingJobs) Kill(context.Context, string) (KillWitness, error)       { return KillWitness{}, errNoJobs }
+func (refusingJobs) Wait(context.Context, string) (ExitInfo, error)           { return ExitInfo{}, errNoJobs }
+func (refusingJobs) Kill(context.Context, string) (KillWitness, error) {
+	return KillWitness{}, errNoJobs
+}
