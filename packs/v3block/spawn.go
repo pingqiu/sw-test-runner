@@ -45,12 +45,14 @@ func spawnDaemon(ctx context.Context, node nodeRunner, bin string, args []string
 	return pidStr, nil
 }
 
-// shellQuote wraps s in single quotes, escaping any embedded single quotes.
+// shellQuote leaves s bare only when every byte is plainly safe for a POSIX
+// shell; otherwise it wraps s in single quotes, escaping embedded ones. A
+// list of unsafe characters would miss some (| ; & < > ( ) * ? [ ] ~ # !).
 func shellQuote(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if !strings.ContainsAny(s, " \t\n'\"\\$`") {
+	if strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-") == "" {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
