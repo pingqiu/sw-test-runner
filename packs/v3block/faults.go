@@ -140,6 +140,17 @@ func resolveProc(ctx context.Context, actx *tr.ActionContext, node runner, e opE
 	return p, ""
 }
 
+// args are a fault's invoke args: the process as asked and, for a holder, the
+// volume it resolved to. The record's Volume stays "": a fault touches every
+// volume.
+func (p *faultProc) args(process string) map[string]any {
+	a := map[string]any{"process": process}
+	if p != nil && p.vol != nil {
+		a["volume"] = p.vol.Name
+	}
+	return a
+}
+
 // save writes the process's state back where resolveProc reads it.
 func (p *faultProc) save(actx *tr.ActionContext) {
 	if p.vol == nil {
@@ -187,7 +198,8 @@ func decodeArgv(b64 string) ([]string, error) {
 // then finds it gone within bound; unknown otherwise.
 func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
-	args := map[string]any{"process": process, "signal": "KILL"}
+	args := p.args(process)
+	args["signal"] = "KILL"
 	if p != nil && digits.MatchString(p.PID) {
 		n, _ := strconv.Atoi(p.PID)
 		args["pid"] = n
@@ -241,7 +253,7 @@ func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, pr
 // call that answers.
 func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
-	return record(actx, e, "restart", "", map[string]any{"process": process}, func() (string, map[string]any) {
+	return record(actx, e, "restart", "", p.args(process), func() (string, map[string]any) {
 		switch {
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}

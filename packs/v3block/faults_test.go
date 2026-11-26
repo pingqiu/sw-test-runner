@@ -452,6 +452,48 @@ func TestHealthySkipsVolumesWithoutAHolderAndWaits(t *testing.T) {
 	}
 }
 
+// A holder fault names the volume it resolved to in its invoke args; the
+// record's Volume stays "" and a master fault carries no volume key. Red
+// control: two volumes, so a resolution to another index's name is seen.
+func TestFaultArgsNameTheResolvedVolume(t *testing.T) {
+	actx, p, e := faultSetup(t)
+	vs, err := specVolumes([]string{"v1", "v2"}, 21000, "nqn.x:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := vs[1]
+	v2.PID, v2.PIDStart = "4343", "300"
+	saveVolume(actx, v2)
+	actx.Vars[specOrderVar] = "v1 v2"
+	f := (&fakeNode{}).
+		on("cat /w/owned", ok(masterLedger)).
+		on("kill -KILL", ok("gone\n"))
+	ctx := context.Background()
+	_, _ = e.kill(ctx, actx, f, "blockvolume:1", time.Second)
+	_, _ = e.restart(ctx, actx, f, "blockvolume:0", time.Second)
+	_, _ = e.kill(ctx, actx, f, "blockmaster", time.Second)
+	_, _ = e.kill(ctx, actx, f, "blockvolume:2", time.Second) // unknown: nothing resolved
+	var invokes []tr.HistoryRecord
+	for _, r := range closeRecords(t, actx, p) {
+		if r.Kind == tr.HistoryInvoke {
+			invokes = append(invokes, r)
+		}
+	}
+	if len(invokes) != 4 {
+		t.Fatalf("invokes %+v", invokes)
+	}
+	for i, want := range []any{"v2", "v1", nil, nil} {
+		r := invokes[i]
+		got, has := r.Args["volume"]
+		if r.Volume != "" || (want == nil) == has || (has && got != want) {
+			t.Errorf("%s %v: Volume %q, args volume %v (present %v), want %v", r.Verb, r.Args["process"], r.Volume, got, has, want)
+		}
+	}
+	if invokes[0].Args["pid"] != float64(4343) {
+		t.Errorf("blockvolume:1 resolved to pid %v, want v2's 4343", invokes[0].Args["pid"])
+	}
+}
+
 func TestDecodeArgv(t *testing.T) {
 	if a, err := decodeArgv(cmdline(holderArgv)); err != nil || !slices.Equal(a, holderArgv) {
 		t.Errorf("%q %v", a, err)
