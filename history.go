@@ -28,6 +28,7 @@ const (
 	HistoryComplete = "complete"
 	HistoryObserve  = "observe"
 	HistoryFault    = "fault"
+	HistoryEnd      = "end" // the last record, written when the run closes its history
 )
 
 // Outcomes of a completion.
@@ -148,15 +149,24 @@ func (h *History) Open() int {
 
 // Close closes the file. Open invocations stay open in the file: C0 reports
 // them.
+//
+// Close first appends the end record, the evidence that the history is the
+// whole run: a file that stops without it (a crashed runner, a truncated
+// copy) is incomplete, and no checker passes it. A latched history gets no end
+// record.
 func (h *History) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.f == nil {
 		return nil
 	}
+	var endErr error
+	if h.broken == nil {
+		endErr = h.appendLocked(&HistoryRecord{Kind: HistoryEnd, Result: map[string]any{"open_invocations": len(h.open)}})
+	}
 	err := h.f.Close()
 	h.f = nil
-	return err
+	return errors.Join(endErr, err)
 }
 
 // appendLocked stamps seq and the clock, writes one line and syncs it. Any

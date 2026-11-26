@@ -177,8 +177,8 @@ class C2(unittest.TestCase):
         self.assertEqual((v['C1'], v['C2'], v['C3']), ('UNKNOWN', 'UNKNOWN', 'UNKNOWN'))
         # The window rule itself, for when overlaps are judged: the frozen
         # snapshot may hold the write that completed during it.
-        _, _, frozen = hc.replay(recs)
-        self.assertIn(w_inv['args']['sha256'], frozen[('v1', 's1')][lba])
+        sh, _, _ = hc.replay(recs)
+        self.assertIn(w_inv['args']['sha256'], sh.frozen[('v1', 's1')][lba])
 
     def test_a_write_to_another_volume_or_refused_is_not_in_the_snapshot(self):
         def rec(seq, kind, verb, vol, **kw):
@@ -193,24 +193,26 @@ class C2(unittest.TestCase):
             rec(5, 'complete', 'write', 'v1', of=4, outcome='refused'),
             rec(6, 'complete', 'snapshot', 'v1', of=1, outcome='ok'),
         ]
-        _, _, frozen = hc.replay(hc.read_history(dump(recs)))
-        held = frozen[('v1', 's1')].get(0, {hc.ZERO})
+        sh, _, _ = hc.replay(hc.read_history(dump(recs)))
+        held = sh.frozen[('v1', 's1')].get(0, {hc.ZERO})
         self.assertNotIn('c' * 64, held, 'a write to another volume')
         self.assertNotIn('d' * 64, held, 'a refused write')
-    def test_no_read_of_the_target_is_unknown_not_pass(self):
+    def test_no_read_of_the_target_fails(self):
         recs = load()
         drop = {id(x) for p in ops(recs, 'read', 'v2') for x in p}
         recs = renumber([r for r in recs if id(r) not in drop])
-        self.assertEqual(verdicts(recs)['C2'], 'UNKNOWN')
+        self.assertEqual(verdicts(recs)['C2'], 'FAIL')
 
 
 def synth(*steps):
-    """A one-at-a-time history from (verb, volume, args, outcome, result) steps."""
+    """A one-at-a-time history from (verb, volume, args, outcome, result) steps,
+    closed by the writer's end record."""
     recs = []
     for verb, vol, args, outcome, result in steps:
         n = len(recs)
         recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
         recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': n + 2, 'outcome': outcome, 'result': result})
+    recs.append({'seq': len(recs) + 1, 'kind': 'end', 'mono_ns': len(recs) + 1})
     return recs
 
 
@@ -225,7 +227,7 @@ class Synthetic(unittest.TestCase):
         recs = synth(*RESTORED,
                      ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
                      ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}))
-        self.assertEqual(verdicts(recs)['C2'], 'UNKNOWN', 'only a written block was read: nothing restored was seen')
+        self.assertEqual(verdicts(recs)['C2'], 'FAIL', 'only a written block was read: nothing restored was seen')
         recs = synth(*RESTORED,
                      ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
                      ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}),
@@ -258,6 +260,97 @@ class Synthetic(unittest.TestCase):
         v = verdicts(recs)
         self.assertEqual((v['C1'], v['C2'], v['C3']), ('UNKNOWN', 'UNKNOWN', 'UNKNOWN'), hc.check(dump(recs)))
         self.assertEqual(hc.overlaps(hc.read_history(dump(load()))), set(), 'the real run is one-at-a-time')
+
+class Evidence(unittest.TestCase):
+    """No checker passes on what it never saw (the lead's rule): an empty or
+    truncated history, or one lacking the operations a checker judges."""
+
+    def all_fail(self, lines, why):
+        for name, v in hc.check(lines).items():
+            self.assertEqual(v['verdict'], 'FAIL', (name, why, v))
+
+    def test_empty_and_whitespace_histories_fail_every_checker(self):
+        self.all_fail([], 'empty')
+        self.all_fail(['', '   ', '\t'], 'whitespace only')
+
+    def test_a_valid_prefix_without_the_end_record_fails_every_checker(self):
+        recs = load()
+        # Cut after the last read of the run: every operation so far is
+        # complete, the stops, deletes and re-create are missing.
+        last_read = max(c['seq'] for i, c in ops(recs, 'read'))
+        self.all_fail(dump([r for r in recs if r['seq'] <= last_read]), 'prefix')
+
+    def test_a_record_after_the_end_record_is_unreadable(self):
+        recs = load()
+        recs.append({'seq': len(recs) + 1, 'kind': 'observe', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'], 'result': {}})
+        for name, v in hc.check(dump(recs)).items():
+            self.assertEqual(v['verdict'], 'UNKNOWN', name)
+
+    def test_each_checker_fails_without_its_operations(self):
+        only_end = synth()
+        v = verdicts(only_end)
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C7': 'FAIL'})
+        writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
+        self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
+        reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
+        self.assertEqual(verdicts(reads_only)['C1'], 'FAIL', 'no write')
+
+
+class Binding(unittest.TestCase):
+    def test_c2_refuses_a_snapshot_from_the_future(self):
+        # The restore completes before any snapshot of that name exists; a
+        # later snapshot of the name must not be taken for its image.
+        recs = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                     ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok', {}),
+                     ('snapshot', 'v1', {'name': 's1'}, 'ok', {}),
+                     ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}))
+        v = hc.check(dump(recs))
+        self.assertEqual(v['C2']['verdict'], 'FAIL')
+        self.assertIn('before the restore', v['C2']['findings'][0])
+
+    def test_c2_binds_the_image_as_it_stood_at_the_restore(self):
+        # s1 is taken again, holding B, after the restore: the target restored
+        # the first s1 (A), so reading A is right and reading B is not.
+        steps = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                 ('snapshot', 'v1', {'name': 's1'}, 'ok', {}),
+                 ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok', {}),
+                 ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                 ('snapshot', 'v1', {'name': 's1'}, 'ok', {})]
+        self.assertEqual(verdicts(synth(*steps, ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A})))['C2'], 'PASS')
+        self.assertEqual(verdicts(synth(*steps, ('read', 'v2', {'lba': 0}, 'ok', {'sha256': S})))['C2'], 'FAIL')
+
+
+class Exercise(unittest.TestCase):
+    """C3 must establish each direction: a write on one side, then a read of
+    the same block on the other."""
+
+    def c3(self, *steps):
+        return verdicts(synth(*RESTORED, *steps))['C3']
+
+    def test_both_directions_read_after_their_writes_pass(self):
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S})), 'PASS')
+
+    def test_reads_before_the_writes_exercise_nothing(self):
+        self.assertEqual(self.c3(('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {})), 'FAIL')
+
+    def test_reads_of_another_block_exercise_nothing(self):
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('read', 'v2', {'lba': 7}, 'ok', {'sha256': hc.ZERO}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 7}, 'ok', {'sha256': hc.ZERO})), 'FAIL')
+
+    def test_a_refused_write_exercises_nothing(self):
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'refused', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})), 'FAIL')
+
 
 class C7(unittest.TestCase):
     def after_delete(self, recs, vol):
@@ -298,6 +391,28 @@ class C7(unittest.TestCase):
         comp = ops(recs, 'create', 'v1')[-1][1]
         comp['result']['detail'] = 'rpc error: code = Unavailable desc = master down'
         self.assertEqual(verdicts(recs)['C7'], 'FAIL')
+    def test_a_re_create_refused_for_another_precondition(self):
+        recs = load()
+        comp = ops(recs, 'create', 'v1')[-1][1]
+        comp['result']['detail'] = 'rpc error: code = FailedPrecondition desc = create volume: size below the minimum'
+        v = hc.check(dump(recs))
+        self.assertEqual(v['C7']['verdict'], 'FAIL')
+        self.assertIn('reservation', v['C7']['findings'][0])
+
+    def test_no_re_create_attempted(self):
+        recs = load()
+        inv, comp = ops(recs, 'create', 'v1')[-1]
+        recs = renumber([r for r in recs if r is not inv and r is not comp])
+        v = hc.check(dump(recs))
+        self.assertEqual(v['C7']['verdict'], 'FAIL')
+        self.assertTrue(any('not exercised' in x for x in v['C7']['findings']))
+
+    def test_no_delete_at_all(self):
+        recs = load()
+        drop = {id(x) for p in ops(recs, 'delete') for x in p}
+        recs = renumber([r for r in recs if id(r) not in drop])
+        self.assertEqual(verdicts(recs)['C7'], 'FAIL')
+
     def test_a_delete_never_observed(self):
         recs = load()
         at = ops(recs, 'delete', 'v1')[0][1]['seq']
@@ -323,11 +438,13 @@ class C3(unittest.TestCase):
         self.assertEqual(v['C3']['verdict'], 'FAIL')
         self.assertIn('write to the target', v['C3']['findings'][0])
 
-    def test_a_direction_not_exercised_is_unknown(self):
+    def test_a_direction_not_exercised_fails(self):
         recs = load()
         drop = {id(x) for p in ops(recs, 'write', 'v2') for x in p}
         recs = renumber([r for r in recs if id(r) not in drop])
-        self.assertEqual(verdicts(recs)['C3'], 'UNKNOWN')
+        v = hc.check(dump(recs))
+        self.assertEqual(v['C3']['verdict'], 'FAIL')
+        self.assertTrue(any('not exercised' in x for x in v['C3']['findings']))
 
 
 if __name__ == '__main__':

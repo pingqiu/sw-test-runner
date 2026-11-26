@@ -37,7 +37,10 @@ import json
 import sys
 
 ZERO = hashlib.sha256(bytes(4096)).hexdigest()
-KINDS = {'invoke', 'complete', 'observe', 'fault'}
+KINDS = {'invoke', 'complete', 'observe', 'fault', 'end'}
+# The master's answer to a create of a deleted name (v1: the name's deletion
+# reservation). C7 requires this reason, not any FailedPrecondition.
+RESERVED_NAME = 'is being deleted or was deleted'
 OUTCOMES = {'ok', 'refused', 'unknown'}
 TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
 
@@ -66,6 +69,8 @@ def read_history(lines):
         if not isinstance(mono, int) or mono < last_mono:
             raise Malformed('line %d: clock %r after %d' % (n, mono, last_mono))
         last_mono = mono
+        if recs and recs[-1]['kind'] == 'end':
+            raise Malformed('line %d: a record after the end record' % n)
         k = r['kind']
         if k == 'invoke':
             if not r.get('op') or not r.get('verb'):
@@ -101,6 +106,8 @@ def c0(recs):
     """A refusal is expected only where its own invocation declares it
     (args.expect == "refused", one step of the scenario), never by verb."""
     f = []
+    if not operations(recs):
+        return verdict(['no operation in the history: nothing was exercised'])
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
         expected = (inv.get('args') or {}).get('expect') == 'refused'
@@ -185,7 +192,8 @@ def replay(recs):
     events = []
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}
     snap_open = {}       # invocation seq -> (volume, {lba: set}) of an open snapshot
-    frozen = {}          # (volume, snapshot) -> {lba: set}
+    frozen = {}          # (volume, snapshot) -> {lba: set}, the latest of that name
+    images = {}          # restore completion seq -> the snapshot image it restored (None: none existed)
     for r in recs:
         if r['kind'] == 'invoke' and r['verb'] == 'snapshot':
             vol = r['volume']
@@ -219,13 +227,17 @@ def replay(recs):
             events.append(('snapshot', inv, r))
         elif verb == 'restore':
             if out == 'ok':
+                # The image is the snapshot AS IT STOOD when the restore completed:
+                # a snapshot of that name taken later is not this restore's.
                 snap = frozen.get((args['source'], args['snapshot']))
+                images[r['seq']] = None if snap is None else {k: set(v) for k, v in snap.items()}
                 if snap is not None:
-                    sh.base[vol] = snap
+                    sh.base[vol] = images[r['seq']]
             events.append(('restore', inv, r))
         else:
             events.append((verb, inv, r))
-    return sh, events, frozen
+    sh.frozen = frozen   # every snapshot as last taken, by (volume, name)
+    return sh, events, images
 
 
 @unknown_on_overlap
@@ -246,6 +258,9 @@ def c1(recs):
             last_read[key] = i
     # Every written block is read after its last write: a volume deleted at
     # the end must be read before its delete, so a delete excuses nothing.
+    if not last_write:
+        f.append('no write in the history: C1 judges nothing')
+    # No read with writes present already fails below (written, never read).
     unread = sorted(k for k, w in last_write.items() if last_read.get(k, -1) < w)
     if unread:
         f.append('written, never read afterwards: %d (%s)' % (len(unread), ', '.join('%s lba %d' % k for k in unread[:8])))
@@ -264,12 +279,14 @@ def restores(recs):
 
 @unknown_on_overlap
 def c2(recs):
-    _, events, frozen = replay(recs)
-    f, unknown = [], False
+    _, events, images = replay(recs)
+    f = []
+    if not restores(recs):
+        return verdict(['no restore in the history: C2 judges nothing'])
     for target, source, snap, at in restores(recs):
-        image = frozen.get((source, snap))
+        image = images.get(at)
         if image is None:
-            f.append('restore of %s from %s/%s: no completed snapshot of that name' % (target, source, snap))
+            f.append('restore of %s from %s/%s: no snapshot of that name had completed before the restore' % (target, source, snap))
             continue
         # The restored content of a block is seen only by a read of the
         # target with no earlier write of the target at that block; a block
@@ -284,52 +301,58 @@ def c2(recs):
             elif ev[0] == 'read' and lba not in written:
                 first.setdefault(lba, ev)
         if not first:
-            unknown = True   # no restored block was read: C2 proves nothing about this target
+            f.append('%s: no restored block was read (each was written first, or none was read): C2 judges nothing' % target)
             continue
         for lba, ev in sorted(first.items()):
             got = (ev[2].get('result') or {}).get('sha256')
             allowed = image.get(lba, {ZERO})
             if got not in allowed:
                 f.append('%s lba %d: first read %s, not a content of %s/%s (%s)' % (target, lba, got, source, snap, sorted(allowed)))
-    return verdict(f, unknown)
+    return verdict(f)
 
 
 @unknown_on_overlap
 def c3(recs):
-    _, events, frozen = replay(recs)
-    f, unknown = [], False
+    """Independence after a restore, both ways. A direction is exercised only
+    by a successful (ok or unknown) write on one side at a block, followed by
+    an ok read of the SAME block on the other side; a refused write, a read
+    before the write or a read of another block exercises nothing. A
+    direction not exercised is a FAIL: C3 judged nothing there."""
+    _, events, images = replay(recs)
+    f = []
+    if not restores(recs):
+        return verdict(['no restore in the history: C3 judges nothing'])
     for target, source, snap, at in restores(recs):
-        image = frozen.get((source, snap), {})
-        src_after, tgt_written = {}, {}
-        reads_t, reads_s = 0, 0
+        image = images.get(at) or {}
+        written = {source: {}, target: {}}   # volume -> lba -> {sha: completion seq} after the restore
+        exercised = {source: False, target: False}   # keyed by the WRITTEN side
         for ev in events:
-            if ev[0] == 'write' and ev[2]['seq'] > at:
-                lba, sha = ev[1]['args']['lba'], ev[1]['args']['sha256']
-                if ev[1]['volume'] == source:
-                    src_after.setdefault(lba, set()).add(sha)
-                elif ev[1]['volume'] == target:
-                    tgt_written.setdefault(lba, set()).add(sha)
-            elif ev[0] == 'read' and ev[2]['seq'] > at:
-                vol, lba = ev[1]['volume'], ev[1]['args']['lba']
+            if ev[0] not in ('read', 'write') or ev[2]['seq'] <= at or ev[1].get('volume') not in written:
+                continue
+            vol, lba = ev[1]['volume'], ev[1]['args']['lba']
+            other = target if vol == source else source
+            if ev[0] == 'write' and ev[2]['outcome'] in ('ok', 'unknown'):
+                written[vol].setdefault(lba, {})[ev[1]['args']['sha256']] = ev[2]['seq']
+            elif ev[0] == 'read':
                 got = (ev[2].get('result') or {}).get('sha256')
-                if vol == target:
-                    reads_t += 1
-                    if got in src_after.get(lba, set()) - image.get(lba, set()):
+                if written[other].get(lba):
+                    exercised[other] = True   # a write on the other side at this block came first
+                foreign = set(written[other].get(lba, {})) - (image.get(lba, set()) if vol == target else set())
+                if got in foreign:
+                    if vol == target:
                         f.append('%s lba %d seq %d holds a write to %s made after the snapshot' % (target, lba, ev[1]['seq'], source))
-                elif vol == source:
-                    reads_s += 1
-                    if got in tgt_written.get(lba, set()):
+                    else:
                         f.append('%s lba %d seq %d holds a write to the target %s' % (source, lba, ev[1]['seq'], target))
         # The directions are told apart by content: a hash written to both
         # volumes at the same block makes them indistinguishable.
-        shared = sorted('lba %d' % lba for lba in set(src_after) & set(tgt_written) if src_after[lba] & tgt_written[lba])
+        shared = sorted('lba %d' % lba for lba in set(written[source]) & set(written[target]) if set(written[source][lba]) & set(written[target][lba]))
         if shared:
-            f.append('%s and %s were written the same content at %s: the directions cannot be told apart' % (source, target, ', '.join(shared[:4])))
-            return verdict([], unknown=True) | {'findings': f}
-        if not (src_after and reads_t and tgt_written and reads_s):
-            unknown = True   # one direction was not exercised: no claim about it
-    return verdict(f, unknown)
-
+            return {'verdict': 'UNKNOWN', 'findings': f + ['%s and %s were written the same content at %s: the directions cannot be told apart' % (source, target, ', '.join(shared[:4]))]}
+        if not exercised[source]:
+            f.append('%s -> %s not exercised: no write to the source read back on the target at the same block' % (source, target))
+        if not exercised[target]:
+            f.append('%s -> %s not exercised: no write to the target read back on the source at the same block' % (target, source))
+    return verdict(f)
 
 def c7(recs):
     f = []
@@ -340,6 +363,8 @@ def c7(recs):
             deleted[inv['volume']] = comp['seq']
         elif inv['verb'] == 'create':
             creates.append((inv['volume'], inv['seq'], comp))
+    if not deleted:
+        return verdict(['no delete with outcome ok in the history: C7 judges nothing'])
     seen = set()
     for r in recs:
         vol = r.get('volume')
@@ -363,13 +388,17 @@ def c7(recs):
     # In v1 the master keeps a deleted name's reservation: a create of that
     # name after its ok delete is REFUSED (FailedPrecondition). If a build lets
     # it through, this goes red so that someone decides it.
+    recreated = set()
     for vol, at, comp in creates:
         if vol not in deleted or at < deleted[vol]:
             continue
+        recreated.add(vol)
         detail = (comp.get('result') or {}).get('detail', '') if comp else ''
-        if comp is None or comp['outcome'] != 'refused' or 'FailedPrecondition' not in detail:
-            f.append('%s created again after its delete: %s, not refused (FailedPrecondition): %s'
-                     % (vol, comp['outcome'] if comp else 'no completion', detail or (comp.get('result') if comp else '')))
+        if comp is None or comp['outcome'] != 'refused' or 'FailedPrecondition' not in detail or RESERVED_NAME not in detail:
+            f.append('%s created again after its delete: %s, not refused for the name''s reservation (FailedPrecondition, %r): %s'
+                     % (vol, comp['outcome'] if comp else 'no completion', RESERVED_NAME, detail or (comp.get('result') if comp else '')))
+    if not recreated:
+        f.append('no create of a deleted name was attempted: the reservation rule was not exercised')
     never = sorted(set(deleted) - seen)
     if never:
         f.append('deleted but never observed afterwards: %s' % ', '.join(never))
@@ -384,6 +413,13 @@ def check(lines):
         recs = read_history(lines)
     except Malformed as e:
         return {name: {'verdict': 'UNKNOWN', 'findings': ['history unreadable: %s' % e]} for name in CHECKERS}
+    # Positive evidence first: an empty history, or one that does not end with
+    # the writer's end record (a crashed runner, a truncated copy), is not a
+    # run; every checker fails it rather than pass on what it never saw.
+    if not recs:
+        return {name: {'verdict': 'FAIL', 'findings': ['empty history: no evidence']} for name in CHECKERS}
+    if recs[-1]['kind'] != 'end':
+        return {name: {'verdict': 'FAIL', 'findings': ['the history has no end record: incomplete evidence (seq %d is the last)' % recs[-1]['seq']]} for name in CHECKERS}
     out = {}
     for name, fn in CHECKERS.items():
         try:

@@ -88,3 +88,4 @@
 {"seq":88,"kind":"invoke","client":"c1","op":"VolumeCreate.MarkReady","verb":"create","volume":"v1","args":{"expect":"refused","size_bytes":16777216},"mono_ns":175612016004}
 {"seq":89,"kind":"complete","of":88,"client":"c1","op":"VolumeCreate.MarkReady","verb":"create","volume":"v1","mono_ns":175625501889,"outcome":"refused","result":{"call_ns":1818644,"detail":"rpc error: code = FailedPrecondition desc = create volume: v1 is being deleted or was deleted; its id is never reused"}}
 {"seq":90,"kind":"observe","client":"c1","verb":"observe","volume":"v1","mono_ns":175688028433,"result":{"files":["HEAD","VOLUME"],"head":{"epoch":2,"gen":16,"holder":"b-v1/r1","state":"deleted"},"workspace":{"exit":1,"text":[""]}}}
+{"seq":91,"kind":"end","mono_ns":175688028434,"result":{"open_invocations":0}}
