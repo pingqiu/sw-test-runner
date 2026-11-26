@@ -7,6 +7,11 @@ package v3block
 //     pool, blocks, negative share and weights (a replay must match them),
 //     and the nightly seed the seed was drawn from when param nightly_seed
 //     is set;
+//   - with param faults (a rate above 0; params fault_processes and
+//     fault_restart_within), right after the header an observe record
+//     "fault_schedule", and the schedule's kills, restarts, healthy points and
+//     resolving observations between the operations (gen_faultrun.go); the
+//     header then names generator GenVersionFaults;
 //   - before each operation, an observe record "gen_step": its number,
 //     action, params and the limit a negative probes. That is the replay
 //     script, and it ties every operation record to its proposal;
@@ -63,6 +68,9 @@ func genExec(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 		out, err := h(ctx, actx, tr.Action{Action: o.Action, Node: node, Params: p})
 		if err != nil {
 			return "", err
+		}
+		if o.Action == "v3_op_observe" {
+			continue // an observation has no outcome (its handler answers "observed")
 		}
 		got := out["value"]
 		if _, known := outcomeRank[got]; !known {
@@ -139,6 +147,18 @@ func genConfig(act tr.Action, actx *tr.ActionContext) (GenConfig, error) {
 			c.Weights[k] = n
 		}
 	}
+	// M2 fault schedule (gen_faults.go): off unless faults is a rate above 0.
+	if s := opParam(act, actx, "faults"); s != "" && s != "off" {
+		if c.Faults, err = strconv.ParseFloat(s, 64); err != nil {
+			return c, fmt.Errorf("v3_gen_run: faults: %w", err)
+		}
+		c.FaultProcesses = strings.Fields(opParam(act, actx, "fault_processes"))
+		if s := opParam(act, actx, "fault_restart_within"); s != "" {
+			if c.RestartWithin, err = strconv.Atoi(s); err != nil || c.RestartWithin < 1 {
+				return c, fmt.Errorf("v3_gen_run: fault_restart_within %q", s)
+			}
+		}
+	}
 	return c, nil
 }
 
@@ -166,6 +186,14 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: header}); err != nil {
 		return nil, err
 	}
+	var fr *faultRun
+	if g.faulty() {
+		s := g.Schedule()
+		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_schedule", Result: s.record()}); err != nil {
+			return nil, err
+		}
+		fr = newFaultRun(s.Events, g)
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("v3_gen_run: %w after %d operations", ctx.Err(), g.no)
@@ -179,6 +207,17 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			return nil, fmt.Errorf("v3_gen_run: operation %d (%s %s): %w", o.No, o.Action, o.Volume, err)
 		}
 		g.Learn(o, outcome)
+		if fr != nil {
+			fr.note(o, outcome)
+			if err := fr.afterOp(ctx, actx, act.Node, o.No); err != nil {
+				return nil, fmt.Errorf("v3_gen_run: %w", err)
+			}
+		}
+	}
+	if fr != nil {
+		if err := fr.finish(ctx, actx, act.Node); err != nil {
+			return nil, fmt.Errorf("v3_gen_run: end of run: %w", err)
+		}
 	}
 	cov := g.Coverage()
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_coverage", Result: cov}); err != nil {

@@ -56,6 +56,11 @@ type GenConfig struct {
 	Blocks   int            // lbas 0..Blocks-1 are used for writes and reads
 	Negative float64        // share of operations that must be refused (default 0.1)
 	Weights  map[string]int // relative share of TIME per operation; default DefaultWeights
+
+	// M2 process faults (gen_faults.go); off when Faults is 0.
+	Faults         float64  // chance of a kill after each operation while nothing is down
+	FaultProcesses []string // the processes the schedule may kill
+	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
 }
 
 // DefaultWeights are shares of run time per operation; the proposal
@@ -85,6 +90,11 @@ type genVol struct {
 	source  string            // for a restore target: its source volume
 	written bool              // a write was acknowledged (reads then have content)
 	snapSeq int
+	// unresolved counts writes with an unknown outcome not yet resolved by a
+	// read at a healthy point (fault runs only): the volume stays serving and
+	// writable, but is not stopped or moved until they are resolved, so the
+	// resolving read finds it where the write left it.
+	unresolved int
 }
 
 // Generator proposes operations; Learn feeds back each outcome.
@@ -97,6 +107,8 @@ type Generator struct {
 	ended  string
 	cells  map[string]int // "action|state" -> count proposed
 	counts map[string]int // action -> count proposed
+	down   string         // the process a fault holds down now ("" for none)
+	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
 }
 
 // NewGenerator validates the config and starts a run.
@@ -118,8 +130,18 @@ func NewGenerator(cfg GenConfig) (*Generator, error) {
 			return nil, fmt.Errorf("generator: weight for unknown operation %q or negative", a)
 		}
 	}
+	if cfg.Faults != 0 {
+		if cfg.RestartWithin == 0 {
+			cfg.RestartWithin = DefaultRestartWithin
+		}
+		cfg.FaultProcesses = slices.Clone(cfg.FaultProcesses)
+		slices.Sort(cfg.FaultProcesses)
+		if _, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin); err != nil {
+			return nil, fmt.Errorf("generator: %w", err)
+		}
+	}
 	g := &Generator{cfg: cfg, rng: rand.New(rand.NewPCG(cfg.Seed, cfg.Seed^0x9e3779b97f4a7c15)),
-		vols: map[string]*genVol{}, cells: map[string]int{}, counts: map[string]int{}}
+		vols: map[string]*genVol{}, cells: map[string]int{}, counts: map[string]int{}, fcells: map[string]int{}}
 	seen := map[string]bool{}
 	for _, n := range cfg.Pool {
 		if n == "" || seen[n] || strings.ContainsAny(n, " \t") {
@@ -138,9 +160,48 @@ func (g *Generator) Header() map[string]any {
 	for k, v := range g.cfg.Weights {
 		w[k] = v
 	}
-	return map[string]any{"generator": GenVersion, "seed": strconv.FormatUint(g.cfg.Seed, 10),
+	h := map[string]any{"generator": GenVersion, "seed": strconv.FormatUint(g.cfg.Seed, 10),
 		"ops": g.cfg.Ops, "pool": slices.Clone(g.cfg.Pool), "blocks": g.cfg.Blocks,
 		"negative": g.cfg.Negative, "weights": w}
+	if g.faulty() {
+		h["generator"] = GenVersionFaults
+		h["faults"] = g.cfg.Faults
+		h["fault_processes"] = slices.Clone(g.cfg.FaultProcesses)
+		h["fault_restart_within"] = g.cfg.RestartWithin
+	}
+	return h
+}
+
+func (g *Generator) faulty() bool { return g.cfg.Faults != 0 }
+
+// Schedule is the run's fault schedule (empty when faults are off).
+func (g *Generator) Schedule() FaultSchedule {
+	if !g.faulty() {
+		return FaultSchedule{Seed: g.cfg.Seed, Events: []FaultEvent{}}
+	}
+	s, _ := NewFaultSchedule(g.cfg.Seed, g.cfg.Ops, g.cfg.FaultProcesses, g.cfg.Faults, g.cfg.RestartWithin)
+	return s
+}
+
+// Fault tells the generator a fault event ran: a kill puts the process down,
+// a restart brings it back. The shadow's lifecycle states do not change (a
+// healthy point requires every volume back as it was); operations proposed
+// while a process is down are counted as fault cells.
+func (g *Generator) Fault(action, process string) {
+	g.fcells[action+"|"+process]++
+	if action == FaultKill {
+		g.down = process
+	} else if g.down == process {
+		g.down = ""
+	}
+}
+
+// Resolved tells the generator that the unknown writes of a volume were
+// resolved by observation at a healthy point.
+func (g *Generator) Resolved(vol string) {
+	if v := g.vols[vol]; v != nil {
+		v.unresolved = 0
+	}
 }
 
 // Ended is why the run stopped proposing ("" while it goes on): "ops" when
@@ -192,6 +253,9 @@ func (g *Generator) Next() (GenOp, bool) {
 	v := g.vols[chosen.op.Volume]
 	g.cells[chosen.op.Action+"|"+v.state]++
 	g.counts[chosen.op.Action]++
+	if g.down != "" {
+		g.fcells["while_down|"+chosen.op.Action]++
+	}
 	return chosen.op, true
 }
 
@@ -267,6 +331,9 @@ func (g *Generator) ordinary() []candidate {
 					break
 				}
 			}
+			if v.unresolved > 0 {
+				break // stays where its unknown writes left it until they are resolved
+			}
 			add(op("v3_op_stop", n))
 			if v.source == "" && len(v.targets) == 0 {
 				add(op("v3_op_move", n))
@@ -314,11 +381,18 @@ func (g *Generator) negatives() []candidate {
 // Learn applies an operation's outcome (ok, refused, unknown) to the shadow.
 // A refused negative changes nothing; a refused ordinary operation changes
 // nothing either (C0 reports it as unexpected); unknown takes the volume out
-// of the run.
+// of the run. In a fault run an unknown write is different: a write never
+// changes the lifecycle state, so the volume stays serving and the write is
+// counted unresolved until a read at a healthy point resolves it.
 func (g *Generator) Learn(o GenOp, outcome string) {
 	v := g.vols[o.Volume]
 	if outcome == "unknown" && o.Action == "v3_op_read" {
 		return // a read changes nothing, whatever its outcome
+	}
+	if outcome == "unknown" && o.Action == "v3_op_write" && g.faulty() && o.Negative == "" {
+		v.written = true
+		v.unresolved++
+		return
 	}
 	if outcome == "unknown" {
 		v.state = stUnknown
@@ -381,6 +455,27 @@ func (g *Generator) Coverage() map[string]any {
 			}
 		}
 	}
+	var fcells map[string]int
+	if g.faulty() {
+		// Fault cells: each process killed and restarted, and each ordinary
+		// action proposed while a process was down.
+		fcells = map[string]int{}
+		for k, v := range g.fcells {
+			fcells[k] = v
+		}
+		var want []string
+		for _, p := range g.cfg.FaultProcesses {
+			want = append(want, FaultKill+"|"+p, FaultRestart+"|"+p)
+		}
+		for a := range all {
+			want = append(want, "while_down|"+a)
+		}
+		for _, c := range want {
+			if g.fcells[c] == 0 {
+				missed = append(missed, c)
+			}
+		}
+	}
 	slices.Sort(missed)
 	cells := map[string]int{}
 	for k, v := range g.cells {
@@ -398,6 +493,10 @@ func (g *Generator) Coverage() map[string]any {
 	if est > 0 {
 		perHour = float64(g.no) * 3600 / est
 	}
-	return map[string]any{"proposed": g.no, "ended": g.ended, "actions": counts, "cells": cells,
+	cov := map[string]any{"proposed": g.no, "ended": g.ended, "actions": counts, "cells": cells,
 		"cells_never_reached": missed, "estimated_ops_per_hour": int(perHour)}
+	if fcells != nil {
+		cov["fault_cells"] = fcells
+	}
+	return cov
 }
