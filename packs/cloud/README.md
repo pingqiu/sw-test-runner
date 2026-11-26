@@ -1,11 +1,11 @@
 # Cloud VM power fault
 
-Actions (mutating, chaos tier; the run needs `--allow-mutating`):
+Actions (mutating, chaos tier; the run needs `--allow-mutating`). The key is `vm`: in a scenario `node:` is the runner node an action runs on, and params are inline keys.
 
 | Action | Params | Effect |
 |---|---|---|
-| `cloud_vm_power` | `node`: an inventory host id | powers that host's VM off; output `fault_key` |
-| `cloud_vm_power_restore` | `node` | powers it on again and proves a new boot |
+| `cloud_vm_power` | `vm`: an inventory host id | powers that host's VM off; output `fault_key` |
+| `cloud_vm_power_restore` | `vm` | powers it on again and proves a new boot |
 
 ## Which power action
 
@@ -21,12 +21,10 @@ The fault's custody is the run's block cloud scope. The scope's `Close` restores
 - name: fault
   actions:
     - action: cloud_vm_power
-      node: client
-      params: { node: node-2 }
+      vm: node-2
     # ... operations while the node is off ...
     - action: cloud_vm_power_restore
-      node: client
-      params: { node: node-2 }
+      vm: node-2
 - name: judge
   always: true
   actions:
