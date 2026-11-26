@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,7 +105,15 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	pgrep := r4File(t, filepath.Join(dir, "pgrep"), "#!/bin/sh\nexit ${R4_TEST_PGREP:-1}\n")
 	env := []string{"R4_ROOT=" + root, "R4_UNITDIR=" + units, "R4_HOSTS=" + hosts, "R4_SYSTEMCTL=" + ctl, "R4_JOURNALCTL=" + journal, "R4_PGREP=" + pgrep}
 	w := filepath.Join(root, "test")
-	r4File(t, filepath.Join(w, ".r4-owner"), "test\n")
+	pkg := filepath.Join(dir, "pkg")
+	r4File(t, filepath.Join(pkg, "payload"), "package\n")
+	r4File(t, filepath.Join(pkg, "SHA256SUMS"), fmt.Sprintf("%x  payload\n", sha256.Sum256([]byte("package\n"))))
+	if out, err := r4Env(t, env, "install", pkg, "test", "10.2.3.4"); err != nil {
+		t.Fatalf("fresh install: %v %s", err, out)
+	}
+	if strings.TrimSpace(mustRead(t, filepath.Join(w, ".r4-owner"))) != "test" {
+		t.Fatal("missing ownership marker")
+	}
 	// An existing root must be refused, even if no package is supplied.
 	if out, err := r4Env(t, env, "install", "/missing-package", "test", "10.2.3.4"); err == nil || !strings.Contains(out, "not fresh") {
 		t.Fatalf("%v %s", err, out)
@@ -139,6 +148,34 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	}
 	if _, err := os.Stat(w); !os.IsNotExist(err) {
 		t.Fatalf("work remains: %v", err)
+	}
+}
+
+func TestR4FailedPreflightPreventsHostWork(t *testing.T) {
+	s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	normal := 0
+	handler := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+		// The only normal action reached must be the source preflight. Always
+		// actions still settle; their host cleanup must independently fail closed.
+		if strings.Contains(a.Params["cmd"], "PREFLIGHT PASS") {
+			normal++
+			return nil, fmt.Errorf("source flag removed")
+		}
+		if a.Action == "upload_path" || a.Action == "cloud_vm_power" || strings.Contains(a.Params["cmd"], " unit $T") {
+			normal++
+		}
+		return nil, nil
+	}
+	r := tr.NewRegistry()
+	for _, n := range []string{"exec", "upload_path", "collect_path", "cloud_vm_power", "cloud_vm_power_restore"} {
+		r.RegisterFunc(n, tr.TierCore, handler)
+	}
+	result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
+	if result.Status != tr.StatusFail || normal != 1 {
+		t.Fatalf("%s normal=%d %s", result.Status, normal, result.Error)
 	}
 }
 
