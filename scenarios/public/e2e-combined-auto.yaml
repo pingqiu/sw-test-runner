@@ -1,7 +1,7 @@
 name: e2e-combined-auto
 timeout: 3m
 env:
-  master_url: "http://198.51.100.184:9333"
+  master_url: "http://192.168.1.184:9333"
 
 # Combined KV + Block test using includes and run_id namespacing.
 # Demonstrates: attach-or-create, reusable templates, data isolation.
@@ -14,7 +14,7 @@ cluster:
   managed:
     master_port: 9522
     node: server
-    ip: "198.51.100.184"
+    ip: "192.168.1.184"
     volumes:
       - port: 18330
         block_listen: ":3380"
@@ -24,11 +24,11 @@ cluster:
 topology:
   nodes:
     server:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 

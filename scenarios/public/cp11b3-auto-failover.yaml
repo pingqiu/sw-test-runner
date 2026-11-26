@@ -2,7 +2,7 @@ name: cp11b3-auto-failover
 timeout: 10m
 env:
   repo_dir: "/opt/work/seaweedfs"
-  master_url: "http://198.51.100.184:9434"
+  master_url: "http://192.168.1.184:9434"
 
 # Tests: T1 (candidate evaluation), T2 (orphan re-evaluation), T6 (preflight/status)
 # Flow: Create RF=2 → write data → kill primary → master auto-promotes → verify data + metrics
@@ -10,11 +10,11 @@ env:
 topology:
   nodes:
     target_node:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client_node:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -52,14 +52,14 @@ phases:
         port: "18190"
         master: "localhost:9434"
         dir: "/tmp/sw-b3-vs1"
-        extra_args: "-block.dir=/tmp/sw-b3-vs1/blocks -block.listen=:3277 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3-vs1/blocks -block.listen=:3277 -ip=192.168.1.184"
         save_as: vs1_pid
       - action: start_weed_volume
         node: target_node
         port: "18191"
         master: "localhost:9434"
         dir: "/tmp/sw-b3-vs2"
-        extra_args: "-block.dir=/tmp/sw-b3-vs2/blocks -block.listen=:3278 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3-vs2/blocks -block.listen=:3278 -ip=192.168.1.184"
         save_as: vs2_pid
       - action: wait_block_servers
         count: "2"
@@ -147,7 +147,7 @@ phases:
         duration: 35s
       - action: wait_block_primary
         name: "failover-test"
-        not: "198.51.100.184:18190"
+        not: "192.168.1.184:18190"
         timeout: 60s
         save_as: promoted
 
@@ -199,7 +199,7 @@ phases:
         port: "18190"
         master: "localhost:9434"
         dir: "/tmp/sw-b3-vs1"
-        extra_args: "-block.dir=/tmp/sw-b3-vs1/blocks -block.listen=:3277 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3-vs1/blocks -block.listen=:3277 -ip=192.168.1.184"
         save_as: vs1_pid2
       - action: wait_block_servers
         count: "2"

@@ -2,17 +2,17 @@ name: suite-ha-failover
 timeout: 5m
 
 env:
-  master_url: "http://198.51.100.184:9433"
+  master_url: "http://192.168.1.184:9433"
   volume_name: ha-test
 
 topology:
   nodes:
     m01:
-      host: 198.51.100.181
+      host: 192.168.1.181
       user: testdev
       key: "/opt/work/testdev_key"
     m02:
-      host: 198.51.100.184
+      host: 192.168.1.184
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -49,14 +49,14 @@ phases:
         port: "18480"
         master: "localhost:9433"
         dir: /tmp/ha-vs1
-        extra_args: "-block.dir=/tmp/ha-vs1/blocks -block.listen=:3295 -block.nvme.enable=true -block.nvme.listen=10.0.0.3:4430 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/ha-vs1/blocks -block.listen=:3295 -block.nvme.enable=true -block.nvme.listen=10.0.0.3:4430 -ip=192.168.1.184"
         save_as: vs1_pid
       - action: start_weed_volume
         node: m01
         port: "18481"
-        master: "198.51.100.184:9433"
+        master: "192.168.1.184:9433"
         dir: /tmp/ha-vs2
-        extra_args: "-block.dir=/tmp/ha-vs2/blocks -block.listen=:3296 -block.nvme.enable=true -block.nvme.listen=10.0.0.1:4431 -ip=198.51.100.181"
+        extra_args: "-block.dir=/tmp/ha-vs2/blocks -block.listen=:3296 -block.nvme.enable=true -block.nvme.listen=10.0.0.1:4431 -ip=192.168.1.181"
         save_as: vs2_pid
       - action: sleep
         duration: 5s

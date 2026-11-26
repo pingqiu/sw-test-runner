@@ -1,7 +1,7 @@
 name: e2e-kv-auto
 timeout: 3m
 env:
-  master_url: "http://198.51.100.184:9333"
+  master_url: "http://192.168.1.184:9333"
 
 # E2E KV test with automatic cluster lifecycle.
 # - First tries to attach to an existing cluster at master_url.
@@ -23,11 +23,11 @@ cluster:
 topology:
   nodes:
     server:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 

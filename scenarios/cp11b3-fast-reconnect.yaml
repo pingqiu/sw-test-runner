@@ -2,7 +2,7 @@ name: cp11b3-fast-reconnect
 timeout: 10m
 env:
   repo_dir: "/opt/work/seaweedfs"
-  master_url: "http://198.51.100.184:9436"
+  master_url: "http://192.168.1.184:9436"
 
 # Tests: T3 (deferred timer safety), T2 (fast reconnect skips failover)
 # Flow: Create RF=2 → write → kill primary briefly → restart before lease expires
@@ -11,11 +11,11 @@ env:
 topology:
   nodes:
     target_node:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client_node:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -53,14 +53,14 @@ phases:
         port: "18194"
         master: "localhost:9436"
         dir: "/tmp/sw-b3r-vs1"
-        extra_args: "-block.dir=/tmp/sw-b3r-vs1/blocks -block.listen=:3281 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3r-vs1/blocks -block.listen=:3281 -ip=192.168.1.184"
         save_as: vs1_pid
       - action: start_weed_volume
         node: target_node
         port: "18195"
         master: "localhost:9436"
         dir: "/tmp/sw-b3r-vs2"
-        extra_args: "-block.dir=/tmp/sw-b3r-vs2/blocks -block.listen=:3282 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3r-vs2/blocks -block.listen=:3282 -ip=192.168.1.184"
         save_as: vs2_pid
       - action: wait_block_servers
         count: "2"
@@ -132,7 +132,7 @@ phases:
         port: "18194"
         master: "localhost:9436"
         dir: "/tmp/sw-b3r-vs1"
-        extra_args: "-block.dir=/tmp/sw-b3r-vs1/blocks -block.listen=:3281 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-b3r-vs1/blocks -block.listen=:3281 -ip=192.168.1.184"
         save_as: vs1_pid2
       # Wait for VS to re-register with master.
       - action: wait_block_servers

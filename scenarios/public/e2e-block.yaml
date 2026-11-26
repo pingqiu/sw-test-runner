@@ -2,7 +2,7 @@ name: e2e-block
 timeout: 5m
 env:
   repo_dir: "/opt/work/seaweedfs"
-  master_url: "http://198.51.100.184:9511"
+  master_url: "http://192.168.1.184:9511"
 
 # End-to-end block test: M02 runs the cluster, m01 is the iSCSI initiator.
 # Proves: create RF=2 → iSCSI login from m01 → write → read → verify md5 → expand → verify expanded size.
@@ -10,11 +10,11 @@ env:
 topology:
   nodes:
     server:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -50,14 +50,14 @@ phases:
         port: "18311"
         master: "localhost:9511"
         dir: "/tmp/sw-e2e-block-vs1"
-        extra_args: "-block.dir=/tmp/sw-e2e-block-vs1/blocks -block.listen=:3360 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-e2e-block-vs1/blocks -block.listen=:3360 -ip=192.168.1.184"
         save_as: vs1_pid
       - action: start_weed_volume
         node: server
         port: "18312"
         master: "localhost:9511"
         dir: "/tmp/sw-e2e-block-vs2"
-        extra_args: "-block.dir=/tmp/sw-e2e-block-vs2/blocks -block.listen=:3361 -ip=198.51.100.184"
+        extra_args: "-block.dir=/tmp/sw-e2e-block-vs2/blocks -block.listen=:3361 -ip=192.168.1.184"
         save_as: vs2_pid
       - action: wait_block_servers
         count: "2"
@@ -92,7 +92,7 @@ phases:
       # m01 connects to iSCSI target on M02.
       - action: iscsi_login_direct
         node: client
-        host: "198.51.100.184"
+        host: "192.168.1.184"
         port: "{{ initial_iscsi_port }}"
         iqn: "{{ initial_iqn }}"
         save_as: device
@@ -144,7 +144,7 @@ phases:
       # Reconnect iSCSI after expand.
       - action: iscsi_login_direct
         node: client
-        host: "198.51.100.184"
+        host: "192.168.1.184"
         port: "{{ initial_iscsi_port }}"
         iqn: "{{ initial_iqn }}"
         save_as: device2

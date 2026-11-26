@@ -1,7 +1,7 @@
 name: e2e-block-auto
 timeout: 3m
 env:
-  master_url: "http://198.51.100.184:9333"
+  master_url: "http://192.168.1.184:9333"
 
 # E2E block test with automatic cluster lifecycle.
 # - Tries to attach to existing cluster with 2 block-capable servers.
@@ -17,7 +17,7 @@ cluster:
   managed:
     master_port: 9521
     node: server
-    ip: "198.51.100.184"
+    ip: "192.168.1.184"
     volumes:
       - port: 18321
         block_listen: ":3370"
@@ -27,7 +27,7 @@ cluster:
 topology:
   nodes:
     server:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
 

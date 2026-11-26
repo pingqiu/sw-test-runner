@@ -2,7 +2,7 @@ name: e2e-kv
 timeout: 3m
 env:
   repo_dir: "/opt/work/seaweedfs"
-  master_url: "http://198.51.100.184:9510"
+  master_url: "http://192.168.1.184:9510"
 
 # End-to-end KV test: M02 runs the cluster, m01 is the client.
 # Proves assign/upload/download across a real network.
@@ -10,11 +10,11 @@ env:
 topology:
   nodes:
     server:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "/opt/work/testdev_key"
     client:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "/opt/work/testdev_key"
 
@@ -47,7 +47,7 @@ phases:
         port: "18310"
         master: "localhost:9510"
         dir: "/tmp/sw-e2e-kv-vs1"
-        extra_args: "-ip=198.51.100.184"
+        extra_args: "-ip=192.168.1.184"
         save_as: vs1_pid
       - action: sleep
         duration: 3s
@@ -57,7 +57,7 @@ phases:
       # Client (m01) assigns via master on M02.
       - action: kv_assign
         node: client
-        master_url: "http://198.51.100.184:9510"
+        master_url: "http://192.168.1.184:9510"
         save_as: file1
       - action: print
         msg: "assigned fid={{ file1_fid }} url={{ file1_url }}"
@@ -87,7 +87,7 @@ phases:
       # Second file: larger (1MB).
       - action: kv_verify
         node: client
-        master_url: "http://198.51.100.184:9510"
+        master_url: "http://192.168.1.184:9510"
         size: "1M"
         save_as: verify_1m
 

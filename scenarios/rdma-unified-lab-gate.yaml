@@ -28,7 +28,7 @@ env:
 topology:
   nodes:
     m01:
-      host: 198.51.100.181
+      host: 192.168.1.181
       user: testdev
       key: "{{ ssh_key }}"
 

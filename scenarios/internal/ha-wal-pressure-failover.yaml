@@ -10,7 +10,7 @@
 # the original dd-written data survives the failover intact.
 #
 # Priority: P1
-# Infra: m01 (client 198.51.100.181) + M02 (target 198.51.100.184)
+# Infra: m01 (client 192.168.1.181) + M02 (target 192.168.1.184)
 
 name: ha-wal-pressure-failover
 timeout: 10m
@@ -20,11 +20,11 @@ env:
 topology:
   nodes:
     target_node:
-      host: "198.51.100.184"
+      host: "192.168.1.184"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
     client_node:
-      host: "198.51.100.181"
+      host: "192.168.1.181"
       user: testdev
       key: "C:/work/dev_server/testdev_key"
 
