@@ -18,7 +18,7 @@ SCENARIO="${TESTOPS_BLOCK_SCENARIO:-$HARNESS/testops/scenarios/helm-single-node-
 RESULTS_DIR="${TESTOPS_RESULTS_DIR:-/mnt/smb/work/share/testops/results/block-ci}"
 PRODUCT_ROOT="${TESTOPS_BLOCK_PRODUCT_ROOT:-/tmp/seaweed_block}"
 REF="${TESTOPS_MONO_REF:-${TESTOPS_REF:-sha-28a99ce4f644}}"   # published sw-block image tag
-M2="${TESTOPS_M2:-198.51.100.184}"
+M2="${TESTOPS_M2:-192.168.1.184}"
 M2_USER="${TESTOPS_M2_USER:-testdev}"
 SSH_KEY="${TESTOPS_SSH_KEY:-/home/testdev/.ssh/id_ed25519}"
 IMG="ghcr.io/seaweedfs/seaweed-block:${REF}"
@@ -87,4 +87,4 @@ fi
 
 echo "Block CI PASS"
 echo "  bundle: $bundle_dir"
-echo "  dashboard: http://198.51.100.181:9099/?project=block-ci"
+echo "  dashboard: http://192.168.1.181:9099/?project=block-ci"

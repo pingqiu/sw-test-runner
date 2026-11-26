@@ -67,4 +67,4 @@ fi
 
 echo "S3 CI PASS"
 echo "  bundle: $bundle_dir"
-echo "  dashboard: http://198.51.100.181:9099/?project=s3-ci"
+echo "  dashboard: http://192.168.1.181:9099/?project=s3-ci"

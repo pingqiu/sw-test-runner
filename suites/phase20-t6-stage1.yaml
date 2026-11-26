@@ -38,5 +38,5 @@ evidence:
   debug_endpoints:
     - "http://10.0.0.1:18480/debug/block/shipper"
     - "http://10.0.0.3:18480/debug/block/shipper"
-  save_to: /mnt/share/sw-block-evidence/phase20-t6
+  save_to: V:/share/sw-block-evidence/phase20-t6
   run_node: m01

@@ -27,7 +27,7 @@ const (
 	defaultQueueDir  = "/mnt/smb/work/share/testops/queue/rdma-ci"
 	defaultStateDir  = "/mnt/smb/work/share/testops/state/rdma-ci"
 	defaultLogDir    = "/mnt/smb/work/share/testops/logs/rdma-ci"
-	defaultDashboard = "http://198.51.100.181:9099/"
+	defaultDashboard = "http://192.168.1.181:9099/"
 	defaultMonoRepo  = "git@github.com:seaweedfs/seaweed-mono.git"
 	defaultRunBy     = "testops-controller"
 	defaultTeam      = "rdma"
