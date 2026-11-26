@@ -183,6 +183,14 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		}
 		header["nightly_seed"] = ns
 	}
+	// fault_healthy_wait: seconds v3_op_healthy polls for a healthy point (its
+	// wait_seconds; unset, it looks once). In the header, so a replay waits the same.
+	if w := opParam(act, actx, "fault_healthy_wait"); w != "" && g.faulty() {
+		if n, err := strconv.Atoi(w); err != nil || n < 0 {
+			return nil, fmt.Errorf("v3_gen_run: fault_healthy_wait %q", w)
+		}
+		header["fault_healthy_wait"] = w
+	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: header}); err != nil {
 		return nil, err
 	}
@@ -192,7 +200,7 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_schedule", Result: s.record()}); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(s.Events, g)
+		fr = newFaultRun(s.Events, g, header)
 	}
 	for {
 		if ctx.Err() != nil {

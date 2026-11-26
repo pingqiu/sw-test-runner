@@ -238,7 +238,7 @@ func v3GenReplay(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_schedule", Result: sched.record()}); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(events, nil)
+		fr = newFaultRun(events, nil, header)
 	}
 	diffs := []genReplayDiff{}
 	for _, st := range steps {
