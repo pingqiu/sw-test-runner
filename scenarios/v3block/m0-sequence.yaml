@@ -187,6 +187,9 @@ phases:
   - name: judge
     always: true
     actions:
+      # Close the history first: its end record says it is the whole run.
+      - action: v3_history_end
+        node: host
       - action: collect_path
         node: host
         path: "{{ work }}/log"

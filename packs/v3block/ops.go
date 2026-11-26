@@ -191,6 +191,22 @@ func fromChunk(stdout string, code int, result map[string]any) (string, map[stri
 	return r, result
 }
 
+// v3HistoryEnd closes the run's history now, writing its end record, so a
+// later phase of the same run (the checkers) judges a history that says it is
+// whole. Every record after it is refused; the CLI's own close at the end of
+// the run is then a no-op.
+func v3HistoryEnd(_ context.Context, actx *tr.ActionContext, _ tr.Action) (map[string]string, error) {
+	if actx.History == nil {
+		return nil, errors.New("v3_history_end: no history (typed operations run only with a run bundle)")
+	}
+	open := actx.History.Open()
+	if err := actx.History.Close(); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
+	actx.Log("  v3_history_end: %s closed, %d invocations open", actx.History.Path(), open)
+	return map[string]string{"value": strconv.Itoa(open)}, nil
+}
+
 // v3OpSpec writes the cluster spec for the named volumes: each gets two hosts
 // (a-<v> first, b-<v> a move target) and a placement on its first host, with
 // no size, so the volume is created later by a timed CreateVolume call (or a

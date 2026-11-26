@@ -65,7 +65,7 @@ func TestM0ScenarioWiring(t *testing.T) {
 				return map[string]string{"value": "ok"}, nil
 			}
 			r := tr.NewRegistry()
-			for _, name := range []string{"exec", "collect_path", "v3_start_blockmaster", "v3_op_spec", "v3_op_create", "v3_op_attach", "v3_op_write", "v3_op_read",
+			for _, name := range []string{"exec", "collect_path", "v3_history_end", "v3_start_blockmaster", "v3_op_spec", "v3_op_create", "v3_op_attach", "v3_op_write", "v3_op_read",
 				"v3_op_snapshot", "v3_op_snapshot_delete", "v3_op_restore", "v3_op_release", "v3_op_stop", "v3_op_move", "v3_op_delete", "v3_op_observe"} {
 				r.RegisterFunc(name, tr.TierCore, handler)
 			}
@@ -80,8 +80,8 @@ func TestM0ScenarioWiring(t *testing.T) {
 			// Teardown, then the judge (logs collected, the checkers run), even
 			// when the sequence failed.
 			n := len(steps)
-			if n < 4 || !strings.HasPrefix(steps[n-4], "exec ") || !strings.HasPrefix(steps[n-3], "collect_path ") || !strings.HasPrefix(steps[n-1], "exec ") {
-				t.Errorf("the run does not end with teardown, log collection and the checkers: %q", steps[max(0, n-4):])
+			if n < 5 || !strings.HasPrefix(steps[n-5], "exec ") || !strings.HasPrefix(steps[n-4], "v3_history_end ") || !strings.HasPrefix(steps[n-3], "collect_path ") || !strings.HasPrefix(steps[n-1], "exec ") {
+				t.Errorf("the run does not end with teardown, log collection and the checkers: %q", steps[max(0, n-5):])
 			}
 			if first := steps[0]; !strings.HasPrefix(first, "exec ") {
 				t.Errorf("the run does not start by claiming its work directory: %q", first)
