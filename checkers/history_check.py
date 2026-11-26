@@ -37,7 +37,7 @@ import json
 import sys
 
 ZERO = hashlib.sha256(bytes(4096)).hexdigest()
-KINDS = {'invoke', 'complete', 'observe', 'fault', 'end'}
+KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
 # The master's answer to a create of a deleted name (v1: the name's deletion
 # reservation). C7 requires this reason, not any FailedPrecondition.
 RESERVED_NAME = 'is being deleted or was deleted'
