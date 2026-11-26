@@ -1,6 +1,7 @@
 package v3block
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,20 @@ import (
 	"github.com/pingqiu/sw-test-runner/actions"
 	"github.com/pingqiu/sw-test-runner/packs/cloud"
 )
+
+func TestR4ScenarioPinsEachRemoteNode(t *testing.T) {
+	s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("node-%d", i)
+		want := fmt.Sprintf("{{ n%d_host_key }}", i)
+		if got := s.Topology.Nodes[id].HostKey; got != want {
+			t.Errorf("%s host key = %q, want per-node pin %q", id, got, want)
+		}
+	}
+}
 
 // The R4 node-loss scenario parses, and every action it uses is registered
 // (the engine would refuse an unknown one only at run time, on the VMs).

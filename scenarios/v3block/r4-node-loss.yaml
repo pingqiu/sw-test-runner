@@ -48,6 +48,7 @@
 #   rf=2: r1 node-2 (the primary to lose), r2 node-3
 # The cloud run passes each host's management and private (data) address as
 # -env values (n1_ip .. n3_ip, n1_data .. n3_data) with ssh_user and ssh_key.
+# Pass n1_host_key .. n3_host_key from the cloud context's per-node host_keys.
 #
 # Everything a run owns is named by its tag, <run_id>-rf<rf>: the work dir
 # /var/lib/r4/<tag>, the units r4-<tag>-master and r4-<tag>-volume, the NQN,
@@ -92,6 +93,9 @@ env:
   n1_data: ""
   n2_data: ""
   n3_data: ""
+  n1_host_key: ""
+  n2_host_key: ""
+  n3_host_key: ""
   ssh_user: "seaweed"
   ssh_key: ""
   hold_seconds: "240"
@@ -105,9 +109,9 @@ env:
 topology:
   nodes:
     controller: { is_native: true }
-    node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
-    node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
-    node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+    node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n1_host_key }}" }
+    node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n2_host_key }}" }
+    node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n3_host_key }}" }
 
 phases:
   - name: preflight
