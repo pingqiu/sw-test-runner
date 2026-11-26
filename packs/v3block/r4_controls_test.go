@@ -203,6 +203,101 @@ func TestR4FailedPreflightPreventsHostWork(t *testing.T) {
 	}
 }
 
+func TestR4EvidenceIncludesInactiveAndMissingUnits(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	w := filepath.Join(root, "test")
+	r4File(t, filepath.Join(w, ".r4-owner"), "test\n")
+	ctl := r4File(t, filepath.Join(dir, "systemctl"), "#!/bin/sh\n[ \"$1\" = status ] || exit 99\necho inactive\nexit 3\n")
+	journal := r4File(t, filepath.Join(dir, "journalctl"), "#!/bin/sh\necho journal-for-$2\nexit ${R4_TEST_JOURNAL_ERROR:-0}\n")
+	env := []string{"R4_ROOT=" + root, "R4_SYSTEMCTL=" + ctl, "R4_JOURNALCTL=" + journal}
+	if out, err := r4Env(t, env, "evidence", "test"); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	for _, role := range []string{"master", "volume", "writer"} {
+		p := filepath.Join(w, "evidence", "r4-test-"+role+".journal")
+		if !strings.Contains(mustRead(t, p), "journal-for-r4-test-"+role) {
+			t.Fatal(p)
+		}
+	}
+	bad := append(append([]string{}, env...), "R4_TEST_JOURNAL_ERROR=1")
+	if out, err := r4Env(t, bad, "evidence", "test"); err == nil || !strings.Contains(out, "incomplete journal capture") {
+		t.Fatalf("journal failure hidden: %v %s", err, out)
+	}
+	if _, err := os.Stat(w); err != nil {
+		t.Fatalf("failed capture removed evidence: %v", err)
+	}
+}
+
+// Exercise the real always phase after failure at each normal action. Evidence
+// must reach the collector before any host stops/removes its units.
+func TestR4EveryExitCollectsJournalsBeforeCleanup(t *testing.T) {
+	for failAt := -1; ; failAt++ {
+		s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		normal, failed := 0, false
+		snap, collected, cleaned := map[string]bool{}, map[string]bool{}, map[string]bool{}
+		h := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+			cmd := a.Params["cmd"]
+			if strings.Contains(cmd, " evidence $T") {
+				snap[a.Node] = true
+				return nil, nil
+			}
+			if a.Action == "collect_path" && a.Node != "controller" {
+				if !snap[a.Node] || cleaned[a.Node] {
+					return nil, fmt.Errorf("journal collection order on %s", a.Node)
+				}
+				collected[a.Node] = true
+				if failAt == -1 && a.Node == "node-1" {
+					failed = true
+					return nil, fmt.Errorf("injected archive failure")
+				}
+				return nil, nil
+			}
+			if strings.Contains(cmd, " cleanup $T") {
+				if !collected[a.Node] {
+					return nil, fmt.Errorf("cleanup before journal collection on %s", a.Node)
+				}
+				cleaned[a.Node] = true
+				return nil, nil
+			}
+			if strings.Contains(cmd, " purge $T") {
+				return nil, fmt.Errorf("purge can erase a failed collection")
+			}
+			if a.Action == "collect_path" || strings.Contains(cmd, "L=/tmp/r4-") {
+				return nil, nil
+			}
+			normal++
+			if normal-1 == failAt {
+				failed = true
+				return nil, fmt.Errorf("injected normal failure")
+			}
+			return nil, nil
+		}
+		r := tr.NewRegistry()
+		for _, n := range []string{"exec", "upload_path", "collect_path", "cloud_vm_power", "cloud_vm_power_restore"} {
+			r.RegisterFunc(n, tr.TierCore, h)
+		}
+		result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
+		for _, node := range []string{"node-1", "node-2", "node-3"} {
+			if !snap[node] || !collected[node] || !cleaned[node] {
+				t.Fatalf("failure %d: %s missing evidence/collection/cleanup: %s", failAt, node, result.Error)
+			}
+		}
+		if !failed {
+			if result.Status != tr.StatusPass {
+				t.Fatal(result.Error)
+			}
+			break
+		}
+		if result.Status != tr.StatusFail {
+			t.Fatalf("injected failure %d passed", failAt)
+		}
+	}
+}
+
 // Run the actual engine with inert handlers. This catches nested variables,
 // wrong parameters, omitted cleanup hosts, and RF-specific pass-line drift.
 func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
