@@ -1,0 +1,309 @@
+# Power-loss (PLC) run as a runner scenario: the exec pack only executes on the VM; the platform seals,
+# verifies and judges on the controller.
+#
+# Classes (env class):
+#   rehearsal  no cloud: judges a retained capture (capture_tgz, pinned by capture_sha256) with the given
+#              packet. The packet may be an unsealed candidate. Never counted, never a launch.
+#   dry        the cloud lifecycle with a sealed packet and a launch token; recorded, not counted.
+#   counted    as dry, plus the product commit must be on main and the four sealed cases must all pass.
+#
+# Phases (controller-local; values reach commands only as environment variables):
+#   seal_check    the packet's SHA256SUMS hash is an approved seal (s <sha> ...) and every file in it verifies;
+#                 no UNSEALED marker; the cloud config's sha256 is the packet's pinned one (dry/counted).
+#                 Rehearsal records seal=unsealed|sealed and never counts.
+#   launch_token  dry/counted: a well-formed hub message id; rehearsal: none allowed.
+#   cloud_run     dry/counted: seaweed-cloud run --config --pack exec --launch-token, then verify (always),
+#                 then an independent resource listing of the group; the pack's out.tgz is at
+#                 config.output/pack/out.tgz. Rehearsal: copies capture_tgz after checking its pin.
+#   unpack        out.tgz unpacks under the run dir; out/SHA256SUMS verifies; out/info.txt is its first entry;
+#                 its FSLIST equals the sealed fs_list (missing or different = refuse).
+#   produce       per sealed fs: plc_select.py out/<fs> out/<fs>/content lout/<fs> (the producer runs on the
+#                 controller; the pack only ships what it reads); the volume id from info.txt HOSTLOCK.
+#   judge         plc_judge.py: the sealed packet's powerloss.judge_run over lout/<fs>/plc/<case> with the
+#                 packet's sealed filesystem policy and out/info.txt; one judge.json; PASS required.
+#   collect       always: run dir evidence (judge.json, run/verify JSON, inventory, out/).
+#   mark_pass     only when every phase passed: re-reads the collected judge.json; gate_pass=1.
+#   cleanup       always: removes only the run dir whose marker holds this run's token.
+#
+# Expected invocation (controller):
+#   swblock run -env class=rehearsal -env packet_dir=/path/packet -env run_name=<RUN> \
+#     -env capture_tgz=/path/out.tgz -env capture_sha256=<sha256> scenarios/plc-powerloss-counted.yaml
+
+name: plc-powerloss-counted
+timeout: 240m
+always_timeout: 20m
+
+env:
+  class: "rehearsal"
+  packet_dir: ""
+  approved_seals: ""
+  run_name: ""
+  product_repo: ""
+  product_head: ""
+  launch_token: ""
+  cloud_bin: ""
+  cloud_config: ""
+  cloud_resource_group: ""
+  capture_tgz: ""
+  capture_sha256: ""
+  python: "python3"
+  plc_tools: ""        # this repository's scenarios/plc (plc_judge.py)
+  producer_dir: ""     # the sealed producer (plc_select.py, plc_produce.py), pinned in the packet
+  scratch_root: "/tmp/sw-plc"
+
+topology:
+  nodes:
+    controller:
+      is_local: true
+
+phases:
+  - name: prepare
+    actions:
+      - action: exec
+        node: controller
+        timeout: 1m
+        env.PLC_RUN: "{{ run_id }}"
+        env.PLC_ROOT: "{{ scratch_root }}"
+        env.PLC_CLASS: "{{ class }}"
+        save_as: plc_token
+        cmd: |
+          set -euf
+          fail() { echo "$*" >&2; exit 2; }
+          case "$PLC_RUN" in *[!0-9A-Za-z_-]*|'') fail 'run_id has unexpected characters' ;; esac
+          case "$PLC_ROOT" in /*) ;; *) fail 'scratch_root must be absolute' ;; esac
+          case "$PLC_CLASS" in rehearsal|dry|counted) ;; *) fail "class must be rehearsal, dry or counted: $PLC_CLASS" ;; esac
+          mkdir -p "$PLC_ROOT"
+          d="$PLC_ROOT/$PLC_RUN"
+          mkdir "$d" 2>/dev/null || fail 'run directory already exists'
+          mkdir "$d/evidence"
+          token=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+          printf '%s\n' "$token" > "$d/.plc-owned"
+          printf '%s\n' "$token"
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ product_head }}"
+        gate_pass: "0"
+        gate_status: "pinned"
+        __plc_class: "{{ class }}"
+        __plc_run: "{{ run_name }}"
+
+  - name: seal_check
+    actions:
+      - action: exec
+        node: controller
+        timeout: 5m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_CLASS: "{{ class }}"
+        env.PLC_PACKET: "{{ packet_dir }}"
+        env.PLC_SEALS: "{{ approved_seals }}"
+        env.PLC_CONFIG: "{{ cloud_config }}"
+        env.PLC_REPO: "{{ product_repo }}"
+        env.PLC_HEAD: "{{ product_head }}"
+        cmd: |
+          set -euf
+          fail() { echo "seal_check: $*" >&2; exit 1; }
+          e="$PLC_DIR/evidence"
+          [ -f "$PLC_PACKET/SHA256SUMS" ] && [ -f "$PLC_PACKET/powerloss.py" ] && [ -f "$PLC_PACKET/drill/powerloss-fs.json" ] \
+            || fail "not a power-loss packet: $PLC_PACKET"
+          seal=$(sha256sum "$PLC_PACKET/SHA256SUMS" | cut -c1-64)
+          printf '%s\n' "$seal" > "$e/packet.seal"
+          sealed=no
+          if [ -n "$PLC_SEALS" ] && [ -f "$PLC_SEALS" ] && grep -qE "^s $seal( |\$)" "$PLC_SEALS"; then sealed=yes; fi
+          [ -e "$PLC_PACKET/UNSEALED" ] && sealed=no
+          printf 'sealed=%s\n' "$sealed" > "$e/seal.txt"
+          if [ "$PLC_CLASS" = rehearsal ]; then
+            echo "rehearsal: packet seal $seal sealed=$sealed (never counted)"
+            exit 0
+          fi
+          [ "$sealed" = yes ] || fail "packet $seal is not an approved seal, or carries UNSEALED"
+          (cd "$PLC_PACKET" && sha256sum -c --quiet SHA256SUMS) > "$e/packet-verify.txt" 2>&1 || fail "packet files do not verify (packet-verify.txt)"
+          pins="$PLC_PACKET/drill/plc-run-pins.json"
+          [ -f "$pins" ] || fail "sealed packet has no drill/plc-run-pins.json"
+          [ -f "$PLC_CONFIG" ] || fail "cloud_config missing: $PLC_CONFIG"
+          want=$(sed -n 's/.*"config_sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$pins" | head -1)
+          got=$(sha256sum "$PLC_CONFIG" | cut -c1-64)
+          [ -n "$want" ] && [ "$got" = "$want" ] || fail "cloud config sha256 $got is not the sealed pin ${want:-<none>}"
+          if [ "$PLC_CLASS" = counted ]; then
+            printf '%s\n' "$PLC_HEAD" | grep -qE '^[0-9a-f]{40}$' || fail 'counted: product_head must be a full commit id'
+            git -C "$PLC_REPO" fetch -q origin main && git -C "$PLC_REPO" merge-base --is-ancestor "$PLC_HEAD" origin/main \
+              || fail "counted: $PLC_HEAD is not on main"
+          fi
+          echo "seal $seal approved; config pin ok; class=$PLC_CLASS"
+
+  - name: launch_token
+    actions:
+      - action: exec
+        node: controller
+        timeout: 1m
+        env.PLC_CLASS: "{{ class }}"
+        env.PLC_TOKEN: "{{ launch_token }}"
+        cmd: |
+          set -euf
+          if [ "$PLC_CLASS" = rehearsal ]; then
+            [ -z "$PLC_TOKEN" ] || { echo 'a rehearsal takes no launch token' >&2; exit 1; }
+            exit 0
+          fi
+          printf '%s\n' "$PLC_TOKEN" | grep -qE '^[0-9a-f]{24}$' || { echo 'no launch token: no run' >&2; exit 1; }
+
+  - name: cloud_run
+    actions:
+      - action: exec
+        node: controller
+        timeout: 200m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_CLASS: "{{ class }}"
+        env.PLC_TOKEN: "{{ launch_token }}"
+        env.PLC_CLOUD: "{{ cloud_bin }}"
+        env.PLC_CONFIG: "{{ cloud_config }}"
+        env.PLC_RG: "{{ cloud_resource_group }}"
+        env.PLC_CAPTURE: "{{ capture_tgz }}"
+        env.PLC_CAPTURE_SHA: "{{ capture_sha256 }}"
+        env.PLC_PY: "{{ python }}"
+        cmd: |
+          set -uf
+          fail() { echo "cloud_run: $*" >&2; exit 1; }
+          e="$PLC_DIR/evidence"
+          if [ "$PLC_CLASS" = rehearsal ]; then
+            [ -f "$PLC_CAPTURE" ] || fail "capture_tgz missing: $PLC_CAPTURE"
+            printf '%s\n' "$PLC_CAPTURE_SHA" | grep -qE '^[0-9a-f]{64}$' || fail 'capture_sha256 must be a sha256'
+            got=$(sha256sum "$PLC_CAPTURE" | cut -c1-64)
+            [ "$got" = "$PLC_CAPTURE_SHA" ] || fail "capture sha256 $got is not the pin $PLC_CAPTURE_SHA"
+            cp "$PLC_CAPTURE" "$PLC_DIR/out.tgz" || fail 'copy failed'
+            echo "rehearsal capture $got"
+            exit 0
+          fi
+          [ -x "$PLC_CLOUD" ] || fail "cloud_bin not executable: $PLC_CLOUD"
+          date -u +%FT%TZ > "$e/started.txt"
+          "$PLC_CLOUD" run --config "$PLC_CONFIG" --pack exec --launch-token "$PLC_TOKEN" --json > "$e/run.json" 2> "$e/runner.log"
+          rc=$?; printf '%s\n' "$rc" > "$e/run.exit"
+          # Teardown is proven whatever the run did: the runner's verify, then an independent listing.
+          "$PLC_CLOUD" verify --config "$PLC_CONFIG" --json > "$e/verify.json" 2>> "$e/runner.log"
+          vrc=$?; printf '%s\n' "$vrc" > "$e/verify.exit"
+          az resource list --resource-group "$PLC_RG" --output json --only-show-errors > "$e/resources-after.json" 2>> "$e/runner.log"
+          arc=$?; printf '%s\n' "$arc" > "$e/resources-after.exit"
+          [ "$rc" = 0 ] || fail "seaweed-cloud run exited $rc (runner.log)"
+          [ "$vrc" = 0 ] || fail "seaweed-cloud verify exited $vrc"
+          [ "$arc" = 0 ] || fail 'independent resource listing failed'
+          "$PLC_PY" -I - "$e/verify.json" "$e/resources-after.json" <<'PY' || fail 'resources remain after the run'
+          import json, sys
+          v = json.load(open(sys.argv[1])); left = json.load(open(sys.argv[2]))
+          ok = not v.get('remaining_resource_ids') and not v.get('create_unresolved') and left == []
+          print('teardown verified' if ok else 'REMAINING: %r / %d listed' % (v.get('remaining_resource_ids'), len(left)))
+          sys.exit(0 if ok else 1)
+          PY
+          out=$("$PLC_PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["output"])' "$PLC_CONFIG") || fail 'config has no output'
+          [ -f "$out/pack/out.tgz" ] || fail "the pack left no out.tgz at $out/pack/out.tgz"
+          cp "$out/pack/out.tgz" "$PLC_DIR/out.tgz" && cp "$out/pack/node.log" "$e/node.log" 2>/dev/null
+          sha256sum "$PLC_DIR/out.tgz" | cut -c1-64 > "$e/out.tgz.sha256"
+
+  - name: unpack
+    actions:
+      - action: exec
+        node: controller
+        timeout: 15m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        cmd: |
+          set -euf
+          fail() { echo "unpack: $*" >&2; exit 1; }
+          d="$PLC_DIR"
+          tar -tzf "$d/out.tgz" | grep -qvE '^(\./)?out(/|$)' && fail 'out.tgz holds paths outside out/'
+          tar -xzf "$d/out.tgz" -C "$d" --no-same-owner
+          [ -f "$d/out/SHA256SUMS" ] || fail 'out/SHA256SUMS missing'
+          (cd "$d/out" && sha256sum -c --quiet SHA256SUMS) || fail 'out/ does not verify against its SHA256SUMS'
+          first=$(head -1 "$d/out/SHA256SUMS" | awk '{print $2}')
+          [ "$first" = info.txt ] || fail "out/SHA256SUMS first entry is $first, not info.txt"
+          cp "$d/out/info.txt" "$d/evidence/info.txt"
+
+  - name: produce
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_PACKET: "{{ packet_dir }}"
+        env.PLC_PRODUCER: "{{ producer_dir }}"
+        env.PLC_NAME: "{{ run_name }}"
+        env.PLC_PY: "{{ python }}"
+        cmd: |
+          set -euf
+          fail() { echo "produce: $*" >&2; exit 1; }
+          d="$PLC_DIR"
+          printf '%s\n' "$PLC_NAME" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || fail 'run_name is required'
+          [ -f "$PLC_PRODUCER/plc_select.py" ] || fail "no producer at $PLC_PRODUCER"
+          fs_list=$("$PLC_PY" -I -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["fs_list"]))' "$PLC_PACKET/drill/powerloss-fs.json")
+          params=$(grep -E '^params ' "$d/out/info.txt") || fail 'info.txt has no params line'
+          [ "$(printf '%s\n' "$params" | grep -c .)" = 1 ] || fail 'info.txt has more than one params line'
+          fsl=$(printf '%s\n' "$params" | sed -n "s/.* FSLIST='\([^']*\)'.*/\1/p")
+          [ "$fsl" = "$fs_list" ] || fail "info.txt FSLIST '$fsl' is not the sealed fs_list '$fs_list'"
+          case "$params" in *' HOSTLOCK=1 '*|*' HOSTLOCK=1') lock=1 ;; *' HOSTLOCK=0 '*|*' HOSTLOCK=0') lock=0 ;; *) fail 'info.txt params carry no HOSTLOCK' ;; esac
+          mkdir "$d/lout"
+          for fs in $fs_list; do
+            if [ "$lock" = 1 ]; then vid="$fs-v1"; else vid=v1; fi
+            [ -d "$d/out/$fs/content" ] || fail "out/$fs/content missing: the pack must ship what the producer reads"
+            mkdir "$d/lout/$fs"
+            "$PLC_PY" -I "$PLC_PRODUCER/plc_select.py" "$d/out/$fs" "$d/out/$fs/content" "$d/lout/$fs" \
+              --run "$PLC_NAME" --volume "$vid" --write-ahead-fixed yes --clock-id host-realtime-ms \
+              > "$d/evidence/produce-$fs.log" 2>&1 || fail "producer refused $fs (produce-$fs.log)"
+          done
+
+  - name: judge
+    actions:
+      - action: exec
+        node: controller
+        timeout: 15m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_PACKET: "{{ packet_dir }}"
+        env.PLC_NAME: "{{ run_name }}"
+        env.PLC_PY: "{{ python }}"
+        env.PLC_JUDGE: "{{ plc_tools }}/plc_judge.py"
+        cmd: |
+          set -euf
+          printf '%s\n' "$PLC_NAME" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || { echo 'run_name is required' >&2; exit 2; }
+          "$PLC_PY" -I "$PLC_JUDGE" "$PLC_PACKET" "$PLC_DIR" "$PLC_NAME" "$PLC_DIR/evidence/judge.json"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: controller
+        path: "{{ scratch_root }}/{{ run_id }}/evidence"
+        name: "plc-evidence"
+
+  - name: mark_pass
+    actions:
+      - action: collect_path
+        node: controller
+        path: "{{ scratch_root }}/{{ run_id }}/evidence"
+        name: "plc-evidence-pass"
+      - action: exec
+        node: controller
+        timeout: 1m
+        env.PLC_ARCHIVE: "{{ artifacts_dir }}/plc-evidence-pass.tgz"
+        env.PLC_PY: "{{ python }}"
+        cmd: |
+          set -euf
+          tar -xzOf "$PLC_ARCHIVE" evidence/judge.json | "$PLC_PY" -I -c 'import json,sys; v=json.load(sys.stdin)["verdict"]; print("collected verdict", v); sys.exit(0 if v == "PASS" else 1)'
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ product_head }}"
+        gate_pass: "1"
+        gate_status: "ok"
+        __plc_class: "{{ class }}"
+        __plc_run: "{{ run_name }}"
+
+  - name: cleanup
+    always: true
+    actions:
+      - action: exec
+        node: controller
+        timeout: 3m
+        env.PLC_RUN: "{{ run_id }}"
+        env.PLC_ROOT: "{{ scratch_root }}"
+        env.PLC_TOKEN: "{{ plc_token }}"
+        cmd: |
+          set -u
+          case "$PLC_RUN" in *[!0-9A-Za-z_-]*|'') echo 'run_id has unexpected characters' >&2; exit 2 ;; esac
+          d="$PLC_ROOT/$PLC_RUN"
+          [ -e "$d" ] || exit 0
+          [ "$(cat "$d/.plc-owned" 2>/dev/null)" = "$PLC_TOKEN" ] || { echo "not removing $d: not this run's directory" >&2; exit 1; }
+          rm -rf -- "$d"
