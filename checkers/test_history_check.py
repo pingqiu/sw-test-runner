@@ -355,7 +355,8 @@ class Evidence(unittest.TestCase):
     def test_each_checker_fails_without_its_operations(self):
         only_end = synth()
         v = verdicts(only_end)
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C7': 'FAIL'})
+        # C5 too: a run without a refusal did not exercise it.
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C7': 'FAIL'})
         writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
         self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
         reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
@@ -562,6 +563,186 @@ class C3(unittest.TestCase):
         v = hc.check(dump(recs))
         self.assertEqual(v['C3']['verdict'], 'FAIL')
         self.assertTrue(any('not exercised' in x for x in v['C3']['findings']))
+
+
+def history(*steps):
+    """A one-at-a-time history: ('obs', volume, gen, files) is an observation
+    (gen or files None: not recorded), any other step is (verb, volume, args,
+    outcome) as an invoke and its complete. Closed by the end record."""
+    recs = []
+    for st in steps:
+        n = len(recs)
+        if st[0] == 'obs':
+            _, vol, gen, files = st[:4]
+            res = dict(st[4]) if len(st) > 4 else {}
+            res['head'] = {'gen': gen, 'epoch': 1, 'holder': 'a/r1', 'state': ''} if gen is not None else 'unreadable'
+            if files is not None:
+                res['files'] = list(files)
+            else:
+                res['listing_error'] = 'filer down'
+            recs.append({'seq': n + 1, 'kind': 'observe', 'verb': 'observe', 'volume': vol, 'mono_ns': n + 1, 'result': res})
+            continue
+        verb, vol, args, outcome = st
+        recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
+        recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': n + 2, 'outcome': outcome, 'result': {}})
+    recs.append({'seq': len(recs) + 1, 'kind': 'end', 'mono_ns': len(recs) + 1})
+    return recs
+
+
+FILES = ['HEAD', 'VOLUME', 'seg/0-x']
+NEG = {'expect': 'refused'}
+
+
+BASE = (('obs', 'v0', 1, FILES), ('obs', 'v0', 1, FILES))   # a baseline pair on another volume
+WS = {'workspace': {'exit': 0, 'text': 'v1 serving epoch 1'}, 'dirs': ['v1-0123abcd']}
+
+
+class C5(unittest.TestCase):
+    def c5(self, *steps, base=True):
+        return hc.check(dump(history(*((BASE if base else ()) + steps))))['C5']
+
+    def test_the_real_run_judges_its_refused_create_but_has_no_baseline(self):
+        v = hc.check(dump(load()))['C5']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline not established', v['findings'][0])
+        self.assertIn('limit ordinary create: 1 of 1 refusal(s) judged', v['findings'])
+
+    def test_unchanged_passes(self):
+        v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], ['limit ordinary write: 1 of 1 refusal(s) judged'])
+
+    def test_a_moved_generation_fails(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('seq 4 write v1', v['findings'][0])
+        self.assertIn('its head changed', v['findings'][0])
+
+    def test_a_listing_that_gained_or_lost_a_file_fails(self):
+        for after in (FILES + ['pool/0/1-y'], FILES[:2]):
+            v = self.c5(('obs', 'v1', 4, FILES), ('snapshot', 'v1', NEG, 'refused'), ('obs', 'v1', 4, after))
+            self.assertEqual(v['verdict'], 'FAIL', (after, v))
+            self.assertIn('seq 4 snapshot v1', v['findings'][0])
+            self.assertIn('its files changed', v['findings'][0])
+
+    def test_a_control_plane_change_fails(self):
+        # A refused delete that left the control plane changed (e.g. reserved).
+        moved = {'workspace': {'exit': 0, 'text': 'v1 deleting (reserved)'}, 'dirs': WS['dirs']}
+        v = self.c5(('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, moved))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('its workspace changed', v['findings'][0])
+        # HEAD's epoch, holder or state counts too, not only its generation.
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))))
+        recs[-2]['result']['head']['state'] = 'revoking'
+        self.assertEqual(hc.check(dump(recs))['C5']['verdict'], 'FAIL')
+
+    def test_a_refused_create_of_a_never_existing_name_is_judged_on_no_directory(self):
+        # No HEAD (a show error) and no directory are observations too.
+        none = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': []}
+        recs = history(*(BASE + (('obs', 'v9', 4, FILES), ('create', 'v9', NEG, 'refused'), ('obs', 'v9', 4, FILES))))
+        for i in (-5, -2):
+            recs[i]['result'] = dict(none)
+        v = hc.check(dump(recs))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        recs[-2]['result'] = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': ['v9-0badc0de']}
+        v = hc.check(dump(recs))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('its dirs changed', v['findings'][0])
+
+    def test_a_part_in_one_observation_only_is_not_judged(self):
+        v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('in one observation only' in x for x in v['findings']), v)
+
+    def test_baseline(self):
+        # Background change between two observations with nothing between: UNKNOWN, even over a change at a refusal.
+        drift = (('obs', 'v0', 1, FILES), ('obs', 'v0', 2, FILES))
+        v = self.c5(*(drift + (('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline: v0 changed', v['findings'][0])
+        # No pair at all: UNKNOWN.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline not established', v['findings'][0])
+        # A refused operation between two observations makes them the refusal's pair, not a baseline pair.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('obs', 'v1', 4, FILES), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_every_limit_must_be_judged(self):
+        # One judged refusal does not carry another limit that was never judged.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('snapshot', 'v2', NEG, 'refused'))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('limit(s) with no judged refusal: ordinary snapshot', v['findings'][0])
+        self.assertIn('limit ordinary write: 1 of 1 refusal(s) judged', v['findings'])
+
+    def test_limits_come_from_the_generators_step(self):
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))))
+        recs.insert(-4, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'gen_step', 'volume': 'v1', 'mono_ns': recs[-5]['mono_ns'],
+                         'result': {'opno': 1, 'action': 'v3_op_delete', 'negative': 'delete while attached'}})
+        v = hc.check(dump(renumber(recs)))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertIn('limit delete while attached: 1 of 1 refusal(s) judged', v['findings'])
+
+    def test_a_negative_not_refused_is_a_note(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'ok'))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertTrue(any(x.startswith('negative not refused: seq 7 delete v1') for x in v['findings']), v)
+
+    def test_no_observation_after_is_not_judged(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'after' in x for x in v['findings']), v)
+        # An operation on the volume invoked before the observation voids it as "after".
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+
+    def test_a_stop_refused_with_detach_aborted_must_leave_the_volume_serving(self):
+        # detach_aborted: "nothing was published and serving resumed here".
+        # The observation after it must show what the one before showed: HEAD
+        # unsealed and the workspace still serving.
+        def run(after_ws=WS, after_state=''):
+            recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('stop', 'v1', {}, 'refused'), ('obs', 'v1', 4, FILES, after_ws))))
+            recs[-3]['result'] = {'detail': 'detach: detach_aborted: nothing was published and serving resumed here'}
+            recs[-2]['result']['head']['state'] = after_state
+            return hc.check(dump(recs))['C5']
+        v = run()
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
+        # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
+        for name, ws, state, part in (
+                ('revoked', {'workspace': {'exit': 0, 'text': 'v1 revoking epoch 1'}, 'dirs': WS['dirs']}, '', 'workspace'),
+                ('no live lease', {'workspace': {'exit': 0, 'text': 'v1 no live lease (recorded ACK r1@1)'}, 'dirs': WS['dirs']}, '', 'workspace'),
+                ('workspace show failing', {'workspace': {'exit': 3, 'text': 'v1 serving epoch 1'}, 'dirs': WS['dirs']}, '', 'workspace'),
+                ('HEAD sealed', WS, 'detached', 'head')):
+            v = run(ws, state)
+            self.assertEqual(v['verdict'], 'FAIL', (name, v))
+            self.assertIn('seq 4 stop v1 (ordinary stop) refused but its %s changed' % part, v['findings'][0], name)
+
+    def test_an_ok_operation_between_before_and_the_refusal_voids_before(self):
+        # The ok write moved the generation from 4 to 5: comparing against the
+        # stale observation would blame the refusal for it.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 6 write v1' in x and 'before' in x for x in v['findings']), v)
+        # An operation on another volume does not void it.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v2', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))
+        self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_an_observation_without_head_or_listing_is_not_judged(self):
+        for after in (('obs', 'v1', None, FILES), ('obs', 'v1', 4, None)):
+            v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), after)
+            self.assertEqual(v['verdict'], 'UNKNOWN', (after, v))
+
+    def test_generator_records_are_not_observations(self):
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))))
+        recs.insert(-1, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'gen_step', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'],
+                         'result': {'head': {'gen': 4}, 'files': FILES}})
+        self.assertEqual(hc.check(dump(renumber(recs)))['C5']['verdict'], 'UNKNOWN')
+
+    def test_no_refusal_fails_not_exercised(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('not exercised', v['findings'][0])
 
 
 if __name__ == '__main__':

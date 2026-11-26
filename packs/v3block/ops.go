@@ -49,8 +49,8 @@ type opEnv struct {
 	// expect is the step's declared outcome ("refused"), recorded in its
 	// invocation so the checkers know which refusal the scenario expected.
 	// Per step, never per verb: any other refusal still fails the run.
-	expect string
-	lockDirs                                   bool
+	expect   string
+	lockDirs bool
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -180,8 +180,8 @@ func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
 }
 
-func fromChunk(stdout string, code int, result map[string]any) (string, map[string]any) {
-	r, d := chunkOutcome(stdout, code)
+func fromChunk(op, stdout string, code int, result map[string]any) (string, map[string]any) {
+	r, d := chunkOutcome(op, stdout, code)
 	if result == nil {
 		result = map[string]any{}
 	}
@@ -227,16 +227,13 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if nqn == "" {
 		nqn = "nqn.2026-11.io.seaweedfs:op-"
 	}
+	vs, err := specVolumes(names, base, nqn)
+	if err != nil {
+		return nil, fmt.Errorf("v3_op_spec: %w", err)
+	}
 	var nodes, vols strings.Builder
-	for i, name := range names {
-		if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`).MatchString(name) {
-			return nil, fmt.Errorf("v3_op_spec: volume name %q", name)
-		}
-		p := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", base+(i+1)*10+k) }
-		v := &opVolume{Name: name, NQN: nqn + name, Hosts: []vsHost{
-			{Server: "a-" + name, Data: p(0), Ctrl: p(1), Status: p(2), NVMe: p(3)},
-			{Server: "b-" + name, Data: p(4), Ctrl: p(5), Status: p(6), NVMe: p(7)},
-		}}
+	for _, v := range vs {
+		name := v.Name
 		for _, h := range v.Hosts {
 			fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", h.Server, h.Data, h.Ctrl)
 		}
@@ -248,6 +245,24 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, fmt.Errorf("v3_op_spec: write %s: %s %v", path, firstLine(stderr), err)
 	}
 	return map[string]string{"value": strconv.Itoa(len(names))}, nil
+}
+
+// specVolumes lays out the named volumes: volume i (from 0) gets two hosts on
+// ports base+(i+1)*10+0..7 (data, ctrl, status, NVMe; first host, then the
+// move target) and the NQN nqn+name. So n volumes use base+10..base+10n+7.
+func specVolumes(names []string, base int, nqn string) ([]*opVolume, error) {
+	var vs []*opVolume
+	for i, name := range names {
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`).MatchString(name) {
+			return nil, fmt.Errorf("volume name %q", name)
+		}
+		p := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", base+(i+1)*10+k) }
+		vs = append(vs, &opVolume{Name: name, NQN: nqn + name, Hosts: []vsHost{
+			{Server: "a-" + name, Data: p(0), Ctrl: p(1), Status: p(2), NVMe: p(3)},
+			{Server: "b-" + name, Data: p(4), Ctrl: p(5), Status: p(6), NVMe: p(7)},
+		}})
+	}
+	return vs, nil
 }
 
 func dirOf(p string) string {
@@ -383,6 +398,15 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 	for {
 		switch procState(ctx, node, pid, start) {
 		case procGone:
+			// Not refused, whatever made it exit. The product's start
+			// refusals (moved, deleted, superseded, geometry_mismatch) exit
+			// 78, but 78 is "a no-restart outcome; the final log line names
+			// the reason" (the product's standalone-deployment guide), not
+			// "nothing changed": it is also head_fenced, a fence after the
+			// start (cmd/blockvolume/process_exit.go:166-176), and the reason
+			// is only in that log line (process_exit.go:118-124). The
+			// process is not the runner's child once launched, so its exit
+			// code is not read either.
 			res["detail"] = "blockvolume exited before serving"
 			return tr.OutcomeUnknown, res
 		case procRunning:
@@ -535,6 +559,11 @@ func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("v3_op_read: %w", err)
 	}
+	if len(lbas) == 0 {
+		// Nothing to read records no operation and has no outcome: a runner
+		// error, never a silent empty answer.
+		return nil, fmt.Errorf("v3_op_read: no lba to read on %s (lbas %q)", v.Name, requireParam(act, actx, "lbas"))
+	}
 	var last map[string]string
 	for _, lba := range lbas {
 		last, err = record(actx, e, "read", v.Name, map[string]any{"lba": lba}, func() (string, map[string]any) {
@@ -573,7 +602,7 @@ func v3OpSnapshot(ctx context.Context, actx *tr.ActionContext, act tr.Action) (m
 		if err != nil {
 			return fail(err.Error())
 		}
-		return fromChunk(stdout, code, nil)
+		return fromChunk(chunkSnapshot, stdout, code, nil)
 	})
 }
 
@@ -608,14 +637,14 @@ func v3OpSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 			if strings.TrimSpace(out[i+1:]) == "200" {
 				status = 0
 			}
-			return fromChunk(out[:max(i, 0)], status, nil)
+			return fromChunk(chunkSnapDelHolder, out[:max(i, 0)], status, nil)
 		}
 		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
 			shellQuote(v.Name), shellQuote(name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
 		if err != nil {
 			return fail(err.Error())
 		}
-		return fromChunk(stdout, code, nil)
+		return fromChunk(chunkSnapDelStore, stdout, code, nil)
 	})
 }
 
@@ -641,7 +670,7 @@ func v3OpRestore(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		if err != nil {
 			return fail(err.Error())
 		}
-		return fromChunk(stdout, code, nil)
+		return fromChunk(chunkRestore, stdout, code, nil)
 	})
 }
 
@@ -662,7 +691,7 @@ func v3OpRelease(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		if err != nil {
 			return fail(err.Error())
 		}
-		return fromChunk(stdout, code, nil)
+		return fromChunk(chunkRelease, stdout, code, nil)
 	})
 }
 
@@ -670,7 +699,7 @@ func v3OpRelease(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 // --plain, revoke with the sealed generation, wait for the holder to exit by
 // itself, and wait for the master's recorded ACK of (replica, epoch). It
 // returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[string]any, string) {
+func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
 	res := map[string]any{"epoch": v.Epoch}
 	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
 		return res, why
@@ -679,7 +708,7 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[stri
 	if err != nil {
 		return res, err.Error()
 	}
-	if r, d := chunkOutcome(stdout, code); r != tr.OutcomeOK {
+	if r, d := chunkOutcome(chunkDetach, stdout, code); r != tr.OutcomeOK {
 		res["detach"] = r
 		return res, "detach: " + d
 	}
@@ -689,7 +718,7 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume) (map[stri
 	}
 	res["sealed_gen"] = gen
 	out, errOut, code, err := e.workspace(ctx, node, v.Name, "revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-	if err != nil || wsOutcome(code) != tr.OutcomeOK {
+	if err != nil || wsOutcome(op, code) != tr.OutcomeOK {
 		res["revoke_exit"] = code
 		return res, "revoke: " + firstLine(out+" "+errOut)
 	}
@@ -722,7 +751,7 @@ func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	}
 	defer saveVolume(actx, v)
 	return record(actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v)
+		res, why := e.handOver(ctx, node, v, wsStop)
 		if why != "" {
 			res["detail"] = why
 			return tr.OutcomeUnknown, res
@@ -748,7 +777,7 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
 	defer saveVolume(actx, v)
 	return record(actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v)
+		res, why := e.handOver(ctx, node, v, wsMove)
 		if why != "" {
 			res["detail"] = "stop: " + why
 			return tr.OutcomeUnknown, res
@@ -759,7 +788,9 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			return fail(err.Error())
 		}
 		res["exit"] = code
-		if r := wsOutcome(code); r != tr.OutcomeOK {
+		// Never refused: the hand-over above already sealed and revoked
+		// (wsRefusals). The exit is recorded for the reader.
+		if r := wsOutcome(wsMove, code); r != tr.OutcomeOK {
 			res["detail"] = firstLine(out + " " + errOut)
 			return r, res
 		}
@@ -782,7 +813,9 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 // procedure is to rerun with the SAME request id once the cause is cleared.
 // So one operation reruns it while the answer is not_admitted, within
 // admit_seconds (default 120), and records every attempt. Its outcome is the
-// last answer's.
+// last answer's. A step that declares expect=refused (a negative: the
+// refusal is what it probes) is one call, never rerun: rerunning would wait
+// out the refusal it tests.
 func v3OpDelete(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, e, v, err := opBegin(actx, act, "v3_op_delete")
 	if err != nil {
@@ -791,28 +824,38 @@ func v3OpDelete(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "admit_seconds"), 120)) * time.Second
 	req := "delete-" + v.Name
 	return record(actx, e, "delete", v.Name, map[string]any{"layout_id": v.LayoutID, "request": req}, func() (string, map[string]any) {
-		end := time.Now().Add(bound)
-		var attempts []string
-		for {
-			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
-				shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote(req)))
-			if err != nil {
-				return tr.OutcomeUnknown, map[string]any{"detail": err.Error(), "attempts": attempts}
-			}
-			r, res := fromChunk(stdout, code, nil)
-			d, _ := res["detail"].(string)
-			attempts = append(attempts, fmt.Sprintf("%s %s", r, firstLine(d)))
-			res["attempts"] = attempts
-			if r == tr.OutcomeOK || !strings.HasPrefix(d, "not_admitted:") || time.Now().After(end) {
-				return r, res
-			}
-			select {
-			case <-ctx.Done():
-				return r, res
-			case <-time.After(3 * time.Second):
-			}
-		}
+		return e.deleteVolume(ctx, node, v, req, bound)
 	})
+}
+
+// deleteRetryEvery is the pause between two attempts of one delete.
+var deleteRetryEvery = 3 * time.Second
+
+// deleteVolume runs `ops chunk volume-delete` once, and again while the
+// answer is not_admitted within bound, unless the step declares
+// expect=refused. Its outcome is the last answer's; every attempt is listed.
+func (e opEnv) deleteVolume(ctx context.Context, node runner, v *opVolume, req string, bound time.Duration) (string, map[string]any) {
+	end := time.Now().Add(bound)
+	var attempts []string
+	for {
+		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
+			shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote(req)))
+		if err != nil {
+			return tr.OutcomeUnknown, map[string]any{"detail": err.Error(), "attempts": attempts}
+		}
+		r, res := fromChunk(chunkVolumeDelete, stdout, code, nil)
+		d, _ := res["detail"].(string)
+		attempts = append(attempts, fmt.Sprintf("%s %s", r, firstLine(d)))
+		res["attempts"] = attempts
+		if r == tr.OutcomeOK || e.expect == tr.OutcomeRefused || !strings.HasPrefix(d, "not_admitted:") || time.Now().After(end) {
+			return r, res
+		}
+		select {
+		case <-ctx.Done():
+			return r, res
+		case <-time.After(deleteRetryEvery):
+		}
+	}
 }
 
 // v3OpObserve records what the product shows of the volume: HEAD from `ops
@@ -851,6 +894,13 @@ func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	if out, _, c, e2 := e.workspace(ctx, node, v.Name, "show"); e2 == nil {
 		res["workspace"] = map[string]any{"exit": c, "text": firstLines(out, 12)}
 	}
+	// The volume's directories in the filer, whatever its layout: a name that
+	// never existed is observed as having none.
+	if dirs, why := listDirs(ctx, node, e.filer, e.chunkPath, v.Name+"-"); why != "" {
+		res["dirs_error"] = why
+	} else {
+		res["dirs"] = dirs
+	}
 	if v.LayoutID != "" {
 		files, why := listFiles(ctx, node, e.filer, e.chunkPath, v.Name+"-"+v.LayoutID[:8])
 		if why != "" {
@@ -868,6 +918,38 @@ func firstLines(s string, n int) []string {
 		lines = lines[:n]
 	}
 	return lines
+}
+
+// listDirs lists the names directly under the chunk path that start with
+// prefix (one level, through the filer's HTTP listing). A missing chunk path
+// is an empty list.
+func listDirs(ctx context.Context, node runner, filer, chunkPath, prefix string) ([]string, string) {
+	host, gport, ok := strings.Cut(filer, ":")
+	gp, err := strconv.Atoi(gport)
+	if !ok || err != nil || gp <= 10000 {
+		return nil, "filer has no SeaweedFS gRPC port"
+	}
+	base := fmt.Sprintf("http://%s:%d%s", host, gp-10000, strings.TrimRight(chunkPath, "/"))
+	py := `import json,sys,urllib.request,urllib.parse,urllib.error
+d,pre=sys.argv[1],sys.argv[2]; out=[]; last=""
+while True:
+    q=urllib.parse.urlencode({"limit":1000,"lastFileName":last,"namePattern":pre+"*"})
+    try:
+        r=json.load(urllib.request.urlopen(urllib.request.Request(d+"/?"+q,headers={"Accept":"application/json"}),timeout=10))
+    except urllib.error.HTTPError as e:
+        if e.code==404 and not last: break
+        raise
+    es=r.get("Entries") or []
+    out+=[e["FullPath"].rsplit("/",1)[1] for e in es]
+    if not r.get("ShouldDisplayLoadMore") or not es: break
+    last=es[-1]["FullPath"].rsplit("/",1)[1]
+print(json.dumps(sorted(n for n in out if n.startswith(pre))))`
+	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("python3 -I -c %s %s %s", shellQuote(py), shellQuote(base), shellQuote(prefix)))
+	var dirs []string
+	if err != nil || code != 0 || json.Unmarshal([]byte(strings.TrimSpace(stdout)), &dirs) != nil {
+		return nil, "listing: " + firstLine(stderr)
+	}
+	return dirs, ""
 }
 
 // listFiles lists every file below the volume's directory through the
