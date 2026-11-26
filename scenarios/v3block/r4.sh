@@ -1,30 +1,71 @@
 #!/usr/bin/env bash
-# R4 node loss (scenarios/v3block/r4-node-loss.yaml): the scenario's checks,
-# one subcommand each, so every check has a failing control
-# (packs/v3block/r4_scenario_test.go). Nothing here starts or stops a product
-# process or a VM; the scenario does that through runner actions.
+# R4 node loss (scenarios/v3block/r4-node-loss.yaml): the scenario's host
+# steps and checks, one subcommand each, so every one has a failing control
+# (packs/v3block/r4_scenario_test.go). VMs are powered off and on by runner
+# actions, not here.
 #
-#   r4.sh write DEV LEDGER ROUND COUNT     COUNT acked 4 KiB writes (O_DIRECT|O_DSYNC)
-#   r4.sh verify DEV LEDGER                every acked range reads back: 0 mismatches
-#   r4.sh drop-control DEV LEDGER          the red control: one acked write the
-#                                          device never got must make verify FAIL
-#   r4.sh no-ack DEV LEDGER SECONDS        one write must NOT be acknowledged in SECONDS
-#   r4.sh held STATUS... -- SECONDS EPOCH  no survivor becomes primary, none leaves EPOCH
+# Checks:
+#   r4.sh write DEV LEDGER ROUND COUNT       COUNT acked 4 KiB writes (O_DIRECT|O_DSYNC);
+#                                            fails unless every one is acknowledged
+#   r4.sh verify DEV LEDGER [ROUND...]       every acked write reads back: 0 mismatches;
+#                                            each ROUND named must have acked writes
+#   r4.sh drop-control DEV LEDGER            the red control: one acked write the
+#                                            device never got must make verify FAIL
+#   r4.sh no-ack DEV LEDGER SECONDS          one write must NOT be acknowledged in SECONDS
+#   r4.sh held STATUS... -- SECONDS EPOCH    no survivor becomes primary, none leaves EPOCH
 #   r4.sh wait-role STATUS ROLE EPOCH SECONDS   STATUS reports ROLE (primary|replica) at EPOCH
+# Client:
+#   r4.sh client-check                       nvme_tcp loaded, native multipath on, nvme-cli
+#   r4.sh connect NQN ADDR PORT SECONDS      (re)connect NQN at ADDR, print its device (dev)
+#   r4.sh dev NQN ADDR SECONDS               the one namespace of NQN with a live path to ADDR
+# Host (TAG = the run's tag; work dir R4_ROOT/TAG, units r4-TAG-master|volume):
+#   r4.sh install PKG TAG MASTER_IP          refuse unless fresh; copy the checked package
+#   r4.sh spec TAG RF N1 N2 N3 DPORT CPORT   write the cluster spec for rf 3 or 2
+#   r4.sh unit TAG ROLE -- EXEC ARG...       write the run's persistent unit (not enabled)
+#   r4.sh start TAG ROLE                     start it (again, after a reboot)
+#   r4.sh cleanup TAG                        stop the run's units, keep their evidence,
+#                                            remove them and prove they are gone
+#   r4.sh purge TAG                          remove the run's work dir and uploads
 #
-# DEV is the NVMe namespace (or, in the controls, a file). LEDGER lines are
-# "round offset length sha256", written only AFTER the write returned success:
-# the ledger holds acknowledged writes and nothing else. STATUS is a command
-# that prints one blockvolume /status JSON (for example
-# "curl -s http://127.0.0.1:9203/status?volume=v1").
-# R4_DD_OFLAG / R4_DD_IFLAG override the direct-I/O flags (the controls run on files).
+# DEV is the NVMe namespace (or, in the controls, a file with R4_ALLOW_FILE=1).
+# LEDGER lines are "round offset length sha256", written only AFTER the write
+# returned success: the ledger holds acknowledged writes and nothing else.
+# The device's last block is kept out of write's range: no-ack and
+# drop-control use it, so a window write still in flight can never change a
+# ledger block. STATUS is a command that prints one blockvolume /status JSON
+# (for example "curl -sf --max-time 5 http://127.0.0.1:19603/status?volume=v1");
+# each read is bounded by R4_STATUS_TIMEOUT.
+#
+# The units are the run's own, not the installed deploy/systemd units: root,
+# flags inline, not enabled (a rebooted VM starts its blockvolume only when the
+# scenario says so), with the example units' restart policy: Restart=on-failure
+# and RestartPreventExitStatus=78, so a final refusal is not retried.
+#
+# Overrides for the controls: R4_DD_OFLAG / R4_DD_IFLAG (direct-I/O flags),
+# R4_DD (the dd), R4_POLL, R4_ALLOW_FILE, R4_SYS / R4_DEVDIR (sysfs and /dev),
+# R4_ROOT, R4_UNITDIR, R4_HOSTS, R4_SYSTEMCTL, R4_JOURNALCTL, R4_PGREP.
 set -euo pipefail
 
 bs=4096
 oflag="${R4_DD_OFLAG:-direct,dsync}"
 iflag="${R4_DD_IFLAG:-direct}"
+dd_bin="${R4_DD:-dd}"
+root="${R4_ROOT:-/var/lib/r4}"
+unitdir="${R4_UNITDIR:-/etc/systemd/system}"
+hosts="${R4_HOSTS:-/etc/hosts}"
+systemctl_bin="${R4_SYSTEMCTL:-systemctl}"
+journalctl_bin="${R4_JOURNALCTL:-journalctl}"
+pgrep_bin="${R4_PGREP:-pgrep}"
 
 die() { echo "r4: $*" >&2; exit 1; }
+
+# A device the checks may use: a block device (a regular file only in the
+# controls). A missing or stale device is a setup failure, never a result.
+need_dev() {
+  if [[ -b "$1" ]]; then return 0; fi
+  if [[ "${R4_ALLOW_FILE:-}" == 1 && -f "$1" ]]; then return 0; fi
+  die "$2: $1 is not a usable device (setup failure)"
+}
 
 sha_of_block() { # DEV OFFSET
   dd if="$1" bs=$bs count=1 skip=$(( $2 / bs )) iflag="$iflag" status=none 2>/dev/null | sha256sum | cut -d' ' -f1
@@ -32,7 +73,7 @@ sha_of_block() { # DEV OFFSET
 
 # write_one DEV OFFSET FILE: one write of FILE at OFFSET; exit status is the ack.
 write_one() {
-  dd if="$3" of="$1" bs=$bs count=1 seek=$(( $2 / bs )) oflag="$oflag" conv=notrunc status=none 2>/dev/null
+  "$dd_bin" if="$3" of="$1" bs=$bs count=1 seek=$(( $2 / bs )) oflag="$oflag" conv=notrunc status=none 2>/dev/null
 }
 
 blocks_of() { # DEV -> number of 4 KiB blocks
@@ -43,13 +84,14 @@ blocks_of() { # DEV -> number of 4 KiB blocks
 
 cmd_write() {
   local dev="$1" ledger="$2" round="$3" count="$4" tmp
+  need_dev "$dev" write
   local blocks; blocks=$(blocks_of "$dev")
-  (( blocks > 0 )) || die "write: $dev has no blocks"
+  (( blocks > 1 )) || die "write: $dev has too few blocks"
   tmp=$(mktemp)
   trap 'rm -f "$tmp"' RETURN
   local i off sum acked=0
   for (( i = 0; i < count; i++ )); do
-    off=$(( (RANDOM * 32768 + RANDOM) % blocks * bs ))
+    off=$(( (RANDOM * 32768 + RANDOM) % (blocks - 1) * bs ))   # never the last block
     head -c $bs /dev/urandom > "$tmp"
     sum=$(sha256sum < "$tmp" | cut -d' ' -f1)
     if write_one "$dev" "$off" "$tmp"; then
@@ -60,18 +102,25 @@ cmd_write() {
     fi
   done
   echo "acked=$acked of $count"
+  (( acked == count )) || die "write: only $acked of $count writes acknowledged in round $round"
 }
 
-# verify: the LAST acknowledged write of each offset must read back.
+# verify: the LAST acknowledged write of each offset must read back, and each
+# ROUND named must have at least one acknowledged write in the ledger.
 cmd_verify() {
-  local dev="$1" ledger="$2"
+  local dev="$1" ledger="$2"; shift 2
+  need_dev "$dev" verify
   [[ -s "$ledger" ]] || die "verify: empty ledger $ledger (nothing acknowledged)"
-  local -A want=()
+  local -A want=() rounds=()
   local round off len sum
   while read -r round off len sum; do
     [[ "$len" == "$bs" ]] || die "verify: ledger line with length $len"
     want[$off]="$sum $round"
+    rounds[$round]=$(( ${rounds[$round]:-0} + 1 ))
   done < "$ledger"
+  for round in "$@"; do
+    (( ${rounds[$round]:-0} > 0 )) || die "verify: no acknowledged write of round $round in the ledger"
+  done
   local bad=0 got
   for off in "${!want[@]}"; do
     got=$(sha_of_block "$dev" "$off")
@@ -85,9 +134,10 @@ cmd_verify() {
 }
 
 # drop-control: the ledger plus one acked write the device never received
-# (a random block at a fresh offset): verify must fail on it.
+# (a random block at the reserved last block): verify must fail on it.
 cmd_drop_control() {
   local dev="$1" ledger="$2" ctl
+  need_dev "$dev" drop-control
   ctl=$(mktemp)
   trap 'rm -f "$ctl"' RETURN
   cp "$ledger" "$ctl"
@@ -103,26 +153,49 @@ cmd_drop_control() {
 
 # no-ack: a write in the window must not be acknowledged within SECONDS
 # (RF2 after the failover, before the rejoin: quorum 2 with one copy up).
+# Passes only on a write still in flight at the deadline, or one the device
+# refused with an I/O error. A missing device, or dd failing for any other
+# reason, is a setup failure. The write goes to the reserved last block and
+# is not waited for (a write in uninterruptible wait cannot be killed).
 cmd_no_ack() {
-  local dev="$1" ledger="$2" secs="$3" tmp off
-  tmp=$(mktemp)
-  trap 'rm -f "$tmp"' RETURN
-  head -c $bs /dev/urandom > "$tmp"
-  off=0
-  if timeout "$secs" dd if="$tmp" of="$dev" bs=$bs count=1 seek=0 oflag="$oflag" conv=notrunc status=none 2>/dev/null; then
-    echo "window 0 $bs $(sha256sum < "$tmp" | cut -d' ' -f1)" >> "$ledger"
+  local dev="$1" ledger="$2" secs="$3" d tmp off rc
+  need_dev "$dev" no-ack
+  d=$(mktemp -d)
+  head -c $bs /dev/urandom > "$d/block"
+  off=$(( ($(blocks_of "$dev") - 1) * bs ))
+  ( set +e; "$dd_bin" if="$d/block" of="$dev" bs=$bs count=1 seek=$(( off / bs )) oflag="$oflag" conv=notrunc status=none 2>"$d/err"
+    echo $? > "$d/rc.tmp"; mv "$d/rc.tmp" "$d/rc" ) </dev/null >/dev/null 2>&1 &   # holds no fd of the step's output
+  local pid=$! end=$(( SECONDS + secs ))
+  while [[ ! -e "$d/rc" ]] && (( SECONDS < end )); do sleep 0.2; done
+  if [[ ! -e "$d/rc" ]]; then
+    kill -9 "$pid" 2>/dev/null || true
+    need_dev "$dev" "no-ack (after the window)"
+    echo "no-ack: no acknowledgement in ${secs}s (the write is still in flight at the reserved offset $off)"
+    return 0
+  fi
+  rc=$(cat "$d/rc")
+  if (( rc == 0 )); then
+    echo "window $off $bs $(sha256sum < "$d/block" | cut -d' ' -f1)" >> "$ledger"
+    rm -rf "$d"
     die "no-ack: a write was ACKNOWLEDGED in the window (a FINDING: the volume ran on one copy)"
   fi
-  echo "no-ack: no acknowledgement in ${secs}s"
+  if grep -qE 'Input/output error|Remote I/O error' "$d/err"; then
+    need_dev "$dev" "no-ack (after the refusal)"
+    echo "no-ack: the write was refused (rc=$rc: $(head -c 200 "$d/err"))"
+    rm -rf "$d"
+    return 0
+  fi
+  local err; err=$(head -c 300 "$d/err"); rm -rf "$d"
+  die "no-ack: the write failed for another reason (rc=$rc: $err): a setup or tool failure, not a refusal"
 }
 
 field() { # JSON KEY: a top-level scalar
   python3 -c 'import json,sys; v=json.load(sys.stdin).get(sys.argv[1]); print("" if v is None else v)' "$1"
 }
 
-role_of() { # STATUS -> "role epoch healthy"
+role_of() { # STATUS -> "role epoch healthy replication"
   local j
-  j=$(bash -c "$1") || return 1
+  j=$(timeout "${R4_STATUS_TIMEOUT:-10}" bash -c "$1") || return 1
   echo "$(echo "$j" | field AuthorityRole) $(echo "$j" | field Epoch) $(echo "$j" | field Healthy) $(echo "$j" | field ReplicationRole)"
 }
 
@@ -164,12 +237,210 @@ cmd_wait_role() {
   done
 }
 
+cmd_client_check() {
+  command -v nvme >/dev/null || die "client-check: nvme-cli is not installed"
+  modprobe nvme_tcp || die "client-check: cannot load nvme_tcp"
+  [[ -d /sys/module/nvme_tcp ]] || die "client-check: nvme_tcp is not loaded"
+  local mp; mp=$(cat /sys/module/nvme_core/parameters/multipath 2>/dev/null || echo absent)
+  [[ "$mp" == Y ]] || die "client-check: native NVMe multipath is off ($mp)"
+  echo "client-check: nvme-cli $(nvme version | head -1), nvme_tcp loaded, multipath=$mp"
+}
+
+# dev NQN ADDR SECONDS: exactly one subsystem carries NQN, it has a live
+# controller at ADDR and exactly one namespace; print that namespace's device.
+# Anything else (none, two, a stale path) fails: the run never guesses a name.
+cmd_dev() {
+  local nqn="$1" addr="$2" end=$(( SECONDS + $3 ))
+  local sys="${R4_SYS:-/sys/class/nvme-subsystem}" devdir="${R4_DEVDIR:-/dev}"
+  local why
+  while :; do
+    why=""
+    local subs=() s c n
+    for s in "$sys"/*; do
+      [[ -f "$s/subsysnqn" ]] || continue
+      [[ "$(cat "$s/subsysnqn")" == "$nqn" ]] && subs+=("$s")
+    done
+    if (( ${#subs[@]} != 1 )); then
+      why="${#subs[@]} subsystems carry $nqn"
+    else
+      s="${subs[0]}"
+      local live=0 nss=()
+      for c in "$s"/*; do
+        n=$(basename "$c")
+        if [[ "$n" =~ ^nvme[0-9]+$ && -f "$c/state" && -f "$c/address" ]]; then
+          if [[ "$(cat "$c/state")" == live ]] && grep -qE "(^|,)traddr=$addr(,|$)" "$c/address"; then live=1; fi
+        elif [[ "$n" =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+          nss+=("$n")
+        fi
+      done
+      if (( live == 0 )); then why="no live path to $addr for $nqn"
+      elif (( ${#nss[@]} != 1 )); then why="${#nss[@]} namespaces under $nqn"
+      elif [[ ! -b "$devdir/${nss[0]}" ]] && ! [[ "${R4_ALLOW_FILE:-}" == 1 && -e "$devdir/${nss[0]}" ]]; then why="$devdir/${nss[0]} is not a block device"
+      else echo "$devdir/${nss[0]}"; return 0
+      fi
+    fi
+    (( SECONDS < end )) || die "dev: $why"
+    sleep "${R4_POLL:-1}"
+  done
+}
+
+cmd_connect() {
+  local nqn="$1" addr="$2" port="$3" secs="$4"
+  timeout 30 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
+  timeout 60 nvme connect -t tcp -a "$addr" -s "$port" -n "$nqn" >&2 || die "connect: nvme connect $addr:$port $nqn failed"
+  cmd_dev "$nqn" "$addr" "$secs"
+}
+
+check_tag() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad tag '$1'"; }
+unit_of() { echo "r4-$1-$2"; } # TAG ROLE
+
+# A unit that is loaded in any form (a transient one too) is not absent.
+unit_active() { # UNIT: active, activating, deactivating or reloading
+  local st; st=$("$systemctl_bin" is-active "$1" 2>/dev/null || true)
+  [[ "$st" =~ ^(active|activating|deactivating|reloading)$ ]]
+}
+
+cmd_install() {
+  local pkg="$1" tag="$2" mip="$3" w r u
+  check_tag "$tag"; w="$root/$tag"
+  [[ ! -e "$w" ]] || die "install: $w exists: not fresh work"
+  for r in master volume; do
+    u=$(unit_of "$tag" "$r")
+    [[ ! -e "$unitdir/$u.service" ]] || die "install: $unitdir/$u.service exists: not fresh work"
+    ! unit_active "$u" || die "install: $u is running: not fresh work"
+  done
+  ! grep -qE '(^|[[:space:]])blockmaster([[:space:]]|$)' "$hosts" || die "install: $hosts already maps blockmaster"
+  (cd "$pkg" && sha256sum -c --quiet SHA256SUMS) || die "install: the package does not match its SHA256SUMS"
+  mkdir -p "$root"
+  cp -a "$pkg" "$w"
+  chmod 0755 "$w"
+  echo "$mip blockmaster # r4-$tag" >> "$hosts"
+  sync
+  echo "install: $w fresh, package checked, blockmaster -> $mip"
+}
+
+cmd_spec() {
+  local tag="$1" rf="$2" n1="$3" n2="$4" n3="$5" dp="$6" cp="$7"
+  check_tag "$tag"
+  local out="$root/$tag/cluster-spec.yaml"
+  node() { printf '  - server_id: %s\n    data_addr: %s:%s\n    ctrl_addr: %s:%s\n' "$1" "$2" "$dp" "$2" "$cp"; }
+  place() { printf '      - server_id: %s\n        replica_id: %s\n' "$1" "$2"; }
+  case "$rf" in
+    3) { echo nodes:; node s1 "$n1"; node s2 "$n2"; node s3 "$n3"
+         printf 'volumes:\n  - id: v1\n    size_bytes: 268435456\n    replication_factor: 3\n    placements:\n'
+         place s2 r1; place s1 r2; place s3 r3; } > "$out" ;;
+    2) { echo nodes:; node s2 "$n2"; node s3 "$n3"
+         printf 'volumes:\n  - id: v1\n    size_bytes: 268435456\n    replication_factor: 2\n    placements:\n'
+         place s2 r1; place s3 r2; } > "$out" ;;
+    *) die "spec: rf must be 3 or 2" ;;
+  esac
+  sync
+  echo "$out"
+}
+
+# unit TAG ROLE -- EXEC ARG...: the run's persistent unit. Written once
+# (fresh work), synced to disk before the VM can lose power.
+cmd_unit() {
+  local tag="$1" role="$2"; shift 2
+  check_tag "$tag"
+  [[ "$role" == master || "$role" == volume ]] || die "unit: role must be master or volume"
+  [[ "${1:-}" == "--" ]] || die "unit TAG ROLE -- EXEC ARG..."; shift
+  (( $# > 0 )) && [[ "$1" == /* ]] || die "unit: EXEC must be an absolute path"
+  local a
+  for a in "$@"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:=,@+-]+$ ]] || die "unit: argument '$a' needs quoting; refused"
+  done
+  local u; u=$(unit_of "$tag" "$role")
+  local f="$unitdir/$u.service"
+  [[ ! -e "$f" ]] || die "unit: $f exists: not fresh work"
+  cat > "$f" <<EOF
+# R4 run unit ($tag $role), written by scenarios/v3block/r4.sh; removed by r4.sh cleanup.
+[Unit]
+Description=R4 run $tag $role
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=$*
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=5s
+EOF
+  sync
+  "$systemctl_bin" daemon-reload
+  echo "unit: $f"
+}
+
+cmd_start() {
+  local tag="$1" role="$2" u
+  check_tag "$tag"; u=$(unit_of "$tag" "$role")
+  [[ -f "$unitdir/$u.service" ]] || die "start: $unitdir/$u.service is missing"
+  "$systemctl_bin" start "$u"
+  echo "start: $u $("$systemctl_bin" is-active "$u" 2>/dev/null || true)"
+}
+
+# cleanup TAG: stop the run's units, keep each one's status and journal (and
+# the run's own files) in WORK/evidence, remove the units and the blockmaster
+# mapping, then prove nothing of the run is left running.
+cmd_cleanup() {
+  local tag="$1" w ev r u f bad=0
+  check_tag "$tag"; w="$root/$tag"; ev="$w/evidence"
+  mkdir -p "$ev"
+  for r in master volume; do
+    u=$(unit_of "$tag" "$r")
+    if [[ -e "$unitdir/$u.service" ]] || unit_active "$u"; then
+      "$systemctl_bin" stop "$u" || echo "cleanup: stop $u failed" >&2
+      "$systemctl_bin" status "$u" --no-pager > "$ev/$u.status" 2>&1 || true
+      "$journalctl_bin" -u "$u" --no-pager > "$ev/$u.journal" 2>&1 || true
+    fi
+    rm -f "$unitdir/$u.service"
+  done
+  "$systemctl_bin" daemon-reload || true
+  for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+    [[ -f "$w/$f" ]] && cp "$w/$f" "$ev/"
+  done
+  if [[ -f "$hosts" ]] && grep -q "# r4-$tag\$" "$hosts"; then
+    local keep; keep=$(grep -v "# r4-$tag\$" "$hosts" || true)
+    printf '%s\n' "$keep" > "$hosts"
+  fi
+  # The absence proof.
+  for r in master volume; do
+    u=$(unit_of "$tag" "$r")
+    [[ ! -e "$unitdir/$u.service" ]] || { echo "cleanup: $u.service still present" >&2; bad=1; }
+    if unit_active "$u"; then echo "cleanup: $u is still $("$systemctl_bin" is-active "$u" 2>/dev/null)" >&2; bad=1; fi
+  done
+  if "$pgrep_bin" -f -- "$w/bin/" >/dev/null 2>&1; then echo "cleanup: a process from $w/bin is still running" >&2; bad=1; fi
+  if grep -q "# r4-$tag\$" "$hosts" 2>/dev/null; then echo "cleanup: the blockmaster mapping is still in $hosts" >&2; bad=1; fi
+  (( bad == 0 )) || die "cleanup: the run's services are not gone"
+  echo "cleanup: r4-$tag units stopped and absent; evidence in $ev"
+}
+
+cmd_purge() {
+  local tag="$1" w
+  check_tag "$tag"; w="$root/$tag"
+  rm -rf "${w:?}" "/tmp/r4-$tag.tgz" "/tmp/r4-$tag-x"
+  echo "purge: $w removed"
+}
+
 case "${1:-}" in
   write) shift; [[ $# -eq 4 ]] || die "write DEV LEDGER ROUND COUNT"; cmd_write "$@" ;;
-  verify) shift; [[ $# -eq 2 ]] || die "verify DEV LEDGER"; cmd_verify "$@" ;;
+  verify) shift; [[ $# -ge 2 ]] || die "verify DEV LEDGER [ROUND...]"; cmd_verify "$@" ;;
   drop-control) shift; [[ $# -eq 2 ]] || die "drop-control DEV LEDGER"; cmd_drop_control "$@" ;;
   no-ack) shift; [[ $# -eq 3 ]] || die "no-ack DEV LEDGER SECONDS"; cmd_no_ack "$@" ;;
   held) shift; cmd_held "$@" ;;
   wait-role) shift; [[ $# -eq 4 ]] || die "wait-role STATUS ROLE EPOCH SECONDS"; cmd_wait_role "$@" ;;
-  *) die "usage: r4.sh write|verify|drop-control|no-ack|held|wait-role ..." ;;
+  client-check) shift; cmd_client_check ;;
+  dev) shift; [[ $# -eq 3 ]] || die "dev NQN ADDR SECONDS"; cmd_dev "$@" ;;
+  connect) shift; [[ $# -eq 4 ]] || die "connect NQN ADDR PORT SECONDS"; cmd_connect "$@" ;;
+  install) shift; [[ $# -eq 3 ]] || die "install PKG TAG MASTER_IP"; cmd_install "$@" ;;
+  spec) shift; [[ $# -eq 7 ]] || die "spec TAG RF N1 N2 N3 DPORT CPORT"; cmd_spec "$@" ;;
+  unit) shift; [[ $# -ge 4 ]] || die "unit TAG ROLE -- EXEC ARG..."; cmd_unit "$@" ;;
+  start) shift; [[ $# -eq 2 ]] || die "start TAG ROLE"; cmd_start "$@" ;;
+  cleanup) shift; [[ $# -eq 1 ]] || die "cleanup TAG"; cmd_cleanup "$@" ;;
+  purge) shift; [[ $# -eq 1 ]] || die "purge TAG"; cmd_purge "$@" ;;
+  *) die "usage: r4.sh write|verify|drop-control|no-ack|held|wait-role|client-check|dev|connect|install|spec|unit|start|cleanup|purge ..." ;;
 esac
