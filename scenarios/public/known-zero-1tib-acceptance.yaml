@@ -4,6 +4,7 @@ always_timeout: 20m
 env:
   kz_run: ""
   rc_sha: ""
+  product_src: ""
   archive_path: ""
   archive_sha256: ""
   source_host: ""
@@ -20,6 +21,7 @@ env:
   helper_path: "scripts/kz/host.py"
   controller_python: "python3"
   judge_path: "scripts/kz/judge.py"
+  contract_path: "scripts/kz/contract.py"
 topology:
   nodes:
     controller:
@@ -36,6 +38,15 @@ topology:
       key: "{{ ssh_key }}"
       host_key: "{{ target_host_key }}"
 phases:
+  # No host action precedes the pinned product/runner target-list check.
+  - name: product-contract
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        cmd: "{{ controller_python }} '{{ contract_path }}'"
+        env.KZ_PRODUCT_SRC: "{{ product_src }}"
+        env.KZ_RC: "{{ rc_sha }}"
   # One absolute fallback instant for both hosts, fixed before any host work.
   - name: cleanup-deadline
     actions:

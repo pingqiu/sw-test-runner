@@ -19,6 +19,7 @@ import time
 import tarfile
 
 BINS = {"kz.test", "blockmaster", "blockvolume", "blockvolume-kzhold", "sw-block", "weed"}
+TARGET_COUNT = 2
 
 def call(*args, okay=(0,), timeout=60):
     p = subprocess.run(args, text=True, capture_output=True, timeout=timeout)
@@ -172,7 +173,7 @@ def poll(c, handoff=False):
     state(c); root = Path(c["root"])
     if handoff and (root / "x/handoff.json").is_file():
         h = json.loads((root / "x/handoff.json").read_text())
-        if h["run"] != c["run"] or h["bytes"] != 1 << 40 or len(h["targets"]) != 4: raise ValueError("foreign/incomplete handoff")
+        if h["run"] != c["run"] or h["bytes"] != 1 << 40 or len(h["targets"]) != TARGET_COUNT: raise ValueError("foreign/incomplete handoff")
         print("HANDOFF " + base64.b64encode((root / "x/handoff.json").read_bytes()).decode()); return
     if (root / "out/exit.json").exists():
         e = json.loads((root / "out/exit.json").read_text())
@@ -192,7 +193,7 @@ def accept(c):
     if not text.startswith("HANDOFF "): raise ValueError("not a handoff receipt")
     raw = base64.b64decode(text[len("HANDOFF "):], validate=True)
     h = json.loads(raw)
-    if h["run"] != c["run"] or h["bytes"] != 1 << 40 or len(h["targets"]) != 4: raise ValueError("handoff mismatch")
+    if h["run"] != c["run"] or h["bytes"] != 1 << 40 or len(h["targets"]) != TARGET_COUNT: raise ValueError("handoff mismatch")
     with (root / "x/handoff.json").open("xb") as f: f.write(raw)
 
 def cleanup(c):

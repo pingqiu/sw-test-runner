@@ -18,6 +18,25 @@ class HostTest(unittest.TestCase):
         c=dict(root=str(root), run="kz-20261126t050000z", role="source", self="192.0.2.1", peer="192.0.2.2",
                deadline="2099-01-01T00:00:00Z", rc="a"*40, archive_sha="b"*64, ci_unit="actions.runner.example.service", min_free_bytes="1", unit="swb-kz-20261126t050000z-source")
         return root,c
+    def test_restore_only_handoff_on_both_roles(self):
+        import base64
+        for names in (("kzext4r", "kzxfsr"), ("kzext4r",), ("kzext4r", "kzext4f", "kzxfsr", "kzxfsf")):
+            with self.subTest(names=names), tempfile.TemporaryDirectory() as base:
+                root,c=self.fixture(base);(root/"x").mkdir()
+                (root/"state.json").write_text(json.dumps(dict(config=c)))
+                h=dict(run=c["run"],bytes=1<<40,targets=[dict(volume=n) for n in names])
+                raw=json.dumps(h).encode()
+                (root/"x/handoff.json").write_bytes(raw)
+                if len(names)==2:
+                    with contextlib.redirect_stdout(io.StringIO()) as out: host.poll(c,True)
+                    self.assertTrue(out.getvalue().startswith("HANDOFF "))
+                else:
+                    with self.assertRaisesRegex(ValueError,"handoff"): host.poll(c,True)
+                (root/"x/handoff.json").unlink()
+                with patch.dict(host.os.environ,{"KZ_HANDOFF_B64":"HANDOFF "+base64.b64encode(raw).decode()}):
+                    if len(names)==2: host.accept(c)
+                    else:
+                        with self.assertRaisesRegex(ValueError,"handoff"): host.accept(c)
     def test_prepare_interrupt_at_every_command_then_cleanup(self):
         # Interrupt after a command's effects (including CI stop), then rerun cleanup.
         for phase,cut in [(p,c) for p,n in (("prepare",13),("cleanup",9)) for c in range(1,n)]:

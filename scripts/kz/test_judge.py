@@ -10,11 +10,19 @@ from judge import judge, judge_archive
 RUN = "kz-20261126t050000z"
 def report(role):
     names = ([(n, v) for v in ("kzext4", "kzxfs") for n in (1, 2)] + [(5, "kzc1")]
-             if role == "source" else [(n, v) for v in ("kzext4r", "kzext4f", "kzxfsr", "kzxfsf") for n in (3, 4)])
+             if role == "source" else [(n, v) for v in ("kzext4r", "kzxfsr") for n in (3, 4)])
     return dict(run=RUN, role=role, bytes=1 << 40, device=True,
                 lines=[f"KZ STEP {n} PASS {v} measured evidence" for n,v in names])
 
 class JudgeTest(unittest.TestCase):
+    def test_four_restore_rows_only(self):
+        good = report("target")
+        self.assertEqual(len(good["lines"]), 4)
+        self.assertEqual(len(report("source")["lines"]) + len(good["lines"]), 9)
+        for volume in ("kzext4f", "kzxfsf"):
+            extra = copy.deepcopy(good)
+            extra["lines"] += [f"KZ STEP {n} PASS {volume} legacy fork" for n in (3, 4)]
+            self.assertFalse(judge(extra, "target", RUN, 0))
     def test_complete(self):
         for role in ("source", "target"):
             self.assertTrue(judge(report(role), role, RUN, 0))
