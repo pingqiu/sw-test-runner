@@ -40,7 +40,7 @@ go test . -run TestKnownZeroScenarioAlwaysSettlesBothHosts -count=10
 
 Run from the same directory with `swblock run`, all `-env key=value` flags
 **before** the scenario path. Supply every empty env entry from the YAML:
-kz_run, rc_sha, archive_path, archive_sha256, source_host, target_host, ssh_user,
+kz_run, rc_sha, product_src, archive_path, archive_sha256, source_host, target_host, ssh_user,
 ssh_key, source_host_key, target_host_key, source_root, target_root,
 source_ci_unit, target_ci_unit, min_free_bytes. Host addresses are distinct IPs;
 SSH keys are operator paths and host keys are approved public pins. The exact
@@ -117,9 +117,28 @@ process boundary. Polling and timeouts decide failure, never product authority.
 
 ## Verdict and evidence
 
+Before any host action, `scripts/kz/contract.py` reads the product test at
+`rc_sha` from the controller's `product_src` Git repository and compares its
+literal filesystem/kind lists and target naming with the host count and judge
+set. A changed source recipe or mismatched set refuses the run before host
+preparation. It creates no product resource. The same check can be run alone:
+
+```sh
+KZ_PRODUCT_SRC=/path/to/product KZ_RC=<full-sha> python3 scripts/kz/contract.py
+```
+
+This source-shape guard is intentionally conservative: a refactor of the test's
+target recipe needs a reviewed guard update, even when the target set is unchanged.
+Use a product pin containing the restore-only fixture change; the former
+restore-and-fork fixture is rejected. The packet must record both product and
+runner pins. `contract_path` defaults to `scripts/kz/contract.py` alongside the
+runner's `host.py` and `judge.py`.
+
 The product test owns byte/counter assertions. The runner judge independently
 requires exact run/role, integer one TiB, real device mode, rc0, and exactly five
-source plus eight target PASS rows (no duplicate, missing, failed or extra row).
+source plus four target PASS rows, nine total (no duplicate, missing, failed or extra row).
+The two targets are `kzext4r` and `kzxfsr`, each with steps 3 and 4; forks are
+outside v1. Both handoff boundaries require exactly two targets.
 A smaller rehearsal or user-space mode cannot count. Both test exit receipts
 must match the run/role. Successful cleanup is not a product PASS.
 
@@ -131,7 +150,7 @@ failure keeps the overall runner result FAIL, regardless of report judgment.
 The bundle contains both role reports, complete logs, launch/source/binary pins,
 exit and cleanup receipts. Source rows cover empty S0 and mkfs/S1 for ext4+XFS,
 plus the fresh-start crash; target rows cover before-hydration and mounted
-readback for each restore/fork. `out/`, state, helpers and pinned binaries remain
+readback for each restore. `out/`, state, helpers and pinned binaries remain
 on the hosts as evidence; the cleanup removes temporary data, mounts, NQNs and
 role processes. Remove retained artifacts only under a separate explicit
 host+absolute-path cleanup instruction after bundle verification.
