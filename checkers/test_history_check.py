@@ -356,7 +356,12 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C7': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL'})
+        # DUR: flushed writes read back, no kill: not exercised.
+        flushed_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                             ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))
+        self.assertEqual(verdicts(flushed_only)['DUR'], 'FAIL')
+        self.assertIn('not exercised', hc.check(dump(flushed_only))['DUR']['findings'][0])
         writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
         self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
         reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
@@ -658,6 +663,112 @@ class C5(unittest.TestCase):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('not exercised', v['findings'][0])
+
+
+B, C, JUNK = 'b' * 64, 'c' * 64, 'f' * 64
+KILL = ('kill', '', {'process': 'blockvolume:0', 'pid': 4242, 'signal': 'KILL'}, 'ok', {})
+
+
+def w(lba, sha, outcome='ok', flush=True, vol='v1'):
+    args = {'lba': lba, 'sha256': sha, 'round': 'g1'}
+    if not flush:
+        args['flush'] = False
+    return ('write', vol, args, outcome, {})
+
+
+def rd(lba, sha, vol='v1'):
+    return ('read', vol, {'lba': lba}, 'ok', {'sha256': sha})
+
+
+def fl(outcome='ok', vol='v1'):
+    return ('flush', vol, {}, outcome, {})
+
+
+class DUR(unittest.TestCase):
+    def dur(self, *steps):
+        return hc.check(dump(synth(*steps)))['DUR']
+
+    def assert_pass(self, v, lost):
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertIn('acknowledged, not flushed, lost: %d' % lost, v['findings'])
+
+    def assert_fail(self, v, why):
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertTrue(any(why in x for x in v['findings']), v)
+
+    # Green: what the pages allow.
+    def test_a_lost_unflushed_write_passes_and_is_counted(self):
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, A)), lost=1)
+
+    def test_a_kept_unflushed_write_passes_and_nothing_is_lost(self):
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, B)), lost=0)
+
+    def test_an_unflushed_write_of_a_new_volume_may_vanish_to_zero(self):
+        self.assert_pass(self.dur(w(0, B, flush=False), KILL, rd(0, hc.ZERO)), lost=1)
+
+    def test_an_unknown_write_after_the_durable_one_is_allowed(self):
+        self.assert_pass(self.dur(w(0, A), w(0, B, outcome='unknown'), KILL, rd(0, B)), lost=0)
+        self.assert_pass(self.dur(w(0, A), w(0, B, outcome='unknown'), KILL, rd(0, A)), lost=0)
+
+    def test_the_lost_count_is_every_acknowledged_write_after_the_value_read(self):
+        steps = [w(0, A), w(0, B, flush=False), w(0, C, flush=False), KILL]
+        self.assert_pass(self.dur(*steps, rd(0, A)), lost=2)
+        self.assert_pass(self.dur(*steps, rd(0, B)), lost=1)
+
+    def test_a_refused_kill_is_no_kill(self):
+        refused = ('kill', '', KILL[2], 'refused', {})
+        # No kill: C1's rule, and the unflushed write must read back.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), refused, rd(0, A)), 'not one of')
+
+    # Red controls: the seeded defects DUR must catch.
+    def test_red_an_older_value_than_the_last_durable_one(self):
+        # B is durable through the acknowledged flush; A reappears after the kill.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), fl(), KILL, rd(0, A)), 'an older value than the last durable one')
+        # The same with a flushed write as the durable one.
+        self.assert_fail(self.dur(w(0, A), w(0, B), KILL, rd(0, A)), 'an older value than the last durable one')
+
+    def test_red_content_no_write_produced(self):
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, JUNK)), 'content no write produced')
+
+    def test_red_zero_when_a_durable_write_exists(self):
+        self.assert_fail(self.dur(w(0, B, flush=False), fl(), KILL, rd(0, hc.ZERO)), 'ZERO although a durable write exists')
+
+    def test_red_an_unknown_flush_is_not_treated_as_durable(self):
+        # With the flush acknowledged, reading A after the kill is a FAIL; with
+        # the flush unknown nothing became durable, so A (the flushed write) is
+        # allowed and B counted lost. A checker that took the unknown flush for
+        # an acknowledged one fails the second history.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), fl('ok'), KILL, rd(0, A)), 'older value')
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), fl('unknown'), KILL, rd(0, A)), lost=1)
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), fl('refused'), KILL, rd(0, A)), lost=1)
+
+    def test_red_a_flush_of_another_volume_makes_nothing_durable(self):
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), fl(vol='v9'), KILL, rd(0, A)), lost=1)
+
+    def test_red_a_write_before_the_last_durable_one_does_not_come_back(self):
+        # After C is durable (a flushed write), a second kill may not bring
+        # back A, allowed after the first kill.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, A), w(0, C), KILL, rd(0, A)), 'older value')
+        # An unknown write invoked BEFORE the last durable one is not allowed
+        # after a kill (the definition: writes invoked after the last durable
+        # value), although C1's shadow keeps it possible without a kill.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, A)), 'older value')
+        self.assert_pass(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), rd(0, A)), lost=0)
+
+    # Evidence.
+    def test_a_kill_without_any_read_after_it_judges_nothing(self):
+        v = self.dur(w(0, A), w(0, B, flush=False), rd(0, B), KILL)
+        self.assert_fail(v, 'judged nothing')
+        self.assertIn('acknowledged, not flushed, not read after the kill: 1 block(s)', v['findings'])
+
+    def test_without_a_kill_it_is_c1s_rule(self):
+        self.assert_pass(self.dur(w(0, B, flush=False), rd(0, B)), lost=0)
+        self.assert_fail(self.dur(w(0, B, flush=False), rd(0, hc.ZERO)), 'not one of')
+        self.assert_fail(self.dur(w(0, B, flush=False)), 'written, never read afterwards')
+
+    def test_a_flush_key_that_is_not_a_boolean_is_unknown(self):
+        bad = ('write', 'v1', {'lba': 0, 'sha256': A, 'flush': 'false'}, 'ok', {})
+        self.assertEqual(self.dur(bad, KILL, rd(0, A))['verdict'], 'UNKNOWN')
 
 
 if __name__ == '__main__':

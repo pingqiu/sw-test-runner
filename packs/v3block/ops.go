@@ -31,7 +31,7 @@ var opIDs = map[string]string{
 	"create":          "VolumeCreate.MarkReady",
 	"attach":          "HolderInterface.Start",
 	"write":           "HolderInterface.Write",
-	"read":            "Guest.Read", // a read changes no state; no model has an action for it
+	"read":            "Guest.Read",  // a read changes no state; no model has an action for it
 	"flush":           "Guest.Flush", // the guest's fsync of the device; no model has an action for it yet
 	"snapshot":        "SnapshotRemoval.Commit",
 	"snapshot_delete": "SnapshotRemoval.DeleteSnap",
