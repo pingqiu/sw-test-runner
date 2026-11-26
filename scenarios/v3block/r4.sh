@@ -503,6 +503,10 @@ cmd_cleanup() {
   for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ -f "$w/$f" ]] && cp "$w/$f" "$ev/"
   done
+  # cleanup runs as root, while collect_path uses the inventory SSH user.
+  # Publish only this evidence directory; never relax the package's TLS keys.
+  chmod 0755 "$ev"
+  find "$ev" -type f -exec chmod 0644 {} +
   if [[ -f "$hosts" ]] && grep -q "# r4-$tag\$" "$hosts"; then
     local keep; keep=$(grep -v "# r4-$tag\$" "$hosts" || true)
     printf '%s\n' "$keep" > "$hosts"

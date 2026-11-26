@@ -108,6 +108,15 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	pkg := filepath.Join(dir, "pkg")
 	r4File(t, filepath.Join(pkg, "payload"), "package\n")
 	r4File(t, filepath.Join(pkg, "SHA256SUMS"), fmt.Sprintf("%x  payload\n", sha256.Sum256([]byte("package\n"))))
+	// The cloud controller builds under umask 077, so its uploaded manifest
+	// remains private when root installs and later copies it into evidence.
+	if err := os.Chmod(filepath.Join(pkg, "SHA256SUMS"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	privateKey := r4File(t, filepath.Join(pkg, "tls", "node.key"), "test-only private material\n")
+	if err := os.Chmod(privateKey, 0600); err != nil {
+		t.Fatal(err)
+	}
 	if out, err := r4Env(t, env, "install", pkg, "test", "10.2.3.4"); err != nil {
 		t.Fatalf("fresh install: %v %s", err, out)
 	}
@@ -142,6 +151,21 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	}
 	if out, err := r4Env(t, env, "cleanup", "test"); err != nil {
 		t.Fatalf("%v %s", err, out)
+	}
+	for _, path := range []string{filepath.Join(w, "evidence"), filepath.Join(w, "evidence", "SHA256SUMS")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0004 == 0 || (info.IsDir() && info.Mode().Perm()&0001 == 0) {
+			t.Fatalf("unprivileged collector cannot read evidence: %s mode=%o", path, info.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(w, "evidence", "tls")); !os.IsNotExist(err) {
+		t.Fatalf("private TLS material copied into evidence: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(w, "tls", "node.key")); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("private TLS permissions changed: info=%v err=%v", info, err)
 	}
 	if out, err := r4Env(t, env, "purge", "test"); err != nil {
 		t.Fatalf("%v %s", err, out)
