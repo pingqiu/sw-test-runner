@@ -1,6 +1,7 @@
 """plc_seal.py controls: the sealed packet is exactly the reviewed files plus the run pins and a manifest that
 verifies; every refusal writes nothing; the candidate is never changed."""
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -9,6 +10,13 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+TOOLS = ['plc_cleanup.sh', 'plc_gate.sh', 'plc_judge.py', 'plc_launch.sh', 'plc_owned.sh', 'plc_seal_check.sh', 'plc_settle.sh']
+# Fixtures are LF bytes on every platform (the seal tool refuses a CR in a text file).
+Path.write_text = lambda self, data, *a, **k: self.write_bytes(data.encode('utf-8'))
+sys.dont_write_bytecode = True
+_spec = importlib.util.spec_from_file_location('plc_seal', HERE/'plc_seal.py')
+plc_seal = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(plc_seal)
 
 
 def sha(p):
@@ -39,12 +47,16 @@ class Seal(unittest.TestCase):
         self.write_producer_sums()
         self.tools = self.t/'tools'
         self.tools.mkdir()
-        (self.tools/'plc_judge.py').write_text('judge\n')
+        for name in TOOLS:
+            (self.tools/name).write_text(name + '\n')
         (self.tools/'test_unlisted.py').write_text('a test the manifest need not name\n')
-        (self.tools/'plc-tools.sha256').write_text('%s  plc_judge.py\n' % sha(self.tools/'plc_judge.py'))
+        self.write_tools_manifest(TOOLS)
         self.head = 'a' * 40
         self.config = self.t/'config.json'
         self.config.write_text(json.dumps({'output': '/root/run/output/R1', 'module_sha256': 'm'}))
+
+    def write_tools_manifest(self, names):
+        (self.tools/'plc-tools.sha256').write_text(''.join('%s  %s\n' % (sha(self.tools/n), n) for n in names))
 
     def write_producer_sums(self):
         (self.producer/'SHA256SUMS').write_text(''.join('%s  %s\n' % (sha(p), p.name) for p in sorted(self.producer.iterdir()) if p.name != 'SHA256SUMS'))
@@ -141,7 +153,63 @@ class Seal(unittest.TestCase):
 
     def test_changed_tool_is_refused(self):
         (self.tools/'plc_judge.py').write_text('a different judge\n')
-        self.refused('tool missing or changed')
+        self.refused('tool file changed')
+
+    def test_tools_manifest_must_name_exactly_the_executed_tools(self):
+        self.write_tools_manifest([n for n in TOOLS if n != 'plc_gate.sh'])
+        self.refused('not name exactly the executed tools')
+
+    def test_producer_must_name_its_entry_point(self):
+        (self.producer/'plc_select.py').rename(self.producer/'select2.py')
+        self.write_producer_sums()
+        self.refused('does not name plc_select.py')
+
+    def test_out_inside_the_candidate_is_refused_and_the_candidate_unchanged(self):
+        before = {p.relative_to(self.cand).as_posix(): sha(p) for p in self.cand.rglob('*') if p.is_file()}
+        r = self.seal(out=self.cand/'sealed')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn('overlaps the candidate', r.stderr)
+        after = {p.relative_to(self.cand).as_posix(): sha(p) for p in self.cand.rglob('*') if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_existing_out_with_content_is_left_as_it_was(self):
+        out = self.t/'sealed'
+        out.mkdir()
+        (out/'someone-elses.txt').write_text('keep\n')
+        r = self.seal()
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ['someone-elses.txt'])
+
+    def run_inprocess(self, hook):
+        """seal() in this process with read_file wrapped: hook(path) runs before each read, as a concurrent writer."""
+        real = plc_seal.read_file
+        def wrapped(path):
+            hook(Path(path))
+            return real(path)
+        plc_seal.read_file = wrapped
+        try:
+            return plc_seal.seal(self.cand, self.list, self.pin, 'pk/', self.config, self.producer, self.tools, self.head, self.t/'sealed')
+        finally:
+            plc_seal.read_file = real
+
+    def test_a_file_changed_between_check_and_copy_refuses(self):
+        def hook(p):
+            if p.name == 'powerloss.py' and not getattr(hook, 'done', False):
+                hook.done = True
+                (self.cand/'powerloss.py').write_text('def judge_run(*a):\n    return {"verdict": "PASS"}\n')
+        with self.assertRaises(plc_seal.Refused) as cm:
+            self.run_inprocess(hook)
+        self.assertIn('changed since review', str(cm.exception))
+        self.assertFalse((self.t/'sealed').exists())
+
+    def test_a_file_appearing_during_the_copy_refuses(self):
+        def hook(p):
+            if p.name == 'powerloss.py':
+                (self.cand/'controls'/'late.py').write_text('x = 1\n')
+        with self.assertRaises(plc_seal.Refused) as cm:
+            self.run_inprocess(hook)
+        self.assertIn('changed while it was being sealed', str(cm.exception))
+        self.assertFalse((self.t/'sealed').exists())
 
     def test_short_product_head_is_refused(self):
         self.head = 'abc1234'

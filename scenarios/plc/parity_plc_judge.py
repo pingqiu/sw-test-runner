@@ -2,7 +2,7 @@
 packet's own judge_run gives, on the packet's own per-filesystem fixtures, for the passing run and for each
 refusal the packet's controls assert. Nothing here re-implements a verdict.
 
-PLC_PACKET=/path/to/packet python3 -m unittest test_plc_judge_parity   (the packet's controls/ build the fixtures)
+PLC_PACKET=/path/to/packet python3 -m unittest parity_plc_judge   (the packet's controls/ build the fixtures)
 """
 import hashlib
 import json

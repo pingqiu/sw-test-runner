@@ -69,3 +69,6 @@ jobs:
           python "$RUNNER_TEMP/guarded_unittest.py" "$PWD"
           python "$RUNNER_TEMP/guarded_unittest.py" "$GITHUB_WORKSPACE/scripts/tests"
           python "$RUNNER_TEMP/guarded_unittest.py" "$GITHUB_WORKSPACE/checkers"
+          # The plc scenario's packet-free controls (stub cloud and az, no packet). parity_plc_judge.py needs an
+          # external packet (PLC_PACKET) and is not named test*.py, so discovery leaves it out.
+          python "$RUNNER_TEMP/guarded_unittest.py" "$GITHUB_WORKSPACE/scenarios/plc"

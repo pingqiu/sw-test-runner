@@ -12,11 +12,16 @@
 # Every decision is in scenarios/plc (pinned by the sealed packet through plc-tools.sha256):
 #   plc_seal_check.sh  approved seal, packet files, cloud config, producer, tools and product head, all before any
 #                      cloud call (rehearsal: records the seal state only)
-#   plc_settle.sh      seaweed-cloud verify plus an independent listing, in the scope the pinned config's variables
-#                      name; runs as an ordinary phase (the gate needs it) and again as an always phase (a
-#                      timed-out or cancelled run is still verified)
+#   plc_launch.sh      the cloud child records its own pid and start time, then becomes seaweed-cloud
+#   plc_settle.sh      terminal barrier on that child, admission by this invocation's launch receipt, then
+#                      seaweed-cloud verify (its real Result contract) plus an independent listing in the scope
+#                      the pinned config's variables name; runs as an ordinary phase (the gate needs it) and again
+#                      as an always phase (a timed-out or cancelled run is still settled, or left UNKNOWN with
+#                      its recovery handle, never observed while the child runs)
 #   plc_judge.py       the sealed packet's powerloss.judge_run; exit 0 only for PASS
 #   plc_gate.sh        the gate value from the COLLECTED evidence: 1 only for counted + sealed=yes + PASS
+#   plc_owned.sh       every always-phase step that writes under the run directory proves it is this invocation's
+#   plc_cleanup.sh     removes the run directory only once evidence, capture and lout are collected exactly
 #
 # Expected invocation (controller; plc_tools is this checkout's scenarios/plc):
 #   swblock run -env class=counted -env packet_dir=... -env approved_seals=... -env run_name=<RUN> \
@@ -26,7 +31,9 @@
 
 name: plc-powerloss-counted
 timeout: 240m
-always_timeout: 20m
+# Always envelope, reserved per step: settle_final 20m (child wait <= 10m + verify), three collects 5m each,
+# cleanup 3m. A step that runs out keeps the run directory (cleanup removes it only after verified collection).
+always_timeout: 45m
 
 env:
   class: "rehearsal"
@@ -136,6 +143,7 @@ phases:
         env.PLC_CAPTURE: "{{ capture_tgz }}"
         env.PLC_CAPTURE_SHA: "{{ capture_sha256 }}"
         env.PLC_PY: "{{ python }}"
+        env.PLC_TOOLS: "{{ plc_tools }}"
         cmd: |
           set -uf
           fail() { echo "cloud_run: $*" >&2; exit 1; }
@@ -150,11 +158,19 @@ phases:
             exit 0
           fi
           [ -x "$PLC_CLOUD" ] || fail "cloud_bin not executable: $PLC_CLOUD"
+          out=$("$PLC_PY" -I -c 'import json,sys; sys.stdout.write(json.load(open(sys.argv[1]))["output"])' "$PLC_CONFIG") || fail 'config has no output'
+          # seaweed-cloud would refuse an existing output; refusing here launches nothing and leaves it as it was.
+          [ ! -e "$out" ] || fail "config output $out already exists: not launched, nothing touched"
           date -u +%FT%TZ > "$e/started.txt"
-          "$PLC_CLOUD" run --config "$PLC_CONFIG" --pack exec --launch-token "$PLC_TOKEN" --json > "$e/run.json" 2> "$e/runner.log"
+          : > "$e/launching"
+          # The child records its own identity (plc_launch.sh) and keeps running if this shell is killed on
+          # timeout or cancel; settle waits on exactly that process before observing anything.
+          bash "$PLC_TOOLS/plc_launch.sh" "$e/cloud.pid" \
+            "$PLC_CLOUD" run --config "$PLC_CONFIG" --pack exec --launch-token "$PLC_TOKEN" --json \
+            < /dev/null > "$e/run.json" 2> "$e/runner.log" &
+          wait "$!"
           rc=$?; printf '%s\n' "$rc" > "$e/run.exit"
           [ "$rc" = 0 ] || fail "seaweed-cloud run exited $rc (runner.log)"
-          out=$("$PLC_PY" -I -c 'import json,sys; sys.stdout.write(json.load(open(sys.argv[1]))["output"])' "$PLC_CONFIG") || fail 'config has no output'
           [ -f "$out/pack/out.tgz" ] || fail "the pack left no out.tgz at $out/pack/out.tgz"
           cp "$out/pack/out.tgz" "$d/capture/out.tgz" || fail 'copy failed'
           cp "$out/pack/node.log" "$d/capture/node.log" 2>/dev/null
@@ -171,9 +187,10 @@ phases:
         env.PLC_CONFIG: "{{ cloud_config }}"
         env.PLC_TOOLS: "{{ plc_tools }}"
         env.PLC_PY: "{{ python }}"
+        env.PLC_TOKEN: "{{ launch_token }}"
         cmd: |
           set -euf
-          bash "$PLC_TOOLS/plc_settle.sh" "$PLC_DIR/evidence" "$PLC_CLASS" "$PLC_CLOUD" "$PLC_CONFIG" "$PLC_PY"
+          bash "$PLC_TOOLS/plc_settle.sh" "$PLC_DIR/evidence" "$PLC_DIR/evidence" "$PLC_CLASS" "$PLC_CLOUD" "$PLC_CONFIG" "$PLC_PY" "$PLC_TOKEN"
 
   - name: unpack
     actions:
@@ -275,33 +292,51 @@ phases:
     actions:
       - action: exec
         node: controller
-        timeout: 15m
+        timeout: 20m
         env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_OWNER: "{{ plc_token }}"
         env.PLC_CLASS: "{{ class }}"
         env.PLC_CLOUD: "{{ cloud_bin }}"
         env.PLC_CONFIG: "{{ cloud_config }}"
         env.PLC_TOOLS: "{{ plc_tools }}"
         env.PLC_PY: "{{ python }}"
+        env.PLC_TOKEN: "{{ launch_token }}"
         cmd: |
           set -uf
+          bash "$PLC_TOOLS/plc_owned.sh" "$PLC_DIR" "$PLC_OWNER" || exit 1
           f="$PLC_DIR/evidence/final"
           mkdir -p "$f"
-          [ -f "$PLC_DIR/evidence/started.txt" ] && cp "$PLC_DIR/evidence/started.txt" "$f/"
-          bash "$PLC_TOOLS/plc_settle.sh" "$f" "$PLC_CLASS" "$PLC_CLOUD" "$PLC_CONFIG" "$PLC_PY"
+          PLC_SETTLE_WAIT=600 bash "$PLC_TOOLS/plc_settle.sh" "$PLC_DIR/evidence" "$f" "$PLC_CLASS" "$PLC_CLOUD" "$PLC_CONFIG" "$PLC_PY" "$PLC_TOKEN"
 
+  # Always actions run settle-all (a failed one does not stop the next), and collect_path only reads, so the
+  # ownership check here records (and fails the run on) a directory that is not this invocation's rather than
+  # preventing the read; nothing under it is written or removed. lout/ exists once produce ran: a run that
+  # stopped earlier fails its collection too, and was already failed.
   - name: collect
     always: true
     actions:
+      - action: exec
+        node: controller
+        timeout: 1m
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_OWNER: "{{ plc_token }}"
+        env.PLC_TOOLS: "{{ plc_tools }}"
+        cmd: |
+          set -uf
+          bash "$PLC_TOOLS/plc_owned.sh" "$PLC_DIR" "$PLC_OWNER"
       - action: collect_path
         node: controller
+        timeout: 5m
         path: "{{ scratch_root }}/{{ run_id }}/evidence"
         name: "plc-evidence"
       - action: collect_path
         node: controller
+        timeout: 5m
         path: "{{ scratch_root }}/{{ run_id }}/capture"
         name: "plc-capture"
       - action: collect_path
         node: controller
+        timeout: 5m
         path: "{{ scratch_root }}/{{ run_id }}/lout"
         name: "plc-lout"
 
@@ -311,13 +346,10 @@ phases:
       - action: exec
         node: controller
         timeout: 3m
-        env.PLC_RUN: "{{ run_id }}"
-        env.PLC_ROOT: "{{ scratch_root }}"
-        env.PLC_TOKEN: "{{ plc_token }}"
+        env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.PLC_OWNER: "{{ plc_token }}"
+        env.PLC_TOOLS: "{{ plc_tools }}"
+        env.PLC_ART: "{{ artifacts_dir }}"
         cmd: |
-          set -u
-          case "$PLC_RUN" in *[!0-9A-Za-z_-]*|'') echo 'run_id has unexpected characters' >&2; exit 2 ;; esac
-          d="$PLC_ROOT/$PLC_RUN"
-          [ -e "$d" ] || exit 0
-          [ "$(cat "$d/.plc-owned" 2>/dev/null)" = "$PLC_TOKEN" ] || { echo "not removing $d: not this run's directory" >&2; exit 1; }
-          rm -rf -- "$d"
+          set -uf
+          bash "$PLC_TOOLS/plc_cleanup.sh" "$PLC_DIR" "$PLC_OWNER" "$PLC_ART"
