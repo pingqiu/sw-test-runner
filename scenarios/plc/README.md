@@ -14,7 +14,7 @@ on the VM. The controller seals, verifies, produces and judges, so the verdict n
 | `plc_judge.py` | the sealed packet's `powerloss.judge_run`. Exit 0 only for PASS; it writes no bytecode into the packet. |
 | `plc_gate.sh` | `gate_pass` from the collected evidence: 1 only for `counted` with `sealed=yes` and PASS; 0 for a passing rehearsal or dry run |
 | `plc_owned.sh` | every always-phase step that writes or removes under the run directory first proves it is this invocation's (prepare's token in `.plc-owned`) |
-| `plc_cleanup.sh` | removes the run directory only when each existing `evidence/`, `capture/` and `lout/` is collected and its archive lists exactly its files; otherwise keeps it |
+| `plc_cleanup.sh` | removes the run directory only when each existing `evidence/`, `capture/` and `lout/` is collected: its archive's gzip stream reads through EOF (trailer CRC32 and size verified), and its members are exactly those files with the same sha256 each; otherwise keeps it |
 | `plc-tools.sha256` | the hashes of the seven executed tools; the sealed packet pins this manifest's sha256 |
 
 ## Sealing a run (`plc_seal.py`)

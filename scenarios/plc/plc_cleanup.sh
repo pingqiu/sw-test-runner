@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # plc_cleanup.sh DIR TOKEN ARTIFACTS PYTHON: remove this invocation's run directory only once everything that
 # decided the run is collected byte for byte. For each of evidence/, capture/ and lout/ that exists under DIR,
-# ARTIFACTS/plc-<name>.tgz must exist and read to its end (the gzip trailer checks the stream), and its regular
+# ARTIFACTS/plc-<name>.tgz must exist, its gzip stream must read through EOF (the trailer's CRC32 and size
+# verified; tarfile alone stops at the tar end-of-archive and never reaches it), and its regular
 # members must be exactly DIR/<name>'s files with the same sha256 each. A member with old or truncated bytes, a
 # file changed after collection (collect_path accepts tar's "file changed as we read it"), a missing or extra
 # file, or an unreadable archive keeps DIR (exit 1, reason printed): a failed or partial collection never
@@ -12,7 +13,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 [ -e "$d" ] || { echo "cleanup: $d is already gone"; exit 0; }
 bash "$here/plc_owned.sh" "$d" "$tok" || exit 1
 "$py" -I - "$d" "$art" <<'PY' || { echo "cleanup: keeping $d" >&2; exit 1; }
-import hashlib, sys, tarfile
+import gzip, hashlib, sys, tarfile
 from pathlib import Path
 d, art = Path(sys.argv[1]), Path(sys.argv[2])
 for sub in ('evidence', 'capture', 'lout'):
@@ -33,6 +34,11 @@ for sub in ('evidence', 'capture', 'lout'):
                 if not m.isfile():
                     sys.exit('cleanup: %s holds a non-regular member %s' % (a.name, m.name))
                 got[m.name.removeprefix('./')] = hashlib.sha256(tf.extractfile(m).read()).hexdigest()
+        # tarfile stops at the tar end-of-archive blocks, before the gzip trailer (CRC32 and size). Read the
+        # gzip stream itself through EOF, so a missing or corrupt trailer refuses instead of passing.
+        with gzip.open(a, 'rb') as g:
+            while g.read(1 << 20):
+                pass
     except (OSError, EOFError, tarfile.TarError) as error:
         sys.exit('cleanup: %s does not read to its end: %s' % (a.name, error))
     if got != disk:

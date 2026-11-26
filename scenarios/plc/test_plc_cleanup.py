@@ -40,6 +40,16 @@ class Cleanup(unittest.TestCase):
         return subprocess.run([BASH, str(HERE/'plc_cleanup.sh'), str(self.d), token, str(self.art), sys.executable],
                               capture_output=True, text=True, timeout=60)
 
+    def damage_trailer(self, sub, damage):
+        a = self.art/('plc-%s.tgz' % sub)
+        raw = a.read_bytes()
+        a.write_bytes(damage(raw))
+        # The damage must leave every tar member readable: otherwise this control tests the member check.
+        with tarfile.open(a, 'r:gz') as tf:
+            for m in tf:
+                if m.isfile():
+                    tf.extractfile(m).read()
+
     def collect_truncated(self, sub, rel):
         """A valid tar of sub/ whose member rel carries only half its bytes (as a collection cut short would)."""
         with tarfile.open(self.art/('plc-%s.tgz' % sub), 'w:gz') as tf:
@@ -73,6 +83,10 @@ class Cleanup(unittest.TestCase):
             'same name, different bytes': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'evidence'/'judge.json').write_bytes(b'{"verdict": "FAIL"}')),
             'file changed after collection, same size': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'capture'/'out.tgz').write_bytes(b'Y' * len(self.payload))),
             'truncated payload in a valid tar': lambda: (self.collect('evidence', 'lout'), self.collect_truncated('capture', 'capture/out.tgz')),
+            # The tar end-of-archive comes before the gzip trailer (CRC32 + size): every member reads fine
+            # either way, so only reading the gzip stream through EOF can refuse these.
+            'gzip trailer missing': lambda: (self.collect('evidence', 'capture', 'lout'), self.damage_trailer('capture', lambda b: b[:-8])),
+            'gzip trailer corrupt': lambda: (self.collect('evidence', 'capture', 'lout'), self.damage_trailer('capture', lambda b: b[:-8] + bytes([b[-8] ^ 0xff]) + b[-7:])),
         }
         for name, prepare in cases.items():
             with self.subTest(case=name):
