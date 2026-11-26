@@ -20,7 +20,8 @@ lab='192\.168\.[0-9]+\.[0-9]+'
 # the controller's dashboard default, the docs site's wiki links). They are
 # private RFC 1918 addresses, not secrets, and become required run
 # parameters in a later change. Everywhere else a lab address is refused.
-lab_allow=('scenarios/**' 'suites/**' 'examples/v3-testops/scenarios/**' 'scripts/run-*-ci.sh'
+lab_allow=('scenarios/**' 'suites/**' 'examples/v3-testops/scenarios/**'
+	'scripts/run-block-ci.sh' 'scripts/run-rdma-ci.sh' 'scripts/run-s3-ci.sh' 'scripts/run-vfs-ci.sh'
 	'scripts/testops-ci-worker.sh' 'cmd/testops-controller/main.go' 'mkdocs.yml')
 self=(':(exclude)scripts/public-text-check.sh' ':(exclude)scripts/tests/test_public_text_check.sh')
 excl=()
@@ -42,9 +43,12 @@ scan "$names|$lab" . "${self[@]}" "${excl[@]}" || rc=$?
 [ "$rc" -eq 0 ] && hit=1
 rc=0
 # The two phase-20 suites write their evidence to the lab share (save_to):
-# that one share path is allowed there, for now, with the addresses.
+# that one reviewed line is allowed there, for now, with the addresses. Any
+# other share path in those files is refused like anywhere else.
 share_allow=('suites/phase20-t6-stage0.yaml' 'suites/phase20-t6-stage1.yaml')
+share_pinned='  save_to: V:/share/sw-block-evidence/phase20-t6'
 names_but_share='(claude|codex)0[0-9]|\btp0[0-9]\b|share[/\]+rdma[/\]|diskstation'
+share='[Vv]:[/\\]+share'
 allow=()
 for p in "${lab_allow[@]}"; do allow+=(":(glob)$p"); done
 for p in "${share_allow[@]}"; do allow+=(":(exclude)$p"); done
@@ -55,6 +59,14 @@ rc=0
 scan "$names_but_share" "${share_allow[@]}" || rc=$?
 [ "$rc" -le 1 ] || exit 2
 [ "$rc" -eq 0 ] && hit=1
+# Share paths in those two files: every line must be exactly the pinned one.
+rc=0
+lines=$(git grep -I -h -i -E "$share" "$tree" -- "${share_allow[@]}") || rc=$?
+[ "$rc" -le 1 ] || { echo "public-text: git grep failed ($rc)" >&2; exit 2; }
+if [ -n "${lines:-}" ] && printf '%s\n' "$lines" | grep -v -x -F -- "$share_pinned" >/dev/null; then
+	git grep -I -n -i -E "$share" "$tree" -- "${share_allow[@]}" | grep -v -F -- "$share_pinned" || true
+	hit=1
+fi
 
 if [ "$hit" -eq 1 ]; then
 	echo "public-text: internal names found (above); replace them with roles, documentation addresses or placeholders" >&2
