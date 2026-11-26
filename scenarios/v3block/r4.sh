@@ -407,6 +407,9 @@ cmd_install() {
   (cd "$pkg" && sha256sum -c --quiet SHA256SUMS) || die "install: the package does not match its SHA256SUMS"
   mkdir -p "$root"
   cp -a "$pkg" "$w"
+  # Authentication opens the audit log before either durable store is opened.
+  # Installation, not a smoke-only directory fixup, owns its parent directory.
+  mkdir -p "$w/master"
   printf '%s\n' "$tag" > "$w/.r4-owner"
   chmod 0755 "$w"
   echo "$mip blockmaster # r4-$tag" >> "$hosts"
