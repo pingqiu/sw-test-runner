@@ -399,20 +399,27 @@ func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 	for _, lba := range lbas {
 		tag := blockTag(v.Name, round, lba)
 		want := blockSHA(tag)
+		// The block is generated and checked BEFORE the invocation: a block
+		// whose hash is not the one recorded would put a content on the device
+		// that the history names nowhere, and the checker would blame the
+		// product. A mismatch is the runner's failure: the run fails, nothing
+		// is written.
+		blk := fmt.Sprintf("%s/.block-%s-%d", e.root, v.Name, lba)
+		gen := fmt.Sprintf(`mkdir -p %s && python3 -c 'import sys;t=sys.argv[1].encode();open(sys.argv[2],"wb").write((t*(4096//len(t)+1))[:4096])' %s %s && sha256sum < %s | cut -c1-64`,
+			shellQuote(e.root), shellQuote(tag), shellQuote(blk), shellQuote(blk))
+		stdout, stderr, code, err := node.Run(ctx, gen)
+		if err != nil || code != 0 || strings.TrimSpace(stdout) != want {
+			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
+		}
 		v.Written[strconv.FormatUint(lba, 10)] = true
 		last, err = record(actx, e, "write", v.Name, map[string]any{"lba": lba, "sha256": want, "round": round}, func() (string, map[string]any) {
 			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
 			if why != "" {
 				return fail(why)
 			}
-			gen := fmt.Sprintf(`python3 -c 'import sys;t=sys.argv[1].encode();sys.stdout.buffer.write((t*(4096//len(t)+1))[:4096])' %s`, shellQuote(tag))
-			cmd := fmt.Sprintf("set -o pipefail; %s | tee >(sha256sum | cut -c1-64 >&2) | dd of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc iflag=fullblock status=none", gen, dev, lba)
-			_, stderr, code, err := node.RunRoot(ctx, "bash -c "+shellQuote(cmd))
+			_, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc status=none", shellQuote(blk), dev, lba))
 			if err != nil || code != 0 {
 				return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
-			}
-			if sum := strings.TrimSpace(stderr); sum != want {
-				return fail("the generator wrote " + firstLine(sum))
 			}
 			return tr.OutcomeOK, nil
 		})
