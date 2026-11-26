@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -56,6 +57,25 @@ def stop(processes):
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait(timeout=5)
+    require(not any(p.poll() is None for p in processes), 'startup smoke left live child processes')
+
+
+def install(root, pkg, base, node):
+    """Run the scenario's installation helper; never manufacture store dirs."""
+    host = base/(node+'-install')
+    host.mkdir()
+    units = host/'units'
+    units.mkdir()
+    hosts = host/'hosts'
+    hosts.write_text('127.0.0.1 localhost\n')
+    ctl = host/'systemctl'
+    ctl.write_text('#!/bin/sh\n[ "$1" = is-active ] || exit 99\necho unknown\nexit 4\n')
+    ctl.chmod(0o700)
+    subprocess.run(['bash',str(root/'runner/scenarios/v3block/r4.sh'),'install',str(pkg),
+                    'local-start-smoke','127.0.0.1'], check=True, stdout=subprocess.DEVNULL,
+                   env=dict(os.environ,R4_ROOT=str(host/'work'), R4_UNITDIR=str(units),
+                            R4_HOSTS=str(hosts), R4_SYSTEMCTL=str(ctl)))
+    return host/'work/local-start-smoke'
 
 
 def watch(processes, logs, phases, seconds, addresses=None):
@@ -115,8 +135,16 @@ def smoke(root, seconds=10):
     for rf in ('3', '2'):
         base = out/('rf'+rf)
         base.mkdir()
-        tls = base/'tls'
+        pkg = base/'pkg'
+        (pkg/'bin').mkdir(parents=True)
+        for binary in ('blockmaster', 'blockvolume'):
+            shutil.copyfile(binaries/binary, pkg/'bin'/binary)
+            (pkg/'bin'/binary).chmod(0o700)
+        shutil.copyfile(root/'runner/scenarios/v3block/r4.sh',pkg/'r4.sh')
+        tls = pkg/'tls'
         subprocess.run(['bash', str(src/'scripts/k8s-alpha-certs.sh'), 'standalone', str(tls), 's1','s2','s3'], env=dict(env, SW_BLOCK_TLS_APPLY='0'), stdout=subprocess.DEVNULL, check=True)
+        (pkg/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+str(p.relative_to(pkg))+'\n'
+                                             for p in sorted(pkg.rglob('*')) if p.is_file()))
         values = dict(scenario['env'], rf=rf, run_id='local-start-smoke', n1_data='127.0.0.1', n2_data='127.0.0.2', n3_data='127.0.0.3', master_port=port('127.0.0.1'), data_port=port('127.0.0.1'), ctrl_port=port('127.0.0.1'), status_port=port('127.0.0.1'), nvme_port=port(bind))
         # Use the scenario's own spec writer, with controller-local endpoints.
         specwork = base/'spec-root/local-start-smoke'
@@ -131,9 +159,9 @@ def smoke(root, seconds=10):
                     continue
                 if rf == '2' and action['node'] == 'node-1' and '/bin/blockvolume ' in action['cmd']:
                     continue
-                work = base/action['node']
-                work.mkdir(exist_ok=True)
-                (work/'master').mkdir(exist_ok=True)
+                work = base/(action['node']+'-install/work/local-start-smoke')
+                if not work.exists():
+                    work = install(root, pkg, base, action['node'])
                 role, argv = command(action, values, work)
                 argv[0] = str(binaries/('blockmaster' if role == 'master' else 'blockvolume'))
                 for i, arg in enumerate(argv):

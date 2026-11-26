@@ -123,6 +123,9 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	if strings.TrimSpace(mustRead(t, filepath.Join(w, ".r4-owner"))) != "test" {
 		t.Fatal("missing ownership marker")
 	}
+	if info, err := os.Stat(filepath.Join(w, "master")); err != nil || !info.IsDir() {
+		t.Fatalf("fresh install has no audit-log parent: %v", err)
+	}
 	// An existing root must be refused, even if no package is supplied.
 	if out, err := r4Env(t, env, "install", "/missing-package", "test", "10.2.3.4"); err == nil || !strings.Contains(out, "not fresh") {
 		t.Fatalf("%v %s", err, out)

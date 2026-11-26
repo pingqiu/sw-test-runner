@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -16,6 +16,12 @@ spec.loader.exec_module(smoke)
 
 
 class R4StartPreflight(unittest.TestCase):
+    def test_leftover_child_is_a_failure(self):
+        child = Mock()
+        child.poll.return_value = None
+        with self.assertRaisesRegex(ValueError, 'left live child'):
+            smoke.stop([child])
+
     def test_exact_scenario_master_keeps_auth_and_audit(self):
         scenario = yaml.safe_load((Path(__file__).resolve().parents[2]/'scenarios/v3block/r4-node-loss.yaml').read_text())
         action = next(p for p in scenario['phases'] if p['name'] == 'start')['actions'][0]
