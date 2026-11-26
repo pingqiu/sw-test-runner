@@ -138,10 +138,17 @@ def smoke(root, seconds=10):
                     set_arg(argv,'--nvme-listen',bind+':'+port(bind))
                 log = base/(action['node']+'-'+role+'.log')
                 f = log.open('wb'); handles.append(f)
-                processes.append(subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, env=env))
+                p = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, env=env)
+                processes.append(p)
                 logs.append(log); phases.append('listening' if role == 'master' else 'status-listening')
                 rendered.append(argv)
-            watch(processes, logs, phases, seconds)
+                # The product enforces one process per volume per host. Smoke
+                # replicas sequentially without bypassing that production lock.
+                if role == 'master':
+                    watch([p], [log], ['listening'], seconds)
+                else:
+                    watch([processes[0], p], [logs[0], log], ['listening', 'status-listening'], seconds)
+                    stop([p])
             receipts['rounds'].append(dict(rf=rf, argv=rendered, phases=phases, result='PASS'))
         finally:
             stop(processes)

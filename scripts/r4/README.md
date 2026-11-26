@@ -40,7 +40,9 @@ No-network regression: `python3 -m unittest discover -s scripts/tests -p test_r4
 Run the local startup preflight on the controller (Linux, Python with PyYAML,
 Go on PATH, OpenSSL, tar and an existing IPv4 interface). It builds the pinned
 RC binaries from `git archive`, extracts the actual master and blockvolume argv
-from the pinned scenario, and starts both RF3 and RF2 for 10 seconds each.
+from the pinned scenario, and starts both RF3 and RF2. Each master and each
+volume command is observed for 10 seconds. The master stays up while volume
+commands run sequentially, respecting the production one-volume-per-host lock.
 Every process must remain alive and emit its listening phase (master `listening`,
 volume `status-listening`). This catches startup refusals; it is not a replication
 or data-readiness qualification. No systemd, root, NVMe initiator or cloud API is
