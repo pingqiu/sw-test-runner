@@ -225,11 +225,11 @@ def cleanup(c):
             shutil.rmtree(scratch)  # exact owned root, only after absence proof
         if s["ci_was_active"]: call("sudo", "-n", "systemctl", "start", c["ci_unit"])
         # Keep out/, state and binaries as evidence until controller collection succeeds.
-        atomic(root / "out/cleanup.json", dict(run=c["run"], role=c["role"], clean=True, ci_restored=s["ci_was_active"]))
         timer = c["unit"]+"-cleanup.timer"
         if unit_field(timer, "LoadState") != "not-found":
             if unit_field(timer, "Description") != description(c)+" cleanup timer": raise ValueError("foreign cleanup timer; no stop")
             call("sudo", "-n", "systemctl", "stop", timer)
+        atomic(root / "out/cleanup.json", dict(run=c["run"], role=c["role"], clean=True, ci_restored=s["ci_was_active"]))
         print("CLEAN")
 
 def main():
