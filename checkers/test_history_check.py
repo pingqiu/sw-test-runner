@@ -363,6 +363,26 @@ class Exercise(unittest.TestCase):
                                  ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
                                  ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})), 'FAIL')
 
+    def test_the_full_six_action_trace_leaves_source_to_target_unexercised(self):
+        # The reviewer's complete trace: the target's final read of T comes after
+        # its own write T, which masks anything the source's A could have carried.
+        v = self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                    ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                    ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                    ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                    ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}),
+                    ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}))
+        self.assertEqual(v, 'FAIL')
+
+    def test_an_unmasked_witness_after_the_readers_write_still_exercises(self):
+        # At each block the reader wrote first and the other side's distinct
+        # write came after it: both directions are exercised, one block each.
+        self.assertEqual(self.c3(('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': T}),
+                                 ('write', 'v1', {'lba': 1, 'sha256': S}, 'ok', {}),
+                                 ('write', 'v2', {'lba': 1, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 1}, 'ok', {'sha256': S})), 'PASS')
     def test_an_unknown_latest_write_exercises_nothing(self):
         self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
                                  ('write', 'v1', {'lba': 0, 'sha256': 'f' * 64}, 'unknown', {}),
