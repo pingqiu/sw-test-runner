@@ -58,13 +58,18 @@ def stop(processes):
             p.wait(timeout=5)
 
 
-def watch(processes, logs, phases, seconds):
+def watch(processes, logs, phases, seconds, addresses=None):
     end = time.monotonic()+seconds
     while time.monotonic() < end:
         for p, log in zip(processes, logs):
             require(p.poll() is None, 'startup exited: '+str(log))
         time.sleep(.1)
-    for log, phase in zip(logs, phases):
+    for i, (log, phase) in enumerate(zip(logs, phases)):
+        if addresses:
+            host, p = addresses[i].rsplit(':', 1)
+            with socket.create_connection((host, int(p)), timeout=1):
+                pass
+            continue
         records = []
         for line in log.read_text(errors='replace').splitlines():
             try:
@@ -145,9 +150,10 @@ def smoke(root, seconds=10):
                 # The product enforces one process per volume per host. Smoke
                 # replicas sequentially without bypassing that production lock.
                 if role == 'master':
-                    watch([p], [log], ['listening'], seconds)
+                    watch([p], [log], ['listening'], seconds, ['127.0.0.1:'+values['master_port']])
                 else:
-                    watch([processes[0], p], [logs[0], log], ['listening', 'status-listening'], seconds)
+                    watch([processes[0], p], [logs[0], log], ['listening', 'status-listening'], seconds,
+                          ['127.0.0.1:'+values['master_port'], argv[argv.index('--status-addr')+1]])
                     stop([p])
             receipts['rounds'].append(dict(rf=rf, argv=rendered, phases=phases, result='PASS'))
         finally:
