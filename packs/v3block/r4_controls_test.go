@@ -340,7 +340,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				if strings.Contains(cmd, "/bin/blockmaster ") {
 					masters++
 					// Documented replicated standalone command, product PR #644:
-					// c1515513c17cdda1c73ac97e5f8d1c4f7d31e86b,
+					// a8f58eb4a6e4cf64e8206e93be85bde1c5607997,
 					// docs/standalone-deployment.md step 2. Run-local paths and
 					// listen address substitute for the example's paths/address.
 					for _, arg := range []string{
@@ -349,6 +349,12 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 						"--cluster-spec $W/cluster-spec.yaml",
 						"--expected-slots-per-volume " + rf,
 						"--lifecycle-product-loop-interval 100ms",
+						"--failback-runtime-rpc",
+						"--tls-cert $W/tls/master.crt",
+						"--tls-key $W/tls/master.key",
+						"--tls-client-ca $W/tls/ca.crt",
+						"--role-file $W/tls/roles",
+						"--audit-log $W/master/audit.jsonl",
 						"--listen 0.0.0.0:19600",
 					} {
 						if !strings.Contains(cmd, arg) {
