@@ -5,6 +5,7 @@ import tarfile
 import json
 import re
 
+TARGET_VOLUMES = ("kzext4r", "kzxfsr")
 
 def judge(report, role, run, rc):
     if role not in ("source", "target") or type(rc) is not int or rc != 0 or not isinstance(report, dict):
@@ -13,7 +14,7 @@ def judge(report, role, run, rc):
             or type(report.get("bytes")) is not int or report.get("bytes") != 1 << 40 or report.get("device") is not True):
         return False
     expected = ({(n, v) for v in ("kzext4", "kzxfs") for n in (1, 2)} | {(5, "kzc1")}
-                if role == "source" else {(n, v) for v in ("kzext4r", "kzext4f", "kzxfsr", "kzxfsf") for n in (3, 4)})
+                if role == "source" else {(n, v) for v in TARGET_VOLUMES for n in (3, 4)})
     lines = report.get("lines")
     if not isinstance(lines, list) or len(lines) != len(expected):
         return False

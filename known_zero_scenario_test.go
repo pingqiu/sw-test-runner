@@ -13,7 +13,7 @@ import (
 // Execute the committed YAML through the real engine with off-host handlers.
 // It proves phase failure/cleanup wiring, not NVMe or systemd behavior.
 func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
-	for _, fault := range []string{"", "source:start", "source:handoff", "controller:judge", "source:cleanup", "source:collect-reports"} {
+	for _, fault := range []string{"", "controller:contract", "source:start", "source:handoff", "controller:judge", "source:cleanup", "source:collect-reports"} {
 		t.Run(fault, func(t *testing.T) {
 			s, err := tr.ParseFile("scenarios/public/known-zero-1tib-acceptance.yaml")
 			if err != nil {
@@ -42,6 +42,9 @@ func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
 				if strings.Contains(a.Params["cmd"], "judge.py'") {
 					key = "judge"
 				}
+				if strings.Contains(a.Params["cmd"], "contract.py'") {
+					key = "contract"
+				}
 				key = a.Node + ":" + key
 				mu.Lock()
 				counts[key]++
@@ -59,6 +62,9 @@ func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
 			result := tr.NewEngine(r, nil).Run(context.Background(), s, a)
 			if (result.Status == tr.StatusPass) != (fault == "") {
 				t.Fatalf("fault=%s status=%s error=%s", fault, result.Status, result.Error)
+			}
+			if fault == "controller:contract" && (counts["source:prepare"] != 0 || counts["source:start"] != 0 || counts["target:start"] != 0) {
+				t.Fatalf("host preparation/launch ran after contract refusal: %v", counts)
 			}
 			for _, role := range []string{"source", "target"} {
 				for _, verb := range []string{"cleanup", "collect-closeout"} {
@@ -81,12 +87,22 @@ func TestKnownZeroScenarioResolvesLaunchInputs(t *testing.T) {
 	s.Env["target_root"] = "/scratch/target"
 	s.Env["kz_run"] = run
 	s.Env["run_id"] = "runner-internal-bundle-id"
+	s.Env["product_src"] = "/product"
+	s.Env["rc_sha"] = strings.Repeat("a", 40)
+	if s.Phases[0].Name != "product-contract" {
+		t.Fatal("product contract must precede every host action")
+	}
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	handler := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
 		key := ""
 		want := ""
 		got := ""
+		if a.Node == "controller" && strings.Contains(a.Params["cmd"], "contract.py'") {
+			if a.Params["env.KZ_PRODUCT_SRC"] != "/product" || a.Params["env.KZ_RC"] != strings.Repeat("a", 40) {
+				return nil, fmt.Errorf("product contract inputs not resolved: %v", a.Params)
+			}
+		}
 		if a.Node == "source" && strings.HasSuffix(a.Params["cmd"], "host.py' prepare") {
 			key = "root"
 			want = "/scratch/source"
@@ -103,7 +119,7 @@ func TestKnownZeroScenarioResolvesLaunchInputs(t *testing.T) {
 		if a.Node == "source" && key == "root" && a.Params["env.KZ_DEADLINE"] != "2099-01-01T00:00:00Z" {
 			return nil, fmt.Errorf("absolute cleanup deadline not propagated: %q", a.Params["env.KZ_DEADLINE"])
 		}
-		if a.Node == "controller" {
+		if a.Node == "controller" && strings.Contains(a.Params["cmd"], "judge.py'") {
 			role := a.Params["env.KZ_ROLE"]
 			key = "judge-" + role
 			want = "/bundle/" + role + ".tgz"
