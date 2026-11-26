@@ -1,0 +1,1 @@
+{"schema":"seaweed.cloud-smoke/v1","code":"EMPTY","remedy":"RG is retained and contains zero resources","effects":[],"remaining_resource_ids":[],"remaining_observed":true,"create_unresolved":false,"billable_resources":"billable resources remaining: 0 (checked 04:05Z)","estimated_usd":0.12,"cumulative_estimated_usd":0.12,"actual_cost_usd":null}
