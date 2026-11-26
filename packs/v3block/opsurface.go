@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -101,59 +100,12 @@ func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration)
 	return "", "no block device for " + nqn
 }
 
-// zeroBlockSHA is the sha256 of a 4096-byte zero block: a new volume's content.
-const zeroBlockSHA = "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
-
 // blockSHA is the sha256 of the block a write of tag puts down, computed here
 // so a write whose outcome is unknown still names the value it attempted.
 func blockSHA(tag string) string {
 	b := []byte(strings.Repeat(tag, 4096/len(tag)+1))[:4096]
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
-}
-
-// vsUsage is the answer of `sw-block ops chunk usage`.
-type vsUsage struct {
-	Snapshots     int `json:"snapshots"`
-	Dependents    int `json:"dependents"`
-	OwnChunks     int `json:"own_chunks"`
-	ForeignChunks int `json:"foreign_chunks"`
-}
-
-// countFiles counts every file below dir through the filer's JSON listing.
-func countFiles(ctx context.Context, node runner, dir string) (int, string) {
-	py := `import json,sys,urllib.request,urllib.parse,urllib.error
-def ls(d):
-    n,last=0,""
-    while True:
-        q=urllib.parse.urlencode({"limit":1000,"lastFileName":last})
-        try:
-            r=json.load(urllib.request.urlopen(urllib.request.Request(d+"/?"+q,headers={"Accept":"application/json"}),timeout=10))
-        except urllib.error.HTTPError as e:
-            if e.code==404 and not last: return 0
-            raise
-        es=r.get("Entries") or []
-        for e in es:
-            p=e["FullPath"]
-            n+=ls(d.split("/",3)[0]+"//"+d.split("/",3)[2]+urllib.parse.quote(p)) if e.get("Mode",0)&0o20000000000 else 1
-        if not r.get("ShouldDisplayLoadMore") or not es: return n
-        last=es[-1]["FullPath"].rsplit("/",1)[1]
-print(ls(sys.argv[1]))`
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("python3 -I -c %s %s", shellQuote(py), shellQuote(dir)))
-	n, perr := strconv.Atoi(strings.TrimSpace(stdout))
-	if err != nil || code != 0 || perr != nil {
-		return 0, "listing " + dir + ": " + firstLine(stderr)
-	}
-	return n, ""
-}
-
-// stopPID signals pid and waits until it is gone.
-func stopPID(ctx context.Context, node runner, pid, sig string, bound time.Duration) string {
-	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
-		return "no recorded pid"
-	}
-	_, _, _, _ = node.Run(ctx, fmt.Sprintf("kill -%s %s 2>/dev/null", sig, pid))
-	return waitGone(ctx, node, pid, bound)
 }
 
 // alive reports whether the recorded pid still runs.

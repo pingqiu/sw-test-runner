@@ -35,4 +35,16 @@ func RegisterPack(r *tr.Registry) {
 	r.RegisterFunc("v3_status", tr.TierBlock, v3Status)
 	r.RegisterFunc("v3_wait_primary", tr.TierBlock, v3WaitPrimary)
 	r.RegisterFunc("v3_assert_no_authority_leak", tr.TierBlock, v3AssertNoAuthorityLeak)
+
+	// Typed operations (ops.go): one operator operation on one volume, each
+	// recording invoke and complete in the run's history; they decide nothing.
+	r.RegisterFunc("v3_op_spec", tr.TierDevOps, v3OpSpec)
+	for name, f := range map[string]tr.ActionHandlerFunc{
+		"v3_op_create": v3OpCreate, "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
+		"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,
+		"v3_op_release": v3OpRelease, "v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete,
+		"v3_op_observe": v3OpObserve,
+	} {
+		r.RegisterFunc(name, tr.TierBlock, f)
+	}
 }
