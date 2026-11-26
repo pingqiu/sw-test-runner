@@ -12,7 +12,7 @@
 #
 # One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
 # the product under test), runner_src (this checkout), weed (the pinned
-# SeaweedFS binary). Expected refusals: none.
+# SeaweedFS binary). Expected refusals: one, declared at its step (expect: refused).
 #
 #   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD \
 #     -env weed=/path/weed -env work=/root/m0-run scenarios/v3block/m0-sequence.yaml
@@ -20,9 +20,6 @@
 name: v3block-m0-sequence
 timeout: 30m
 always_timeout: 5m
-
-metadata:
-  expected_refusals: ""
 
 env:
   product_src: ""
@@ -38,7 +35,6 @@ env:
   chunk_path: "/m0"
   lock_dirs_test_only: "true"
   lbas: "0 2048 4095"
-  expected_refusals: ""
   # Every typed operation reads these as vars.
   bin_dir: "{{ work }}/bin"
   master: "127.0.0.1:{{ master_port }}"
@@ -149,8 +145,9 @@ phases:
       - {action: v3_op_stop, node: host, volume: v1}
       - {action: v3_op_delete, node: host, volume: v1}
       - {action: v3_op_observe, node: host, volume: v1}
-      # The same name again: a new identity in another directory (C7).
-      - {action: v3_op_create, node: host, volume: v1}
+      # The same name again after its delete: v1 refuses it (the master keeps
+      # the name's deletion reservation). Declared here, at this step only (C7).
+      - {action: v3_op_create, node: host, volume: v1, expect: refused}
       - {action: v3_op_observe, node: host, volume: v1}
 
   - name: teardown
@@ -197,5 +194,4 @@ phases:
         env.HIST: "{{ bundle_dir }}/history.jsonl"
         env.OUT: "{{ artifacts_dir }}/checks.json"
         env.CHECK: "{{ runner_src }}/checkers/history_check.py"
-        env.EXPECTED: "{{ expected_refusals }}"
-        cmd: python3 -I "$CHECK" "$HIST" --expected-refusals "$EXPECTED" --json "$OUT"
+        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT"

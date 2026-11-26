@@ -44,6 +44,10 @@ var opIDs = map[string]string{
 // opEnv is the configuration every operation shares, from params or vars.
 type opEnv struct {
 	bin, master, filer, chunkPath, root, client string
+	// expect is the step's declared outcome ("refused"), recorded in its
+	// invocation so the checkers know which refusal the scenario expected.
+	// Per step, never per verb: any other refusal still fails the run.
+	expect string
 	lockDirs                                   bool
 }
 
@@ -122,7 +126,10 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 	}
 	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
 		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
-		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true"}
+		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect")}
+	if e.expect != "" && e.expect != tr.OutcomeRefused {
+		return nil, opEnv{}, nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
+	}
 	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
 		if strings.Contains(f, "{{") {
 			return nil, opEnv{}, nil, fmt.Errorf("%s: unresolved configuration %q", name, f)
@@ -147,6 +154,12 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 
 // record runs one operation between its invoke and complete records.
 func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func() (string, map[string]any)) (map[string]string, error) {
+	if e.expect != "" {
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["expect"] = e.expect
+	}
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: e.client, Op: opIDs[verb], Verb: verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err

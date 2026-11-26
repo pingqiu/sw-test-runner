@@ -85,11 +85,28 @@ class C0(unittest.TestCase):
         ops(recs, 'restore')[0][1]['outcome'] = 'unknown'
         self.assertEqual(verdicts(recs)['C0'], 'FAIL')
 
-    def test_a_refusal_fails_unless_expected(self):
+    def test_a_refusal_fails_unless_its_own_step_declared_it(self):
         recs = load()
-        ops(recs, 'release')[0][1]['outcome'] = 'refused'
+        inv, comp = ops(recs, 'release')[0]
+        comp['outcome'] = 'refused'
         self.assertEqual(verdicts(recs)['C0'], 'FAIL')
-        self.assertEqual(verdicts(recs, expected_refusals=('release',))['C0'], 'PASS')
+        inv.setdefault('args', {})['expect'] = 'refused'
+        self.assertEqual(verdicts(recs)['C0'], 'PASS')
+
+    def test_a_declaration_covers_its_step_not_its_verb(self):
+        recs = load()
+        # The run declares one create refusal (the re-create after delete);
+        # the first create refused as well is not covered by it.
+        first = ops(recs, 'create', 'v1')[0]
+        first[1]['outcome'] = 'refused'
+        self.assertEqual(verdicts(recs)['C0'], 'FAIL')
+
+    def test_a_declared_refusal_answered_ok(self):
+        recs = load()
+        recreate = ops(recs, 'create', 'v1')[-1]
+        self.assertEqual(recreate[0]['args'].get('expect'), 'refused')
+        recreate[1]['outcome'] = 'ok'
+        self.assertEqual(verdicts(recs)['C0'], 'FAIL')
 
 
 class C1(unittest.TestCase):
@@ -190,21 +207,24 @@ class C7(unittest.TestCase):
         obs['result']['show_error'] = {'exit': 1, 'code': 'volume_not_found'}
         self.assertEqual(verdicts(recs)['C7'], 'FAIL', 'absent instead of the tombstone')
 
-    def test_a_create_of_the_same_name_reusing_the_identity(self):
+    def test_a_create_of_the_deleted_name_that_is_let_through(self):
         recs = load()
-        old = ops(recs, 'delete', 'v1')[0][0]['args']['layout_id']
-        mono = recs[-1]['mono_ns']
-        n = len(recs)
-        recs += [{'seq': n + 1, 'kind': 'invoke', 'client': 'c1', 'op': 'VolumeCreate.MarkReady', 'verb': 'create', 'volume': 'v1', 'args': {'size_bytes': 16777216}, 'mono_ns': mono},
-                 {'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'client': 'c1', 'op': 'VolumeCreate.MarkReady', 'verb': 'create', 'volume': 'v1', 'mono_ns': mono, 'outcome': 'ok', 'result': {'layout_id': old}}]
-        self.assertEqual(verdicts(recs)['C7'], 'FAIL')
-        recs[-1]['result']['layout_id'] = 'b' * 32
-        self.assertEqual(verdicts(recs)['C7'], 'PASS')
+        inv, comp = ops(recs, 'create', 'v1')[-1]
+        self.assertGreater(inv['seq'], ops(recs, 'delete', 'v1')[0][1]['seq'])
+        comp['outcome'], comp['result'] = 'ok', {'layout_id': 'b' * 32}
+        v = hc.check(dump(recs))
+        self.assertEqual(v['C7']['verdict'], 'FAIL')
+        self.assertIn('not refused', v['C7']['findings'][0])
 
+    def test_a_create_of_the_deleted_name_refused_for_another_reason(self):
+        recs = load()
+        comp = ops(recs, 'create', 'v1')[-1][1]
+        comp['result']['detail'] = 'rpc error: code = Unavailable desc = master down'
+        self.assertEqual(verdicts(recs)['C7'], 'FAIL')
     def test_a_delete_never_observed(self):
         recs = load()
-        obs = self.after_delete(recs, 'v1')
-        recs = renumber([r for r in recs if r is not obs])
+        at = ops(recs, 'delete', 'v1')[0][1]['seq']
+        recs = renumber([r for r in recs if not (r['kind'] == 'observe' and r.get('volume') == 'v1' and r['seq'] > at)])
         self.assertEqual(verdicts(recs)['C7'], 'FAIL')
 
 

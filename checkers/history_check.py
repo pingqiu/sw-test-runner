@@ -1,14 +1,15 @@
 """Checkers of a run's history file (runner spec S4), judging the history alone.
 
-python3 -I history_check.py HISTORY.jsonl [--expected-refusals verb,verb] [--json OUT]
+python3 -I history_check.py HISTORY.jsonl [--json OUT]
 
 Each checker returns PASS, FAIL or UNKNOWN with its findings. A history that
 does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
 
-  C0  every invoke has its complete; no outcome is unknown; no refusal the
-      scenario did not declare as expected (half of the spec's C6)
+  C0  every invoke has its complete; no outcome is unknown; a refusal only
+      where its own step declared it (args.expect = refused), never by verb;
+      a declared refusal answered ok is a finding (half of the spec's C6)
   C1  every acknowledged write is read back: each read returns a value the
       shadow allows; and no written block goes unread after its last write
       (a count that must be 0; a later delete does not excuse it)
@@ -21,8 +22,8 @@ code is 0 only when every checker passes.
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
       a missing HEAD (the tombstone keeps a later volume of the same name out
-      of this directory). A later create of the same name must get another
-      layout id, so it lands in another directory.
+      of this directory). In v1 a create of that name afterwards is refused
+      (FailedPrecondition: the master keeps the name's deletion reservation).
 
 The shadow (spec S3): per volume and block, the set of values the block may
 hold. A new volume holds zeros. An acknowledged write makes its value the
@@ -96,16 +97,21 @@ def verdict(findings, unknown=False):
     return {'verdict': 'UNKNOWN' if unknown else 'PASS', 'findings': []}
 
 
-def c0(recs, expected_refusals=()):
+def c0(recs):
+    """A refusal is expected only where its own invocation declares it
+    (args.expect == "refused", one step of the scenario), never by verb."""
     f = []
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
+        expected = (inv.get('args') or {}).get('expect') == 'refused'
         if comp is None:
             f.append('no completion: ' + name)
         elif comp['outcome'] == 'unknown':
             f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
-        elif comp['outcome'] == 'refused' and inv['verb'] not in expected_refusals:
+        elif comp['outcome'] == 'refused' and not expected:
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
+        elif comp['outcome'] == 'ok' and expected:
+            f.append('declared refusal answered ok: ' + name)
     return verdict(f)
 
 
@@ -272,19 +278,17 @@ def c3(recs):
 
 def c7(recs):
     f = []
-    deleted = {}    # volume -> (completion seq of its ok delete, the deleted layout id)
-    creates = []    # (volume, completion seq, layout id) of ok creates
+    deleted = {}    # volume -> completion seq of its ok delete
+    creates = []    # (volume, invocation seq, completion) of every create
     for inv, comp in operations(recs):
-        if not comp or comp['outcome'] != 'ok':
-            continue
-        if inv['verb'] == 'delete':
-            deleted[inv['volume']] = (comp['seq'], (inv.get('args') or {}).get('layout_id'))
+        if inv['verb'] == 'delete' and comp and comp['outcome'] == 'ok':
+            deleted[inv['volume']] = comp['seq']
         elif inv['verb'] == 'create':
-            creates.append((inv['volume'], comp['seq'], (comp.get('result') or {}).get('layout_id')))
+            creates.append((inv['volume'], inv['seq'], comp))
     seen = set()
     for r in recs:
         vol = r.get('volume')
-        if r['kind'] != 'observe' or vol not in deleted or vol in seen or r['seq'] < deleted[vol][0]:
+        if r['kind'] != 'observe' or vol not in deleted or vol in seen or r['seq'] < deleted[vol]:
             continue
         seen.add(vol)
         res = r.get('result') or {}
@@ -301,10 +305,16 @@ def c7(recs):
         missing = sorted(TOMBSTONE - set(files))
         if missing:
             f.append('%s after delete: %s missing from its directory (the tombstone keeps the name out of it)' % (vol, ', '.join(missing)))
-    # A volume of the same name created after the delete is a new identity.
-    for vol, at, layout in creates:
-        if vol in deleted and at > deleted[vol][0] and (not layout or layout == deleted[vol][1]):
-            f.append('%s created again after its delete with layout id %r, the deleted one\'s: the directory would be reused' % (vol, layout))
+    # In v1 the master keeps a deleted name's reservation: a create of that
+    # name after its ok delete is REFUSED (FailedPrecondition). If a build lets
+    # it through, this goes red so that someone decides it.
+    for vol, at, comp in creates:
+        if vol not in deleted or at < deleted[vol]:
+            continue
+        detail = (comp.get('result') or {}).get('detail', '') if comp else ''
+        if comp is None or comp['outcome'] != 'refused' or 'FailedPrecondition' not in detail:
+            f.append('%s created again after its delete: %s, not refused (FailedPrecondition): %s'
+                     % (vol, comp['outcome'] if comp else 'no completion', detail or (comp.get('result') if comp else '')))
     never = sorted(set(deleted) - seen)
     if never:
         f.append('deleted but never observed afterwards: %s' % ', '.join(never))
@@ -314,7 +324,7 @@ def c7(recs):
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C7': c7}
 
 
-def check(lines, expected_refusals=()):
+def check(lines):
     try:
         recs = read_history(lines)
     except Malformed as e:
@@ -322,7 +332,7 @@ def check(lines, expected_refusals=()):
     out = {}
     for name, fn in CHECKERS.items():
         try:
-            out[name] = fn(recs, expected_refusals) if name == 'C0' else fn(recs)
+            out[name] = fn(recs)
         except (KeyError, TypeError) as e:
             out[name] = {'verdict': 'UNKNOWN', 'findings': ['record without a field the checker needs: %r' % (e,)]}
     return out
@@ -331,11 +341,10 @@ def check(lines, expected_refusals=()):
 def main(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('history')
-    p.add_argument('--expected-refusals', default='')
     p.add_argument('--json')
     a = p.parse_args(argv)
     with open(a.history, encoding='utf-8') as fh:
-        result = check(fh.read().splitlines(), tuple(x for x in a.expected_refusals.split(',') if x))
+        result = check(fh.read().splitlines())
     text = json.dumps(result, indent=1, sort_keys=True)
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as fh:
