@@ -18,6 +18,7 @@ spec.loader.exec_module(module)
 class AutoP2(unittest.TestCase):
     def setUp(self):
         self.line = {"body": {"VolumeID": "v1", "ReplicaID": "r2", "Epoch": 2,
+                     "DataAddr": "10.84.1.11:19601",
                      "Primary": {"Kind": 2, "FencedEpoch": 2, "Basis": 1,
                                  "DurableLSN": 70}}}
         self.status = {"VolumeID": "v1", "ReplicaID": "r2", "Epoch": 2,
@@ -63,7 +64,7 @@ class AutoP2(unittest.TestCase):
             authority, status = root / "authority.json", root / "status.json"
             authority.write_text(json.dumps(self.line))
             status.write_text(json.dumps(self.status))
-            argv = ["auto-p2.py", "--authority", str(authority), "--status", str(status),
+            argv = ["auto-p2.py", "check", "--authority", str(authority), "--status", str(status),
                     "--volume", "v1", "--old-holder", "r1", "--old-epoch", "1",
                     "--minimum-lsn", "70", "--operator-calls", "0", "--helper",
                     "r4.sh", "--device", "owned-device", "--ledger", "ledger"]
@@ -82,6 +83,52 @@ class AutoP2(unittest.TestCase):
     def test_lost_ack_fails_instead_of_metadata_only_pass(self):
         with self.assertRaises(subprocess.CalledProcessError):
             self.invoke(subprocess.CalledProcessError(1, "verify"))
+
+    def test_observer_follows_either_survivor(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "authority.json"
+            for replica, address in [("r2", "10.84.1.11:19601"), ("r3", "10.84.1.13:19601")]:
+                line = copy.deepcopy(self.line)
+                line["body"].update(ReplicaID=replica, DataAddr=address)
+                path.write_text(json.dumps(line))
+                value = module.wait_line(path, 1, "automatic", 0, {replica: address})
+                self.assertEqual(module.decode(module.token(value))["authority"]["body"]["ReplicaID"], replica)
+
+    def test_no_line_never_invokes_operator(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "authority.json"
+            line = copy.deepcopy(self.line)
+            line["body"].update(Epoch=1, ReplicaID="r1")
+            path.write_text(json.dumps(line))
+            with mock.patch.object(module.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "no automatic operator fallback"):
+                    module.wait_line(path, 0, "automatic", 0, {"r2": "10.84.1.11:19601"})
+                run.assert_not_called()
+
+    def test_foreign_endpoint_and_unfenced_line_refuse(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "authority.json"
+            path.write_text(json.dumps(self.line))
+            with self.assertRaisesRegex(ValueError, "endpoint"):
+                module.wait_line(path, 1, "automatic", 0, {"r2": "10.84.1.99:19601"})
+            bad = copy.deepcopy(self.line)
+            bad["body"]["Primary"]["FencedEpoch"] = 1
+            path.write_text(json.dumps(bad))
+            with self.assertRaisesRegex(ValueError, "fencing"):
+                module.wait_line(path, 1, "automatic", 0, {"r2": "10.84.1.11:19601"})
+
+    def test_operator_mode_must_be_explicit_and_counted(self):
+        module.check(self.line, self.status, **dict(self.kw, operator_calls=1), mode="operator")
+        with self.assertRaises(ValueError):
+            module.check(self.line, self.status, **self.kw, mode="operator")
+
+    def test_scenario_packages_checker_and_guards_operator_command(self):
+        source = (Path(__file__).resolve().parents[2] / "scenarios/v3block/r4-node-loss.yaml").read_text()
+        self.assertIn('failover_mode: "automatic"', source)
+        self.assertIn('git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py"', source)
+        self.assertIn("[ '{{ failover_mode }}' = operator ] || exit 0\n", source)
+        self.assertIn('auto-p2.py verify "$PROMOTION"', source)
+        self.assertIn('auto-p2.py field "$PROMOTION" host', source)
 
 
 if __name__ == "__main__":

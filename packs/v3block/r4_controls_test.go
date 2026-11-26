@@ -277,6 +277,9 @@ func TestR4EveryExitCollectsJournalsBeforeCleanup(t *testing.T) {
 				failed = true
 				return nil, fmt.Errorf("injected normal failure")
 			}
+			if strings.Contains(cmd, "auto-p2.py wait ") {
+				return map[string]string{"value": "test-promotion-token"}, nil
+			}
 			return nil, nil
 		}
 		r := tr.NewRegistry()
@@ -394,12 +397,18 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				}
 				if strings.Contains(cmd, "ops failover ") {
 					failover = strings.Contains(cmd, "--expect-current r1@1 --confirm-old-node-off v1")
+					if !strings.Contains(cmd, "[ 'automatic' = operator ] || exit 0") {
+						return nil, fmt.Errorf("automatic mode must skip the operator command")
+					}
 				}
 				if strings.Contains(cmd, "r4.sh start test-run-rf"+rf+" volume") && a.Node == "node-2" {
 					rejoin = true
 				}
 				if strings.Contains(cmd, "verify \"$DEV\" $W/ledger before during-loss after-rejoin") {
 					post = true
+				}
+				if strings.Contains(cmd, "auto-p2.py wait ") {
+					return map[string]string{"value": "test-promotion-token"}, nil
 				}
 				return nil, nil
 			}
