@@ -4,7 +4,9 @@ package v3block
 // operation handlers as M0 execute and record, and the outcome is fed back.
 // The history gets, besides the operations' own records:
 //   - first, an observe record "gen_header": generator version, seed, ops,
-//     pool, blocks, negative share and weights (a replay must match them);
+//     pool, blocks, negative share and weights (a replay must match them),
+//     and the nightly seed the seed was drawn from when param nightly_seed
+//     is set;
 //   - before each operation, an observe record "gen_step": its number,
 //     action, params and the limit a negative probes. That is the replay
 //     script, and it ties every operation record to its proposal;
@@ -152,7 +154,16 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err != nil {
 		return nil, err
 	}
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: g.Header()}); err != nil {
+	header := g.Header()
+	// The nightly seed the run's seed was drawn from, when a nightly driver set
+	// one: the header then names both.
+	if ns := opParam(act, actx, "nightly_seed"); ns != "" {
+		if _, err := strconv.ParseUint(ns, 10, 64); err != nil {
+			return nil, fmt.Errorf("v3_gen_run: nightly_seed: %w", err)
+		}
+		header["nightly_seed"] = ns
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: header}); err != nil {
 		return nil, err
 	}
 	for {

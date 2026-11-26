@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func TestPlanGivesEachRunItsOwnSeedPortsAndTagAndAlwaysALongRun(t *testing.T) {
-	runs := plan(20261127, 4, 2500, 10000, 31000, 200)
+	runs := plan(20261127, 4, 2500, 10000, 20000, 1000)
 	if len(runs) != 5 || runs[4].Kind != "long" || runs[4].Ops != 10000 || runs[0].Ops != 2500 {
 		t.Fatalf("%+v", runs)
 	}
@@ -22,18 +23,21 @@ func TestPlanGivesEachRunItsOwnSeedPortsAndTagAndAlwaysALongRun(t *testing.T) {
 			t.Fatalf("run %d shares a port base or tag", i)
 		}
 		ports[r.PortBase], tags[r.Tag] = true, true
+		if !regexp.MustCompile(`^[a-z0-9]+$`).MatchString(r.Tag) {
+			t.Fatalf("run %d tag %q is not lowercase letters and digits", i, r.Tag)
+		}
 	}
 	// No parallel runs at all still keeps the long run.
-	if only := plan(1, 0, 10, 100, 31000, 200); len(only) != 1 || only[0].Kind != "long" {
+	if only := plan(1, 0, 10, 100, 20000, 1000); len(only) != 1 || only[0].Kind != "long" {
 		t.Fatalf("%+v", only)
 	}
 }
 
 func TestArgvPassesTheRunsSeedNightlySeedPortsAndTag(t *testing.T) {
-	r := plan(7, 1, 25, 100, 31000, 200)[1]
+	r := plan(7, 1, 25, 100, 20000, 1000)[1]
 	a := strings.Join(argv("/bin/swblock", "s.yaml", "/res", 7, r, []string{"product_src=/p"}), " ")
 	for _, want := range []string{"-results-dir /res/run-1", "-env product_src=/p", "-env gen_ops=100",
-		"-env nightly_seed=7", "-env port_base=31200", "-env run_tag=n7-1", " s.yaml"} {
+		"-env nightly_seed=7", "-env port_base=21000", "-env run_tag=n7r1", " s.yaml"} {
 		if !strings.Contains(strings.ReplaceAll(a, "\\", "/"), want) {
 			t.Errorf("argv lacks %q: %s", want, a)
 		}

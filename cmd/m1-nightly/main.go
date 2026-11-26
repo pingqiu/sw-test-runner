@@ -9,7 +9,7 @@
 //	  -env product_src=... -env runner_src=... [-parallel 4 -short-ops 2500 -long-ops 10000]
 //
 // Run i (0..parallel-1 short, parallel = long) gets seed NightlySeeds(nightly)[i],
-// port_base = -port-base + i*-port-step and run_tag = n<nightly>-<i>.
+// port_base = -port-base + i*-port-step and run_tag = n<nightly>r<i> (lowercase letters and digits: the scenario's rule).
 package main
 
 import (
@@ -41,7 +41,7 @@ func plan(nightly uint64, parallel, shortOps, longOps, portBase, portStep int) [
 	var runs []v3block.NightRun
 	for i := 0; i <= parallel; i++ {
 		r := v3block.NightRun{Index: i, Kind: "short", Seed: seeds[i], Ops: shortOps,
-			PortBase: portBase + i*portStep, Tag: fmt.Sprintf("n%d-%d", nightly, i)}
+			PortBase: portBase + i*portStep, Tag: fmt.Sprintf("n%dr%d", nightly, i)}
 		if i == parallel {
 			r.Kind, r.Ops = "long", longOps
 		}
@@ -87,8 +87,8 @@ func main() {
 	parallel := flag.Int("parallel", 4, "short runs at the same time (the long run is always added)")
 	shortOps := flag.Int("short-ops", 2500, "operations per short run")
 	longOps := flag.Int("long-ops", 10000, "operations of the long run")
-	portBase := flag.Int("port-base", 31000, "first run's port base")
-	portStep := flag.Int("port-step", 200, "port distance between runs")
+	portBase := flag.Int("port-base", 20000, "first run's port base")
+	portStep := flag.Int("port-step", 1000, "port distance between runs (a run spans port_base..+10*names+7 and +10000..+10002)")
 	dry := flag.Bool("dry-run", false, "print the plan and the command lines, run nothing")
 	flag.Var(&env, "env", "key=value passed to every run (repeatable)")
 	flag.Parse()
@@ -97,8 +97,8 @@ func main() {
 	if nightly == 0 {
 		nightly, _ = strconv.ParseUint(time.Now().UTC().Format("20060102"), 10, 64)
 	}
-	if *swblock == "" || *results == "" || *parallel < 0 || *shortOps <= 0 || *longOps <= 0 || *portStep < 50 {
-		fmt.Fprintln(os.Stderr, "m1-nightly: -swblock and -results are required; ops positive; -port-step at least 50")
+	if *swblock == "" || *results == "" || *parallel < 0 || *shortOps <= 0 || *longOps <= 0 || *portStep < 1000 {
+		fmt.Fprintln(os.Stderr, "m1-nightly: -swblock and -results are required; ops positive; -port-step at least 1000")
 		os.Exit(2)
 	}
 	runs := plan(nightly, *parallel, *shortOps, *longOps, *portBase, *portStep)
