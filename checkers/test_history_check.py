@@ -353,6 +353,23 @@ class Exercise(unittest.TestCase):
                                  ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
                                  ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})), 'FAIL')
 
+    def test_an_overwritten_distinguishing_value_exercises_nothing(self):
+        # The reviewer's sequence: the source writes S, then A (the snapshot's
+        # own content); the target reads A. S was overwritten, so that read
+        # could not tell isolation from propagation.
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})), 'FAIL')
+
+    def test_an_unknown_latest_write_exercises_nothing(self):
+        self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                                 ('write', 'v1', {'lba': 0, 'sha256': 'f' * 64}, 'unknown', {}),
+                                 ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                                 ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                                 ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S})), 'FAIL')
+
     def test_an_unknown_write_exercises_nothing(self):
         self.assertEqual(self.c3(('write', 'v1', {'lba': 0, 'sha256': S}, 'unknown', {}),
                                  ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
