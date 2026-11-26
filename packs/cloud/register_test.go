@@ -64,7 +64,9 @@ func TestOpenScopeRefusesAMismatchedContext(t *testing.T) {
 	}
 	for name, c := range map[string]struct{ inv, ctx func(string) string }{
 		"another run id in the context": {nil, func(s string) string { return strings.Replace(s, `"run_id":"r4-1"`, `"run_id":"r4-2"`, 1) }},
-		"a host key for a foreign host": {nil, func(s string) string { return strings.Replace(s, `"node-1":`, `"node-9":"ssh-ed25519 AAAAC3Nz","node-1":`, 1) }},
+		"a host key for a foreign host": {nil, func(s string) string {
+			return strings.Replace(s, `"node-1":`, `"node-9":"ssh-ed25519 AAAAC3Nz","node-1":`, 1)
+		}},
 		"no time to restore before the hard deadline": {func(s string) string {
 			return regexp.MustCompile(`"hard":"[^"]+"`).ReplaceAllString(s, `"hard":"`+time.Now().Add(time.Hour+2*time.Minute).UTC().Format(time.RFC3339)+`"`)
 		}, nil},
@@ -77,7 +79,7 @@ func TestOpenScopeRefusesAMismatchedContext(t *testing.T) {
 }
 
 func TestPowerActionRefusesWithoutCustody(t *testing.T) {
-	if _, err := vmPowerOff(t.Context(), &tr.ActionContext{}, tr.Action{Params: map[string]string{"node": "node-1"}}); err == nil || !strings.Contains(err.Error(), "no fault custody") {
+	if _, err := vmPowerOff(t.Context(), &tr.ActionContext{}, tr.Action{Params: map[string]string{"vm": "node-1"}}); err == nil || !strings.Contains(err.Error(), "no fault custody") {
 		t.Fatalf("no scope: %v", err)
 	}
 }
@@ -143,7 +145,7 @@ func TestPowerActionAppliesRestoresAndLeavesTheReceiptInTheBundle(t *testing.T) 
 	c := &fakeCloud{power: "running"}
 	c.install(t)
 	actx := &tr.ActionContext{Safety: s, History: h, Bundle: &tr.RunBundle{Dir: bundleDir}}
-	act := tr.Action{Action: "cloud_vm_power", Params: map[string]string{"node": "node-1"}}
+	act := tr.Action{Action: "cloud_vm_power", Params: map[string]string{"vm": "node-1"}}
 	out, err := vmPowerOff(t.Context(), actx, act)
 	if err != nil || out["fault_key"] != "node-1/"+goodVM {
 		t.Fatalf("apply: %v %v", out, err)
@@ -178,4 +180,51 @@ func TestPowerActionAppliesRestoresAndLeavesTheReceiptInTheBundle(t *testing.T) 
 		t.Fatalf("close after an explicit restore: %v", err)
 	}
 	_ = h.Close()
+}
+
+// The README's scenario snippet parses, and its key reaches the action as
+// Params["vm"] (a scenario's node: is the runner node, Action.Node).
+func TestTheReadmeSnippetParsesAndCarriesTheVMKey(t *testing.T) {
+	raw, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	start := strings.Index(doc, "```yaml\n")
+	end := strings.Index(doc[start+8:], "```")
+	if start < 0 || end < 0 {
+		t.Fatal("no yaml snippet in the README")
+	}
+	snippet := doc[start+8 : start+8+end]
+	var b strings.Builder
+	b.WriteString("name: readme-snippet\nphases:\n")
+	for _, line := range strings.Split(strings.TrimRight(snippet, "\n"), "\n") {
+		b.WriteString("  " + line + "\n")
+	}
+	s, err := tr.Parse([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("the README snippet does not parse: %v\n%s", err, b.String())
+	}
+	seen := 0
+	for _, ph := range s.Phases {
+		for _, a := range ph.Actions {
+			if a.Action != "cloud_vm_power" && a.Action != "cloud_vm_power_restore" {
+				continue
+			}
+			seen++
+			if a.Params["vm"] != "node-2" {
+				t.Errorf("%s: Params = %v, want vm=node-2", a.Action, a.Params)
+			}
+			r := tr.NewRegistry()
+			RegisterPack(r)
+			for _, k := range r.RequiredParams(a.Action) {
+				if a.Params[k] == "" {
+					t.Errorf("%s: required param %q not set by the snippet", a.Action, k)
+				}
+			}
+		}
+	}
+	if seen != 2 || !UsesFaults(s) {
+		t.Fatalf("snippet actions seen %d", seen)
+	}
 }

@@ -42,16 +42,19 @@ func OpenScope(ctx context.Context, contextPath, outputDir string) (*tr.RunScope
 // RegisterPack registers the cloud fault actions. Both are mutating (they
 // act on cloud resources) and chaos tier.
 //
-//	cloud_vm_power          node: <inventory host id>  -> fault_key
-//	cloud_vm_power_restore  node: <inventory host id>
+//	cloud_vm_power          vm: <inventory host id>  -> fault_key
+//	cloud_vm_power_restore  vm: <inventory host id>
+//
+// The key is vm, not node: in a scenario node: names the runner node an
+// action runs on (Action.Node), and params are inline keys.
 //
 // The restore action is the scenario's explicit restore, recorded before the
 // history closes; the scope's Close restores anything left, in reverse order.
 func RegisterPack(r *tr.Registry) {
 	r.RegisterMutatingFunc("cloud_vm_power", tr.TierChaos, vmPowerOff)
-	r.SetRequiredParams("cloud_vm_power", []string{"node"})
+	r.SetRequiredParams("cloud_vm_power", []string{"vm"})
 	r.RegisterMutatingFunc("cloud_vm_power_restore", tr.TierChaos, vmPowerRestore)
-	r.SetRequiredParams("cloud_vm_power_restore", []string{"node"})
+	r.SetRequiredParams("cloud_vm_power_restore", []string{"vm"})
 }
 
 // plan builds the power fault of one inventory host from the run's context.
@@ -86,7 +89,7 @@ func plan(actx *tr.ActionContext, node string) (tr.WitnessedPowerFault, error) {
 }
 
 func vmPowerOff(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	p, err := plan(actx, act.Params["node"])
+	p, err := plan(actx, act.Params["vm"])
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +102,7 @@ func vmPowerOff(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 }
 
 func vmPowerRestore(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	p, err := plan(actx, act.Params["node"])
+	p, err := plan(actx, act.Params["vm"])
 	if err != nil {
 		return nil, err
 	}
