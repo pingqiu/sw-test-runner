@@ -827,11 +827,48 @@ class DUR(unittest.TestCase):
         # After C is durable (a flushed write), a second kill may not bring
         # back A, allowed after the first kill.
         self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, A), w(0, C), KILL, rd(0, A)), 'older value')
-        # An unknown write invoked BEFORE the last durable one is not allowed
-        # after a kill (the definition: writes invoked after the last durable
-        # value), although C1's shadow keeps it possible without a kill.
-        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, A)), 'older value')
-        self.assert_pass(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), rd(0, A)), lost=0)
+
+    def test_an_unknown_write_may_land_after_a_later_durable_one_and_is_counted(self):
+        # r1: an unknown write invoked BEFORE the last durable value may land
+        # after it while its holder lives; after the kill its value is allowed.
+        v = self.dur(w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, A))
+        self.assert_pass(v, lost=0)
+        self.assertIn('unknown write landed after a later durable write: 1', v['findings'])
+        # The same without a kill (C1's shadow keeps it possible).
+        v = self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), rd(0, A))
+        self.assert_pass(v, lost=0)
+        self.assertIn('unknown write landed after a later durable write: 1', v['findings'])
+        # It did not land: nothing counted.
+        v = self.dur(w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, B))
+        self.assertIn('unknown write landed after a later durable write: 0', v['findings'])
+
+    def test_red_an_unknown_settled_by_a_kill_does_not_land_later(self):
+        # The kill settles A (read B); a second kill may not bring A back.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, B), KILL, rd(0, A)), 'older value')
+        # An unknown invoked after the durable point, settled as not taken
+        # effect (read ZERO), does not come back at a second kill.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), KILL, rd(0, hc.ZERO), KILL, rd(0, A)), 'no open unknown explains')
+        # An acknowledged unflushed write not read stays allowed (a kill of
+        # another process may have left it in a live holder).
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), w(0, C, outcome='unknown'), KILL, rd(0, A), KILL, rd(0, B)), lost=1)
+
+    def test_red_a_value_that_changes_between_two_reads_after_a_kill(self):
+        # Both A and B are allowed after the kill; the first read fixes B, a
+        # later read of A with no write in between is a change.
+        steps = [w(0, A, outcome='unknown'), w(0, B), KILL, rd(0, B)]
+        self.assert_fail(self.dur(*steps, rd(0, A)), 'the value changed after the unknowns were settled')
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), KILL, rd(0, A), rd(0, B)), 'the value changed')
+        # Stable reads pass; a write in between resets it.
+        self.assert_pass(self.dur(*steps, rd(0, B), rd(0, B)), lost=0)
+        self.assert_pass(self.dur(*steps, w(0, C), rd(0, C)), lost=0)
+
+    def test_red_an_older_value_no_open_unknown_explains(self):
+        # A acknowledged and flushed, then B: A is older than the last durable
+        # value and no unknown write of A is open.
+        self.assert_fail(self.dur(w(0, A), w(0, B), KILL, rd(0, A)), 'an older value than the last durable one that no open unknown explains')
+        # An unknown write of A AFTER a kill that settled it explains nothing
+        # at a later kill either.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), KILL, rd(0, hc.ZERO), w(0, B), KILL, rd(0, A)), 'no open unknown explains')
 
     # Evidence.
     def test_a_kill_without_any_read_after_it_judges_nothing(self):
