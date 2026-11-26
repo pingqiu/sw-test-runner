@@ -22,6 +22,17 @@ variable "cluster" {
   type    = bool
   default = false
 }
+# The block product's three-node R4 profile: node-1..node-3 of vm_size, the
+# kernel NVMe/TCP client prerequisites, and the block ports open between the
+# run's own nodes only. Exclusive with cluster.
+variable "three_node" {
+  type    = bool
+  default = false
+  validation {
+    condition     = !(var.three_node && var.cluster)
+    error_message = "three_node and cluster are exclusive profiles."
+  }
+}
 variable "run_id" {
   type    = string
   default = null
@@ -32,6 +43,12 @@ variable "node_host_keys" {
   default   = {}
 }
 locals {
+  # R4: blockmaster 19600, data 19601, ctrl 19602, NVMe/TCP 4420 (the
+  # scenario's ports; status listens on loopback only).
+  r4_ports = [19600, 19601, 19602, 4420]
+  r4_nodes = { for i in range(1, 4) : "node-${i}" => {
+    roles = ["client"], size = var.vm_size, private_ip = "10.84.1.${10 + i}", cache_disk_gib = 0, format_allowed = false, services = []
+  } }
   cluster_nodes = merge({ meta = {
     roles    = ["master", "filer", "s3"], size = "Standard_D4s_v5", private_ip = "10.84.1.10", cache_disk_gib = 0, format_allowed = false
     services = [for s in [{ name = "master_http", port = 9333 }, { name = "master_grpc", port = 19333 }, { name = "filer_http", port = 8888 }, { name = "filer_grpc", port = 18888 }, { name = "s3_http", port = 8333 }] : s]
@@ -61,7 +78,7 @@ module "run" {
   source                     = "../azure"
   resource_group_name        = var.resource_group_name
   location                   = var.location
-  run_id                     = coalesce(var.run_id, var.cluster ? "ten-http-gate" : "single-http-gate")
+  run_id                     = coalesce(var.run_id, var.three_node ? "r4-three-gate" : var.cluster ? "ten-http-gate" : "single-http-gate")
   ssh_public_key             = var.ssh_public_key
   host_keys                  = var.host_keys
   node_host_keys             = var.node_host_keys
@@ -70,7 +87,9 @@ module "run" {
   artifact_manifest_sha256   = var.artifact_manifest_sha256
   run_declaration            = var.run_declaration
   process_cleanup_reserve_ms = var.process_cleanup_reserve_ms
-  nodes = var.cluster ? local.cluster_nodes : {
+  internal_ports             = var.three_node ? local.r4_ports : []
+  nvme_client                = var.three_node
+  nodes = var.three_node ? local.r4_nodes : var.cluster ? local.cluster_nodes : {
     node1 = {
       roles          = ["master", "filer", "volume", "s3", "client"]
       size           = var.vm_size

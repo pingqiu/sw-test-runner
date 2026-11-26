@@ -103,6 +103,21 @@ variable "nodes" {
   }
 }
 
+variable "internal_ports" {
+  description = "Extra TCP ports open between the run's own nodes only (source and destination the run's subnet), for a workload whose listeners are not HTTP module services. Empty by default: no other profile opens anything new."
+  type        = list(number)
+  default     = []
+  validation {
+    condition     = length(distinct(var.internal_ports)) == length(var.internal_ports) && alltrue([for p in var.internal_ports : p >= 1 && p <= 65535 && p != 22 && p == floor(p)])
+    error_message = "Internal ports must be distinct integers 1..65535, never the management port 22."
+  }
+}
+
+variable "nvme_client" {
+  description = "Install the kernel NVMe/TCP client prerequisites on every node: nvme-cli, native NVMe multipath for nvme_core, and nvme_tcp loaded at boot. Off by default."
+  type        = bool
+  default     = false
+}
 variable "process_cleanup_reserve_ms" {
   description = "Original S0b process reserve; distinct from cloud resource cleanup seconds. No authority is granted."
   type        = number

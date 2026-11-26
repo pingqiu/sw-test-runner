@@ -319,6 +319,7 @@ type declaration struct {
 	Location     string `json:"location"`
 	Size         string `json:"vm_size"`
 	Cluster      bool   `json:"cluster"`
+	ThreeNode    bool   `json:"three_node"` // the block R4 profile: node-1..node-3
 	Run          struct {
 		Work    time.Time `json:"work_deadline"`
 		Hard    time.Time `json:"hard_deadline"`
@@ -332,14 +333,34 @@ type declaration struct {
 // smoke and the ten-node cluster, and Standard_L16s_v3 (local NVMe; the ublk
 // density pack) for one node only. Anything else is refused before any cloud call.
 func sizeAllowed(d declaration) bool {
+	if d.Cluster && d.ThreeNode {
+		return false // exclusive profiles
+	}
 	switch d.Size {
 	case "Standard_D2s_v5":
 		return true
 	case "Standard_L16s_v3":
-		return !d.Cluster
+		return !d.multi()
 	}
 	return false
 }
+
+// nodeIDs are the hosts of a multi-node profile, each with its own pinned
+// server key: the ten-node HTTP cluster, or the block R4 profile's three
+// nodes. A one-node run has none (its single key is the host_keys path).
+func (d declaration) nodeIDs() []string {
+	switch {
+	case d.ThreeNode:
+		return []string{"node-1", "node-2", "node-3"}
+	case d.Cluster:
+		return []string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6", "client1", "client2", "client3"}
+	}
+	return nil
+}
+
+// multi is a multi-node profile: it gets per-node keys, a subscription-wide
+// residue scan, the orphan sweep, a recovery record and explicit OS disk tags.
+func (d declaration) multi() bool { return d.Cluster || d.ThreeNode }
 
 func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 	files, hash, err := Sources(c.Source)
@@ -368,7 +389,7 @@ func inputs(c Config) (map[string][]byte, []byte, declaration, error) {
 		return nil, nil, d, err
 	}
 	if !uuid.MatchString(d.Subscription) || !groupNameRE.MatchString(d.Group) || d.Location != "westus2" || !sizeAllowed(d) || d.Run.Reserve < 600 || d.Run.Reserve > 1800 || d.Run.Work.IsZero() || !d.Run.Hard.After(d.Run.Work.Add(time.Duration(d.Run.Reserve-1)*time.Second)) || d.Run.Hard.Second() != 0 || d.Run.Hard.Nanosecond() != 0 {
-		return nil, nil, d, errors.New("require westus2 Standard_D2s_v5 (one node or the ten-node cluster) or one Standard_L16s_v3 node, explicit subscription/RG and minute-aligned cleanup envelope")
+		return nil, nil, d, errors.New("require westus2 Standard_D2s_v5 (one node, the ten-node cluster or the three-node block profile) or one Standard_L16s_v3 node, explicit subscription/RG and minute-aligned cleanup envelope")
 	}
 	for _, p := range []string{c.Source, c.Variables, c.Output, c.Cloud.SSHKey} {
 		if !filepath.IsAbs(p) {
@@ -785,8 +806,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Code = "PLAN_ONLY"
 		out.Remedy = "review estimate, module/lock/vars and artifacts; obtain launch token before run"
 		count := 1
-		if d.Cluster {
-			count = 10
+		if d.multi() {
+			count = len(d.nodeIDs())
 		}
 		out.Plan = map[string]any{"module_sha256": c.ModuleSHA256, "variables_sha256": c.VariablesSHA256, "subscription": d.Subscription, "resource_group": d.Group, "vm_size": d.Size, "vm_count": count, "region": d.Location, "hard_deadline": d.Run.Hard, "estimated_usd": c.EstimatedUSD, "cap_usd": d.Run.Budget, "budget": budget, "steps": []string{"generate VM host key locally", "read-only empty RG", "terraform init -lockfile=readonly", "terraform plan -out=smoke.tfplan", "terraform apply smoke.tfplan", "shared pack direct HTTP phases", "terraform destroy", "independent read-only RG list"}}
 		return
@@ -982,7 +1003,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		if e == nil {
 			ids, e = resourceIDs(b, filepath.Base(c.Output), true)
 		}
-		if d.Cluster {
+		if d.multi() {
 			b, se := call(cx, "az", "resource", "list", "--subscription", d.Subscription, "--output", "json", "--only-show-errors")
 			var own, other []string
 			if se == nil {
@@ -1060,7 +1081,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			out.Error = err.Error()
 			return
 		}
-		if d.Cluster {
+		if d.multi() {
 			if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`).MatchString(filepath.Base(c.Output)) {
 				out.Error = "cluster output basename must be a safe unique run ID"
 				return
@@ -1072,8 +1093,8 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 			}
 		}
 		c.Cloud.Output = c.Output
-		if d.Cluster {
-			c.Cloud.HostKeys, err = clusterHostKeys(root)
+		if d.multi() {
+			c.Cloud.HostKeys, err = clusterHostKeys(root, d.nodeIDs())
 		} else {
 			c.Cloud.HostKey, err = hostKey(root)
 		}
@@ -1117,7 +1138,7 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Effects = append(out.Effects, "terraform destroy")
 		_, de := call(cx, "terraform", "destroy", "-parallelism=3", "-input=false", "-auto-approve", "-lock-timeout=0s", "-no-color")
 		var swept []string
-		if d.Cluster {
+		if d.multi() {
 			var se error
 			swept, se = sweepOrphans(cx, d.Subscription, d.Group, filepath.Base(c.Output), call)
 			de = errors.Join(de, se)
@@ -1217,13 +1238,13 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 		out.Error = e.Error()
 		return
 	}
-	if d.Cluster {
+	if d.multi() {
 		disks, de := call(work, "terraform", "output", "-json", "os_disk_ids")
 		var ids []string
 		if de == nil {
 			de = json.Unmarshal(disks, &ids)
-			if de == nil && len(ids) != 10 {
-				de = errors.New("require ten explicit OS disk IDs")
+			if want := len(d.nodeIDs()); de == nil && len(ids) != want {
+				de = fmt.Errorf("require %d explicit OS disk IDs, got %d", want, len(ids))
 			}
 		}
 		for _, id := range ids {
@@ -1256,9 +1277,14 @@ func (ctl Controller) Execute(ctx context.Context, mode string, c Config) (out R
 	return
 }
 
-func clusterHostKeys(root string) (map[string]string, error) {
+// clusterHostKeys generates one server key per node of a multi-node profile
+// (ids, from declaration.nodeIDs) and pins each in host.auto.tfvars.json.
+func clusterHostKeys(root string, ids []string) (map[string]string, error) {
+	if len(ids) == 0 {
+		return nil, errors.New("a multi-node profile names no nodes")
+	}
 	public, keys := map[string]string{}, map[string]map[string]string{}
-	for _, id := range []string{"meta", "vol1", "vol2", "vol3", "vol4", "vol5", "vol6", "client1", "client2", "client3"} {
+	for _, id := range ids {
 		p, e := hostKey(root)
 		if e != nil {
 			return nil, e
