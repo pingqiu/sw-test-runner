@@ -205,6 +205,8 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 			counts := map[string]int{}
 			starts := 0
 			connects := 0
+			writer := false
+			writerStopped := false
 			failover := false
 			rejoin := false
 			post := false
@@ -215,6 +217,15 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 					}
 				}
 				cmd := a.Params["cmd"]
+				if strings.Contains(cmd, "r4.sh unit $T writer") {
+					writer = true
+				}
+				if a.Action == "cloud_vm_power" && !writer {
+					return nil, fmt.Errorf("power-off precedes continuous writer")
+				}
+				if strings.Contains(cmd, "r4.sh writer-stop $T") {
+					writerStopped = true
+				}
 				if strings.Contains(cmd, "/bin/blockvolume ") {
 					starts++
 					if !strings.Contains(cmd, "--allow-external-nvme-bind") {
@@ -226,6 +237,9 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				}
 				if strings.Contains(cmd, "r4.sh connect ") {
 					connects++
+					if connects > 1 && !writerStopped {
+						return nil, fmt.Errorf("reconnect before stopping the fault-boundary writer")
+					}
 				}
 				if strings.Contains(cmd, "cleanup $T") {
 					counts[a.Node]++
@@ -236,7 +250,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				if strings.Contains(cmd, "r4.sh start test-run-rf"+rf+" volume") && a.Node == "node-2" {
 					rejoin = true
 				}
-				if strings.Contains(cmd, "verify \"$DEV\" $W/ledger before after-rejoin") {
+				if strings.Contains(cmd, "verify \"$DEV\" $W/ledger before during-loss after-rejoin") {
 					post = true
 				}
 				return nil, nil
@@ -246,7 +260,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				reg.RegisterFunc(n, tr.TierCore, handler)
 			}
 			result := tr.NewEngine(reg, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
-			if result.Status != tr.StatusPass || starts != 3 || connects != 2 || !failover || !rejoin || !post {
+			if result.Status != tr.StatusPass || starts != 3 || connects != 2 || !failover || !rejoin || !post || !writer || !writerStopped {
 				t.Fatalf("%s %s starts=%d connects=%d failover=%v rejoin=%v post=%v", result.Status, result.Error, starts, connects, failover, rejoin, post)
 			}
 			for _, n := range []string{"node-1", "node-2", "node-3"} {

@@ -103,7 +103,7 @@ func TestR4VerifyFailsOnALostAckedWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	var off int64
-	for _, c := range line[1] {
+	for _, c := range line[3] {
 		off = off*10 + int64(c-'0')
 	}
 	if _, err := f.WriteAt(make([]byte, 4096), off); err != nil {

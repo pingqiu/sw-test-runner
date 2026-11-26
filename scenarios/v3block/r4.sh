@@ -7,6 +7,10 @@
 # Checks:
 #   r4.sh write DEV LEDGER ROUND COUNT       COUNT acked 4 KiB writes (O_DIRECT|O_DSYNC);
 #                                            fails unless every one is acknowledged
+#   r4.sh stream DEV LEDGER ROUND COUNT      continuous fault-boundary writes;
+#                                            COUNT=0 until the owned unit stops
+#   r4.sh writer-ready TAG SECONDS           writer active and at least one ACK
+#   r4.sh writer-stop TAG                    writer survived the fault, now stop
 #   r4.sh verify DEV LEDGER [ROUND...]       every acked write reads back: 0 mismatches;
 #                                            each ROUND named must have acked writes
 #   r4.sh drop-control DEV LEDGER            the red control: one acked write the
@@ -21,15 +25,16 @@
 # Host (TAG = the run's tag; work dir R4_ROOT/TAG, units r4-TAG-master|volume):
 #   r4.sh install PKG TAG MASTER_IP          refuse unless fresh; copy the checked package
 #   r4.sh spec TAG RF N1 N2 N3 DPORT CPORT   write the cluster spec for rf 3 or 2
-#   r4.sh unit TAG ROLE -- EXEC ARG...       write the run's persistent unit (not enabled)
+#   r4.sh unit TAG ROLE -- EXEC ARG...       persistent master/volume/writer unit
 #   r4.sh start TAG ROLE                     start it (again, after a reboot)
 #   r4.sh cleanup TAG                        stop the run's units, keep their evidence,
 #                                            remove them and prove they are gone
 #   r4.sh purge TAG                          remove the run's work dir and uploads
 #
 # DEV is the NVMe namespace (or, in the controls, a file with R4_ALLOW_FILE=1).
-# LEDGER lines are "round offset length sha256", written only AFTER the write
-# returned success: the ledger holds acknowledged writes and nothing else.
+# LEDGER lines are "intent|ack op round offset length sha256". Intent precedes
+# the device write; ack follows success. After the latest ack, unacked intents
+# at that offset are also possible contents. No other content is accepted.
 # The device's last block is kept out of write's range: no-ack and
 # drop-control use it, so a window write still in flight can never change a
 # ledger block. STATUS is a command that prints one blockvolume /status JSON
@@ -77,6 +82,10 @@ write_one() {
   "$dd_bin" if="$3" of="$1" bs=$bs count=1 seek=$(( $2 / bs )) oflag="$oflag" conv=notrunc status=none 2>/dev/null
 }
 
+ledger_line() { # LEDGER KIND OP ROUND OFFSET SHA
+  printf '%s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$bs" "$6" >> "$1"
+}
+
 blocks_of() { # DEV -> number of 4 KiB blocks
   local n
   if [[ -b "$1" ]]; then n=$(blockdev --getsize64 "$1"); else n=$(stat -c %s "$1"); fi
@@ -95,8 +104,10 @@ cmd_write() {
     off=$(( (RANDOM * 32768 + RANDOM) % (blocks - 1) * bs ))   # never the last block
     head -c $bs /dev/urandom > "$tmp"
     sum=$(sha256sum < "$tmp" | cut -d' ' -f1)
+    local op="$round-$BASHPID-$i"
+    ledger_line "$ledger" intent "$op" "$round" "$off" "$sum"
     if write_one "$dev" "$off" "$tmp"; then
-      echo "$round $off $bs $sum" >> "$ledger"   # acknowledged: recorded
+      ledger_line "$ledger" ack "$op" "$round" "$off" "$sum"
       acked=$((acked + 1))
     else
       echo "r4: write $round@$off not acknowledged" >&2
@@ -106,32 +117,96 @@ cmd_write() {
   (( acked == count )) || die "write: only $acked of $count writes acknowledged in round $round"
 }
 
-# verify: the LAST acknowledged write of each offset must read back, and each
-# ROUND named must have at least one acknowledged write in the ledger.
+# The client writer remains alive across the fault. Its run-owned systemd
+# unit bounds and stops it; every failed attempt remains an unacked intent.
+# Count=0 streams until stopped; a positive count is useful for file controls.
+cmd_stream() {
+  local dev="$1" ledger="$2" round="$3" count="$4" seq=0 off sum op
+  need_dev "$dev" stream
+  local blocks; blocks=$(blocks_of "$dev")
+  (( blocks > 1 )) || die "stream: too few blocks"
+  local d; d=$(mktemp -d "$(dirname "$ledger")/stream.XXXXXX")
+  # Keep an open reference: a removed/renumbered /dev name must never redirect
+  # this writer onto a different device. Stop this writer before reconnecting.
+  exec 9<>"$dev"
+  local bound="/proc/$$/fd/9"
+  while (( count == 0 || seq < count )); do
+    off=$(( (RANDOM * 32768 + RANDOM) % (blocks - 1) * bs ))
+    head -c $bs /dev/urandom > "$d/block"
+    sum=$(sha256sum < "$d/block" | cut -d' ' -f1)
+    op="$round-$BASHPID-$seq"
+    ledger_line "$ledger" intent "$op" "$round" "$off" "$sum"
+    if write_one "$bound" "$off" "$d/block"; then
+      ledger_line "$ledger" ack "$op" "$round" "$off" "$sum"
+      printf '%s\n' "$op" > "$(dirname "$ledger")/writer-ready"
+    else
+      echo "stream: $op unacknowledged" >&2
+      sleep 0.2
+    fi
+    seq=$((seq + 1))
+  done
+}
+
+cmd_writer_ready() {
+  local tag="$1" end=$(( SECONDS + $2 )) w="$root/$1"
+  check_tag "$tag"
+  while :; do
+    unit_active "$(unit_of "$tag" writer)" || die "writer exited before the fault"
+    [[ ! -s "$w/writer-ready" ]] || { echo "writer-ready: $(cat "$w/writer-ready")"; return 0; }
+    (( SECONDS < end )) || die "writer did not acknowledge its first write"
+    sleep 0.2
+  done
+}
+
+cmd_writer_stop() {
+  local tag="$1" u
+  check_tag "$tag"; u=$(unit_of "$tag" writer)
+  unit_active "$u" || die "writer was not running through power-off"
+  timeout 45 "$systemctl_bin" stop "$u" || die "writer stop is unknown; retained"
+  ! unit_active "$u" || die "writer is still alive; no reconnect or verify"
+  echo "writer stopped after power-off"
+}
+
+# Verify the last ACK or a later unacked intent, with each required round
+# having at least one ACK. Unrelated contents and unmatched ACKs always fail.
 cmd_verify() {
   local dev="$1" ledger="$2"; shift 2
   need_dev "$dev" verify
   [[ -s "$ledger" ]] || die "verify: empty ledger $ledger (nothing acknowledged)"
-  local -A want=() rounds=()
-  local round off len sum
-  while read -r round off len sum; do
-    [[ "$len" == "$bs" ]] || die "verify: ledger line with length $len"
-    want[$off]="$sum $round"
-    rounds[$round]=$(( ${rounds[$round]:-0} + 1 ))
-  done < "$ledger"
-  for round in "$@"; do
-    (( ${rounds[$round]:-0} > 0 )) || die "verify: no acknowledged write of round $round in the ledger"
-  done
-  local bad=0 got
-  for off in "${!want[@]}"; do
-    got=$(sha_of_block "$dev" "$off")
-    if [[ "$got" != "${want[$off]%% *}" ]]; then
-      echo "MISMATCH offset=$off round=${want[$off]##* } want=${want[$off]%% *} got=$got"
-      bad=$((bad + 1))
-    fi
-  done
-  echo "verified=${#want[@]} mismatches=$bad"
-  (( bad == 0 ))
+  python3 - "$dev" "$ledger" "$iflag" "$@" <<'PY'
+import hashlib,re,subprocess,sys
+dev,ledger,iflag,*required=sys.argv[1:]
+intents={};acked=set();values={};has_ack=set();rounds={}
+for line in open(ledger):
+    parts=line.split()
+    if len(parts)!=6: raise SystemExit('verify: malformed ledger')
+    kind,op,round,offset,length,sha=parts
+    if not offset.isdecimal() or int(offset)%4096 or length!='4096' or not re.fullmatch('[0-9a-f]{64}',sha):
+        raise SystemExit('verify: malformed range/hash')
+    off=int(offset); fact=(round,off,sha)
+    if kind=='intent':
+        if op in intents: raise SystemExit('verify: duplicate intent')
+        intents[op]=fact
+        if off in has_ack: values[off].add(sha)
+    elif kind=='ack':
+        if intents.get(op)!=fact or op in acked: raise SystemExit('verify: unmatched/duplicate ack')
+        acked.add(op);has_ack.add(off);values[off]={sha}
+        rounds[round]=rounds.get(round,0)+1
+    else: raise SystemExit('verify: unknown ledger record')
+for round in required:
+    if not rounds.get(round): raise SystemExit('verify: no acknowledged write of round '+round+' in the ledger')
+if not has_ack: raise SystemExit('verify: no acknowledged offsets')
+bad=0
+for off in sorted(has_ack):
+    read=subprocess.run(['dd','if='+dev,'bs=4096','count=1','skip='+str(off//4096),'iflag='+iflag,'status=none'],capture_output=True)
+    if read.returncode or len(read.stdout)!=4096: raise SystemExit('verify: device read failed at '+str(off))
+    got=hashlib.sha256(read.stdout).hexdigest()
+    if got not in values[off]:
+        print('MISMATCH offset='+str(off)+' got='+got+' allowed='+','.join(sorted(values[off])))
+        bad+=1
+print('verified='+str(len(has_ack))+' mismatches='+str(bad))
+raise SystemExit(1 if bad else 0)
+PY
 }
 
 # drop-control: the ledger plus one acked write the device never received
@@ -145,7 +220,9 @@ cmd_drop_control() {
   local blocks off
   blocks=$(blocks_of "$dev")
   off=$(( (blocks - 1) * bs ))
-  echo "dropped $off $bs $(head -c $bs /dev/urandom | sha256sum | cut -d' ' -f1)" >> "$ctl"
+  local sum; sum=$(head -c $bs /dev/urandom | sha256sum | cut -d' ' -f1)
+  ledger_line "$ctl" intent dropped-control dropped "$off" "$sum"
+  ledger_line "$ctl" ack dropped-control dropped "$off" "$sum"
   if cmd_verify "$dev" "$ctl" >/dev/null 2>&1; then
     die "drop-control: verify passed with a dropped acked write: the check cannot fail"
   fi
@@ -164,6 +241,8 @@ cmd_no_ack() {
   d=$(mktemp -d "$(dirname "$ledger")/no-ack.XXXXXX")
   head -c $bs /dev/urandom > "$d/block"
   off=$(( ($(blocks_of "$dev") - 1) * bs ))
+  local op="window-$BASHPID" sum; sum=$(sha256sum < "$d/block" | cut -d' ' -f1)
+  ledger_line "$ledger" intent "$op" window "$off" "$sum"
   ( set +e; "$dd_bin" if="$d/block" of="$dev" bs=$bs count=1 seek=$(( off / bs )) oflag="$oflag" conv=notrunc status=none 2>"$d/err" &
     child=$!; echo "$child" > "$d/pid"; wait "$child"
     echo $? > "$d/rc.tmp"; mv "$d/rc.tmp" "$d/rc" ) </dev/null >/dev/null 2>&1 &
@@ -178,7 +257,7 @@ cmd_no_ack() {
   fi
   rc=$(cat "$d/rc")
   if (( rc == 0 )); then
-    echo "window $off $bs $(sha256sum < "$d/block" | cut -d' ' -f1)" >> "$ledger"
+    ledger_line "$ledger" ack "$op" window "$off" "$sum"
     rm -rf "$d"
     die "no-ack: a write was ACKNOWLEDGED in the window (a FINDING: the volume ran on one copy)"
   fi
@@ -230,6 +309,9 @@ cmd_wait_role() {
   while :; do
     if r=$(role_of "$s"); then
       set -- $r
+      if [[ "$want" == replica && "$1" == primary && "$3" == True ]]; then
+        die "wait-role: old node is primary and healthy at epoch $2"
+      fi
       if [[ "$2" == "$epoch" ]]; then
         if [[ "$want" == primary && "$1" == primary && "$3" == True ]]; then echo "primary at $epoch"; return 0; fi
         if [[ "$want" == replica && "$1" != primary && "$4" == replica_ready ]]; then echo "replica_ready at $epoch"; return 0; fi
@@ -312,7 +394,7 @@ cmd_install() {
   local pkg="$1" tag="$2" mip="$3" w r u
   check_tag "$tag"; w="$root/$tag"
   [[ ! -e "$w" ]] || die "install: $w exists: not fresh work"
-  for r in master volume; do
+  for r in master volume writer; do
     u=$(unit_of "$tag" "$r")
     [[ ! -e "$unitdir/$u.service" ]] || die "install: $unitdir/$u.service exists: not fresh work"
     ! unit_active "$u" || die "install: $u is running: not fresh work"
@@ -352,7 +434,7 @@ cmd_spec() {
 cmd_unit() {
   local tag="$1" role="$2"; shift 2
   check_tag "$tag"
-  [[ "$role" == master || "$role" == volume ]] || die "unit: role must be master or volume"
+  [[ "$role" == master || "$role" == volume || "$role" == writer ]] || die "unit: invalid role"
   [[ "${1:-}" == "--" ]] || die "unit TAG ROLE -- EXEC ARG..."; shift
   (( $# > 0 )) && [[ "$1" == /* ]] || die "unit: EXEC must be an absolute path"
   local a
@@ -380,6 +462,10 @@ RestartPreventExitStatus=78
 RestartSec=5s
 EOF
   sync
+  if [[ "$role" == writer ]]; then
+    printf '\n# Writer is never restarted or allowed to outlive its fault window.\nRestart=no\nRuntimeMaxSec=600\n' >> "$f"
+    sync
+  fi
   "$systemctl_bin" daemon-reload
   echo "unit: $f"
 }
@@ -401,7 +487,7 @@ cmd_cleanup() {
   [[ -f "$w/.r4-owner" && "$(cat "$w/.r4-owner")" == "$tag" ]] || die "cleanup: no ownership proof for $w; retained"
   rm -f "$w/.cleanup-ok"
   mkdir -p "$ev"
-  for r in master volume; do
+  for r in master volume writer; do
     u=$(unit_of "$tag" "$r")
     if [[ -e "$unitdir/$u.service" ]] || unit_active "$u"; then
       "$systemctl_bin" stop "$u" || echo "cleanup: stop $u failed" >&2
@@ -419,7 +505,7 @@ cmd_cleanup() {
     printf '%s\n' "$keep" > "$hosts"
   fi
   # The absence proof.
-  for r in master volume; do
+  for r in master volume writer; do
     u=$(unit_of "$tag" "$r")
     [[ ! -e "$unitdir/$u.service" ]] || { echo "cleanup: $u.service still present" >&2; bad=1; }
     if unit_active "$u"; then echo "cleanup: $u is still $("$systemctl_bin" is-active "$u" 2>/dev/null)" >&2; bad=1; fi
@@ -462,6 +548,9 @@ cmd_purge() {
 
 case "${1:-}" in
   write) shift; [[ $# -eq 4 ]] || die "write DEV LEDGER ROUND COUNT"; cmd_write "$@" ;;
+  stream) shift; [[ $# -eq 4 ]] || die "stream DEV LEDGER ROUND COUNT"; cmd_stream "$@" ;;
+  writer-ready) shift; [[ $# -eq 2 ]] || die "writer-ready TAG SECONDS"; cmd_writer_ready "$@" ;;
+  writer-stop) shift; [[ $# -eq 1 ]] || die "writer-stop TAG"; cmd_writer_stop "$@" ;;
   verify) shift; [[ $# -ge 2 ]] || die "verify DEV LEDGER [ROUND...]"; cmd_verify "$@" ;;
   drop-control) shift; [[ $# -eq 2 ]] || die "drop-control DEV LEDGER"; cmd_drop_control "$@" ;;
   no-ack) shift; [[ $# -eq 3 ]] || die "no-ack DEV LEDGER SECONDS"; cmd_no_ack "$@" ;;
@@ -476,5 +565,5 @@ case "${1:-}" in
   start) shift; [[ $# -eq 2 ]] || die "start TAG ROLE"; cmd_start "$@" ;;
   cleanup) shift; [[ $# -eq 1 ]] || die "cleanup TAG"; cmd_cleanup "$@" ;;
   purge) shift; [[ $# -eq 1 ]] || die "purge TAG"; cmd_purge "$@" ;;
-  *) die "usage: r4.sh write|verify|drop-control|no-ack|held|wait-role|client-check|dev|connect|install|spec|unit|start|cleanup|purge ..." ;;
+  *) die "usage: r4.sh write|stream|writer-ready|writer-stop|verify|drop-control|no-ack|held|wait-role|client-check|dev|connect|install|spec|unit|start|cleanup|purge ..." ;;
 esac

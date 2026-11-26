@@ -15,8 +15,10 @@
 #   P3  the operator's failover (sw-block ops failover --expect-current
 #       --confirm-old-node-off) moves the line through the fencing round:
 #       the target is primary at epoch e+1 (r4.sh wait-role primary).
-#   P4  every acknowledged write (ledger: round offset length sha256, logged
-#       only after the write returned) reads back from the new primary:
+#   P4  a writer runs through the power-off; intent precedes each write and
+#       ack follows success. An acked offset with later unacked attempts may
+#       hold its acked content or any of those attempts, and nothing else.
+#       Every other acknowledged offset reads back exactly from the new primary:
 #       0 mismatches (r4.sh verify); the red control drops one acked write
 #       and the check must FAIL (r4.sh drop-control).
 #   P4b rf=2 only: between the failover and the rejoin no write is
@@ -28,6 +30,13 @@
 #   P6  after the rejoin a new round of writes is all acknowledged, and every
 #       acked write, old and new, reads back (verify ... after-rejoin).
 # Every write round must be acknowledged in full (r4.sh write fails short).
+# The during-loss streaming round is the exception: I/O errors and unacked
+# attempts are expected around the fault; it must have acknowledged a write
+# before the fault, stay running through it, and stop before reconnecting.
+# P3 observes role/epoch and the operator answer; the fencing round itself is
+# inferred from that operator transition, not independently observed here.
+# P2 polls every five seconds: a transient status between polls is not seen;
+# a published line change is caught through its monotonically increasing epoch.
 # The device is found again by its NQN after every connect (r4.sh connect /
 # dev): exactly one namespace with a live path to the expected target.
 # The checkers C1-C3 do not judge this scenario in v1: it records no typed
@@ -243,11 +252,26 @@ phases:
           DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} {{ nvme_port }} 30) &&
           sudo bash $W/r4.sh write "$DEV" $W/ledger before {{ writes }}
 
+  - name: writer-through-loss
+    actions:
+      - action: exec
+        node: node-1
+        timeout: 1m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} 10) &&
+          sudo bash $W/r4.sh unit $T writer -- /bin/bash $W/r4.sh stream "$DEV" $W/ledger during-loss 0 &&
+          sudo bash $W/r4.sh start $T writer && sudo bash $W/r4.sh writer-ready $T 30
+
   - name: lose-the-primary
     actions:
       - action: cloud_vm_power                                   # P1
         node: node-1
         vm: node-2                  # the VM to power off
+      - action: exec
+        node: node-1
+        timeout: 1m
+        cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
 
   # P2: every survivor watched over the same whole window, at once.
   - name: hold
@@ -279,7 +303,7 @@ phases:
         timeout: 5m
         cmd: |
           bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo bash $W/r4.sh verify "$DEV" $W/ledger before | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
           R4STEP
       - action: exec                                             # P4b (rf=2)
         node: node-1
@@ -303,7 +327,7 @@ phases:
         timeout: 5m
         cmd: |
           bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before after-rejoin | sudo tee $W/verify-after-rejoin.txt
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss after-rejoin | sudo tee $W/verify-after-rejoin.txt
           R4STEP
 
   - name: collect
