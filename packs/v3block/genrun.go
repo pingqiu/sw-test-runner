@@ -73,6 +73,40 @@ func genExec(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 	return worst, nil
 }
 
+// genStep records one proposal and executes it: the gen_step record, an
+// observation of the volume before a negative operation, the operation through
+// genExec, and an observation after a refusal. v3_gen_run and v3_gen_replay
+// both run every step through here, so a replayed history has the same shape
+// as a recorded one.
+func genStep(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) (string, error) {
+	observe := func() error {
+		_, err := genExec(ctx, actx, node, GenOp{Action: "v3_op_observe", Volume: o.Volume, Params: map[string]string{"volume": o.Volume}})
+		return err
+	}
+	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
+	if o.Negative != "" {
+		step["negative"] = o.Negative
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
+		return "", err
+	}
+	if o.Negative != "" {
+		if err := observe(); err != nil {
+			return "", err
+		}
+	}
+	outcome, err := genExec(ctx, actx, node, o)
+	if err != nil {
+		return "", err
+	}
+	if outcome == tr.OutcomeRefused {
+		if err := observe(); err != nil {
+			return "", err
+		}
+	}
+	return outcome, nil
+}
+
 // genConfig reads the run's parameters.
 func genConfig(act tr.Action, actx *tr.ActionContext) (GenConfig, error) {
 	var c GenConfig
@@ -121,10 +155,6 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: g.Header()}); err != nil {
 		return nil, err
 	}
-	observe := func(vol string) error {
-		_, err := genExec(ctx, actx, act.Node, GenOp{Action: "v3_op_observe", Volume: vol, Params: map[string]string{"volume": vol}})
-		return err
-	}
 	for {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("v3_gen_run: %w after %d operations", ctx.Err(), g.no)
@@ -133,28 +163,11 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if !ok {
 			break
 		}
-		step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
-		if o.Negative != "" {
-			step["negative"] = o.Negative
-		}
-		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
-			return nil, err
-		}
-		if o.Negative != "" {
-			if err := observe(o.Volume); err != nil {
-				return nil, err
-			}
-		}
-		outcome, err := genExec(ctx, actx, act.Node, o)
+		outcome, err := genStep(ctx, actx, act.Node, o)
 		if err != nil {
 			return nil, fmt.Errorf("v3_gen_run: operation %d (%s %s): %w", o.No, o.Action, o.Volume, err)
 		}
 		g.Learn(o, outcome)
-		if outcome == tr.OutcomeRefused {
-			if err := observe(o.Volume); err != nil {
-				return nil, err
-			}
-		}
 	}
 	cov := g.Coverage()
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_coverage", Result: cov}); err != nil {
