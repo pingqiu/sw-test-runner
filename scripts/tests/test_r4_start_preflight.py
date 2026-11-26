@@ -1,6 +1,6 @@
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import tempfile
@@ -20,7 +20,7 @@ class R4StartPreflight(unittest.TestCase):
         scenario = yaml.safe_load((Path(__file__).resolve().parents[2]/'scenarios/v3block/r4-node-loss.yaml').read_text())
         action = next(p for p in scenario['phases'] if p['name'] == 'start')['actions'][0]
         for rf in ('2','3'):
-            role, argv = smoke.command(action, dict(scenario['env'],rf=rf,run_id='smoke'), Path('/tmp/smoke'))
+            role, argv = smoke.command(action, dict(scenario['env'],rf=rf,run_id='smoke'), PurePosixPath('/tmp/smoke'))
             self.assertEqual(role,'master')
             self.assertEqual(argv[argv.index('--expected-slots-per-volume')+1],rf)
             self.assertEqual(argv[argv.index('--lifecycle-product-loop-interval')+1],'100ms')
