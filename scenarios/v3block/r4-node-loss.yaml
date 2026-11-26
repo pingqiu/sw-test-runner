@@ -1,0 +1,347 @@
+# R4 node loss, standalone (systemd), 3 cloud VMs, mutual TLS.
+#
+# The release's manual-failover rule, end to end: a primary whose host loses
+# power is NOT replaced automatically; the operator's failover moves the line
+# through the fencing round; no acknowledged write is lost; the old primary,
+# powered on again, is fenced and rejoins as a replica.
+#
+# Pass line (stated before the run), each asserted below with a failing
+# control (packs/v3block/r4_scenario_test.go), for rf=3 and then rf=2:
+#   P1  the primary's VM (node-2) loses power abruptly (cloud_vm_power:
+#       az vm stop --skip-shutdown; the node no longer answers).
+#   P2  NO automatic promotion: for hold_seconds no survivor becomes primary
+#       and none leaves the line's epoch, every survivor watched over the
+#       same whole window (r4.sh held, one parallel phase).
+#   P3  the operator's failover (sw-block ops failover --expect-current
+#       --confirm-old-node-off) moves the line through the fencing round:
+#       the target is primary at epoch e+1 (r4.sh wait-role primary).
+#   P4  a writer runs through the power-off; intent precedes each write and
+#       ack follows success. An acked offset with later unacked attempts may
+#       hold its acked content or any of those attempts, and nothing else.
+#       Every other acknowledged offset reads back exactly from the new primary:
+#       0 mismatches (r4.sh verify); the red control drops one acked write
+#       and the check must FAIL (r4.sh drop-control).
+#   P4b rf=2 only: between the failover and the rejoin no write is
+#       acknowledged (r4.sh no-ack); an ack there is a finding, and a device
+#       or tool failure fails the step (it is not a refusal).
+#   P5  the old VM powered on (cloud_vm_power_restore proves a new boot); its
+#       blockvolume unit, started again, is fenced: it reports replica_ready
+#       at e+1 behind the new primary, never primary (r4.sh wait-role replica).
+#   P6  after the rejoin a new round of writes is all acknowledged, and every
+#       acked write, old and new, reads back (verify ... after-rejoin).
+# Every write round must be acknowledged in full (r4.sh write fails short).
+# The during-loss streaming round is the exception: I/O errors and unacked
+# attempts are expected around the fault; it must have acknowledged a write
+# before the fault, stay running through it, and stop before reconnecting.
+# P3 observes role/epoch and the operator answer; the fencing round itself is
+# inferred from that operator transition, not independently observed here.
+# P2 polls every five seconds: a transient status between polls is not seen;
+# a published line change is caught through its monotonically increasing epoch.
+# The device is found again by its NQN after every connect (r4.sh connect /
+# dev): exactly one namespace with a live path to the expected target.
+# The checkers C1-C3 do not judge this scenario in v1: it records no typed
+# operations; its verdict is these assertions.
+#
+# Hosts: the cloud run's inventory node-1..node-3, one VM each. node-1 runs
+# blockmaster and the client (kernel NVMe/TCP, native multipath); replicas:
+#   rf=3: r1 node-2 (the primary to lose), r2 node-1, r3 node-3
+#   rf=2: r1 node-2 (the primary to lose), r2 node-3
+# The cloud run passes each host's management and private (data) address as
+# -env values (n1_ip .. n3_ip, n1_data .. n3_data) with ssh_user and ssh_key.
+#
+# Everything a run owns is named by its tag, <run_id>-rf<rf>: the work dir
+# /var/lib/r4/<tag>, the units r4-<tag>-master and r4-<tag>-volume, the NQN,
+# the controller's /tmp/r4-<tag>. A host that already holds any of them, or a
+# blockmaster mapping, is refused (r4.sh install). The always phase stops the
+# units on every host, keeps their status and journal with the run's files,
+# removes them and proves them gone (r4.sh cleanup), then purges the work.
+#
+# The units are the run's own (r4.sh unit), not the installed deploy/systemd
+# units: root, flags inline, no sandboxing, written to /etc/systemd/system and
+# synced, and NOT enabled, so the rebooted node-2 starts its blockvolume only
+# when the rejoin says so. They keep the example units' restart policy
+# (Restart=on-failure, RestartPreventExitStatus=78: a final refusal is not
+# retried).
+#
+# Build provenance: the binaries are built on the controller from
+# `git archive product_head`, r4.sh is taken from runner_head, the scenario
+# file must equal its runner_head copy, and SHA256SUMS (checked on every host)
+# plus provenance.txt are collected into the bundle.
+#
+# Env values never nest {{ }}: the engine resolves an action's params once,
+# so every command names {{ run_id }}-rf{{ rf }} itself.
+#
+#   swblock run --allow-mutating -env rf=3 -env product_src=<checkout> \
+#     -env runner_src=$PWD -env product_head=<final RC sha> -env runner_head=<sha> \
+#     -env n1_ip=.. -env n2_ip=.. -env n3_ip=.. -env n1_data=.. -env n2_data=.. -env n3_data=.. \
+#     -env ssh_user=.. -env ssh_key=.. scenarios/v3block/r4-node-loss.yaml
+
+name: v3block-r4-node-loss
+timeout: 60m
+always_timeout: 10m
+
+env:
+  rf: "3"
+  product_src: ""
+  runner_src: ""
+  product_head: ""        # the final release candidate (40 hex)
+  runner_head: ""         # the runner commit this scenario and r4.sh come from (40 hex)
+  n1_ip: ""
+  n2_ip: ""
+  n3_ip: ""
+  n1_data: ""
+  n2_data: ""
+  n3_data: ""
+  ssh_user: "seaweed"
+  ssh_key: ""
+  hold_seconds: "240"
+  writes: "64"
+  master_port: "19600"
+  data_port: "19601"
+  ctrl_port: "19602"
+  status_port: "19603"
+  nvme_port: "4420"
+
+topology:
+  nodes:
+    controller: { is_native: true }
+    node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+    node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+    node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+
+phases:
+  - name: preflight
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.RF: "{{ rf }}"
+        cmd: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          def show(repo,sha,path):
+              if not re.fullmatch('[0-9a-f]{40}',sha): raise SystemExit('full source pin required')
+              return subprocess.check_output(['git','-C',repo,'show',sha+':'+path],text=True,timeout=20)
+          src,head,rs,rhead=(os.environ[k] for k in ('SRC','HEAD','RS','RHEAD'))
+          assert os.environ['RF'] in ('2','3'), 'rf must be 2 or 3'
+          files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
+          for flag in ('allow-external-nvme-bind','master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
+              assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
+          for flag in ('failback-runtime-rpc','tls-cert','role-file','launcher-replication-ack'):
+              assert '"'+flag+'"' in files['cmd/blockmaster/main.go'], 'removed master flag '+flag
+          for flag in ('target-data','target-ctrl','expect-current','confirm-old-node-off'):
+              assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
+          assert 'RestartPreventExitStatus=78' in files['deploy/systemd/sw-blockvolume.service']
+          from pathlib import Path
+          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh'):
+              assert Path(rs,p).read_text()==show(rs,rhead,p), 'runner working copy differs from pin: '+p
+          print('PREFLIGHT PASS product='+head+' runner='+rhead+' rf='+os.environ['RF'])
+          PY
+  - name: build
+    actions:
+      # Binaries and certificates are made once on the controller, from the
+      # pinned commits (git archive / git show, never the working tree), and
+      # uploaded (the runner repository is private: no fetch on the VMs).
+      - action: exec
+        node: controller
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.L: "/tmp/r4-{{ run_id }}-rf{{ rf }}"
+        cmd: |
+          set -eu
+          hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
+          hex40 "$HEAD" || { echo "product_head is not a full sha" >&2; exit 2; }
+          hex40 "$RHEAD" || { echo "runner_head is not a full sha" >&2; exit 2; }
+          git -C "$SRC" cat-file -e "$HEAD^{commit}"
+          git -C "$RS" cat-file -e "$RHEAD^{commit}"
+          git -C "$RS" diff --quiet "$RHEAD" -- scenarios/v3block/r4-node-loss.yaml || { echo "the scenario being run is not runner_head's" >&2; exit 2; }
+          [ ! -e "$L" ] || { echo "$L exists: not fresh work" >&2; exit 2; }
+          mkdir -p "$L/src" "$L/pkg/bin"
+          git -C "$SRC" archive -o "$L/src.tar" "$HEAD" && tar -xf "$L/src.tar" -C "$L/src"
+          for b in blockmaster blockvolume sw-block; do (cd "$L/src" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$L/pkg/bin/$b" ./cmd/$b); done
+          git -C "$RS" show "$RHEAD:scenarios/v3block/r4.sh" > "$L/pkg/r4.sh"
+          # Development certificates from the product's script (files only):
+          # blockmaster's carries DNS:blockmaster, so every node maps that
+          # name to node-1's private address and dials blockmaster by name.
+          SW_BLOCK_TLS_APPLY=0 bash "$L/src/scripts/k8s-alpha-certs.sh" standalone "$L/pkg/tls" s1 s2 s3 >/dev/null
+          (cd "$L/pkg" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+          tar -C "$L/pkg" -czf "$L/r4-pkg.tgz" .
+          { echo "product_head=$HEAD"; echo "runner_head=$RHEAD"; go version
+            grep -E ' \./(bin/|r4\.sh)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
+          cat "$L/provenance.txt"
+      - {action: upload_path, node: node-1, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      - {action: upload_path, node: node-2, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      - {action: upload_path, node: node-3, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      # Fresh work on every host, the package checked against its SHA256SUMS.
+      - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      # The client: nvme-cli, nvme_tcp and native multipath, before any I/O.
+      - {action: exec, node: node-1, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+
+  - name: start
+    actions:
+      # blockmaster on node-1, the volume's replicas per rf, each as the run's
+      # own persistent unit (see the header).
+      - action: exec
+        node: node-1
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh spec $T {{ rf }} {{ n1_data }} {{ n2_data }} {{ n3_data }} {{ data_port }} {{ ctrl_port }} &&
+          sudo bash $W/r4.sh unit $T master -- $W/bin/blockmaster
+          --authority-store $W/master/authority --lifecycle-store $W/master/lifecycle
+          --cluster-spec $W/cluster-spec.yaml --expected-slots-per-volume {{ rf }}
+          --launcher-replication-ack sync-quorum --listen 0.0.0.0:{{ master_port }}
+          --tls-cert $W/tls/master.crt --tls-key $W/tls/master.key --tls-client-ca $W/tls/ca.crt
+          --role-file $W/tls/roles --failback-runtime-rpc &&
+          sudo bash $W/r4.sh start $T master
+      - action: exec
+        node: node-2
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s2 --volume-id v1 --replica-id r1
+          --data-addr {{ n2_data }}:{{ data_port }} --ctrl-addr {{ n2_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen {{ n2_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s2.crt --master-tls-key $W/tls/node-s2.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      - action: exec
+        node: node-3
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2);
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s3 --volume-id v1 --replica-id $R
+          --data-addr {{ n3_data }}:{{ data_port }} --ctrl-addr {{ n3_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen {{ n3_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s3.crt --master-tls-key $W/tls/node-s3.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      - action: exec
+        node: node-1
+        timeout: 2m
+        cmd: >-
+          [ {{ rf }} = 3 ] || exit 0; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s1 --volume-id v1 --replica-id r2
+          --data-addr {{ n1_data }}:{{ data_port }} --ctrl-addr {{ n1_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen {{ n1_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s1.crt --master-tls-key $W/tls/node-s1.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      # r1 primary at epoch 1 (creation complete: its first ready answer).
+      - {action: exec, node: node-2, timeout: 3m, cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 1 150"}
+
+  - name: write-before-loss
+    actions:
+      - action: exec
+        node: node-1
+        timeout: 3m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} {{ nvme_port }} 30) &&
+          sudo bash $W/r4.sh write "$DEV" $W/ledger before {{ writes }}
+
+  - name: writer-through-loss
+    actions:
+      - action: exec
+        node: node-1
+        timeout: 1m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} 10) &&
+          sudo bash $W/r4.sh unit $T writer -- /bin/bash $W/r4.sh stream "$DEV" $W/ledger during-loss 0 &&
+          sudo bash $W/r4.sh start $T writer && sudo bash $W/r4.sh writer-ready $T 30
+
+  - name: lose-the-primary
+    actions:
+      - action: cloud_vm_power                                   # P1
+        node: node-1
+        vm: node-2                  # the VM to power off
+      - action: exec
+        node: node-1
+        timeout: 1m
+        cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
+
+  # P2: every survivor watched over the same whole window, at once.
+  - name: hold
+    parallel: true
+    actions:
+      - action: exec                                             # r3 (rf=3) / r2 (rf=2)
+        node: node-3
+        timeout: 10m
+        cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
+      - action: exec                                             # r2 (rf=3 only)
+        node: node-1
+        timeout: 10m
+        cmd: "[ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh held 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
+
+  - name: operator-failover
+    actions:
+      - action: exec                                             # P3
+        node: node-1
+        timeout: 3m
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); sudo env SW_BLOCK_TLS_CERT=$W/tls/failback-executor.crt SW_BLOCK_TLS_KEY=$W/tls/failback-executor.key SW_BLOCK_TLS_CA=$W/tls/ca.crt $W/bin/sw-block ops failover --master blockmaster:{{ master_port }} --volume v1 --target r2 --target-data "$DATA:{{ data_port }}" --target-ctrl "$DATA:{{ ctrl_port }}" --expect-current r1@1 --confirm-old-node-off v1 | sudo tee $W/failover.txt
+          R4STEP
+      # The new primary is r2: on node-1 (rf=3) or node-3 (rf=2).
+      - {action: exec, node: node-1, timeout: 3m, cmd: "[ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
+      - {action: exec, node: node-3, timeout: 3m, cmd: "[ {{ rf }} = 2 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
+      - action: exec                                             # P4 + its red control
+        node: node-1
+        timeout: 5m
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
+          R4STEP
+      - action: exec                                             # P4b (rf=2)
+        node: node-1
+        timeout: 2m
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          [ {{ rf }} = 2 ] || exit 0; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n3_data }} 10) && sudo bash $W/r4.sh no-ack "$DEV" $W/ledger 30 | sudo tee $W/no-ack.txt
+          R4STEP
+
+  - name: rejoin
+    actions:
+      - action: cloud_vm_power_restore                           # P5: a new boot
+        node: node-1
+        vm: node-2                  # the VM powered off in P1
+      # The unit file survived the power loss (written and synced at start);
+      # it is not enabled, so the blockvolume starts here, not at boot.
+      - {action: exec, node: node-2, timeout: 2m, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh start {{ run_id }}-rf{{ rf }} volume"}
+      - {action: exec, node: node-2, timeout: 5m, cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240"}
+      - action: exec                                             # P6
+        node: node-1
+        timeout: 5m
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss after-rejoin | sudo tee $W/verify-after-rejoin.txt
+          R4STEP
+
+  - name: collect
+    always: true
+    actions:
+      # Stop and prove gone on every host (evidence kept), collect, purge.
+      - {action: exec, node: node-1, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: collect_path, node: node-1, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-1-evidence"}
+      - {action: collect_path, node: node-2, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-2-evidence"}
+      - {action: collect_path, node: node-3, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-3-evidence"}
+      - {action: collect_path, node: controller, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/provenance.txt"}
+      - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || exit 0; sudo bash $S purge $T"}
+      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || exit 0; sudo bash $S purge $T"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || exit 0; sudo bash $S purge $T"}
+      - {action: exec, node: controller, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; rm -rf \"${L:?}\""}
