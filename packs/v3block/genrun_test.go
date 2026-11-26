@@ -114,8 +114,8 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(actx.Bundle.Dir, "gen-coverage.json")); err != nil {
 		t.Fatal(err)
 	}
-	// Every operation record follows its gen_step; a negative is preceded by an
-	// observation of its volume and its refusal followed by one.
+	// Every operation record follows its gen_step; a negative is preceded by two
+	// observations of its volume (C5's baseline pair) and followed by one.
 	steps, refusals := 0, 0
 	for i, r := range recs {
 		if r.Verb != "gen_step" {
@@ -124,12 +124,14 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 		steps++
 		next := recs[i+1]
 		if r.Result["negative"] != nil {
-			if next.Verb != "observe" || next.Volume != r.Volume {
-				t.Fatalf("negative step %v not observed before: %+v", r.Result, next)
+			for _, o := range recs[i+1 : i+3] {
+				if o.Verb != "observe" || o.Volume != r.Volume {
+					t.Fatalf("negative step %v not observed twice before: %+v", r.Result, o)
+				}
 			}
 			refusals++
 			// invoke, complete(refused), then the observation after it
-			if recs[i+2].Kind != tr.HistoryInvoke || recs[i+3].Outcome != tr.OutcomeRefused || recs[i+4].Verb != "observe" {
+			if recs[i+3].Kind != tr.HistoryInvoke || recs[i+4].Outcome != tr.OutcomeRefused || recs[i+5].Verb != "observe" || recs[i+5].Volume != r.Volume {
 				t.Fatalf("refusal at step %v not observed after", r.Result)
 			}
 		} else if next.Kind != tr.HistoryInvoke {

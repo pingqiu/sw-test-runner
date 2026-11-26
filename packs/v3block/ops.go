@@ -866,6 +866,13 @@ func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	if out, _, c, e2 := e.workspace(ctx, node, v.Name, "show"); e2 == nil {
 		res["workspace"] = map[string]any{"exit": c, "text": firstLines(out, 12)}
 	}
+	// The volume's directories in the filer, whatever its layout: a name that
+	// never existed is observed as having none.
+	if dirs, why := listDirs(ctx, node, e.filer, e.chunkPath, v.Name+"-"); why != "" {
+		res["dirs_error"] = why
+	} else {
+		res["dirs"] = dirs
+	}
 	if v.LayoutID != "" {
 		files, why := listFiles(ctx, node, e.filer, e.chunkPath, v.Name+"-"+v.LayoutID[:8])
 		if why != "" {
@@ -883,6 +890,38 @@ func firstLines(s string, n int) []string {
 		lines = lines[:n]
 	}
 	return lines
+}
+
+// listDirs lists the names directly under the chunk path that start with
+// prefix (one level, through the filer's HTTP listing). A missing chunk path
+// is an empty list.
+func listDirs(ctx context.Context, node runner, filer, chunkPath, prefix string) ([]string, string) {
+	host, gport, ok := strings.Cut(filer, ":")
+	gp, err := strconv.Atoi(gport)
+	if !ok || err != nil || gp <= 10000 {
+		return nil, "filer has no SeaweedFS gRPC port"
+	}
+	base := fmt.Sprintf("http://%s:%d%s", host, gp-10000, strings.TrimRight(chunkPath, "/"))
+	py := `import json,sys,urllib.request,urllib.parse,urllib.error
+d,pre=sys.argv[1],sys.argv[2]; out=[]; last=""
+while True:
+    q=urllib.parse.urlencode({"limit":1000,"lastFileName":last,"namePattern":pre+"*"})
+    try:
+        r=json.load(urllib.request.urlopen(urllib.request.Request(d+"/?"+q,headers={"Accept":"application/json"}),timeout=10))
+    except urllib.error.HTTPError as e:
+        if e.code==404 and not last: break
+        raise
+    es=r.get("Entries") or []
+    out+=[e["FullPath"].rsplit("/",1)[1] for e in es]
+    if not r.get("ShouldDisplayLoadMore") or not es: break
+    last=es[-1]["FullPath"].rsplit("/",1)[1]
+print(json.dumps(sorted(n for n in out if n.startswith(pre))))`
+	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("python3 -I -c %s %s %s", shellQuote(py), shellQuote(base), shellQuote(prefix)))
+	var dirs []string
+	if err != nil || code != 0 || json.Unmarshal([]byte(strings.TrimSpace(stdout)), &dirs) != nil {
+		return nil, "listing: " + firstLine(stderr)
+	}
+	return dirs, ""
 }
 
 // listFiles lists every file below the volume's directory through the

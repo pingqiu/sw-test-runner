@@ -31,15 +31,27 @@ code is 0 only when every checker passes.
       the volume after the refusal's complete, with no operation touching the
       volume invoked in between. An operation touches its volume, a restore
       also its source, and a fault operation every volume (the history does
-      not map volumes to VMs). Compared: result.head.gen (any write to HEAD
-      moves the generation) and result.files as a sorted list. Both must be
-      recorded in both observations (HEAD a record with an integer gen, files
-      a list): an observation with show_error, an unreadable HEAD or a
-      listing_error proves nothing either way. FAIL if a judged refusal shows
-      a different generation or listing; a refusal without both observations
-      is not judged (a note). UNKNOWN if there were refusals and none could be
-      judged; PASS if one was judged and none changed anything; FAIL (not
-      exercised) if there was no refusal at all, like the other checkers
+      not map volumes to VMs). Compared, the whole observed state: HEAD
+      (generation, epoch, holder, state) or the show error's code, the
+      control plane's workspace answer (exit and text), the volume's
+      directories (result.dirs, so a name that never existed is observed as
+      having none) and its file listing (result.files). A part recorded in
+      neither observation is not compared and is named in a note; a part
+      recorded in one only, an unreadable HEAD, or a listing error leaves the
+      refusal not judged.
+      BASELINE: two consecutive observations of a volume with no operation
+      touching it invoked between them must show the same state; the product
+      works in the background (checkpoint publishing, cleaning), and a
+      difference there makes C5 UNKNOWN for the run, and so does a history
+      with refusals but no such pair.
+      Each refusal belongs to a LIMIT: the generator's gen_step names the
+      limit a negative operation probes; other refusals are "ordinary <verb>".
+      The findings report judged / refusals per limit. FAIL if a judged
+      refusal shows a different state; UNKNOWN if a limit that occurred has
+      no judged refusal; PASS only if every limit that occurred was judged at
+      least once and none changed anything; FAIL (not exercised) if there was
+      no refusal at all, like the other checkers. A negative operation that
+      was not refused is listed in a note (it is not C5's to judge)
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
@@ -505,16 +517,84 @@ def touches(inv, vol):
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
+STATE_PARTS = ('head', 'workspace', 'dirs', 'files')
+
+
 def observed_state(obs):
-    """(HEAD generation, sorted file listing) of an observation, or the reason
-    it records no comparable state."""
+    """The comparable state of an observation: {part: value} for each part it
+    records, and {part: why} for each part it records but cannot compare."""
     res = obs.get('result') or {}
-    head, files = res.get('head'), res.get('files')
-    if not isinstance(head, dict) or not isinstance(head.get('gen'), int) or isinstance(head.get('gen'), bool):
-        return None, 'no HEAD generation (%r)' % (head if head is not None else res.get('show_error'))
-    if not isinstance(files, list):
-        return None, 'no file listing (%s)' % res.get('listing_error', 'none recorded')
-    return (head['gen'], sorted(files)), None
+    state, bad = {}, {}
+    head = res.get('head')
+    if isinstance(head, dict) and isinstance(head.get('gen'), int) and not isinstance(head.get('gen'), bool):
+        state['head'] = ('head', head.get('gen'), head.get('epoch'), head.get('holder'), head.get('state'))
+    elif isinstance(res.get('show_error'), dict):
+        state['head'] = ('show_error', res['show_error'].get('code'))
+    elif head is not None:
+        bad['head'] = 'HEAD %r' % (head,)
+    ws = res.get('workspace')
+    if isinstance(ws, dict):
+        state['workspace'] = (ws.get('exit'), ws.get('text'))
+    for part in ('dirs', 'files'):
+        if isinstance(res.get(part), list):
+            state[part] = tuple(sorted(res[part]))
+        elif (part + '_error' if part == 'dirs' else 'listing_error') in res:
+            bad[part] = res.get(part + '_error' if part == 'dirs' else 'listing_error')
+    return state, bad
+
+
+def state_diff(a, b):
+    """The parts in which two comparable states differ, and the parts not
+    compared because neither records them, or (None, why) when they cannot be
+    compared."""
+    (sa, ba), (sb, bb) = a, b
+    if ba or bb:
+        return None, 'records %s' % '; '.join('%s: %s' % kv for kv in sorted({**ba, **bb}.items()))
+    one = sorted(set(sa) ^ set(sb))
+    if one:
+        return None, 'records %s in one observation only' % ', '.join(one)
+    return [p for p in STATE_PARTS if p in sa and sa[p] != sb[p]], [p for p in STATE_PARTS if p not in sa]
+
+
+def show_part(state, part):
+    v = state[0].get(part)
+    if part in ('dirs', 'files'):
+        return '%d entries' % len(v)
+    return repr(v)[:120]
+
+
+def limits_of(recs):
+    """{invoke seq: limit}: the limit the generator's latest gen_step names for
+    the operations it proposed, else "ordinary <verb>"."""
+    out, step = {}, None
+    for r in recs:
+        if r['kind'] == 'observe' and r.get('verb') == 'gen_step':
+            step = (r.get('result') or {}).get('negative')
+        elif r['kind'] == 'invoke':
+            out[r['seq']] = step if step else 'ordinary %s' % r['verb']
+    return out
+
+
+def baseline(recs):
+    """(pairs checked, findings): every two consecutive observations of a
+    volume with no operation touching it invoked between them."""
+    last, checked, f = {}, 0, []
+    for r in recs:
+        if r['kind'] == 'invoke':
+            for vol in list(last):
+                if touches(r, vol):
+                    del last[vol]
+        elif r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume'):
+            vol = r['volume']
+            if vol in last:
+                diff, _ = state_diff(observed_state(last[vol]), observed_state(r))
+                if diff is not None:
+                    checked += 1
+                    if diff:
+                        f.append('baseline: %s changed with no operation on it (%s; observations seq %d, %d): the product works in the background here, C5 cannot lay a change to a refusal'
+                                 % (vol, ', '.join(diff), last[vol]['seq'], r['seq']))
+            last[vol] = r
+    return checked, f
 
 
 @unknown_on_overlap
@@ -528,9 +608,16 @@ def c5(recs):
     if not refusals:
         return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
-    f, notes, judged = [], [], 0
+    limit = limits_of(recs)
+    f, notes, gaps = [], [], set()
+    per = {}   # limit -> [refusals, judged]
+    for inv, comp in ops_:
+        if comp is not None and comp['outcome'] != 'refused' and (inv.get('args') or {}).get('expect') == 'refused':
+            notes.append('negative not refused: seq %d %s %s (%s) answered %s' % (inv['seq'], inv['verb'], inv.get('volume'), limit[inv['seq']], comp['outcome']))
     for inv, comp in refusals:
         vol = inv.get('volume')
+        lim = limit[inv['seq']]
+        per.setdefault(lim, [0, 0])[0] += 1
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], vol or '(no volume)')
         if not vol:
             notes.append('not judged: %s: an operation on no volume' % name)
@@ -554,22 +641,28 @@ def c5(recs):
         if before is None or after is None:
             notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
             continue
-        (b, bwhy), (a, awhy) = observed_state(before), observed_state(after)
-        if b is None or a is None:
-            notes.append('not judged: %s: observation seq %d records %s' % (name, (before if b is None else after)['seq'], bwhy or awhy))
+        b, a = observed_state(before), observed_state(after)
+        diff, missing = state_diff(b, a)
+        if diff is None:
+            notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
             continue
-        judged += 1
-        if b[0] != a[0]:
-            f.append('%s refused but HEAD generation moved %d -> %d (observations seq %d, %d)' % (name, b[0], a[0], before['seq'], after['seq']))
-        if b[1] != a[1]:
-            gained, lost = sorted(set(a[1]) - set(b[1])), sorted(set(b[1]) - set(a[1]))
-            f.append('%s refused but its file listing changed: gained %s, lost %s (observations seq %d, %d)'
-                     % (name, ', '.join(gained[:8]) or 'none', ', '.join(lost[:8]) or 'none', before['seq'], after['seq']))
+        gaps.update(missing)
+        per[lim][1] += 1
+        for part in diff:
+            f.append('%s (%s) refused but its %s changed: %s -> %s (observations seq %d, %d)'
+                     % (name, lim, part, show_part(b, part), show_part(a, part), before['seq'], after['seq']))
+    report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
+    if gaps:
+        notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
+    checked, bf = baseline(recs)
+    if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
+        return {'verdict': 'UNKNOWN', 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:
-        return {'verdict': 'FAIL', 'findings': f + notes}
-    if not judged:
-        return {'verdict': 'UNKNOWN', 'findings': notes + ['%d refusal(s), none judged' % len(refusals)]}
-    return {'verdict': 'PASS', 'findings': notes}
+        return {'verdict': 'FAIL', 'findings': f + report + notes}
+    unjudged = [lim for lim, (n, j) in sorted(per.items()) if not j]
+    if unjudged:
+        return {'verdict': 'UNKNOWN', 'findings': ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] + report + notes}
+    return {'verdict': 'PASS', 'findings': report + notes}
 
 
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C7': c7}

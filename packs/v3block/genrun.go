@@ -10,9 +10,10 @@ package v3block
 //   - before each operation, an observe record "gen_step": its number,
 //     action, params and the limit a negative probes. That is the replay
 //     script, and it ties every operation record to its proposal;
-//   - an observation of the volume before every negative operation and after
-//     every refusal, so C5 ("a refused operation changed nothing") is judged
-//     from two observations around it;
+//   - two observations of the volume before every negative operation (the
+//     first pair is C5's baseline: equal, with nothing between them) and one
+//     after every negative operation and every refusal, so C5 ("a refused
+//     operation changed nothing") is judged from the observations around it;
 //   - last, an observe record "gen_coverage" (also written to the bundle as
 //     gen-coverage.json).
 // It stops on a runner error (a handler error), never on a product answer.
@@ -94,16 +95,22 @@ func genStep(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
 		return "", err
 	}
+	// Two observations before a negative operation: with nothing between
+	// them they must be equal (C5's baseline: the product's background work
+	// shows there, not at the refusal), and the second is the refusal's
+	// "before".
 	if o.Negative != "" {
-		if err := observe(); err != nil {
-			return "", err
+		for i := 0; i < 2; i++ {
+			if err := observe(); err != nil {
+				return "", err
+			}
 		}
 	}
 	outcome, err := genExec(ctx, actx, node, o)
 	if err != nil {
 		return "", err
 	}
-	if outcome == tr.OutcomeRefused {
+	if outcome == tr.OutcomeRefused || o.Negative != "" {
 		if err := observe(); err != nil {
 			return "", err
 		}
