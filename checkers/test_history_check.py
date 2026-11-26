@@ -600,7 +600,7 @@ NEG = {'expect': 'refused'}
 
 
 BASE = (('obs', 'v0', 1, FILES), ('obs', 'v0', 1, FILES))   # a baseline pair on another volume
-WS = {'workspace': {'exit': 0, 'text': 'v1 serving epoch 1'}, 'dirs': ['v1-0123abcd']}
+WS = {'workspace': {'exit': 0, 'text': 'v1 serving epoch 1'}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
 
 
 class C5(unittest.TestCase):
@@ -633,7 +633,7 @@ class C5(unittest.TestCase):
 
     def test_a_control_plane_change_fails(self):
         # A refused delete that left the control plane changed (e.g. reserved).
-        moved = {'workspace': {'exit': 0, 'text': 'v1 deleting (reserved)'}, 'dirs': WS['dirs']}
+        moved = {'workspace': {'exit': 0, 'text': 'v1 deleting (reserved)'}, 'dirs': WS['dirs'], 'snapshots': []}
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, moved))
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its workspace changed', v['findings'][0])
@@ -654,6 +654,20 @@ class C5(unittest.TestCase):
         v = hc.check(dump(recs))['C5']
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its dirs changed', v['findings'][0])
+
+    def test_red_a_refusal_that_changed_the_snapshot_names(self):
+        snaps = dict(WS, snapshots=['s1'])
+        unread = {k: v for k, v in WS.items() if k != 'snapshots'}
+        unread['snapshots_error'] = 'chunk show: HEAD unreadable'
+        v = self.c5(('obs', 'v1', 4, FILES, snaps), ('snapshot_delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, snaps))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        v = self.c5(('obs', 'v1', 4, FILES, snaps), ('snapshot_delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, dict(WS, snapshots=[])))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('its snapshots changed', v['findings'][0])
+        # an observation that could not read the names proves nothing either way
+        v = self.c5(('obs', 'v1', 4, FILES, snaps), ('snapshot_delete', 'v1', NEG, 'refused'),
+                    ('obs', 'v1', 4, FILES, unread))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
 
     def test_a_part_in_one_observation_only_is_not_judged(self):
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))
@@ -912,6 +926,48 @@ class C6(unittest.TestCase):
     def test_red_an_unknown_snapshot_without_an_observation_before_it(self):
         self.assert_c6('FAIL', ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
                        ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), contains='no clean observation')
+
+    def test_the_root_rule_is_named_when_it_judged(self):
+        v = self.assert_c6('PASS', ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}),
+                           KILL, RESTART, ('healthy', True), ('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1, ROOT2])))
+        self.assertTrue(any('placed took effect: by root objects' in x for x in v['findings']), v)
+
+    def snap(self, before, after, roots_after):
+        return self.c6(('obs', 'v1', dict(live(['HEAD', 'VOLUME', ROOT1]), snapshots=before)), ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}),
+                       KILL, RESTART, ('healthy', True), ('obs', 'v1', dict(live(['HEAD', 'VOLUME'] + roots_after), snapshots=after)))
+
+    def test_an_unknown_snapshot_placed_by_its_name_passes(self):
+        for after in (['s0', 's1'], ['s0']):
+            v = self.snap(['s0'], after, [ROOT1, ROOT2])
+            self.assertEqual(v['verdict'], 'PASS', v)
+            self.assertTrue(any('by snapshot names' in x for x in v['findings']), v)
+
+    def test_red_names_judge_over_roots(self):
+        # A new root but the name absent: by names it did not take effect;
+        # no new root but the name present: by names it took effect. The
+        # notes prove the names decided, not the roots.
+        v = self.snap([], [], [ROOT1, ROOT2])
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertTrue(any("placed did not: by snapshot names: 's1' absent" in x for x in v['findings']), v)
+        v = self.snap([], ['s1'], [ROOT1])
+        self.assertTrue(any("placed took effect: by snapshot names: 's1' present" in x for x in v['findings']), v)
+        # a root lost, which the root rule fails, is not what names judge
+        self.assertEqual(self.snap([], ['s1'], [ROOT2])['verdict'], 'PASS')
+
+    def test_red_an_unknown_snapshot_that_lost_another_name(self):
+        v = self.snap(['s0'], ['s1'], [ROOT1, ROOT2])
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('other snapshots lost: s0', v['findings'][0])
+
+    def test_red_snapshot_names_in_one_observation_only_or_already_present(self):
+        recs = m2(('obs', 'v1', live(['HEAD', 'VOLUME', ROOT1])), ('snapshot', 'v1', {'name': 's1'}, 'unknown', {}),
+                  KILL, RESTART, ('healthy', True), ('obs', 'v1', dict(live(['HEAD', 'VOLUME', ROOT1, ROOT2]), snapshots=['s1'])))
+        v = hc.check(dump(recs))['C6']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('recorded by one observation only', v['findings'][0])
+        v = self.snap(['s1'], ['s1'], [ROOT1, ROOT2])
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('already present before it', v['findings'][0])
 
     # deletes
     def test_an_unknown_delete_placed_by_status_and_listing_passes(self):

@@ -948,27 +948,7 @@ func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	res := map[string]any{}
 	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
 		shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
-	if err == nil && code == 0 {
-		var body struct {
-			Head *struct {
-				Gen    uint64
-				Epoch  uint64
-				Holder string
-				State  string
-			} `json:"head"`
-		}
-		if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) == nil && body.Head != nil {
-			res["head"] = map[string]any{"gen": body.Head.Gen, "epoch": body.Head.Epoch, "holder": body.Head.Holder, "state": body.Head.State}
-		} else {
-			res["head"] = "unreadable"
-		}
-	} else {
-		var eb struct {
-			Code string `json:"code"`
-		}
-		_ = json.Unmarshal([]byte(strings.TrimSpace(stdout)), &eb)
-		res["show_error"] = map[string]any{"exit": code, "code": eb.Code}
-	}
+	observeChunkShow(res, stdout, code, err)
 	if out, _, c, e2 := e.workspace(ctx, node, v.Name, "show"); e2 == nil {
 		res["workspace"] = map[string]any{"exit": c, "text": firstLines(out, 12)}
 	}
@@ -988,6 +968,48 @@ func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 		}
 	}
 	return map[string]string{"value": "observed"}, actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: e.client, Volume: v.Name, Verb: "observe", Result: res})
+}
+
+// observeChunkShow records the answer of `ops chunk show`: HEAD's generation,
+// epoch, holder and state as "head", and the names of HEAD's snapshots map
+// (sorted; empty when HEAD holds none) as "snapshots". The command prints
+// the product's decoded HEAD, whose snapshots map is the volume's snapshot
+// list. Without a readable HEAD there is no list: "snapshots_error" says why.
+func observeChunkShow(res map[string]any, stdout string, code int, err error) {
+	if err != nil || code != 0 {
+		var eb struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal([]byte(strings.TrimSpace(stdout)), &eb)
+		res["show_error"] = map[string]any{"exit": code, "code": eb.Code}
+		if err != nil {
+			res["snapshots_error"] = fmt.Sprintf("chunk show: %v", err)
+		} else {
+			res["snapshots_error"] = fmt.Sprintf("chunk show: exit %d code %q", code, eb.Code)
+		}
+		return
+	}
+	var body struct {
+		Head *struct {
+			Gen       uint64
+			Epoch     uint64
+			Holder    string
+			State     string
+			Snapshots map[string]json.RawMessage
+		} `json:"head"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) != nil || body.Head == nil {
+		res["head"] = "unreadable"
+		res["snapshots_error"] = "chunk show: HEAD unreadable"
+		return
+	}
+	res["head"] = map[string]any{"gen": body.Head.Gen, "epoch": body.Head.Epoch, "holder": body.Head.Holder, "state": body.Head.State}
+	names := make([]string, 0, len(body.Head.Snapshots))
+	for n := range body.Head.Snapshots {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	res["snapshots"] = names
 }
 
 func firstLines(s string, n int) []string {

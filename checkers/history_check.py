@@ -32,8 +32,8 @@ code is 0 only when every checker passes.
       volume invoked in between. An operation touches its volume, a restore
       also its source, and a fault operation every volume (the history does
       not map volumes to VMs). Compared, the whole observed state: HEAD
-      (generation, epoch, holder, state) or the show error's code, the
-      control plane's workspace answer (exit and text), the volume's
+      (generation, epoch, holder, state) or the show error's code, HEAD's
+      snapshot names (result.snapshots), the control plane's workspace answer (exit and text), the volume's
       directories (result.dirs, so a name that never existed is observed as
       having none) and its file listing (result.files). A part recorded in
       neither observation is not compared and is named in a note; a part
@@ -80,8 +80,11 @@ code is 0 only when every checker passes.
       an observation after that point (after its completion when the point is
       the end): a write by an ok read of the same block returning its value
       (took effect) or a value the block allowed before it (did not); a
-      snapshot by the volume's root/ objects against the observation before
-      it (a new root: took effect; the same roots: did not); a delete, move
+      snapshot by HEAD's snapshot names against the observation before it
+      (its name present: took effect; absent: did not; another name lost: a
+      third state), or, only when neither observation records the names,
+      by the volume's root/ objects (a new root: took effect; the same
+      roots: did not), the note saying which rule judged it; a delete, move
       or restore by the status (HEAD) and the listing. FAIL on a third state,
       on an unknown no clean observation places (none after the point, or the
       volume or block changed in between), on a run whose last healthy
@@ -548,7 +551,7 @@ def touches(inv, vol):
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
-STATE_PARTS = ('head', 'workspace', 'dirs', 'files')
+STATE_PARTS = ('head', 'snapshots', 'workspace', 'dirs', 'files')
 
 
 def observed_state(obs):
@@ -563,6 +566,14 @@ def observed_state(obs):
         state['head'] = ('show_error', res['show_error'].get('code'))
     elif head is not None:
         bad['head'] = 'HEAD %r' % (head,)
+    # HEAD's snapshot names; a volume whose show answered an error code has no
+    # HEAD and so no snapshots, a state like any other.
+    if isinstance(res.get('snapshots'), list):
+        state['snapshots'] = tuple(sorted(res['snapshots']))
+    elif isinstance(res.get('show_error'), dict) and 'snapshots_error' in res:
+        state['snapshots'] = ('no HEAD',)
+    elif 'snapshots_error' in res:
+        bad['snapshots'] = res['snapshots_error']
     ws = res.get('workspace')
     if isinstance(ws, dict):
         state['workspace'] = (ws.get('exit'), ws.get('text'))
@@ -938,14 +949,28 @@ def _place_by_status(inv, obs, base):
     head, files = res.get('head'), res.get('files')
     err = (res.get('show_error') or {}).get('code') if isinstance(res.get('show_error'), dict) else None
     if verb == 'snapshot':
-        bfiles = (base.get('result') or {}).get('files')
+        # By HEAD's snapshot names when both observations record them; by the
+        # root/ objects only when neither does.
+        bres = base.get('result') or {}
+        bnames, names = bres.get('snapshots'), res.get('snapshots')
+        if isinstance(bnames, list) and isinstance(names, list):
+            name = args.get('name')
+            if name in bnames:
+                return None, 'by snapshot names: %r already present before it (observation seq %d)' % (name, base['seq'])
+            lost = sorted(set(bnames) - set(names))
+            if lost:
+                return 'third', 'by snapshot names: other snapshots lost: %s' % ', '.join(lost[:4])
+            return ('took effect' if name in names else 'did not'), 'by snapshot names: %r %s' % (name, 'present' if name in names else 'absent')
+        if isinstance(bnames, list) or isinstance(names, list):
+            return None, 'snapshot names recorded by one observation only (seq %d, %d)' % (base['seq'], obs['seq'])
+        bfiles = bres.get('files')
         if not isinstance(files, list) or not isinstance(bfiles, list):
             return None, 'no listing before and after (observations seq %d, %d)' % (base['seq'], obs['seq'])
         before = {f for f in bfiles if f.startswith('root/')}
         now = {f for f in files if f.startswith('root/')}
         if before - now:
-            return 'third', 'root objects lost: %s' % ', '.join(sorted(before - now)[:4])
-        return ('took effect' if now - before else 'did not'), 'roots %d -> %d' % (len(before), len(now))
+            return 'third', 'by root objects: root objects lost: %s' % ', '.join(sorted(before - now)[:4])
+        return ('took effect' if now - before else 'did not'), 'by root objects (no snapshot names recorded): roots %d -> %d' % (len(before), len(now))
     if verb == 'restore':
         if isinstance(head, dict):
             if not isinstance(files, list):
@@ -1051,6 +1076,8 @@ def c6(recs):
             f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
         elif how == 'third':
             f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
+        elif inv['verb'] == 'snapshot':
+            notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
     if f:
         return {'verdict': 'FAIL', 'findings': f + notes}
     if unruled:
