@@ -317,6 +317,9 @@ func (g *Generator) negatives() []candidate {
 // of the run.
 func (g *Generator) Learn(o GenOp, outcome string) {
 	v := g.vols[o.Volume]
+	if outcome == "unknown" && o.Action == "v3_op_read" {
+		return // a read changes nothing, whatever its outcome
+	}
 	if outcome == "unknown" {
 		v.state = stUnknown
 		if t := o.Params["target_volume"]; t != "" {
