@@ -60,6 +60,10 @@ type History struct {
 	start time.Time
 	next  uint64
 	open  map[uint64]HistoryRecord
+	// broken latches the first failed append: the file may end in a torn
+	// line, so every later record is refused and the run fails to record.
+	// A history with a hole never reaches a checker as if it were whole.
+	broken error
 }
 
 // OpenHistory creates the history file; an existing file is refused, so a
@@ -84,6 +88,12 @@ func (b *RunBundle) OpenHistory() (*History, error) {
 func (h *History) Path() string { return h.path }
 
 // Invoke records the start of an operation and returns its seq.
+//
+// The callers' rule: record the invocation BEFORE the command is issued, and
+// the completion (Complete) AFTER its answer, or the runner's own deadline,
+// is in hand. An action that records both after the fact turns every
+// concurrent history into a sequential one, and the checkers would judge an
+// order that never happened.
 func (h *History) Invoke(r HistoryRecord) (uint64, error) {
 	if r.Op == "" || r.Verb == "" {
 		return 0, errors.New("history: an invocation names its op and verb")
@@ -149,21 +159,27 @@ func (h *History) Close() error {
 	return err
 }
 
-// appendLocked stamps seq and the clock, writes one line and syncs it.
+// appendLocked stamps seq and the clock, writes one line and syncs it. Any
+// write or sync failure latches the history broken.
 func (h *History) appendLocked(r *HistoryRecord) error {
+	if h.broken != nil {
+		return fmt.Errorf("history: failed to record earlier, refusing every later record: %w", h.broken)
+	}
 	if h.f == nil {
 		return errors.New("history: closed")
 	}
 	r.Seq, r.MonoNs = h.next, time.Since(h.start).Nanoseconds()
 	b, err := json.Marshal(r)
 	if err != nil {
-		return fmt.Errorf("history: %w", err)
+		return fmt.Errorf("history: %w", err) // nothing was written; the file is whole
 	}
 	if _, err := h.f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("history: write: %w", err)
+		h.broken = fmt.Errorf("write of seq %d: %w", r.Seq, err)
+		return fmt.Errorf("history: %w", h.broken)
 	}
 	if err := h.f.Sync(); err != nil {
-		return fmt.Errorf("history: sync: %w", err)
+		h.broken = fmt.Errorf("sync of seq %d: %w", r.Seq, err)
+		return fmt.Errorf("history: %w", h.broken)
 	}
 	h.next++
 	return nil

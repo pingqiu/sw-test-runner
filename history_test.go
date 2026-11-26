@@ -111,6 +111,44 @@ func TestHistoryRefuses(t *testing.T) {
 	}
 }
 
+// After a failed append the history refuses every later record, even once
+// the file would accept writes again: a torn line is never followed.
+func TestHistoryLatchesAFailedAppend(t *testing.T) {
+	dir := t.TempDir()
+	h, err := OpenHistory(filepath.Join(dir, "history.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Invoke(HistoryRecord{Op: "HolderInterface.Write", Verb: "write"}); err != nil {
+		t.Fatal(err)
+	}
+	good := h.f
+	_ = good.Close() // the next write fails
+	if _, err := h.Invoke(HistoryRecord{Op: "HolderInterface.Write", Verb: "write"}); err == nil {
+		t.Fatal("a write to a failed file was accepted")
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "other.jsonl"), os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	h.mu.Lock()
+	h.f = f // a writable file again
+	h.mu.Unlock()
+	for name, call := range map[string]func() error{
+		"invoke":   func() error { _, e := h.Invoke(HistoryRecord{Op: "HolderInterface.Write", Verb: "write"}); return e },
+		"complete": func() error { return h.Complete(1, OutcomeOK, nil) },
+		"observe":  func() error { return h.Observe(HistoryObserve, HistoryRecord{}) },
+	} {
+		if err := call(); err == nil {
+			t.Errorf("%s accepted after a failed append", name)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "other.jsonl")); len(b) != 0 {
+		t.Errorf("records written after the failure: %q", b)
+	}
+}
+
 // Concurrent writers still produce a gapless sequence in file order.
 func TestHistoryConcurrentAppendsHaveNoGap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.jsonl")

@@ -676,19 +676,42 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 }
 
 // v3OpDelete deletes the volume through the master's delete authority
-// (MoveAdmission.DelMark, `ops chunk volume-delete`).
+// (MoveAdmission.DelMark, `ops chunk volume-delete`). After a stop the master
+// admits the delete only once the holder's lease horizon plus the clock-skew
+// margin has passed, and answers not_admitted until then; the CLI's own
+// procedure is to rerun with the SAME request id once the cause is cleared.
+// So one operation reruns it while the answer is not_admitted, within
+// admit_seconds (default 120), and records every attempt. Its outcome is the
+// last answer's.
 func v3OpDelete(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, e, v, err := opBegin(actx, act, "v3_op_delete")
 	if err != nil {
 		return nil, err
 	}
-	return record(actx, e, "delete", v.Name, map[string]any{"layout_id": v.LayoutID}, func() (string, map[string]any) {
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote("delete-"+v.Name)))
-		if err != nil {
-			return fail(err.Error())
+	bound := time.Duration(actions.ParseInt(optionalParam(act, "admit_seconds"), 120)) * time.Second
+	req := "delete-" + v.Name
+	return record(actx, e, "delete", v.Name, map[string]any{"layout_id": v.LayoutID, "request": req}, func() (string, map[string]any) {
+		end := time.Now().Add(bound)
+		var attempts []string
+		for {
+			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
+				shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote(req)))
+			if err != nil {
+				return tr.OutcomeUnknown, map[string]any{"detail": err.Error(), "attempts": attempts}
+			}
+			r, res := fromChunk(stdout, code, nil)
+			d, _ := res["detail"].(string)
+			attempts = append(attempts, fmt.Sprintf("%s %s", r, firstLine(d)))
+			res["attempts"] = attempts
+			if r == tr.OutcomeOK || !strings.HasPrefix(d, "not_admitted:") || time.Now().After(end) {
+				return r, res
+			}
+			select {
+			case <-ctx.Done():
+				return r, res
+			case <-time.After(3 * time.Second):
+			}
 		}
-		return fromChunk(stdout, code, nil)
 	})
 }
 

@@ -2,11 +2,14 @@ package v3block
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 )
@@ -109,6 +112,44 @@ func TestRecordWritesInvokeAndComplete(t *testing.T) {
 		if !strings.Contains(op, ".") {
 			t.Errorf("verb %s has op %q, not Module.Action", verb, op)
 		}
+	}
+}
+
+// The callers' rule: the invocation is on disk before the command runs, and
+// the completion is stamped after its answer. A handler that sleeps between
+// the two shows both.
+func TestRecordInvokesBeforeAndCompletesAfter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	h, err := tr.OpenHistory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	actx := &tr.ActionContext{History: h, Log: func(string, ...interface{}) {}}
+	const nap = 60 * time.Millisecond
+	var seenDuring string
+	if _, err := record(actx, opEnv{client: "c1"}, "write", "v1", map[string]any{"lba": 0}, func() (string, map[string]any) {
+		b, _ := os.ReadFile(path)
+		seenDuring = string(b)
+		time.Sleep(nap)
+		return tr.OutcomeOK, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seenDuring, `"kind":"invoke"`) || strings.Contains(seenDuring, `"kind":"complete"`) {
+		t.Fatalf("while the command ran the file held %q; want the invocation only", seenDuring)
+	}
+	b, _ := os.ReadFile(path)
+	var rs []tr.HistoryRecord
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var r tr.HistoryRecord
+		if err := json.Unmarshal([]byte(l), &r); err != nil {
+			t.Fatal(err)
+		}
+		rs = append(rs, r)
+	}
+	if len(rs) != 2 || rs[1].MonoNs-rs[0].MonoNs < nap.Nanoseconds() {
+		t.Fatalf("records %+v; want the completion stamped at least %s after the invocation", rs, nap)
 	}
 }
 
