@@ -15,7 +15,7 @@
 #
 # One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
 # the product under test), weed (the pinned SeaweedFS binary). Defaults are the
-# 4-volume smoke; the 200-volume run sets count=200 move_count=10.
+# 4-volume smoke; the 200-volume run sets count=200 move_count=10 parallel=200.
 #
 #   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD -env weed=/path/weed \
 #     -env work=/root/vs-run scenarios/v3block/many-volumes.yaml
@@ -142,7 +142,8 @@ phases:
         mode: record
         save_as: objects_before
 
-  - name: write-and-snapshot
+  - name: write-and-peak
+    parallel: true
     actions:
       - action: v3_vs_write
         node: host
@@ -150,6 +151,9 @@ phases:
       - action: v3_vs_host
         node: host
         save_as: peak
+
+  - name: snapshot-and-write
+    actions:
       - action: v3_vs_snapshot
         node: host
         name: s1

@@ -133,3 +133,27 @@ func TestManyVolumesKicksCleaningAfterMoves(t *testing.T) {
 		t.Fatal("missing live-set observation")
 	}
 }
+
+func TestManyVolumesSamplesDuringGuestIO(t *testing.T) {
+	s, err := tr.ParseFile("../../scenarios/v3block/many-volumes.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range s.Phases {
+		write, sample := false, false
+		for _, a := range p.Actions {
+			write = write || a.Action == "v3_vs_write"
+			sample = sample || a.Action == "v3_vs_host"
+		}
+		if sample {
+			found = true
+			if !write || !p.Parallel {
+				t.Fatal("host sampling must run in parallel with guest IO")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing host sample")
+	}
+}
