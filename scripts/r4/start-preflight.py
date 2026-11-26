@@ -90,6 +90,9 @@ def smoke(root, seconds=10):
     scenario_path = 'scenarios/v3block/r4-node-loss.yaml'
     pinned = subprocess.check_output(['git', '-C', str(root/'runner'), 'show', pins['runner']+':'+scenario_path])
     require((root/'runner'/scenario_path).read_bytes() == pinned, 'scenario differs from runner pin')
+    helper = 'scenarios/v3block/r4.sh'
+    require((root/'runner'/helper).read_bytes() == subprocess.check_output(
+        ['git', '-C', str(root/'runner'), 'show', pins['runner']+':'+helper]), 'scenario helper differs from runner pin')
     scenario = yaml.safe_load(pinned)
     actions = next(p['actions'] for p in scenario['phases'] if p['name'] == 'start')
     out = Path(tempfile.mkdtemp(prefix='start-preflight-', dir=root))
@@ -120,6 +123,8 @@ def smoke(root, seconds=10):
         specwork.mkdir(parents=True)
         subprocess.run(['bash', str(root/'runner/scenarios/v3block/r4.sh'), 'spec', 'local-start-smoke', rf, values['n1_data'],values['n2_data'],values['n3_data'],values['data_port'],values['ctrl_port']], env=dict(env,R4_ROOT=str(base/'spec-root')), stdout=subprocess.DEVNULL, check=True)
         processes, logs, phases, rendered, handles = [], [], [], [], []
+        round_receipt = dict(rf=rf, argv=rendered, phases=phases, result='FAIL')
+        receipts['rounds'].append(round_receipt)
         try:
             for action in actions:
                 if ' unit $T ' not in action.get('cmd',''):
@@ -155,9 +160,10 @@ def smoke(root, seconds=10):
                     watch([processes[0], p], [logs[0], log], ['listening', 'status-listening'], seconds,
                           ['127.0.0.1:'+values['master_port'], argv[argv.index('--status-addr')+1]])
                     stop([p])
-            receipts['rounds'].append(dict(rf=rf, argv=rendered, phases=phases, result='PASS'))
+            round_receipt['result'] = 'PASS'
         finally:
             stop(processes)
+            round_receipt['leftover_pids'] = [p.pid for p in processes if p.poll() is None]
             for f in handles:
                 f.close()
             (out/'receipt.json').write_text(json.dumps(receipts, indent=2)+'\n')
