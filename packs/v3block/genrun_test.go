@@ -44,7 +44,7 @@ func (f *fakeProduct) install(t *testing.T) {
 			verb := strings.TrimPrefix(name, "v3_op_")
 			if name == "v3_op_observe" {
 				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"]})
-				return map[string]string{"value": tr.OutcomeOK}, nil
+				return map[string]string{"value": "observed"}, nil // as v3OpObserve: an observation, not an outcome
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + verb, Verb: verb, Volume: act.Params["volume"]})
 			_ = actx.History.Complete(seq, out, nil)

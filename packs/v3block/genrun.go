@@ -81,8 +81,10 @@ func genExec(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 // both run every step through here, so a replayed history has the same shape
 // as a recorded one.
 func genStep(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) (string, error) {
+	// An observation records what it saw and has no outcome (v3OpObserve
+	// returns "observed"), so it is called directly, not through genExec.
 	observe := func() error {
-		_, err := genExec(ctx, actx, node, GenOp{Action: "v3_op_observe", Volume: o.Volume, Params: map[string]string{"volume": o.Volume}})
+		_, err := genHandlers["v3_op_observe"](ctx, actx, tr.Action{Action: "v3_op_observe", Node: node, Params: map[string]string{"volume": o.Volume}})
 		return err
 	}
 	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
