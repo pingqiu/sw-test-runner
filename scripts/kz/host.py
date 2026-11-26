@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-host verbs for the runner's known-zero scenario; no SSH or peer orchestration."""
 import base64
+from datetime import datetime, timezone
 try:
     import fcntl
 except ImportError:  # Off-host controls may import pure validation on Windows.
@@ -26,7 +27,7 @@ def call(*args, okay=(0,), timeout=60):
     return p.stdout.strip()
 
 def config():
-    c = {k: os.environ["KZ_" + k.upper()] for k in ("root", "run", "role", "self", "peer", "rc", "archive_sha", "ci_unit", "min_free_bytes")}
+    c = {k: os.environ["KZ_" + k.upper()] for k in ("root", "run", "role", "self", "peer", "rc", "archive_sha", "ci_unit", "min_free_bytes", "deadline")}
     root = Path(c["root"])
     if (not re.fullmatch(r"kz-[0-9]{8}t[0-9]{6}z", c["run"])
             or c["role"] not in ("source", "target")
@@ -98,9 +99,16 @@ def idle():
 def description(c):
     return "known-zero " + c["root"] + " " + c["rc"]
 
+def cleanup_calendar(c):
+    # The controller fixes this once, before staging. Prepare never adds time.
+    deadline = datetime.strptime(c["deadline"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    if deadline.timestamp() <= time.time():
+        raise ValueError("cleanup deadline is not in the future")
+    return deadline.strftime("%Y-%m-%d %H:%M:%S UTC")
 def prepare(c):
     root = Path(c["root"])
     if (root / "state.json").exists(): raise ValueError("run id already prepared; no reuse")
+    calendar = cleanup_calendar(c)
     backing = nvme_root(root)
     if shutil.disk_usage(root).free < int(c["min_free_bytes"]): raise ValueError("below declared capacity floor")
     for name in ("sudo", "systemd-run", "nvme", "mkfs.ext4", "mkfs.xfs", "filefrag", "findmnt", "losetup"):
@@ -121,7 +129,7 @@ def prepare(c):
     atomic(root / "out/launch.json", s)
     # Host-side fallback uses the same cleanup verb if the controller disappears.
     env = ["KZ_"+k.upper()+"="+v for k,v in c.items() if k != "unit"]
-    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-active=275m", "--timer-property=AccuracySec=1s",
+    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-calendar="+cleanup_calendar(c), "--timer-property=AccuracySec=1s",
          "--timer-property=Description="+description(c)+" cleanup timer",
          "--property=User="+str(os.getuid()), "--property=RuntimeMaxSec=300", "--property=KillMode=control-group", "--collect",
          "/usr/bin/env", *env, sys.executable, str(root / "host.py"), "cleanup")

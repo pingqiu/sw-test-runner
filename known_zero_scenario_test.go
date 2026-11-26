@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Execute the committed YAML through the real engine with off-host handlers.
@@ -96,6 +97,12 @@ func TestKnownZeroScenarioResolvesLaunchInputs(t *testing.T) {
 			want = "HANDOFF e30="
 			got = a.Params["env.KZ_HANDOFF_B64"]
 		}
+		if a.SaveAs == "cleanup_at" {
+			return map[string]string{"value": "2099-01-01T00:00:00Z"}, nil
+		}
+		if a.Node == "source" && key == "root" && a.Params["env.KZ_DEADLINE"] != "2099-01-01T00:00:00Z" {
+			return nil, fmt.Errorf("absolute cleanup deadline not propagated: %q", a.Params["env.KZ_DEADLINE"])
+		}
 		if a.Node == "controller" {
 			role := a.Params["env.KZ_ROLE"]
 			key = "judge-" + role
@@ -128,5 +135,29 @@ func TestKnownZeroScenarioResolvesLaunchInputs(t *testing.T) {
 	result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
 	if result.Status != tr.StatusPass || !seen["root"] || !seen["handoff"] || !seen["judge-source"] || !seen["judge-target"] {
 		t.Fatalf("status=%s error=%s seen=%v", result.Status, result.Error, seen)
+	}
+}
+
+func TestKnownZeroOrdinaryPhaseBudgetsFit(t *testing.T) {
+	s, err := tr.ParseFile("scenarios/public/known-zero-1tib-acceptance.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total time.Duration
+	for _, p := range s.Phases {
+		if p.Always {
+			continue
+		}
+		// Deliberately sum even parallel actions: a conservative staging budget.
+		for _, a := range p.Actions {
+			d, err := time.ParseDuration(a.Timeout)
+			if err != nil {
+				t.Fatalf("%s action timeout %q: %v", p.Name, a.Timeout, err)
+			}
+			total += d
+		}
+	}
+	if total > s.Timeout.Duration {
+		t.Fatalf("ordinary phases %s exceed work budget %s", total, s.Timeout.Duration)
 	}
 }

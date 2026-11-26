@@ -1,5 +1,5 @@
 name: known-zero-1tib-acceptance
-timeout: 250m
+timeout: 255m
 always_timeout: 20m
 env:
   kz_run: ""
@@ -36,6 +36,14 @@ topology:
       key: "{{ ssh_key }}"
       host_key: "{{ target_host_key }}"
 phases:
+  # One absolute fallback instant for both hosts, fixed before any host work.
+  - name: cleanup-deadline
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        cmd: "{{ controller_python }} -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)+timedelta(minutes=280)).strftime(\"%Y-%m-%dT%H:%M:%SZ\"))'"
+        save_as: cleanup_at
   - name: fresh-roots
     parallel: true
     actions:
@@ -52,6 +60,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ source_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
       - action: "exec"
         node: "target"
         timeout: "20s"
@@ -65,6 +74,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ target_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
   - name: stage-pinned-inputs
     parallel: true
     actions:
@@ -104,6 +114,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ source_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
       - action: "exec"
         node: "target"
         timeout: "4m"
@@ -117,6 +128,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ target_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
   - name: source-start
     actions:
       - action: "exec"
@@ -148,6 +160,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ target_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
         env.KZ_HANDOFF_B64: "{{ handoff }}"
       - action: "exec"
         node: "target"
@@ -221,6 +234,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ source_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
       - action: "exec"
         node: "target"
         timeout: "6m"
@@ -234,6 +248,7 @@ phases:
         env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
         env.KZ_CI_UNIT: "{{ target_ci_unit }}"
         env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
   - name: collect-closeout
     always: true
     parallel: true

@@ -90,10 +90,14 @@ The source sequence is handoff <=60 min, target <=100 min, then source-finish
 The three waits total 215 min; signalling adds at most 3 min. Source test/unit
 ceilings are 230/235 min; target test/unit ceilings are 95/100 min. The source's
 KZ_TARGET_WAIT is 105 min, covering target startup, wait and completion signal.
-Runner work is 250 min (including staging, collection and controller judgment),
-with a fresh shared 20 min always budget. A 275 min host timer invokes the same
-cleanup verb if the controller disappears, five minutes past the runner total.
-Its cleanup service has a five-minute ceiling: proposed window 280 min.
+Runner work is 255 min (including staging, collection and controller judgment),
+with a fresh shared 20 min always budget. The first controller action fixes one
+UTC cleanup deadline at its start +280 min, before staging; both hosts receive
+that same instant. Prepare validates it before work and again before arming
+systemd --on-calendar (never a delay relative to prepare). An expired deadline
+refuses admission before CI is stopped. Controller and host UTC clocks must be
+synchronized; qualification checks that premise. The cleanup service is bounded
+to five minutes: proposed window 285 min from the first controller action.
 These are configured deadlines, not proof of completion. The product test is unchanged.
 No source/target process is resumed by a timer.
 

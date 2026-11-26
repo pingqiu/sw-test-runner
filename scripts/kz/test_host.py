@@ -16,7 +16,7 @@ class HostTest(unittest.TestCase):
     def fixture(self, base):
         root=Path(base)/"swb-kz-20261126t050000z"; root.mkdir()
         c=dict(root=str(root), run="kz-20261126t050000z", role="source", self="192.0.2.1", peer="192.0.2.2",
-               rc="a"*40, archive_sha="b"*64, ci_unit="actions.runner.example.service", min_free_bytes="1", unit="swb-kz-20261126t050000z-source")
+               deadline="2099-01-01T00:00:00Z", rc="a"*40, archive_sha="b"*64, ci_unit="actions.runner.example.service", min_free_bytes="1", unit="swb-kz-20261126t050000z-source")
         return root,c
     def test_prepare_interrupt_at_every_command_then_cleanup(self):
         # Interrupt after a command's effects (including CI stop), then rerun cleanup.
@@ -95,3 +95,12 @@ class HostTest(unittest.TestCase):
                 self.assertEqual(call.call_count,1)
 
 if __name__=="__main__":unittest.main()
+
+class DeadlineTest(unittest.TestCase):
+    def test_absolute_deadline_ignores_prepare_delay_and_refuses_past(self):
+        c = {"deadline": "2030-01-01T12:00:00Z"}
+        with patch.object(host.time, "time", return_value=1893499199):
+            self.assertEqual(host.cleanup_calendar(c), "2030-01-01 12:00:00 UTC")
+        with patch.object(host.time, "time", return_value=1893499200):
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                host.cleanup_calendar(c)
