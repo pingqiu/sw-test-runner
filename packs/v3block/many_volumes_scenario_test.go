@@ -3,6 +3,10 @@ package v3block
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +36,9 @@ func TestManyVolumesScenarioWiring(t *testing.T) {
 				mu.Unlock()
 				if a.Action == fail && a.Params["mode"] != "record" {
 					return nil, fmt.Errorf("injected")
+				}
+				if a.SaveAs == "counted" {
+					return map[string]string{"value": "0"}, nil
 				}
 				if a.Action == "v3_start_blockmaster" && a.SaveAs != "" {
 					actx.Vars[a.SaveAs+"_pid"] = fmt.Sprint(100 + len(calls))
@@ -165,7 +172,7 @@ func TestManyVolumesSamplesThroughoutGuestIO(t *testing.T) {
 					t.Fatal("unbounded one-shot sample")
 				}
 			}
-			if a.Action == "v3_vs_write" || a.Action == "v3_vs_move" || a.Action == "v3_vs_verify" || a.Action == "v3_vs_restart" {
+			if a.Action == "v3_vs_create" || a.Action == "v3_vs_attach" || a.Action == "v3_vs_write" || a.Action == "v3_vs_move" || a.Action == "v3_vs_verify" || a.Action == "v3_vs_restart" {
 				if !active || p.Parallel {
 					t.Fatalf("%s is outside continuous sampling", a.Action)
 				}
@@ -178,4 +185,50 @@ func TestManyVolumesSamplesThroughoutGuestIO(t *testing.T) {
 	if !started || !stopped || !cleanup {
 		t.Fatal("missing sampler lifecycle")
 	}
+}
+
+// Execute the real admission command: a smoke can never claim the counted gate.
+func TestManyVolumesCountedClass(t *testing.T) {
+	shell, err := exec.LookPath("bash")
+	if runtime.GOOS == "windows" {
+		if _, err := os.Stat("C:/Program Files/Git/bin/bash.exe"); err == nil {
+			shell = "C:/Program Files/Git/bin/bash.exe"
+			err = nil
+		}
+	}
+	if shell == "" || err != nil {
+		t.Skip("bash unavailable")
+	}
+	s, err := tr.ParseFile("../../scenarios/v3block/many-volumes.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := s.Phases[0].Actions[0].Params["cmd"]
+	for _, c := range []struct {
+		class, n, m, p, want string
+		pass                 bool
+	}{
+		{"smoke", "4", "2", "4", "0", true}, {"counted", "200", "10", "200", "1", true},
+		{"counted", "4", "10", "200", "", false}, {"counted", "200", "2", "200", "", false},
+		{"counted", "200", "10", "16", "", false}, {"other", "200", "10", "200", "", false},
+	} {
+		p := exec.Command(shell, "-c", cmd)
+		p.Env = append(os.Environ(), "CLASS="+c.class, "N="+c.n, "M="+c.m, "P="+c.p)
+		b, e := p.Output()
+		if (e == nil) != c.pass || (c.pass && strings.TrimSpace(string(b)) != c.want) {
+			t.Fatalf("%+v: %s %v", c, b, e)
+		}
+	}
+	var prov tr.Action
+	for _, p := range s.Phases {
+		for _, a := range p.Actions {
+			if a.Action == "emit_provenance" {
+				prov = a
+			}
+		}
+	}
+	if prov.Params["gate_pass"] != "{{ counted }}" || prov.Params["tested_sha"] != "{{ product_head }}" {
+		t.Fatal("provenance is not bound to counted shape and source pin")
+	}
+
 }

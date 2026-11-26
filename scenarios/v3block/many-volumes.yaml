@@ -7,7 +7,9 @@
 # mid-way; planned moves of the first M volumes; every volume's acknowledged
 # blocks read back; no volume stuck; after the snapshot deletes and the
 # product's cleaning, each volume's pool holds exactly its live set.
-# Reported: CreateVolume p50/p99/max, planned-move freeze (detach --plain to
+# Sampler: fixed 1 s deadlines from before create/attach through final verification;
+# report maximum gap and fail above 2 s or on incomplete coverage.
+# Reported, not judged against performance thresholds: CreateVolume p50/p99/max, planned-move freeze (detach --plain to
 # target serving) median/max, host RSS, open fds and CPU at peak.
 #
 # Every step is a typed action (packs/v3block/volset.go) on the operator
@@ -15,9 +17,11 @@
 #
 # One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
 # the product under test), weed (the pinned SeaweedFS binary). Defaults are the
-# 4-volume smoke; the 200-volume run sets count=200 move_count=10 parallel=200.
+# 4-volume report-only smoke; counted requires class=counted count=200 move_count=10 parallel=200.
+# Work is retained as evidence; every run needs a fresh work directory.
 #
 #   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD -env weed=/path/weed \
+#     -env product_head=<40hex> -env runner_head=<40hex> -env weed_sha256=<64hex> \\
 #     -env work=/root/vs-run scenarios/v3block/many-volumes.yaml
 
 name: v3block-many-volumes
@@ -25,6 +29,10 @@ timeout: 120m
 always_timeout: 10m
 
 env:
+  class: "smoke"
+  product_head: ""
+  runner_head: ""
+  weed_sha256: ""
   product_src: ""
   runner_src: ""   # this repository's checkout (for packs/v3block/v3ctl)
   weed: ""
@@ -48,6 +56,18 @@ topology:
       is_local: true
 
 phases:
+  - name: run-class
+    actions:
+      - action: exec
+        node: host
+        save_as: counted
+        timeout: 10s
+        env.CLASS: "{{ class }}"
+        env.N: "{{ count }}"
+        env.M: "{{ move_count }}"
+        env.P: "{{ parallel }}"
+        cmd: |
+          case "$CLASS:$N:$M:$P" in counted:200:10:200) echo 1 ;; smoke:*) echo 0 ;; *) echo 'invalid counted shape or class' >&2; exit 2 ;; esac
   - name: build
     actions:
       - action: exec
@@ -55,25 +75,35 @@ phases:
         timeout: 20m
         env.SRC: "{{ product_src }}"
         env.WORK: "{{ work }}"
-        env.V3CTL: "{{ runner_src }}/packs/v3block/v3ctl/main.go"
+        env.RUNNER: "{{ runner_src }}"
+        env.PRODUCT_HEAD: "{{ product_head }}"
+        env.RUNNER_HEAD: "{{ runner_head }}"
         cmd: |
           set -eu
           [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
           [ ! -e "$WORK" ] || { echo "work directory exists: $WORK" >&2; exit 2; }
           mkdir -p "$WORK/bin" "$WORK/log"
-          git -C "$SRC" rev-parse HEAD > "$WORK/product.sha"
-          for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
-          # v3ctl: the two master calls the CLI has no command for, built with the product's own module.
-          d="$SRC/.runner-v3ctl-$$"; mkdir "$d"; tail -n +2 "$V3CTL" > "$d/main.go"
-          (cd "$SRC" && go build -o "$WORK/bin/v3ctl" "./$(basename "$d")"); rm -r "$d"
-          cat "$WORK/product.sha"
-
+          printf '%s\n' "$PRODUCT_HEAD" "$RUNNER_HEAD" | grep -Ex '[0-9a-f]{40}' | { [ "$(wc -l)" -eq 2 ]; }
+          [ "$(git -C "$SRC" rev-parse "$PRODUCT_HEAD^{commit}")" = "$PRODUCT_HEAD" ]
+          [ "$(git -C "$RUNNER" rev-parse "$RUNNER_HEAD^{commit}")" = "$RUNNER_HEAD" ]
+          mkdir "$WORK/src"
+          git -C "$SRC" archive --output="$WORK/product.tar" "$PRODUCT_HEAD"
+          tar -xf "$WORK/product.tar" -C "$WORK/src"
+          printf '%s\n' "$PRODUCT_HEAD" > "$WORK/product.sha"
+          printf '%s\n' "$RUNNER_HEAD" > "$WORK/runner.sha"
+          for b in blockmaster blockvolume sw-block; do (cd "$WORK/src" && go build -o "$WORK/bin/$b" ./cmd/$b); done
+          # Build the helper from the pinned runner tree; never write to product_src.
+          mkdir "$WORK/src/.runner-v3ctl"
+          git -C "$RUNNER" show "$RUNNER_HEAD:packs/v3block/v3ctl/main.go" > "$WORK/v3ctl.go"
+          tail -n +2 "$WORK/v3ctl.go" > "$WORK/src/.runner-v3ctl/main.go"
+          (cd "$WORK/src" && go build -o "$WORK/bin/v3ctl" ./.runner-v3ctl)
   - name: store
     actions:
       - action: exec
         node: host
         timeout: 3m
         env.WEED: "{{ weed }}"
+        env.WEED_SHA: "{{ weed_sha256 }}"
         env.WORK: "{{ work }}"
         env.MP: "{{ weed_master_port }}"
         env.VP: "{{ weed_volume_port }}"
@@ -81,6 +111,7 @@ phases:
         cmd: |
           set -eu
           [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
+          printf '%s  %s\n' "$WEED_SHA" "$WEED" | sha256sum -c -
           mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
           "$WEED" version > "$WORK/weed.version"
           # POSIX sh (no /dev/tcp): curl exits 7 when the port refuses; any other answer is a listener.
@@ -127,6 +158,9 @@ phases:
 
   - name: create
     actions:
+      - action: v3_vs_host
+        node: host
+        mode: start
       - action: v3_vs_create
         node: host
         save_as: create
@@ -144,9 +178,6 @@ phases:
 
   - name: io-with-sampling
     actions:
-      - action: v3_vs_host
-        node: host
-        mode: start
       - action: v3_vs_write
         node: host
         round: r1
@@ -244,6 +275,13 @@ phases:
         save_as: peak
       - action: emit_provenance
         product: seaweed-block
+        tested_sha: "{{ product_head }}"
+        gate_pass: "{{ counted }}"
+        __vs_class: "{{ class }}"
+        __vs_move_count: "{{ move_count }}"
+        __vs_parallel: "{{ parallel }}"
+        __vs_runner_sha: "{{ runner_head }}"
+        __vs_weed_sha256: "{{ weed_sha256 }}"
         __vs_count: "{{ count }}"
         __vs_create_p50_ms: "{{ create_p50_ms }}"
         __vs_create_p99_ms: "{{ create_p99_ms }}"
@@ -251,6 +289,7 @@ phases:
         __vs_freeze_p50_ms: "{{ freeze_p50_ms }}"
         __vs_freeze_max_ms: "{{ freeze_max_ms }}"
         __vs_freeze_n: "{{ freeze_n }}"
+        __vs_peak_max_gap_s: "{{ peak_max_gap_s }}"
         __vs_peak_samples: "{{ peak_samples }}"
         __vs_peak_rss_mib: "{{ peak_rss_mib }}"
         __vs_peak_open_fds: "{{ peak_open_fds }}"
@@ -264,6 +303,7 @@ phases:
         mode: cleanup
       - action: v3_vs_stop
         node: host
+        timeout: 2m
       - action: exec
         node: host
         timeout: 1m

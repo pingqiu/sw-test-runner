@@ -154,7 +154,8 @@ func v3VsSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	s.LockDirs = optionalParam(act, "lock_dirs_test_only") == "true"
 	nqn := optionalParam(act, "nqn_prefix")
 	if nqn == "" {
-		nqn = "nqn.2026-11.io.seaweedfs:vs-"
+		sum := sha256.Sum256([]byte(s.Root))
+		nqn = "nqn.2026-11.io.seaweedfs:vs-" + hex.EncodeToString(sum[:8]) + "-"
 	}
 	for i := 1; i <= count; i++ {
 		name := fmt.Sprintf("%s%03d", prefix, i)
@@ -1214,8 +1215,33 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		}
 		return outcome{Result: "ok"}
 	})
+	// Independently enumerate the whole run, including daemons whose launch
+	// reply was lost before their PID reached the state. Residue is never PASS.
+	sum := sha256.Sum256([]byte(s.Root))
+	prefix := "nqn.2026-11.io.seaweedfs:vs-" + hex.EncodeToString(sum[:8]) + "-"
+	stdout, stderr, code, sweepErr := node.RunRoot(ctx, fmt.Sprintf("python3 -I -c %s %s %s", shellQuote(hostAbsenceSweep), shellQuote(s.Bin+"/blockvolume"), shellQuote(prefix)))
+	if sweepErr != nil || code != 0 {
+		outs = append(outs, outcome{Volume: "run-sweep", Result: "unknown", Detail: fmt.Sprintf("residue or absence unreadable: %s %s %v", firstLine(stdout), firstLine(stderr), sweepErr)})
+	}
 	return report(actx, act, "v3_vs_stop", outs)
 }
+
+// This sweep is independent of recorded PIDs and per-volume connection state.
+const hostAbsenceSweep = `import os,sys,glob,json
+binary,prefix=sys.argv[1:];pids=[];nqns=[]
+for p in os.listdir("/proc"):
+    if not p.isdigit(): continue
+    try:
+        if open("/proc/"+p+"/cmdline","rb").read().split(b"\0")[0].decode()==binary: pids.append(p)
+    except FileNotFoundError: pass
+for path in glob.glob("/sys/class/nvme/nvme*/subsysnqn"):
+    try:
+        nqn=open(path).read().strip()
+        if nqn.startswith(prefix): nqns.append(nqn)
+    except FileNotFoundError: pass
+print(json.dumps(dict(pids=pids,nqns=nqns)))
+sys.exit(1 if pids or nqns else 0)
+`
 
 // hostSampler samples the host CPU and this run's blockvolume RSS/fds each
 // second. Matching the executable follows replacement PIDs after restarts/moves.
@@ -1235,12 +1261,19 @@ def processes():
             fds+=len(os.listdir("/proc/"+p+"/fd"))
         except (OSError,UnicodeError): pass
     return rss/1024,fds
-peak=dict(samples=0,rss_mib=0,open_fds=0,cpu_busy_pct=0)
+start=time.monotonic(); last=start; next_tick=start+1
+peak=dict(samples=0,rss_mib=0,open_fds=0,cpu_busy_pct=0,max_gap_s=0,started_unix=time.time(),elapsed_s=0,complete=False)
 t0,i0=cpu()
-end=time.monotonic()+7200
+open(out+".ready","x").close()
+end=start+7200
 while True:
-    time.sleep(1)
+    time.sleep(max(0,next_tick-time.monotonic()))
     t1,i1=cpu();rss,fds=processes()
+    now=time.monotonic(); next_tick+=1
+    peak["max_gap_s"]=max(peak["max_gap_s"],now-last);last=now
+    peak["elapsed_s"]=now-start
+    peak["stopped_unix"]=time.time()
+    peak["complete"]=os.path.exists(stop)
     peak["samples"]+=1
     peak["rss_mib"]=max(peak["rss_mib"],rss)
     peak["open_fds"]=max(peak["open_fds"],fds)
@@ -1248,9 +1281,23 @@ while True:
     with open(out+".tmp","w") as f: json.dump(peak,f)
     os.replace(out+".tmp",out)
     t0,i0=t1,i1
-    if os.path.exists(stop) or time.monotonic()>=end: break
+    if peak["complete"] or now>=end: break
 open(out+".done","x").close()
 `
+
+type hostPeak struct {
+	Samples  int     `json:"samples"`
+	RSS      float64 `json:"rss_mib"`
+	FDs      int     `json:"open_fds"`
+	CPU      float64 `json:"cpu_busy_pct"`
+	MaxGap   float64 `json:"max_gap_s"`
+	Elapsed  float64 `json:"elapsed_s"`
+	Complete bool    `json:"complete"`
+}
+
+func (p hostPeak) valid() bool {
+	return p.Samples >= 1 && p.Complete && p.MaxGap > 0 && p.MaxGap <= 2 && p.Elapsed > 0 && float64(p.Samples) >= math.Floor(p.Elapsed)-1 && p.RSS >= 0 && p.FDs >= 0 && p.CPU >= 0 && p.CPU <= 100
+}
 
 // v3VsHost brackets every IO phase with start/stop. The stop reports maxima,
 // not an observation presented as a peak. Cleanup also stops a partial run.
@@ -1266,6 +1313,7 @@ func v3VsHost(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	switch mode {
 	case "start":
 		cmd = fmt.Sprintf("mkdir -p %s; test ! -e %s || exit 2\nprintf %%s %s > %s\nsetsid python3 -I %s %s %s %s > %s 2>&1 < /dev/null &\n", shellQuote(s.Root), shellQuote(path+".py"), shellQuote(hostSampler), shellQuote(path+".py"), shellQuote(path+".py"), shellQuote(s.Bin+"/blockvolume"), shellQuote(path), shellQuote(stop), shellQuote(path+".log"))
+		cmd += fmt.Sprintf("for i in $(seq 1 50); do [ -e %s ] && exit 0; sleep 0.1; done; echo 'sampler did not start' >&2; exit 1", shellQuote(path+".ready"))
 	case "stop", "cleanup":
 		cmd = fmt.Sprintf("[ -e %s ] || exit 0\ntouch %s\nfor i in $(seq 1 50); do [ -e %s ] && { cat %s; exit 0; }; sleep 0.1; done\necho 'sampler did not stop' >&2; exit 1", shellQuote(path+".py"), shellQuote(stop), shellQuote(path+".done"), shellQuote(path))
 	default:
@@ -1278,16 +1326,11 @@ func v3VsHost(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if mode == "start" || mode == "cleanup" {
 		return map[string]string{"value": mode}, nil
 	}
-	var peak struct {
-		Samples int     `json:"samples"`
-		RSS     float64 `json:"rss_mib"`
-		FDs     int     `json:"open_fds"`
-		CPU     float64 `json:"cpu_busy_pct"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &peak); err != nil || peak.Samples < 1 {
+	var peak hostPeak
+	if err := json.Unmarshal([]byte(stdout), &peak); err != nil || !peak.valid() {
 		return nil, fmt.Errorf("v3_vs_host: missing/invalid samples: %s", firstLine(stdout))
 	}
-	res := map[string]string{"value": strconv.Itoa(peak.Samples), "samples": strconv.Itoa(peak.Samples), "rss_mib": fmt.Sprintf("%.1f", peak.RSS), "open_fds": strconv.Itoa(peak.FDs), "cpu_busy_pct": fmt.Sprintf("%.1f", peak.CPU)}
+	res := map[string]string{"value": strconv.Itoa(peak.Samples), "samples": strconv.Itoa(peak.Samples), "max_gap_s": fmt.Sprintf("%.3f", peak.MaxGap), "rss_mib": fmt.Sprintf("%.1f", peak.RSS), "open_fds": strconv.Itoa(peak.FDs), "cpu_busy_pct": fmt.Sprintf("%.1f", peak.CPU)}
 	if act.SaveAs != "" {
 		for k, v := range res {
 			if k != "value" {
@@ -1295,6 +1338,6 @@ func v3VsHost(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			}
 		}
 	}
-	actx.Log("  v3_vs_host maxima: samples=%s RSS=%s MiB fds=%s CPU=%s%%", res["samples"], res["rss_mib"], res["open_fds"], res["cpu_busy_pct"])
+	actx.Log("  v3_vs_host maxima: samples=%s max_gap=%ss RSS=%s MiB fds=%s CPU=%s%%", res["samples"], res["max_gap_s"], res["rss_mib"], res["open_fds"], res["cpu_busy_pct"])
 	return res, nil
 }

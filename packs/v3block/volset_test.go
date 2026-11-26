@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,9 +274,10 @@ def listing(path):
     return reallist(path)
 def sleep(n):
     global step
-    assert n==1
+    assert 0<=n<=1
     step+=1
 builtins.open=fakeopen; os.listdir=listing; time.sleep=sleep
+time.monotonic=lambda: float(step)
 os.path.exists=lambda p: step>=2 if p==sys.argv[3] else realexists(p)
 `
 	path := filepath.Join(dir, "sampler.py")
@@ -289,14 +291,75 @@ os.path.exists=lambda p: step>=2 if p==sys.argv[3] else realexists(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got map[string]float64
+	var got struct {
+		Samples  float64 `json:"samples"`
+		RSS      float64 `json:"rss_mib"`
+		FDs      float64 `json:"open_fds"`
+		CPU      float64 `json:"cpu_busy_pct"`
+		Gap      float64 `json:"max_gap_s"`
+		Complete bool    `json:"complete"`
+	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["samples"] != 2 || got["rss_mib"] != 2 || got["open_fds"] != 10 || got["cpu_busy_pct"] != 90 {
+	if got.Samples != 2 || got.RSS != 2 || got.FDs != 10 || got.CPU != 90 || got.Gap != 1 || !got.Complete {
 		t.Fatalf("maxima/count: %s", b)
 	}
 	if _, err := os.Stat(out + ".done"); err != nil {
 		t.Fatal("sampler did not settle", err)
+	}
+}
+
+func TestHostPeakCoverageRefusesGapsAndIncompleteWindow(t *testing.T) {
+	good := hostPeak{Samples: 10, Elapsed: 10, MaxGap: 1.02, Complete: true, RSS: 20, FDs: 30, CPU: 60}
+	if !good.valid() {
+		t.Fatal("normal fixed-tick sample refused")
+	}
+	for _, bad := range []hostPeak{
+		{Samples: 10, Elapsed: 10, MaxGap: 2.001, Complete: true},
+		{Samples: 2, Elapsed: 10, MaxGap: 1, Complete: true},
+		{Samples: 10, Elapsed: 10, MaxGap: 1, Complete: false},
+		{Samples: 0, Elapsed: 10, MaxGap: 1, Complete: true},
+	} {
+		if bad.valid() {
+			t.Fatalf("partial peak accepted: %+v", bad)
+		}
+	}
+}
+
+func TestHostAbsenceSweepFindsUnrecordedResources(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		py, err = exec.LookPath("python3")
+	}
+	if err != nil {
+		t.Skip("Python unavailable")
+	}
+	for _, c := range []struct {
+		name, binary, nqn string
+		clean             bool
+	}{
+		{"foreign", "/foreign/blockvolume", "nqn:foreign", true},
+		{"unrecorded-pid", "/owned/blockvolume", "nqn:foreign", false},
+		{"unrecorded-subsystem", "/foreign/blockvolume", "nqn:owned-new-volume", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			harness := fmt.Sprintf(`import io,os,builtins,glob
+os.listdir=lambda p:["313"]
+glob.glob=lambda p:["/fake/nqn"]
+def fakeopen(p,*a,**kw):
+    if p=="/fake/nqn": return io.StringIO(%q)
+    return io.BytesIO(%q.encode()+b"\0")
+builtins.open=fakeopen
+`, c.nqn, c.binary)
+			p := filepath.Join(t.TempDir(), "sweep.py")
+			if err := os.WriteFile(p, []byte(harness+hostAbsenceSweep), 0600); err != nil {
+				t.Fatal(err)
+			}
+			b, e := exec.Command(py, p, "/owned/blockvolume", "nqn:owned-").CombinedOutput()
+			if (e == nil) != c.clean {
+				t.Fatalf("clean=%v result=%v %s", c.clean, e, b)
+			}
+		})
 	}
 }
