@@ -222,7 +222,10 @@ phases:
         node: host
         mode: live
         save_as: objects_after
-        bound_seconds: "300"
+        # The first moved volume lost s1 while stopped (store-direct delete).
+        # Keep default hourly cleaning; observe through a pass plus 5 min.
+        bound_seconds: "3900"
+        timeout: 70m
       - action: v3_vs_verify
         node: host
       - action: emit_provenance

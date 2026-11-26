@@ -3,9 +3,11 @@ package v3block
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 )
@@ -88,5 +90,34 @@ func TestManyVolumesScenarioWiring(t *testing.T) {
 				t.Errorf("a failed run emitted provenance")
 			}
 		})
+	}
+}
+
+// A stopped holder's store-direct snapshot delete is cleaned at the shipped
+// hourly maintenance pass. Do not declare a leak before that pass can run.
+func TestManyVolumesDefaultCleaningObservation(t *testing.T) {
+	s, err := tr.ParseFile("../../scenarios/v3block/many-volumes.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, phase := range s.Phases {
+		for _, a := range phase.Actions {
+			if a.Action != "v3_vs_objects" || a.Params["mode"] != "live" {
+				continue
+			}
+			found = true
+			seconds, err := strconv.Atoi(a.Params["bound_seconds"])
+			if err != nil || seconds <= 3600 {
+				t.Fatalf("default hourly cleaning needs observation beyond a pass: %q", a.Params["bound_seconds"])
+			}
+			limit, err := time.ParseDuration(a.Timeout)
+			if err != nil || limit <= time.Duration(seconds)*time.Second {
+				t.Fatalf("action timeout %q must exceed observation %ds", a.Timeout, seconds)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing live-set observation")
 	}
 }
