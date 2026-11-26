@@ -27,6 +27,7 @@ func TestR4ScenarioUsesOnlyRegisteredActions(t *testing.T) {
 	actions.RegisterNVMeActions(r)
 	RegisterPack(r)
 	cloud.RegisterPack(r)
+	r.AllowMutating = true // the run passes --allow-mutating (the power fault)
 	var seen []string
 	collectAlways := false
 	for _, ph := range s.Phases {
