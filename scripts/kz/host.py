@@ -121,7 +121,7 @@ def prepare(c):
     atomic(root / "out/launch.json", s)
     # Host-side fallback uses the same cleanup verb if the controller disappears.
     env = ["KZ_"+k.upper()+"="+v for k,v in c.items() if k != "unit"]
-    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-active=210m", "--timer-property=AccuracySec=1s",
+    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-active=205m", "--timer-property=AccuracySec=1s",
          "--timer-property=Description="+description(c)+" cleanup timer",
          "--property=User="+str(os.getuid()), "--property=RuntimeMaxSec=300", "--property=KillMode=control-group", "--collect",
          "/usr/bin/env", *env, sys.executable, str(root / "host.py"), "cleanup")

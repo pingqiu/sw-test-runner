@@ -40,7 +40,7 @@ go test . -run TestKnownZeroScenarioAlwaysSettlesBothHosts -count=10
 
 Run from the same directory with `swblock run`, all `-env key=value` flags
 **before** the scenario path. Supply every empty env entry from the YAML:
-run_id, rc_sha, archive_path, archive_sha256, source_host, target_host, ssh_user,
+kz_run, rc_sha, archive_path, archive_sha256, source_host, target_host, ssh_user,
 ssh_key, source_host_key, target_host_key, source_root, target_root,
 source_ci_unit, target_ci_unit, min_free_bytes. Host addresses are distinct IPs;
 SSH keys are operator paths and host keys are approved public pins. The exact
@@ -51,10 +51,15 @@ physical free-space floor in bytes; logical sparse capacity is not free space.
 For example, the command shape is:
 
 ```text
-swblock run -results-dir <bundle-root> -env run_id=<new-id> ...all other env flags... scenarios/public/known-zero-1tib-acceptance.yaml
+swblock run -results-dir <bundle-root> -env kz_run=<new-id> ...all other env flags... scenarios/public/known-zero-1tib-acceptance.yaml
 ```
 
-The helper and judge paths default to files in this checkout. Runner uploads are
+The helper and judge paths default to files in this checkout. The helper is
+uploaded; the judge stays on the controller. `controller_python` defaults to
+`python3` (override to `python` on a Windows controller when needed); it must
+name a Python executable on PATH. The local Bash command runner must also be
+available on the controller. Use the flat runner syntax `{{ name }}` throughout;
+`kz_run` is separate from the bundle-reserved `run_id`. Runner uploads are
 bounded and checked. Both hosts need Python 3, systemd, passwordless sudo,
 nvme-cli, ext4/XFS tools, filefrag, findmnt, lsblk and losetup. The product test
 resolves its own exact exported NQN before mkfs; no physical backing disk is
@@ -70,7 +75,7 @@ formatted. All test data and mounts stay below the declared roots.
 | Prepared | start records exclusive started marker, starts bounded unit | A lost launch reply cannot trigger a second launch; cleanup observes unit |
 | Source running | handoff is a run-bound JSON receipt | RUNNING, EOF, SSH error or early process exit is never handoff |
 | Target running | poll exit.json then judge report | No receipt 30 s after unit ends is rc125, not an hours-long idle wait |
-| Target passed | signal source, wait source, judge source | Failure stops ordinary phases; always-cleanup still runs on both hosts |
+| Target exits 0 | signal source, wait source, collect both report archives and judge on controller | Failure stops ordinary phases; always-cleanup still runs on both hosts |
 | Any prepared state | cleanup under flock | Verify unit description bound to root+RC before stop; a foreign unit refuses |
 | Unit stopped | unmount run mounts, disconnect exact run NQNs, prove absence | Failed proof leaves scratch and CI stopped; rerun same cleanup |
 | Absence proved | delete only root/tmp, restore prior-active CI, receipt | Rerun is idempotent; unrelated data/services are untouched |
@@ -80,10 +85,17 @@ The state record is one atomic local JSON record, synced before CI changes.
 Only prepare writes the prior CI state; start writes the at-most-once marker;
 only cleanup restores it. The run unit's description is the root+RC ownership
 check. Timers have a separately checked description before cancellation.
-Host unit runtime ceilings are 170/110 min; work is 190 min with a fresh shared
-20 min always budget. A 210 min host timer invokes the same cleanup verb if the
-controller disappears. These are configured deadlines, not proof of completion.
+Host unit runtime ceilings are 170/110 min; work is 180 min with a fresh shared
+20 min always budget. A 205 min host timer invokes the same cleanup verb if the
+controller disappears, five minutes after the runner's total budget. Its cleanup
+service has a five-minute runtime ceiling, keeping the proposed window at 210 min. These are configured deadlines, not proof of completion.
 No source/target process is resumed by a timer.
+
+If either automatic cleanup fails, the named run operator in the launch packet
+reruns the same cleanup verb on that host after diagnosis; it restores CI only
+after absence is proved. The coordinator assigns a replacement operator if
+necessary. Do not manually restart CI or release the lab lease while dirty or
+unknown state remains. The packet names the people owning this obligation.
 
 Environment assumptions: no host reboot, privilege/cgroup escape, external
 replacement of a run directory/unit, or physical disk remapping during the
@@ -100,6 +112,11 @@ requires exact run/role, integer one TiB, real device mode, rc0, and exactly fiv
 source plus eight target PASS rows (no duplicate, missing, failed or extra row).
 A smaller rehearsal or user-space mode cannot count. Both test exit receipts
 must match the run/role. Successful cleanup is not a product PASS.
+
+The last ordinary phase judges both collected tgz files on the controller,
+without extracting their contents to disk. Always phases then clean both hosts
+and collect separate closeout archives even on failure; a cleanup/collection
+failure keeps the overall runner result FAIL, regardless of report judgment.
 
 The bundle contains both role reports, complete logs, launch/source/binary pins,
 exit and cleanup receipts. Source rows cover empty S0 and mkfs/S1 for ext4+XFS,

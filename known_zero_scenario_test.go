@@ -12,7 +12,7 @@ import (
 // Execute the committed YAML through the real engine with off-host handlers.
 // It proves phase failure/cleanup wiring, not NVMe or systemd behavior.
 func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
-	for _, fault := range []string{"", "source:start", "source:handoff", "target:judge", "source:cleanup", "source:collect_path"} {
+	for _, fault := range []string{"", "source:start", "source:handoff", "controller:judge", "source:cleanup", "source:collect-reports"} {
 		t.Run(fault, func(t *testing.T) {
 			s, err := tr.ParseFile("scenarios/public/known-zero-1tib-acceptance.yaml")
 			if err != nil {
@@ -27,6 +27,12 @@ func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
 			counts := map[string]int{}
 			handler := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
 				key := a.Action
+				if a.Action == "collect_path" {
+					key = "collect-reports"
+					if strings.Contains(a.Params["name"], "closeout") {
+						key = "collect-closeout"
+					}
+				}
 				for _, verb := range []string{"prepare", "start", "handoff", "accept", "poll", "done", "cleanup"} {
 					if strings.Contains(a.Params["cmd"], "host.py' "+verb+" ") || strings.HasSuffix(a.Params["cmd"], "host.py' "+verb) {
 						key = verb
@@ -54,12 +60,73 @@ func TestKnownZeroScenarioAlwaysSettlesBothHosts(t *testing.T) {
 				t.Fatalf("fault=%s status=%s error=%s", fault, result.Status, result.Error)
 			}
 			for _, role := range []string{"source", "target"} {
-				for _, verb := range []string{"cleanup", "collect_path"} {
+				for _, verb := range []string{"cleanup", "collect-closeout"} {
 					if counts[role+":"+verb] != 1 {
 						t.Fatalf("missing always action: %s %s counts=%v", role, verb, counts)
 					}
 				}
 			}
 		})
+	}
+}
+
+func TestKnownZeroScenarioResolvesLaunchInputs(t *testing.T) {
+	s, err := tr.ParseFile("scenarios/public/known-zero-1tib-acceptance.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const run = "kz-20261126t050000z"
+	s.Env["source_root"] = "/scratch/source"
+	s.Env["target_root"] = "/scratch/target"
+	s.Env["kz_run"] = run
+	s.Env["run_id"] = "runner-internal-bundle-id"
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	handler := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+		key := ""
+		want := ""
+		got := ""
+		if a.Node == "source" && strings.HasSuffix(a.Params["cmd"], "host.py' prepare") {
+			key = "root"
+			want = "/scratch/source"
+			got = a.Params["env.KZ_ROOT"]
+		}
+		if a.Node == "target" && strings.HasSuffix(a.Params["cmd"], "host.py' accept") {
+			key = "handoff"
+			want = "HANDOFF e30="
+			got = a.Params["env.KZ_HANDOFF_B64"]
+		}
+		if a.Node == "controller" {
+			role := a.Params["env.KZ_ROLE"]
+			key = "judge-" + role
+			want = "/bundle/" + role + ".tgz"
+			got = a.Params["env.KZ_ARCHIVE"]
+			if a.Params["env.KZ_ACCEPTANCE_ID"] != run {
+				return nil, fmt.Errorf("controller acceptance id=%q", a.Params["env.KZ_ACCEPTANCE_ID"])
+			}
+		}
+		if key != "" {
+			if got != want {
+				return nil, fmt.Errorf("%s=%q want %q", key, got, want)
+			}
+			if a.Node != "controller" && a.Params["env.KZ_RUN"] != run {
+				return nil, fmt.Errorf("KZ_RUN=%q; bundle id overwrote acceptance id", a.Params["env.KZ_RUN"])
+			}
+			mu.Lock()
+			seen[key] = true
+			mu.Unlock()
+		}
+		if a.Action == "collect_path" {
+			return map[string]string{"value": "/bundle/" + a.Node + ".tgz"}, nil
+		}
+		return map[string]string{"value": "HANDOFF e30="}, nil
+	}
+	r := tr.NewRegistry()
+	for _, name := range []string{"exec", "upload_path", "wait_exec_match", "collect_path"} {
+		r.RegisterFunc(name, tr.TierCore, handler)
+	}
+	result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
+	if result.Status != tr.StatusPass || !seen["root"] || !seen["handoff"] || !seen["judge-source"] || !seen["judge-target"] {
+		t.Fatalf("status=%s error=%s seen=%v", result.Status, result.Error, seen)
 	}
 }
