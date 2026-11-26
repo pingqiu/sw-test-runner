@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 PK = Path(os.environ.get('PLC_PACKET', ''))
 if not (PK/'powerloss.py').is_file():
     raise SystemExit('PLC_PACKET must name a power-loss packet (powerloss.py, controls/, drill/powerloss-fs.json)')
+sys.dont_write_bytecode = True  # importing the packet's controls must not write into the packet
 sys.path.insert(0, str(PK/'controls'))
 from test_nonprefix_attempts import FIX, RUN, read, write  # noqa: E402  the packet's own fixture builders
 import test_nonprefix_attempts as attempt_fixture  # noqa: E402
@@ -119,6 +120,40 @@ class Parity(unittest.TestCase):
         r['chunks'][0]['sha256'] = 'f'*64
         write(p, r)
         self.expect('FAIL')
+
+    def expect_not_pass(self):
+        scenario, rc, direct = self.both()
+        self.assertNotEqual(direct, 'PASS', 'the packet judge itself passed an incomplete run')
+        self.assertEqual(scenario, direct, 'the scenario judge differs from the packet judge')
+        self.assertNotEqual(rc, 0, 'a non-PASS exited 0')
+
+    def test_one_missing_case_on_either_filesystem_is_not_pass(self):
+        import shutil
+        for fs in ('ext4', 'xfs'):
+            for case in CASES:
+                with self.subTest(fs=fs, case=case):
+                    self.setUp()
+                    shutil.rmtree(self.run_root/'lout'/fs/'plc'/case)
+                    self.expect_not_pass()
+
+    def test_truncated_case_data_is_not_pass(self):
+        for fs in ('ext4', 'xfs'):
+            with self.subTest(fs=fs):
+                self.setUp()
+                p = self.run_root/'lout'/fs/'plc'/'pl-flushed-exact'/'published.observation.json'
+                raw = p.read_bytes()
+                p.write_bytes(raw[:len(raw)//2])
+                self.expect_not_pass()
+
+    def test_invalid_nonprefix_obligation_is_not_pass(self):
+        for fs in ('ext4', 'xfs'):
+            with self.subTest(fs=fs):
+                self.setUp()
+                root = self.run_root/'lout'/fs/'plc'/'pl-nonprefix'
+                containers = sorted(p for p in root.glob('*.json'))
+                self.assertTrue(containers, 'the fixture has no pl-nonprefix container json')
+                containers[0].write_text('{"schema": "not-the-nonprefix-attempts-schema"}')
+                self.expect_not_pass()
 
     def test_unreadable_packet_is_unknown_never_pass(self):
         out = Path(self.temp.name)/'judge.json'

@@ -15,6 +15,8 @@ import runpy
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # judging must not write into the sealed packet (no __pycache__)
+
 # The four sealed cases of a counted run; judge_cases refuses any other set.
 CASES = ['pl-flushed-exact', 'pl-nonprefix', 'pl-quiet-certified', 'pl-oracle-control']
 EXIT = {'PASS': 0, 'FAIL': 1}
