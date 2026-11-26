@@ -20,7 +20,7 @@ Each node supplies a stable private IPv4, VM size, roles, cache-disk GiB, explic
 
 It sets two module inputs that are off by default, so no other profile changes:
 
-- `internal_ports = [19600, 19601, 19602, 4420]`: the blockmaster, data, control and NVMe/TCP ports, opened in the existing `internal-services` rule with the run's own subnet as **both** source and destination. Port 22 is refused, and SSH stays controller-only.
+- `internal_ports = [19600, 19601, 19602, 4420]`: the blockmaster, data, control and NVMe/TCP ports, opened in the existing `internal-services` rule with the run's own subnet as **both** source and destination. Port 22 is refused, and SSH stays controller-only. NVMe/TCP has no authentication of its own, so this opening is sound only while the subnet holds this run's machines and nothing else. The module creates the run's own VNet and subnet and places only the run's nodes in them; do not attach any other NIC to that subnet.
 - `nvme_client = true`: cloud-init adds `nvme-cli`, sets `options nvme_core multipath=Y` (`/etc/modprobe.d/seaweed-nvme-multipath.conf`), loads `nvme_tcp` at boot and once at first start. `r4.sh client-check` verifies all three on the client before any I/O.
 
 Without `nvme_client`, a node's cloud-init is the module's file unchanged (`tests/nvme_client.tftest.hcl` asserts it byte for byte).
