@@ -5,11 +5,12 @@
 # timed out or was cancelled is still settled. In order:
 #   1. nothing to settle (exit 0, recorded) for a rehearsal, or when this invocation launched no cloud child
 #      (no RUNEV/launching);
-#   2. terminal barrier: the cloud child must have exited. RUNEV/cloud.pid is the pid and start time of
-#      plc_launch.sh, recorded before the child started; the launcher exits only after the child. Waits up to
-#      PLC_SETTLE_WAIT seconds (default 600). Still running, or
-#      launched with no recorded identity: UNKNOWN (exit 1) with the recovery handle; inventory is never
-#      observed while the child can still create or delete;
+#   2. terminal barrier: the cloud child's termination must be positively established, and the only proof is
+#      plc_launch.sh's receipt RUNEV/cloud.pid.exit, written after its wait reaped the child. While the
+#      launcher (RUNEV/cloud.pid: pid and start time, recorded before the child started; a zombie counts as
+#      ended) is alive, wait up to PLC_SETTLE_WAIT seconds (default 600). Still running, a launcher that ended
+#      without a receipt (killed, OOM), or a launch with no recorded identity: UNKNOWN (exit 1) with the
+#      recovery handle; inventory is never observed while the child may still create or delete;
 #   3. admission: the config's output holds launch.json with this invocation's launch TOKEN (seaweed-cloud
 #      writes it only after admission). Output still absent: not admitted, nothing of ours exists (exit 0,
 #      recorded, nothing touched). Output present without our token: UNKNOWN (exit 1), untouched;
@@ -34,13 +35,19 @@ while [ ! -s "$ev/cloud.pid" ] && [ "$waited" -lt 10 ]; do sleep 1; waited=$((wa
 read -r pid start < "$ev/cloud.pid" 2>/dev/null \
   || fail "UNKNOWN: a cloud child was launched but recorded no identity; recovery: seaweed-cloud verify/destroy --config $config"
 case "$pid$start" in *[!0-9]*|'') fail "UNKNOWN: cloud.pid is malformed; recovery: seaweed-cloud verify/destroy --config $config" ;; esac
+# Terminal only with the launcher's receipt (cloud.pid.exit, written after its wait reaped the child). A launcher
+# still alive: wait (bounded). A launcher gone without a receipt (killed, OOM): the child's fate is unproven.
+handle() { printf 'launcher=%s %s cloud_child=%s config=%s\n' "$pid" "$start" "$(cat "$ev/cloud.pid.child" 2>/dev/null)" "$config" > "$o/recovery-handle.txt"; }
 waited=0
-while alive "$pid" "$start" && [ "$waited" -lt "$wait_s" ]; do sleep 2; waited=$((waited + 2)); done
-if alive "$pid" "$start"; then
-  printf 'launcher_pid=%s launcher_start=%s cloud_pid=%s config=%s\n' "$pid" "$start" "$(cat "$ev/cloud.pid.child" 2>/dev/null)" "$config" > "$o/recovery-handle.txt"
-  fail "UNKNOWN: cloud child (launcher pid $pid) still running after ${waited}s; not verified; recovery handle in recovery-handle.txt"
+while [ ! -s "$ev/cloud.pid.exit" ] && alive "$pid" "$start" && [ "$waited" -lt "$wait_s" ]; do sleep 2; waited=$((waited + 2)); done
+if [ ! -s "$ev/cloud.pid.exit" ]; then
+  handle
+  if alive "$pid" "$start"; then
+    fail "UNKNOWN: cloud child still running after ${waited}s (launcher pid $pid); not verified; recovery handle in recovery-handle.txt"
+  fi
+  fail "UNKNOWN: the launcher ended without a terminal receipt, so the cloud child's termination is unproven; not verified; recovery handle in recovery-handle.txt"
 fi
-echo "cloud child pid $pid terminal (waited ${waited}s)" > "$o/barrier.txt"
+echo "cloud child terminal: exit $(cat "$ev/cloud.pid.exit") reaped by its launcher (waited ${waited}s)" > "$o/barrier.txt"
 
 # 3. Admission.
 out=$("$py" -I -c 'import json,sys; v=json.load(open(sys.argv[1])).get("output"); sys.stdout.write(v if isinstance(v, str) else "")' "$config") \

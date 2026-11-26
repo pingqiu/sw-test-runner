@@ -59,7 +59,10 @@ class Settle(unittest.TestCase):
                                             'variables_sha256': pin}).encode())
 
     def launch(self, *cmd):
-        """Start cmd through plc_launch.sh exactly as cloud_run does; return once it recorded its identity."""
+        """Start cmd through plc_launch.sh exactly as cloud_run does (a fresh launch: no earlier record or
+        receipt); return once it recorded its identity."""
+        for name in ('cloud.pid', 'cloud.pid.child', 'cloud.pid.exit'):
+            (self.e/name).unlink(missing_ok=True)
         (self.e/'launching').write_bytes(b'')
         p = subprocess.Popen([BASH, str(HERE/'plc_launch.sh'), posix(self.e/'cloud.pid')] + list(cmd))
         self.children.append(p)
@@ -157,7 +160,8 @@ class Settle(unittest.TestCase):
         """As the runner cancels cloud_run: only the step's shell is killed. The launcher and its cloud child keep
         running; settle must not observe inventory until the child has exited, and with a short wait it is
         UNKNOWN."""
-        (self.e/'cloud.pid').unlink()
+        for name in ('cloud.pid', 'cloud.pid.child', 'cloud.pid.exit'):
+            (self.e/name).unlink(missing_ok=True)
         (self.e/'launching').write_bytes(b'')
         shell = subprocess.Popen([BASH, '-c', 'bash "$1" "$2" sleep 6 < /dev/null > /dev/null 2>&1 & wait "$!"', '_',
                                   posix(HERE/'plc_launch.sh'), posix(self.e/'cloud.pid')])
@@ -175,6 +179,34 @@ class Settle(unittest.TestCase):
         rc, note = self.settle(wait='30')
         self.assertEqual(rc, 0, note)
         self.assertGreater(time.time() - started, 1.0, 'settled without waiting for the active child')
+
+    def test_a_launcher_killed_without_a_receipt_is_unknown(self):
+        """The launcher dies abnormally (SIGKILL, as an OOM kill would) while the cloud child keeps running: no
+        terminal receipt, so the child's termination is unproven and nothing is observed."""
+        for name in ('cloud.pid', 'cloud.pid.exit', 'cloud.pid.child'):
+            (self.e/name).unlink(missing_ok=True)
+        self.launch('sleep', '30')
+        deadline = time.time() + 20
+        while not (self.e/'cloud.pid.child').exists() and time.time() < deadline:
+            time.sleep(0.1)
+        launcher = (self.e/'cloud.pid').read_text().split()[0]
+        child = (self.e/'cloud.pid.child').read_text().split()[0]
+        try:
+            subprocess.run([BASH, '-c', 'kill -9 $0', launcher], timeout=30)
+            rc, note = self.settle(wait='6')
+            self.assertEqual(rc, 1, note)
+            self.assertIn('without a terminal receipt', note)
+            self.assertEqual(self.calls_made(), '', 'inventory observed with the cloud child unaccounted for')
+            self.assertFalse((self.e/'cloud.pid.exit').exists())
+        finally:
+            subprocess.run([BASH, '-c', 'kill -9 $0 2>/dev/null; true', child], timeout=30)
+
+    def test_the_launcher_reports_the_childs_status(self):
+        for name in ('cloud.pid', 'cloud.pid.exit'):
+            (self.e/name).unlink(missing_ok=True)
+        p = self.launch('bash', '-c', 'exit 7')
+        self.assertEqual(p.wait(timeout=20), 7)
+        self.assertEqual((self.e/'cloud.pid.exit').read_text().strip(), '7')
 
     def test_a_launch_without_a_recorded_identity_is_unknown(self):
         (self.e/'cloud.pid').unlink()
@@ -213,7 +245,7 @@ class Settle(unittest.TestCase):
         """Guard for the controls above: the stub seaweed-cloud and az execute (exit 0 on the clean case)."""
         cloud, az = self.stubs()
         for stub, args in ((cloud, ''), (az, ' group exists')):
-            r = subprocess.run([BASH, '-c', '"$0"' + args, posix(stub)], capture_output=True, timeout=30)
+            r = subprocess.run([BASH, '-c', 'exec $0' + args, posix(stub)], capture_output=True, timeout=30)
             self.assertEqual(r.returncode, 0, '%s does not run: %r' % (stub.name, r.stderr))
 
 

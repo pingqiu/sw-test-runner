@@ -1,8 +1,10 @@
 """plc_owned.sh and plc_cleanup.sh controls (packet-free): an always-phase step touches only this invocation's
 run directory, and cleanup removes it only when every existing evidence/capture/lout directory is collected
 exactly; a failed or partial collection keeps it."""
+import io
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -20,9 +22,10 @@ class Cleanup(unittest.TestCase):
         self.addCleanup(t.cleanup)
         self.t = Path(t.name)
         self.d = self.t/'run'
+        self.payload = bytes(range(256)) * 64
         for rel in ('evidence/judge.json', 'evidence/final/settle.txt', 'capture/out.tgz', 'lout/ext4/plc/a'):
             (self.d/rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.d/rel).write_bytes(b'x')
+            (self.d/rel).write_bytes(self.payload)
         (self.d/'.plc-owned').write_bytes((TOKEN + '\n').encode())
         self.art = self.t/'artifacts'
         self.art.mkdir()
@@ -34,8 +37,22 @@ class Cleanup(unittest.TestCase):
                 tf.add(self.d/sub, arcname=sub)
 
     def run_cleanup(self, token=TOKEN):
-        return subprocess.run([BASH, str(HERE/'plc_cleanup.sh'), str(self.d), token, str(self.art)],
+        return subprocess.run([BASH, str(HERE/'plc_cleanup.sh'), str(self.d), token, str(self.art), sys.executable],
                               capture_output=True, text=True, timeout=60)
+
+    def collect_truncated(self, sub, rel):
+        """A valid tar of sub/ whose member rel carries only half its bytes (as a collection cut short would)."""
+        with tarfile.open(self.art/('plc-%s.tgz' % sub), 'w:gz') as tf:
+            for p in sorted((self.d/sub).rglob('*')):
+                if not p.is_file():
+                    continue
+                name = p.relative_to(self.d).as_posix()
+                data = p.read_bytes()
+                if name == rel:
+                    data = data[:len(data) // 2]
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
 
     def test_removed_once_everything_is_collected(self):
         self.collect('evidence', 'capture', 'lout')
@@ -53,6 +70,9 @@ class Cleanup(unittest.TestCase):
             'lout not collected': lambda: self.collect('evidence', 'capture'),
             'archive unreadable': lambda: (self.collect('evidence', 'capture'), (self.art/'plc-lout.tgz').write_bytes(b'not a tar')),
             'archive missing a file': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'lout'/'late').write_bytes(b'y')),
+            'same name, different bytes': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'evidence'/'judge.json').write_bytes(b'{"verdict": "FAIL"}')),
+            'file changed after collection, same size': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'capture'/'out.tgz').write_bytes(b'Y' * len(self.payload))),
+            'truncated payload in a valid tar': lambda: (self.collect('evidence', 'lout'), self.collect_truncated('capture', 'capture/out.tgz')),
         }
         for name, prepare in cases.items():
             with self.subTest(case=name):

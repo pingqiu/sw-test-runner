@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# plc_launch.sh PIDFILE CMD [ARGS...]: run CMD under a launcher whose lifetime covers it, for the settle barrier.
-# Before CMD starts, the launcher records its own "pid starttime" to PIDFILE (atomically); it then runs CMD as
-# its child, records the child's pid to PIDFILE.child, and exits only after the child has exited, with the
-# child's status. TERM/INT/HUP are forwarded to the child (whose own cancellation then runs) and never end the
-# launcher early. So "the recorded process has exited" means the cloud child has exited. When the scenario's
-# shell is killed on timeout or cancel, the launcher and its child keep running and the barrier waits on them.
+# plc_launch.sh PIDFILE CMD [ARGS...]: run CMD under a launcher that leaves a terminal receipt, for the settle
+# barrier. Before CMD starts, the launcher records its own "pid starttime" to PIDFILE (atomically). It then runs
+# CMD as its child and records the child's "pid starttime" to PIDFILE.child (for the recovery handle). When the
+# launcher's wait has REAPED the child, it writes the child's exit status to PIDFILE.exit (atomically), then exits
+# with that status. PIDFILE.exit is the only proof that the cloud child terminated: a launcher that dies any other
+# way (OOM, SIGKILL) leaves no receipt, and settle reports UNKNOWN. TERM/INT/HUP are forwarded to the child
+# (whose own cancellation then runs) and never end the launcher early. When the scenario's shell is killed on
+# timeout or cancel, the launcher and its child keep running.
 set -uf
 pf=$1; shift
 read -r st < "/proc/$$/stat" || exit 97
@@ -17,10 +19,15 @@ trap 'forward INT' INT
 trap 'forward HUP' HUP
 "$@" &
 child=$!
-printf '%s\n' "$child" > "$pf.child"
+cst=-
+if read -r st < "/proc/$child/stat" 2>/dev/null; then f=(${st##*) }); cst=${f[19]}; fi
+printf '%s %s\n' "$child" "$cst" > "$pf.child"
+# A forwarded signal interrupts wait while the child still runs; loop until the child is reaped (it then leaves
+# the job table, so a reused pid can never be mistaken for it).
 while :; do
   wait "$child"
   rc=$?
-  kill -0 "$child" 2>/dev/null || break
+  [ -z "$(jobs -rp)" ] && break
 done
+printf '%s\n' "$rc" > "$pf.exit.tmp" && mv -f "$pf.exit.tmp" "$pf.exit"
 exit "$rc"

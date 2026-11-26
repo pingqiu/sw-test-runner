@@ -350,6 +350,7 @@ phases:
         env.PLC_OWNER: "{{ plc_token }}"
         env.PLC_TOOLS: "{{ plc_tools }}"
         env.PLC_ART: "{{ artifacts_dir }}"
+        env.PLC_PY: "{{ python }}"
         cmd: |
           set -uf
-          bash "$PLC_TOOLS/plc_cleanup.sh" "$PLC_DIR" "$PLC_OWNER" "$PLC_ART"
+          bash "$PLC_TOOLS/plc_cleanup.sh" "$PLC_DIR" "$PLC_OWNER" "$PLC_ART" "$PLC_PY"
