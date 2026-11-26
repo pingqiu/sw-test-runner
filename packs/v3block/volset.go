@@ -34,7 +34,7 @@ import (
 const volSetVar = "v3vs"
 
 // vsHost is one simulated host of a volume: its server id and endpoints.
-type vsHost struct {
+type setVsHost struct {
 	Server string `json:"server"`
 	Data   string `json:"data"`
 	Ctrl   string `json:"ctrl"`
@@ -46,7 +46,7 @@ type vsVolume struct {
 	Name     string              `json:"name"`
 	NQN      string              `json:"nqn"`
 	LayoutID string              `json:"layout_id,omitempty"`
-	Hosts    [2]vsHost           `json:"hosts"` // [0] the first placement, [1] the move target
+	Hosts    [2]setVsHost        `json:"hosts"` // [0] the first placement, [1] the move target
 	Cur      int                 `json:"cur"`   // index of the host serving now
 	PID      string              `json:"pid,omitempty"`
 	Epoch    uint64              `json:"epoch,omitempty"`
@@ -86,15 +86,15 @@ func (s *vsSet) save(actx *tr.ActionContext) {
 	actx.Vars[volSetVar] = string(b)
 }
 
-func (s *vsSet) cli() string     { return s.Bin + "/sw-block" }
-func (s *vsSet) v3ctl() string   { return s.Bin + "/v3ctl" }
-func (v *vsVolume) host() vsHost { return v.Hosts[v.Cur] }
+func (s *vsSet) cli() string        { return s.Bin + "/sw-block" }
+func (s *vsSet) v3ctl() string      { return s.Bin + "/v3ctl" }
+func (v *vsVolume) host() setVsHost { return v.Hosts[v.Cur] }
 
 // vsSpecHosts lays out the endpoints of volume i (1-based): ten ports each
 // from base, the first four for host 0 and the next four for host 1.
-func vsSpecHosts(base, i int, name string) [2]vsHost {
+func vsSpecHosts(base, i int, name string) [2]setVsHost {
 	p := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", base+i*10+k) }
-	return [2]vsHost{
+	return [2]setVsHost{
 		{Server: "a-" + name, Data: p(0), Ctrl: p(1), Status: p(2), NVMe: p(3)},
 		{Server: "b-" + name, Data: p(4), Ctrl: p(5), Status: p(6), NVMe: p(7)},
 	}
@@ -162,7 +162,7 @@ func v3VsSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		s.Volumes = append(s.Volumes, vsVolume{Name: name, NQN: nqn + name, Hosts: vsSpecHosts(base, i, name)})
 	}
 	cmd := fmt.Sprintf("mkdir -p %s %s && cat > %s <<'V3VS_SPEC_EOF'\n%sV3VS_SPEC_EOF\n",
-		shellQuote(s.Root), shellQuote(dirOf(specPath)), shellQuote(specPath), vsClusterSpec(s))
+		shellQuote(s.Root), shellQuote(setDirOf(specPath)), shellQuote(specPath), vsClusterSpec(s))
 	if _, stderr, code, err := node.Run(ctx, cmd); err != nil || code != 0 {
 		return nil, fmt.Errorf("v3_vs_spec: write %s: code=%d %s %v", specPath, code, stderr, err)
 	}
@@ -171,7 +171,7 @@ func v3VsSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	return map[string]string{"value": strconv.Itoa(count)}, nil
 }
 
-func dirOf(p string) string {
+func setDirOf(p string) string {
 	if i := strings.LastIndex(p, "/"); i > 0 {
 		return p[:i]
 	}
@@ -278,13 +278,13 @@ func latency(d []time.Duration) map[string]string {
 
 // run runs one command and returns stdout, stderr, the exit code and
 // whether the command could not be run at all.
-type runner interface {
+type setRunner interface {
 	Run(ctx context.Context, cmd string) (string, string, int, error)
 	RunRoot(ctx context.Context, cmd string) (string, string, int, error)
 }
 
 // v3ctlAnswer is v3ctl's JSON answer.
-type v3ctlAnswer struct {
+type setV3ctlAnswer struct {
 	Outcome    string `json:"outcome"`
 	Volume     string `json:"volume"`
 	LayoutID   string `json:"layout_id"`
@@ -295,8 +295,8 @@ type v3ctlAnswer struct {
 
 // parseV3ctl maps v3ctl's exit code and answer to an outcome. The exit code
 // and the answer must agree; anything else is unknown.
-func parseV3ctl(stdout string, code int, volume string) (v3ctlAnswer, string) {
-	var a v3ctlAnswer
+func setParseV3ctl(stdout string, code int, volume string) (setV3ctlAnswer, string) {
+	var a setV3ctlAnswer
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil || a.Volume != volume {
 		return a, "unknown"
 	}
@@ -320,9 +320,9 @@ func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		if err != nil {
 			return outcome{Result: "unknown", Detail: err.Error()}
 		}
-		a, r := parseV3ctl(stdout, code, v.Name)
+		a, r := setParseV3ctl(stdout, code, v.Name)
 		if r != "ok" {
-			return outcome{Result: r, Detail: firstLine(a.Error + " " + stderr)}
+			return outcome{Result: r, Detail: setFirstLine(a.Error + " " + stderr)}
 		}
 		v.LayoutID = a.LayoutID
 		return outcome{Result: "ok", Dur: time.Duration(a.CallNs)}
@@ -331,7 +331,7 @@ func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	return report(actx, act, "v3_vs_create", outs)
 }
 
-func vsBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, *vsSet, error) {
+func vsBegin(actx *tr.ActionContext, act tr.Action, name string) (setRunner, *vsSet, error) {
 	node, err := actions.GetNode(actx, act.Node)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", name, err)
@@ -343,7 +343,7 @@ func vsBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, *vsSet
 	return node, s, nil
 }
 
-func firstLine(s string) string {
+func setFirstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
@@ -356,7 +356,7 @@ func firstLine(s string) string {
 
 // volumeArgs is blockvolume's command line for v on host h, as the product's
 // own real-process tests run it, with the layout id from the master.
-func (s *vsSet) volumeArgs(v *vsVolume, h vsHost) []string {
+func (s *vsSet) volumeArgs(v *vsVolume, h setVsHost) []string {
 	args := []string{"--master", s.Master, "--server-id", h.Server, "--volume-id", v.Name, "--replica-id", "r1",
 		"--layout-id", v.LayoutID, "--data-addr", h.Data, "--ctrl-addr", h.Ctrl, "--status-addr", h.Status,
 		"--durable-root", s.Root + "/" + h.Server, "--durable-impl", "walstore-chunk",
@@ -370,7 +370,7 @@ func (s *vsSet) volumeArgs(v *vsVolume, h vsHost) []string {
 }
 
 // vsStatus is the part of blockvolume's /status the actions read.
-type vsStatus struct {
+type setVsStatus struct {
 	VolumeID             string
 	Epoch                uint64
 	Healthy              bool
@@ -378,13 +378,13 @@ type vsStatus struct {
 	FrontendPrimaryReady bool
 }
 
-func (st vsStatus) serving(vol string) bool {
+func (st setVsStatus) serving(vol string) bool {
 	return st.VolumeID == vol && st.Healthy && st.AuthorityRole == "primary" && st.FrontendPrimaryReady && st.Epoch > 0
 }
 
-func readStatus(ctx context.Context, node runner, h vsHost, vol string) (vsStatus, bool) {
+func setReadStatus(ctx context.Context, node setRunner, h setVsHost, vol string) (setVsStatus, bool) {
 	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("curl -s -m 2 %s", shellQuote("http://"+h.Status+"/status?volume="+vol)))
-	var st vsStatus
+	var st setVsStatus
 	if err != nil || code != 0 || json.Unmarshal([]byte(stdout), &st) != nil {
 		return st, false
 	}
@@ -393,10 +393,10 @@ func readStatus(ctx context.Context, node runner, h vsHost, vol string) (vsStatu
 
 // waitServing polls the volume's status until it serves above minEpoch, the
 // process exits, or the bound passes.
-func waitServing(ctx context.Context, node runner, v *vsVolume, minEpoch uint64, bound time.Duration) (uint64, string) {
+func waitServing(ctx context.Context, node setRunner, v *vsVolume, minEpoch uint64, bound time.Duration) (uint64, string) {
 	end := time.Now().Add(bound)
 	for time.Now().Before(end) {
-		if st, ok := readStatus(ctx, node, v.host(), v.Name); ok && st.serving(v.Name) && st.Epoch > minEpoch {
+		if st, ok := setReadStatus(ctx, node, v.host(), v.Name); ok && st.serving(v.Name) && st.Epoch > minEpoch {
 			return st.Epoch, ""
 		}
 		if v.PID != "" {
@@ -415,7 +415,7 @@ func waitServing(ctx context.Context, node runner, v *vsVolume, minEpoch uint64,
 
 // attach starts blockvolume for v on its current host, waits until it
 // serves above minEpoch, and connects the kernel NVMe/TCP host to it.
-func (s *vsSet) attach(ctx context.Context, node runner, v *vsVolume, minEpoch uint64, bound time.Duration) outcome {
+func (s *vsSet) attach(ctx context.Context, node setRunner, v *vsVolume, minEpoch uint64, bound time.Duration) outcome {
 	h := v.host()
 	if v.LayoutID == "" {
 		return outcome{Result: "refused", Detail: "no layout id (create first)"}
@@ -433,7 +433,7 @@ func (s *vsSet) attach(ctx context.Context, node runner, v *vsVolume, minEpoch u
 	stdout, stderr, code, err := node.Run(ctx, cmd)
 	pid := strings.TrimSpace(stdout)
 	if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
-		return outcome{Result: "unknown", Detail: "start: " + firstLine(stderr)}
+		return outcome{Result: "unknown", Detail: "start: " + setFirstLine(stderr)}
 	}
 	v.PID = pid
 	epoch, why := waitServing(ctx, node, v, minEpoch, bound)
@@ -443,10 +443,10 @@ func (s *vsSet) attach(ctx context.Context, node runner, v *vsVolume, minEpoch u
 	}
 	v.Epoch = epoch
 	host, port, _ := strings.Cut(h.NVMe, ":")
-	if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
+	if why := setNvmeConnect(ctx, node, host, port, v.NQN); why != "" {
 		return outcome{Result: "unknown", Detail: why}
 	}
-	if _, why := deviceOf(ctx, node, v.NQN, 20*time.Second); why != "" {
+	if _, why := setDeviceOf(ctx, node, v.NQN, 20*time.Second); why != "" {
 		return outcome{Result: "unknown", Detail: why}
 	}
 	return outcome{Result: "ok"}
@@ -454,32 +454,32 @@ func (s *vsSet) attach(ctx context.Context, node runner, v *vsVolume, minEpoch u
 
 // nvmeConnect connects the kernel NVMe/TCP host to nqn at host:port through
 // the kernel's fabrics interface, the call nvme-cli makes (no tool needed).
-func nvmeConnect(ctx context.Context, node runner, host, port, nqn string) string {
+func setNvmeConnect(ctx context.Context, node setRunner, host, port, nqn string) string {
 	if !regexp.MustCompile(`^[0-9.]+$`).MatchString(host) || !regexp.MustCompile(`^[0-9]+$`).MatchString(port) || !regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`).MatchString(nqn) {
 		return "nvme connect: malformed address or nqn"
 	}
 	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s", host, port, nqn)
 	if _, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("printf %%s %s > /dev/nvme-fabrics", shellQuote(opts))); err != nil || code != 0 {
-		return "nvme connect: " + firstLine(stderr)
+		return "nvme connect: " + setFirstLine(stderr)
 	}
 	return ""
 }
 
 // nvmeDisconnect deletes every kernel controller of subsystem nqn through
 // sysfs (what `nvme disconnect -n` does) and confirms none remains.
-func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
+func setNvmeDisconnect(ctx context.Context, node setRunner, nqn string) string {
 	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ "$(cat "$d/subsysnqn" 2>/dev/null)" = %s ] && echo 1 > "$d/delete_controller"; done; true`, shellQuote(nqn))
 	if _, stderr, code, err := node.RunRoot(ctx, cmd); err != nil || code != 0 {
-		return "nvme disconnect: " + firstLine(stderr)
+		return "nvme disconnect: " + setFirstLine(stderr)
 	}
-	if _, why := deviceOf(ctx, node, nqn, 500*time.Millisecond); why == "" {
+	if _, why := setDeviceOf(ctx, node, nqn, 500*time.Millisecond); why == "" {
 		return "nvme disconnect: a controller of " + nqn + " remains"
 	}
 	return ""
 }
 
 // deviceOf finds the block device of the connected subsystem nqn in sysfs.
-func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration) (string, string) {
+func setDeviceOf(ctx context.Context, node setRunner, nqn string, bound time.Duration) (string, string) {
 	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ "$(cat "$d/subsysnqn" 2>/dev/null)" = %s ] || continue; for n in "$d"/nvme*n*; do [ -e "$n" ] && basename "$n"; done; done | sed -E 's/c[0-9]+n/n/' | sort -u`, shellQuote(nqn))
 	end := time.Now().Add(bound)
 	for time.Now().Before(end) {
@@ -508,7 +508,7 @@ func v3VsAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			if err != nil {
 				return outcome{Result: "unknown", Detail: err.Error()}
 			}
-			a, r := parseV3ctl(stdout, code, v.Name)
+			a, r := setParseV3ctl(stdout, code, v.Name)
 			if r != "ok" {
 				return outcome{Result: r, Detail: "resolve: " + a.Error}
 			}
@@ -523,7 +523,7 @@ func v3VsAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 // blockSHA is the content of the 4096-byte block a write puts at lba: a
 // repeated tag naming the volume, the round and the block, so a block read
 // from the wrong volume, round or offset cannot match.
-func blockTag(vol, round string, lba uint64) string {
+func setBlockTag(vol, round string, lba uint64) string {
 	return fmt.Sprintf("%s|%s|%d|", vol, round, lba)
 }
 
@@ -541,7 +541,7 @@ const zeroBlockSHA = "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48
 
 // blockSHA is the sha256 of the block a write of tag puts down, computed here
 // so a write whose outcome is unknown still names the value it attempted.
-func blockSHA(tag string) string {
+func setBlockSHA(tag string) string {
 	b := []byte(strings.Repeat(tag, 4096/len(tag)+1))[:4096]
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -563,7 +563,7 @@ func v3VsWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 		return nil, errors.New("v3_vs_write: round (1-16 of [A-Za-z0-9_-]) is required")
 	}
 	outs := s.forEach(ctx, s.selectVolumes(act), func(ctx context.Context, v *vsVolume) outcome {
-		dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
+		dev, why := setDeviceOf(ctx, node, v.NQN, 5*time.Second)
 		if why != "" {
 			return outcome{Result: "unknown", Detail: why}
 		}
@@ -571,19 +571,19 @@ func v3VsWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 			v.Expect = map[string][]string{}
 		}
 		for _, lba := range lbas(s.Blocks) {
-			tag := blockTag(v.Name, round, lba)
+			tag := setBlockTag(v.Name, round, lba)
 			gen := fmt.Sprintf(`python3 -c 'import sys;t=sys.argv[1].encode();sys.stdout.buffer.write((t*(4096//len(t)+1))[:4096])' %s`, shellQuote(tag))
 			cmd := fmt.Sprintf("set -o pipefail; %s | tee >(sha256sum | cut -c1-64 >&2) | dd of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc iflag=fullblock status=none", gen, dev, lba)
 			_, stderr, code, err := node.RunRoot(ctx, "bash -c "+shellQuote(cmd))
 			key := strconv.FormatUint(lba, 10)
-			want := blockSHA(tag)
+			want := setBlockSHA(tag)
 			if err != nil || code != 0 {
 				v.Expect[key] = unknownWrite(v.Expect[key], want)
-				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: code %d %s", lba, code, firstLine(stderr))}
+				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: code %d %s", lba, code, setFirstLine(stderr))}
 			}
 			if sum := strings.TrimSpace(stderr); sum != want {
 				v.Expect[key] = unknownWrite(v.Expect[key], want)
-				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: the generator wrote %s, not %s", lba, firstLine(sum), want)}
+				return outcome{Result: "unknown", Detail: fmt.Sprintf("write lba %d: the generator wrote %s, not %s", lba, setFirstLine(sum), want)}
 			}
 			v.Expect[key] = []string{want}
 		}
@@ -605,7 +605,7 @@ func v3VsVerify(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		if len(v.Expect) == 0 {
 			return outcome{Result: "refused", Detail: "nothing written to verify"}
 		}
-		dev, why := deviceOf(ctx, node, v.NQN, 10*time.Second)
+		dev, why := setDeviceOf(ctx, node, v.NQN, 10*time.Second)
 		if why != "" {
 			return outcome{Result: "unknown", Detail: why}
 		}
@@ -617,9 +617,9 @@ func v3VsVerify(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		for _, k := range keys {
 			stdout, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("dd if=%s bs=4096 skip=%s count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, k))
 			if err != nil || code != 0 {
-				return outcome{Result: "unknown", Detail: fmt.Sprintf("read lba %s: %s", k, firstLine(stderr))}
+				return outcome{Result: "unknown", Detail: fmt.Sprintf("read lba %s: %s", k, setFirstLine(stderr))}
 			}
-			if got := strings.TrimSpace(stdout); !contains(v.Expect[k], got) {
+			if got := strings.TrimSpace(stdout); !setContains(v.Expect[k], got) {
 				return outcome{Result: "refused", Detail: fmt.Sprintf("DATA lba %s sha256 %s, want one of %v", k, got, v.Expect[k])}
 			}
 		}
@@ -635,13 +635,13 @@ func unknownWrite(before []string, want string) []string {
 	if len(before) == 0 {
 		before = []string{zeroBlockSHA}
 	}
-	if contains(before, want) {
+	if setContains(before, want) {
 		return before
 	}
 	return append(append([]string(nil), before...), want)
 }
 
-func contains(set []string, v string) bool {
+func setContains(set []string, v string) bool {
 	for _, x := range set {
 		if x == v {
 			return true
@@ -654,7 +654,7 @@ func contains(set []string, v string) bool {
 // change nothing. The `retryable` flag is about retrying, not about effect
 // (detach_aborted is retryable and applied nothing; outcome_unknown is
 // retryable and may have applied), so it decides nothing here.
-var chunkRefusals = map[string]bool{
+var setChunkRefusals = map[string]bool{
 	// core/host/volume/chunk_control.go chunkErrorCode, ErrDetachAborted:
 	// "nothing was published and serving resumed here".
 	"detach_aborted": true,
@@ -667,7 +667,7 @@ var chunkRefusals = map[string]bool{
 // an outcome: exit 0 ok; a code in chunkRefusals refused; every other answer,
 // outcome_unknown included whatever its flag says, unknown, for a read of the
 // state to decide.
-func chunkOutcome(stdout string, code int) (string, string) {
+func setChunkOutcome(stdout string, code int) (string, string) {
 	if code == 0 {
 		return "ok", ""
 	}
@@ -679,7 +679,7 @@ func chunkOutcome(stdout string, code int) (string, string) {
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
 		return "unknown", fmt.Sprintf("exit %d without an error body", code)
 	}
-	if chunkRefusals[e.Code] {
+	if setChunkRefusals[e.Code] {
 		return "refused", e.Code + ": " + e.Message
 	}
 	return "unknown", e.Code + ": " + e.Message
@@ -702,7 +702,7 @@ func v3VsSnapshot(ctx context.Context, actx *tr.ActionContext, act tr.Action) (m
 		if err != nil {
 			return outcome{Result: "unknown", Detail: err.Error()}
 		}
-		r, d := chunkOutcome(stdout, code)
+		r, d := setChunkOutcome(stdout, code)
 		return outcome{Result: r, Detail: d}
 	})
 	return report(actx, act, "v3_vs_snapshot", outs)
@@ -736,11 +736,11 @@ func v3VsSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 // chunk` (store direct) is cleaned only at the next periodic pass, hourly by
 // default. Only the move probe permits store-direct deletion while stopped;
 // holderOnly never falls back if the serving holder becomes unavailable.
-func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, name string, holderOnly bool) (string, string) {
+func (s *vsSet) snapshotDelete(ctx context.Context, node setRunner, v *vsVolume, name string, holderOnly bool) (string, string) {
 	var stdout string
 	var code int
 	var err error
-	if holderOnly || alive(ctx, node, v.PID) {
+	if holderOnly || setAlive(ctx, node, v.PID) {
 		body, _ := json.Marshal(map[string]string{"volumeID": v.Name, "name": name})
 		// The body, then the HTTP status alone on the last line.
 		var out string
@@ -762,7 +762,7 @@ func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, na
 			return "unknown", err.Error()
 		}
 	}
-	r, d := chunkOutcome(stdout, code)
+	r, d := setChunkOutcome(stdout, code)
 	if r == "ok" {
 		if v.Deleted == nil {
 			v.Deleted = map[string]bool{}
@@ -859,14 +859,14 @@ type vsUsage struct {
 	ForeignChunks int `json:"foreign_chunks"`
 }
 
-func chunkUsage(ctx context.Context, node runner, s *vsSet, vol string) (vsUsage, string) {
+func chunkUsage(ctx context.Context, node setRunner, s *vsSet, vol string) (vsUsage, string) {
 	var u vsUsage
 	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk usage --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
 		shellQuote(vol), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath)))
 	if err != nil {
 		return u, "usage: " + err.Error()
 	}
-	if r, d := chunkOutcome(stdout, code); r != "ok" {
+	if r, d := setChunkOutcome(stdout, code); r != "ok" {
 		return u, "usage " + r + ": " + d
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &u) != nil {
@@ -876,7 +876,7 @@ func chunkUsage(ctx context.Context, node runner, s *vsSet, vol string) (vsUsage
 }
 
 // countFiles counts every file below dir through the filer's JSON listing.
-func countFiles(ctx context.Context, node runner, dir string) (int, string) {
+func countFiles(ctx context.Context, node setRunner, dir string) (int, string) {
 	py := `import json,sys,urllib.request,urllib.parse,urllib.error
 def ls(d):
     n,last=0,""
@@ -897,7 +897,7 @@ print(ls(sys.argv[1]))`
 	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("python3 -I -c %s %s", shellQuote(py), shellQuote(dir)))
 	n, perr := strconv.Atoi(strings.TrimSpace(stdout))
 	if err != nil || code != 0 || perr != nil {
-		return 0, "listing " + dir + ": " + firstLine(stderr)
+		return 0, "listing " + dir + ": " + setFirstLine(stderr)
 	}
 	return n, ""
 }
@@ -923,7 +923,7 @@ func v3VsRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	start := time.Now()
 	o := func() outcome {
-		if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
+		if why := setNvmeDisconnect(ctx, node, v.NQN); why != "" {
 			return outcome{Result: "unknown", Detail: why}
 		}
 		if why := stopPID(ctx, node, v.PID, sig, 30*time.Second); why != "" {
@@ -937,16 +937,16 @@ func v3VsRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 }
 
 // stopPID signals pid and waits until it is gone.
-func stopPID(ctx context.Context, node runner, pid, sig string, bound time.Duration) string {
+func stopPID(ctx context.Context, node setRunner, pid, sig string, bound time.Duration) string {
 	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return "no recorded pid"
 	}
 	_, _, _, _ = node.Run(ctx, fmt.Sprintf("kill -%s %s 2>/dev/null", sig, pid))
-	return waitGone(ctx, node, pid, bound)
+	return setWaitGone(ctx, node, pid, bound)
 }
 
 // alive reports whether the recorded pid still runs.
-func alive(ctx context.Context, node runner, pid string) bool {
+func setAlive(ctx context.Context, node setRunner, pid string) bool {
 	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return false
 	}
@@ -954,7 +954,7 @@ func alive(ctx context.Context, node runner, pid string) bool {
 	return strings.TrimSpace(out) == "alive"
 }
 
-func waitGone(ctx context.Context, node runner, pid string, bound time.Duration) string {
+func setWaitGone(ctx context.Context, node setRunner, pid string, bound time.Duration) string {
 	end := time.Now().Add(bound)
 	for time.Now().Before(end) {
 		if out, _, _, _ := node.Run(ctx, "kill -0 "+pid+" 2>/dev/null && echo alive"); strings.TrimSpace(out) != "alive" {
@@ -995,20 +995,20 @@ var (
 // parseDetach reads the sealed generation of a plain detach: the JSON answer
 // on stdout and exactly "sealed HEAD generation: G" on stderr, both naming
 // the same generation, for this volume at this epoch.
-func parseDetach(stdout, stderr, vol string, epoch uint64) (uint64, error) {
+func setParseDetach(stdout, stderr, vol string, epoch uint64) (uint64, error) {
 	var a struct {
 		VolumeID  string `json:"volumeID"`
 		HeadGen   uint64 `json:"headGen"`
 		HeadEpoch uint64 `json:"headEpoch"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil {
-		return 0, fmt.Errorf("detach answer is not JSON: %q", firstLine(stdout))
+		return 0, fmt.Errorf("detach answer is not JSON: %q", setFirstLine(stdout))
 	}
 	if a.VolumeID != vol || a.HeadGen == 0 || a.HeadEpoch != epoch {
 		return 0, fmt.Errorf("detach answer %+v; want %s at epoch %d with a generation", a, vol, epoch)
 	}
 	if strings.TrimSpace(stderr) != fmt.Sprintf("sealed HEAD generation: %d", a.HeadGen) {
-		return 0, fmt.Errorf("detach stderr %q does not state generation %d", firstLine(stderr), a.HeadGen)
+		return 0, fmt.Errorf("detach stderr %q does not state generation %d", setFirstLine(stderr), a.HeadGen)
 	}
 	return a.HeadGen, nil
 }
@@ -1043,7 +1043,7 @@ func parseMoved(out, vol, request string, epoch, sealedGen, headGen uint64, targ
 	first, _, _ := strings.Cut(out, "\n")
 	m := reMoved.FindStringSubmatch(strings.TrimRight(first, "\r"))
 	if m == nil || m[1] != vol || m[2] != request || m[3] != strconv.FormatUint(epoch, 10) || m[5] != target {
-		return 0, fmt.Errorf("clean move answer %q does not confirm %s %s r1@%d -> %s", firstLine(out), vol, request, epoch, target)
+		return 0, fmt.Errorf("clean move answer %q does not confirm %s %s r1@%d -> %s", setFirstLine(out), vol, request, epoch, target)
 	}
 	g, _ := strconv.ParseUint(m[6], 10, 64)
 	if g < sealedGen || g != headGen {
@@ -1057,13 +1057,13 @@ func parseMoved(out, vol, request string, epoch, sealedGen, headGen uint64, targ
 }
 
 // headGen reads HEAD's generation with `ops chunk show` (store direct).
-func (s *vsSet) headGen(ctx context.Context, node runner, vol string) (uint64, string) {
+func (s *vsSet) headGen(ctx context.Context, node setRunner, vol string) (uint64, string) {
 	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(s.cli()),
 		shellQuote(vol), shellQuote(s.Master), shellQuote(s.Filer), shellQuote(s.ChunkPath)))
 	if err != nil {
 		return 0, err.Error()
 	}
-	if r, d := chunkOutcome(stdout, code); r != "ok" {
+	if r, d := setChunkOutcome(stdout, code); r != "ok" {
 		return 0, "show " + r + ": " + d
 	}
 	var body struct {
@@ -1079,7 +1079,7 @@ func (s *vsSet) headGen(ctx context.Context, node runner, vol string) (uint64, s
 
 // wsOutcome maps `sw-block ops workspace` exit codes: 0 ok; 1, 2, 5 refused;
 // 3 and 4 (and anything else) unknown.
-func wsOutcome(code int) string {
+func setWsOutcome(code int) string {
 	switch code {
 	case 0:
 		return "ok"
@@ -1113,7 +1113,7 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if v.Moved || v.Cur != 0 {
 			return outcome{Result: "refused", Detail: "already moved"}
 		}
-		if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
+		if why := setNvmeDisconnect(ctx, node, v.NQN); why != "" {
 			return outcome{Result: "unknown", Detail: why}
 		}
 		start := time.Now()
@@ -1122,10 +1122,10 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if err != nil {
 			return outcome{Result: "unknown", Detail: err.Error()}
 		}
-		if r, d := chunkOutcome(stdout, code); r != "ok" {
+		if r, d := setChunkOutcome(stdout, code); r != "ok" {
 			return outcome{Result: r, Detail: "detach: " + d}
 		}
-		gen, perr := parseDetach(stdout, stderr, v.Name, v.Epoch)
+		gen, perr := setParseDetach(stdout, stderr, v.Name, v.Epoch)
 		if perr != nil {
 			return outcome{Result: "unknown", Detail: perr.Error()}
 		}
@@ -1133,10 +1133,10 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			return node.Run(ctx, shellQuote(s.cli())+" ops workspace "+strings.Join(quoteAll(append(args, "--master", s.Master, "--volume", v.Name)), " "))
 		}
 		stdout, stderr, code, err = ws("revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-		if err != nil || wsOutcome(code) != "ok" || !reRevoke.MatchString(stdout) {
-			return outcome{Result: wsOutcomeOr(err, code), Detail: "revoke: " + firstLine(stdout+" "+stderr)}
+		if err != nil || setWsOutcome(code) != "ok" || !reRevoke.MatchString(stdout) {
+			return outcome{Result: wsOutcomeOr(err, code), Detail: "revoke: " + setFirstLine(stdout+" "+stderr)}
 		}
-		if why := waitGone(ctx, node, v.PID, 40*time.Second); why != "" {
+		if why := setWaitGone(ctx, node, v.PID, 40*time.Second); why != "" {
 			return outcome{Result: "unknown", Detail: "the source did not exit by itself after the revoke: " + why}
 		}
 		acked := false
@@ -1164,8 +1164,8 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		req := v.Name + "-move-1"
 		stdout, stderr, code, err = ws("move", "--clean", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10),
 			"--target-host", dst.Server, "--target-data", dst.Data, "--target-ctrl", dst.Ctrl, "--request-id", req)
-		if err != nil || wsOutcome(code) != "ok" {
-			return outcome{Result: wsOutcomeOr(err, code), Detail: "move: " + firstLine(stdout+" "+stderr)}
+		if err != nil || setWsOutcome(code) != "ok" {
+			return outcome{Result: wsOutcomeOr(err, code), Detail: "move: " + setFirstLine(stdout+" "+stderr)}
 		}
 		e2, perr := parseMoved(stdout, v.Name, req, v.Epoch, gen, hg, dst.Server)
 		if perr != nil {
@@ -1186,7 +1186,7 @@ func wsOutcomeOr(err error, code int) string {
 	if err != nil {
 		return "unknown"
 	}
-	return wsOutcome(code)
+	return setWsOutcome(code)
 }
 
 // v3VsStop disconnects every volume and stops its blockvolume by its
@@ -1202,7 +1202,7 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, err
 	}
 	outs := s.forEach(ctx, s.selectVolumes(act), func(ctx context.Context, v *vsVolume) outcome {
-		_ = nvmeDisconnect(ctx, node, v.NQN)
+		_ = setNvmeDisconnect(ctx, node, v.NQN)
 		if v.PID != "" {
 			if why := stopPID(ctx, node, v.PID, "TERM", 15*time.Second); why != "" {
 				if why = stopPID(ctx, node, v.PID, "KILL", 10*time.Second); why != "" {
@@ -1210,7 +1210,7 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 				}
 			}
 		}
-		if _, why := deviceOf(ctx, node, v.NQN, time.Second); why == "" {
+		if _, why := setDeviceOf(ctx, node, v.NQN, time.Second); why == "" {
 			return outcome{Result: "unknown", Detail: "NVMe connection remains"}
 		}
 		return outcome{Result: "ok"}
@@ -1221,7 +1221,7 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	prefix := "nqn.2026-11.io.seaweedfs:vs-" + hex.EncodeToString(sum[:8]) + "-"
 	stdout, stderr, code, sweepErr := node.RunRoot(ctx, fmt.Sprintf("python3 -I -c %s %s %s", shellQuote(hostAbsenceSweep), shellQuote(s.Bin+"/blockvolume"), shellQuote(prefix)))
 	if sweepErr != nil || code != 0 {
-		outs = append(outs, outcome{Volume: "run-sweep", Result: "unknown", Detail: fmt.Sprintf("residue or absence unreadable: %s %s %v", firstLine(stdout), firstLine(stderr), sweepErr)})
+		outs = append(outs, outcome{Volume: "run-sweep", Result: "unknown", Detail: fmt.Sprintf("residue or absence unreadable: %s %s %v", setFirstLine(stdout), setFirstLine(stderr), sweepErr)})
 	}
 	return report(actx, act, "v3_vs_stop", outs)
 }
@@ -1321,14 +1321,14 @@ func v3VsHost(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	}
 	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
 	if err != nil || code != 0 {
-		return nil, fmt.Errorf("v3_vs_host %s: exit %d %s %v", mode, code, firstLine(stderr), err)
+		return nil, fmt.Errorf("v3_vs_host %s: exit %d %s %v", mode, code, setFirstLine(stderr), err)
 	}
 	if mode == "start" || mode == "cleanup" {
 		return map[string]string{"value": mode}, nil
 	}
 	var peak hostPeak
 	if err := json.Unmarshal([]byte(stdout), &peak); err != nil || !peak.valid() {
-		return nil, fmt.Errorf("v3_vs_host: missing/invalid samples: %s", firstLine(stdout))
+		return nil, fmt.Errorf("v3_vs_host: missing/invalid samples: %s", setFirstLine(stdout))
 	}
 	res := map[string]string{"value": strconv.Itoa(peak.Samples), "samples": strconv.Itoa(peak.Samples), "max_gap_s": fmt.Sprintf("%.3f", peak.MaxGap), "rss_mib": fmt.Sprintf("%.1f", peak.RSS), "open_fds": strconv.Itoa(peak.FDs), "cpu_busy_pct": fmt.Sprintf("%.1f", peak.CPU)}
 	if act.SaveAs != "" {

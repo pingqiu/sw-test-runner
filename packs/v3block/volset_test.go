@@ -15,7 +15,7 @@ import (
 
 // Every function that decides an outcome, one row per cell.
 
-func TestParseV3ctl(t *testing.T) {
+func TestVolumeSetParseV3ctl(t *testing.T) {
 	id := strings.Repeat("ab", 16)
 	for _, c := range []struct {
 		name, out string
@@ -32,13 +32,13 @@ func TestParseV3ctl(t *testing.T) {
 		{"no answer", ``, 0, "unknown"},
 		{"no outcome", `{"volume":"v001"}`, 0, "unknown"},
 	} {
-		if _, got := parseV3ctl(c.out, c.code, "v001"); got != c.want {
+		if _, got := setParseV3ctl(c.out, c.code, "v001"); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
 }
 
-func TestChunkOutcome(t *testing.T) {
+func TestVolumeSetChunkOutcome(t *testing.T) {
 	for _, c := range []struct {
 		name, out string
 		code      int
@@ -57,24 +57,24 @@ func TestChunkOutcome(t *testing.T) {
 		{"no body", ``, 1, "unknown"},
 		{"body without a code", `{"message":"x"}`, 1, "unknown"},
 	} {
-		if got, _ := chunkOutcome(c.out, c.code); got != c.want {
+		if got, _ := setChunkOutcome(c.out, c.code); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
 }
 
-func TestWsOutcome(t *testing.T) {
+func TestVolumeSetWsOutcome(t *testing.T) {
 	want := map[int]string{0: "ok", 1: "refused", 2: "refused", 3: "unknown", 4: "unknown", 5: "refused", 9: "unknown", -1: "unknown"}
 	for code, w := range want {
-		if got := wsOutcome(code); got != w {
+		if got := setWsOutcome(code); got != w {
 			t.Errorf("exit %d: %s, want %s", code, got, w)
 		}
 	}
 }
 
-func TestParseDetach(t *testing.T) {
+func TestVolumeSetParseDetach(t *testing.T) {
 	good := `{"volumeID":"v001","headGen":7,"headEpoch":2,"cutLSN":3,"lastWrittenLSN":3}`
-	if g, err := parseDetach(good, "sealed HEAD generation: 7\n", "v001", 2); err != nil || g != 7 {
+	if g, err := setParseDetach(good, "sealed HEAD generation: 7\n", "v001", 2); err != nil || g != 7 {
 		t.Fatalf("good detach: %d %v", g, err)
 	}
 	for name, c := range map[string][2]string{
@@ -85,7 +85,7 @@ func TestParseDetach(t *testing.T) {
 		"no generation":                   {strings.Replace(good, `"headGen":7`, `"headGen":0`, 1), "sealed HEAD generation: 0"},
 		"not JSON":                        {"sealed", "sealed HEAD generation: 7"},
 	} {
-		if _, err := parseDetach(c[0], c[1], "v001", 2); err == nil {
+		if _, err := setParseDetach(c[0], c[1], "v001", 2); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -138,7 +138,7 @@ func TestParseMoved(t *testing.T) {
 }
 
 // Every shell-special character is quoted; plain words stay bare.
-func TestShellQuote(t *testing.T) {
+func TestVolumeSetShellQuote(t *testing.T) {
 	for _, s := range []string{"v001|r1|0|", "a;b", "a&b", "a>b", "a<b", "(a)", "a*", "a?", "[a]", "~a", "#a", "a!b", "a b", "it's", "$x", "`x`", "a\nb"} {
 		q := shellQuote(s)
 		if !strings.HasPrefix(q, "'") {
@@ -158,28 +158,28 @@ func TestShellQuote(t *testing.T) {
 // A write whose outcome is unknown leaves the block's earlier values or the
 // attempted one, nothing else; an acknowledged write leaves only its value.
 func TestUnknownWriteKeepsTheSet(t *testing.T) {
-	a, b := blockSHA("v001|r1|0|"), blockSHA("v001|r2|0|")
+	a, b := setBlockSHA("v001|r1|0|"), setBlockSHA("v001|r2|0|")
 	if got := unknownWrite(nil, a); len(got) != 2 || got[0] != zeroBlockSHA || got[1] != a {
 		t.Fatalf("first write unknown: %v", got)
 	}
 	got := unknownWrite([]string{a}, b)
-	if !contains(got, a) || !contains(got, b) || contains(got, zeroBlockSHA) || len(got) != 2 {
+	if !setContains(got, a) || !setContains(got, b) || setContains(got, zeroBlockSHA) || len(got) != 2 {
 		t.Fatalf("after an acknowledged write, an unknown one: %v", got)
 	}
-	if contains(got, blockSHA("garbage")) {
+	if setContains(got, setBlockSHA("garbage")) {
 		t.Fatal("another content is allowed")
 	}
-	if z := blockSHA(strings.Repeat("\x00", 8)); z != zeroBlockSHA {
+	if z := setBlockSHA(strings.Repeat("\x00", 8)); z != zeroBlockSHA {
 		t.Fatalf("zeroBlockSHA %s, a zero block hashes to %s", zeroBlockSHA, z)
 	}
 }
 
-func TestServing(t *testing.T) {
-	ok := vsStatus{VolumeID: "v001", Epoch: 2, Healthy: true, AuthorityRole: "primary", FrontendPrimaryReady: true}
+func TestVolumeSetServing(t *testing.T) {
+	ok := setVsStatus{VolumeID: "v001", Epoch: 2, Healthy: true, AuthorityRole: "primary", FrontendPrimaryReady: true}
 	if !ok.serving("v001") {
 		t.Fatal("a serving primary was not serving")
 	}
-	for name, st := range map[string]vsStatus{
+	for name, st := range map[string]setVsStatus{
 		"other volume": {VolumeID: "v002", Epoch: 2, Healthy: true, AuthorityRole: "primary", FrontendPrimaryReady: true},
 		"unhealthy":    {VolumeID: "v001", Epoch: 2, AuthorityRole: "primary", FrontendPrimaryReady: true},
 		"not primary":  {VolumeID: "v001", Epoch: 2, Healthy: true, AuthorityRole: "replica", FrontendPrimaryReady: true},

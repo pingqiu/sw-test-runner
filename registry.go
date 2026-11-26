@@ -24,6 +24,11 @@ type ActionContext struct {
 	// to populate provenance.json.
 	Bundle *RunBundle
 
+	// History is the run's history file (S2), opened in the bundle by the
+	// CLI. Typed operations record into it; nil without a bundle, and an
+	// action that records refuses to run without one.
+	History *History
+
 	// Safety is shared typed custody, not serialized in the variable map.
 	// The approved worker adapter supplies the verified SSH scope; legacy paths
 	// must not infer authority from YAML, Vars or the tier name.

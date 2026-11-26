@@ -1,0 +1,178 @@
+# Runner M0: the spec's fixed sequence on one host, every step a typed
+# operation that records into the run's history (history.jsonl in the bundle).
+# The checkers judge that file after the run; no step here decides a result.
+#
+#   create v1, attach, write A (r1), snapshot s1, write A (r2)
+#   restore s1 to v2, attach v2, read v2 A        (the target's first read)
+#   write v1 A (r3), read v2 A                     (the source's write must not appear)
+#   write v2 A (t1), read v1 A                     (the target's write must not appear)
+#   planned move of v1, attach on its second host, read v1 A
+#   read every written block of v1 and v2
+#   stop v2, delete v2, release it from s1, delete s1, stop v1, delete v1; observe both
+#
+# One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
+# the product under test), runner_src (this checkout), weed (the pinned
+# SeaweedFS binary). Expected refusals: none.
+#
+#   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD \
+#     -env weed=/path/weed -env work=/root/m0-run scenarios/v3block/m0-sequence.yaml
+
+name: v3block-m0-sequence
+timeout: 30m
+always_timeout: 5m
+
+env:
+  product_src: ""
+  runner_src: ""
+  weed: ""
+  work: "/root/m0-run"
+  base_port: "21000"
+  weed_master_port: "19533"
+  weed_volume_port: "19580"
+  weed_filer_port: "19588"
+  weed_filer_grpc_port: "29588"   # the filer port + 10000, SeaweedFS's convention
+  master_port: "19600"
+  chunk_path: "/m0"
+  lock_dirs_test_only: "true"
+  lbas: "0 2048 4095"
+  # Every typed operation reads these as vars.
+  bin_dir: "{{ work }}/bin"
+  master: "127.0.0.1:{{ master_port }}"
+  filer: "127.0.0.1:{{ weed_filer_grpc_port }}"
+  root: "{{ work }}/vol"
+  client: "c1"
+  # What this run owns (m0-own.sh): its work directory, by token; its processes, by pid and start time;
+  # its kernel NVMe controllers, by an NQN prefix that carries the run id (written out where exec and
+  # v3_op_spec use them: the engine expands one level). The typed operations read own_script and work.
+  own_script: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+
+topology:
+  nodes:
+    host:
+      is_local: true
+
+phases:
+  - name: build
+    actions:
+      # Acquire the work directory exclusively first: every later step, and the
+      # teardown, acts only under the token this returns.
+      - action: exec
+        node: host
+        timeout: 30s
+        save_as: owner
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.WORK: "{{ work }}"
+        cmd: bash "$OWN" claim "$WORK"
+      - action: exec
+        node: host
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.WORK: "{{ work }}"
+        env.V3CTL: "{{ runner_src }}/packs/v3block/v3ctl/main.go"
+        cmd: |
+          set -eu
+          [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
+          [ -f "$V3CTL" ] || { echo "runner_src is not this checkout: $V3CTL" >&2; exit 2; }
+          mkdir -p "$WORK/bin" "$WORK/log"
+          git -C "$SRC" rev-parse HEAD > "$WORK/product.sha"
+          for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
+          d="$SRC/.runner-v3ctl-$$"; mkdir "$d"; tail -n +2 "$V3CTL" > "$d/main.go"
+          (cd "$SRC" && go build -o "$WORK/bin/v3ctl" "./$(basename "$d")"); rm -r "$d"
+          cat "$WORK/product.sha"
+
+  - name: store
+    actions:
+      - action: exec
+        node: host
+        timeout: 5m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WEED: "{{ weed }}"
+        env.WORK: "{{ work }}"
+        env.MP: "{{ weed_master_port }}"
+        env.VP: "{{ weed_volume_port }}"
+        env.FP: "{{ weed_filer_port }}"
+        env.FG: "{{ weed_filer_grpc_port }}"
+        cmd: |
+          set -eu
+          [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
+          mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
+          "$WEED" version > "$WORK/weed.version"
+          # Each daemon is refused if its ports already listen, and ready only when IT holds them.
+          bash "$OWN" spawn "$WORK" "$TOK" weed-master $MP -- "$WEED" master -ip=127.0.0.1 -port=$MP -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000
+          bash "$OWN" spawn "$WORK" "$TOK" weed-volume $VP -- "$WEED" volume -ip=127.0.0.1 -port=$VP -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=32
+          bash "$OWN" spawn "$WORK" "$TOK" weed-filer $FP $FG -- "$WEED" filer -ip=127.0.0.1 -port=$FP -master=127.0.0.1:$MP -defaultStoreDir="$WORK/weed/f"
+          for i in $(seq 1 120); do curl -s -m 5 -F file=@"$WORK/product.sha" "http://127.0.0.1:$FP/m0-probe/" >/dev/null && exit 0; sleep 0.5; done
+          echo "filer never accepted a write" >&2; exit 1
+  - name: master
+    actions:
+      - action: v3_op_spec
+        node: host
+        volumes: "v1 v2"
+        spec_path: "{{ work }}/cluster-spec.yaml"
+        base_port: "{{ base_port }}"
+        nqn_prefix: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
+      # The master as the store: refused if its port already listens (another
+      # run's master, a leftover), ready only when THIS process holds the port,
+      # and recorded as owned (pid and start time) before anything uses it.
+      - action: exec
+        node: host
+        timeout: 3m
+        save_as: bm_pid
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WORK: "{{ work }}"
+        env.MP: "{{ master_port }}"
+        env.FG: "{{ weed_filer_grpc_port }}"
+        env.CP: "{{ chunk_path }}"
+        cmd: |
+          set -eu
+          mkdir -p "$WORK/master/authority" "$WORK/master/lifecycle"
+          bash "$OWN" spawn "$WORK" "$TOK" blockmaster $MP -- "$WORK/bin/blockmaster" --listen 127.0.0.1:$MP \
+            --authority-store "$WORK/master/authority" --lifecycle-store "$WORK/master/lifecycle" \
+            --cluster-spec "$WORK/cluster-spec.yaml" --expected-slots-per-volume 1 \
+            --workspace-rpc --chunk-filer 127.0.0.1:$FG --chunk-path "$CP"
+  - name: sequence
+    actions:
+      - {action: v3_op_create, node: host, volume: v1}
+      - {action: v3_op_attach, node: host, volume: v1}
+      - {action: v3_op_observe, node: host, volume: v1}
+      - {action: v3_op_write, node: host, volume: v1, lbas: "{{ lbas }}", round: r1}
+      - {action: v3_op_snapshot, node: host, volume: v1, name: s1}
+      - {action: v3_op_observe, node: host, volume: v1}
+      - {action: v3_op_write, node: host, volume: v1, lbas: "{{ lbas }}", round: r2}
+      - {action: v3_op_restore, node: host, volume: v1, snapshot: s1, target_volume: v2}
+      - {action: v3_op_attach, node: host, volume: v2}
+      - {action: v3_op_observe, node: host, volume: v2}
+      - {action: v3_op_read, node: host, volume: v2, lbas: "{{ lbas }}"}
+      - {action: v3_op_write, node: host, volume: v1, lbas: "{{ lbas }}", round: r3}
+      - {action: v3_op_read, node: host, volume: v2, lbas: "{{ lbas }}"}
+      - {action: v3_op_write, node: host, volume: v2, lbas: "{{ lbas }}", round: t1}
+      - {action: v3_op_read, node: host, volume: v1, lbas: "{{ lbas }}"}
+      - {action: v3_op_move, node: host, volume: v1}
+      - {action: v3_op_observe, node: host, volume: v1}
+      - {action: v3_op_attach, node: host, volume: v1, host: "1"}
+      - {action: v3_op_observe, node: host, volume: v1}
+      - {action: v3_op_read, node: host, volume: v1, lbas: written}
+      - {action: v3_op_read, node: host, volume: v2, lbas: written}
+      - {action: v3_op_stop, node: host, volume: v2}
+      - {action: v3_op_delete, node: host, volume: v2}
+      - {action: v3_op_observe, node: host, volume: v2}
+      - {action: v3_op_release, node: host, volume: v1, target_volume: v2}
+      - {action: v3_op_snapshot_delete, node: host, volume: v1, name: s1}
+      - {action: v3_op_stop, node: host, volume: v1}
+      - {action: v3_op_delete, node: host, volume: v1}
+      - {action: v3_op_observe, node: host, volume: v1}
+
+  # Only what this run acquired: nothing at all if the claim failed.
+  - name: teardown
+    always: true
+    actions:
+      - action: exec
+        node: host
+        timeout: 3m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WORK: "{{ work }}"
+        env.NQN: "nqn.2026-11.io.seaweedfs:op-{{ run_id }}-"
+        cmd: bash "$OWN" teardown "$WORK" "$TOK" "$NQN"

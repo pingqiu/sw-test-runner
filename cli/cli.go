@@ -303,6 +303,16 @@ func runCmd(args []string) {
 	// Hand the run bundle to action handlers via ActionContext so build
 	// actions can populate provenance.json. nil-safe for --no-bundle.
 	actx.Bundle = bundle
+	// The run's history (S2) lives in the bundle; without a bundle there is
+	// none, and typed operations refuse to run.
+	if bundle != nil {
+		h, err := bundle.OpenHistory()
+		if err != nil {
+			logger.Fatalf("history: %v", err)
+		}
+		actx.History = h
+		defer h.Close()
+	}
 
 	// Cluster lifecycle: try attach, fall back to managed if needed.
 	clusterMgr := tr.NewClusterManager(scenario.Cluster, logFunc)
@@ -1158,6 +1168,13 @@ func runNativeSuiteChild(ctx context.Context, registry *tr.Registry, suite *tr.S
 	}
 	defer cleanupNodes(actx)
 	actx.Bundle = bundle
+	h, err := bundle.OpenHistory()
+	if err != nil {
+		_ = statusWriter.Finalize(tr.RunStateError, err.Error())
+		return nil, bundle.Manifest.RunID, bundle.Dir, fmt.Errorf("history child: %w", err)
+	}
+	actx.History = h
+	defer h.Close()
 
 	clusterMgr := tr.NewClusterManager(scenario.Cluster, logFunc)
 	if err := clusterMgr.Setup(ctx, actx); err != nil {
