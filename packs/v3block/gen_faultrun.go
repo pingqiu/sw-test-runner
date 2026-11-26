@@ -29,10 +29,13 @@ type faultRun struct {
 	down    string // the process down now
 	pending []GenOp
 	gen     *Generator // nil in a replay
+	wait    string     // v3_op_healthy's wait_seconds ("" for its default: look once)
 }
 
-func newFaultRun(events []FaultEvent, g *Generator) *faultRun {
-	return &faultRun{events: events, gen: g}
+// newFaultRun takes the header's fault_healthy_wait (absent: "").
+func newFaultRun(events []FaultEvent, g *Generator, header map[string]any) *faultRun {
+	w, _ := header["fault_healthy_wait"].(string)
+	return &faultRun{events: events, gen: g, wait: w}
 }
 
 // note takes an operation's outcome: an unknown is pending resolution. A read
@@ -85,7 +88,11 @@ func (f *faultRun) healthy(ctx context.Context, actx *tr.ActionContext, node str
 	if !ok {
 		return fmt.Errorf("no handler for v3_op_healthy")
 	}
-	out, err := h(ctx, actx, tr.Action{Action: "v3_op_healthy", Node: node, Params: map[string]string{}})
+	p := map[string]string{}
+	if f.wait != "" {
+		p["wait_seconds"] = f.wait
+	}
+	out, err := h(ctx, actx, tr.Action{Action: "v3_op_healthy", Node: node, Params: p})
 	if err != nil {
 		return fmt.Errorf("v3_op_healthy: %w", err)
 	}

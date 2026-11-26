@@ -132,6 +132,7 @@ type faultFake struct {
 	unhealthy   int // the first n healthy calls answer false
 	healthyCall int
 	log         []string
+	waits       []string // wait_seconds of each healthy call
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -171,10 +172,11 @@ func (f *faultFake) install(t *testing.T) {
 	}
 	genHandlers["v3_op_kill"] = fault(FaultKill)
 	genHandlers["v3_op_restart"] = fault(FaultRestart)
-	genHandlers["v3_op_healthy"] = func(_ context.Context, actx *tr.ActionContext, _ tr.Action) (map[string]string, error) {
+	genHandlers["v3_op_healthy"] = func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 		f.healthyCall++
 		ok := f.down == "" && f.healthyCall > f.unhealthy
 		f.log = append(f.log, fmt.Sprintf("healthy %v", ok))
+		f.waits = append(f.waits, act.Params["wait_seconds"])
 		_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{"healthy": ok, "down": []string{}, "not_serving": []string{}}})
 		return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(ok)}, nil
 	}
@@ -380,6 +382,52 @@ func TestGenRunWithFaultsEndsHealthyWhenTheRunEndsWhileDown(t *testing.T) {
 	}
 	if left := unresolvedUnknowns(records(t, p)); len(left) != 0 {
 		t.Fatalf("unknowns not resolved: %v", left)
+	}
+}
+
+func TestGenRunWithFaultsPassesTheHealthyWaitInRunAndReplay(t *testing.T) {
+	f := &faultFake{}
+	f.install(t)
+	actx, a := genRunCtx(t)
+	act := faultAct("120", "0.05")
+	act.Params["fault_healthy_wait"] = "45"
+	if _, err := v3GenRun(context.Background(), actx, act); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	if records(t, a)[0].Result["fault_healthy_wait"] != "45" || len(f.waits) < 2 {
+		t.Fatalf("header %v, waits %v", records(t, a)[0].Result, f.waits)
+	}
+	for _, w := range f.waits {
+		if w != "45" {
+			t.Fatalf("waits %v", f.waits)
+		}
+	}
+	f.waits = nil
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+		t.Fatalf("%v %v", out, err)
+	}
+	for _, w := range f.waits {
+		if w != "45" {
+			t.Fatalf("replay waits %v", f.waits)
+		}
+	}
+	// Without the param the handler's own default applies (no wait_seconds sent).
+	f2 := &faultFake{}
+	f2.install(t)
+	actx2, _ := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx2, faultAct("60", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range f2.waits {
+		if w != "" {
+			t.Fatalf("waits %v", f2.waits)
+		}
+	}
+	act.Params["fault_healthy_wait"] = "-1"
+	actx3, _ := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx3, act); err == nil {
+		t.Fatal("a negative wait was accepted")
 	}
 }
 
