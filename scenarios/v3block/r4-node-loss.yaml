@@ -27,6 +27,8 @@
 #   P5  the old VM powered on (cloud_vm_power_restore proves a new boot); its
 #       blockvolume unit, started again, is fenced: it reports replica_ready
 #       at e+1 behind the new primary, never primary (r4.sh wait-role replica).
+#       Before P6, the selected primary must also list r1 healthy at e+1 on
+#       /status/peers. Supporting admission alone is not catch-up completion.
 #   P6  after the rejoin a new round of writes is all acknowledged, and every
 #       acked write, old and new, reads back (verify ... after-rejoin).
 # Every write round must be acknowledged in full (r4.sh write fails short).
@@ -359,6 +361,16 @@ phases:
       # it is not enabled, so the blockvolume starts here, not at boot.
       - {action: exec, node: node-2, timeout: 2m, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh start {{ run_id }}-rf{{ rf }} volume"}
       - {action: exec, node: node-2, timeout: 5m, cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240"}
+      - action: exec
+        node: node-1
+        timeout: 5m
+        env.PROMOTION: "{{ promotion }}"
+        cmd: "[ {{ rf }} = 3 ] || exit 0; W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/auto-p2.py peers \"$PROMOTION\" r2 http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 $W/rejoin-peers.json"
+      - action: exec
+        node: node-3
+        timeout: 5m
+        env.PROMOTION: "{{ promotion }}"
+        cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2); sudo python3 $W/auto-p2.py peers \"$PROMOTION\" $R http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 $W/rejoin-peers.json"
       - action: exec                                             # P6
         node: node-1
         timeout: 5m

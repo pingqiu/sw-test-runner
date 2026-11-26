@@ -23,6 +23,12 @@ before cleanup. New primary selection may be r2 or r3; later connections follow
 the persisted endpoint. RF2's no-ACK-before-rejoin and the old node's any-epoch
 primary refusal remain unchanged.
 
+Rejoin has two gates: the returning node must never report primary and must
+reach replica_ready at epoch 2; then the selected primary's `/status/peers`
+must list that old r1 as `State=healthy, Epoch=2`. Its own supporting admission
+is not completion of catch-up. No guest writes are sent between those gates.
+The existing 240-second catch-up budget decides failure, never eligibility.
+
 The original local rehearsal failed against the former manual-only contract;
 it is not relabeled as a pass. The whole sequence must pass again on the selected
 RC with primary process SIGKILL before requesting a paid run. Process restart is

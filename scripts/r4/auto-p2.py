@@ -79,6 +79,13 @@ def wait_line(path, seconds, mode, calls, candidates):
         time.sleep(min(0.5, max(0, end-time.monotonic())))
 
 
+def peer_healthy(payload, primary, replica, epoch):
+    """The primary's view, not supporting admission on the returning replica."""
+    return (payload.get("VolumeID") == "v1" and payload.get("ReplicaID") == primary
+            and any(p.get("ReplicaID") == replica and p.get("Epoch") == epoch
+                    and p.get("State") == "healthy" for p in payload.get("Peers", [])))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -97,6 +104,11 @@ def main():
     ready.add_argument("replica")
     ready.add_argument("url")
     ready.add_argument("out", type=Path)
+    peers = sub.add_parser("peers")
+    peers.add_argument("token")
+    peers.add_argument("replica") # this process's identity; skip if not selected
+    peers.add_argument("url")
+    peers.add_argument("out", type=Path)
     verify = sub.add_parser("verify")
     verify.add_argument("token")
     verify.add_argument("helper", type=Path)
@@ -126,27 +138,32 @@ def main():
         args.out.write_text(json.dumps(value, indent=2)+"\n")
         print(token(value))
         return
-    if args.command in ("field", "status", "verify"):
+    if args.command in ("field", "status", "peers", "verify"):
         value = decode(args.token)
         line = value["authority"]["body"]
         if args.command == "field":
             print(dict(replica=line["ReplicaID"], epoch=line["Epoch"],
                        host=line["DataAddr"].rsplit(":", 1)[0])[args.field])
             return
-        if args.command == "status":
+        if args.command in ("status", "peers"):
             if args.replica != line["ReplicaID"]:
                 print("not the selected successor")
                 return
-            end = time.monotonic()+120
+            end = time.monotonic()+(240 if args.command == "peers" else 120)
             while True:
                 try:
                     with urllib.request.urlopen(args.url, timeout=5) as response:
                         status = json.load(response)
-                    check(value["authority"], status, volume="v1", old_holder="r1",
-                          old_epoch=1, minimum_lsn=1,
-                          operator_calls=value["operator_calls"], mode=value["mode"])
+                    if args.command == "peers":
+                        if not peer_healthy(status, line["ReplicaID"], "r1", line["Epoch"]):
+                            raise ValueError("primary has not made old r1 healthy at e+1: "+json.dumps(status))
+                    else:
+                        check(value["authority"], status, volume="v1", old_holder="r1",
+                              old_epoch=1, minimum_lsn=1,
+                              operator_calls=value["operator_calls"], mode=value["mode"])
                     args.out.write_text(json.dumps(status, indent=2)+"\n")
-                    print("successor serving with fencing proof")
+                    print("old r1 healthy in primary view" if args.command == "peers"
+                          else "successor serving with fencing proof")
                     return
                 except (OSError, ValueError) as error:
                     if time.monotonic() >= end:

@@ -492,6 +492,36 @@ cmd_evidence() {
   check_tag "$tag"; w="$root/$tag"; ev="$w/evidence"
   [[ -f "$w/.r4-owner" && "$(cat "$w/.r4-owner")" == "$tag" ]] || die "evidence: no ownership proof for $w"
   mkdir -p "$ev"
+  # Before teardown, preserve sockets and dump ONLY this run's volume if its
+  # data listener refuses connections while the process is still alive.
+  ss -ltnp > "$ev/listening-sockets.txt" 2>&1 || true
+  python3 - "$w" > "$ev/refused-listener-diagnostic.json" <<'PY'
+import errno,json,os,signal,socket,sys,time
+from pathlib import Path
+w=Path(sys.argv[1]); records=[]
+for proc in Path('/proc').iterdir():
+    if not proc.name.isdigit(): continue
+    try:
+        args=(proc/'cmdline').read_bytes().split(b'\0')
+        if not args or args[0] != os.fsencode(w/'bin/blockvolume'): continue
+        i=args.index(b'--data-addr'); addr=args[i+1].decode()
+        host,port=addr.rsplit(':',1)
+        try:
+            with socket.create_connection((host,int(port)),timeout=1): pass
+            records.append(dict(pid=int(proc.name),address=addr,listening=True))
+        except OSError as error:
+            row=dict(pid=int(proc.name),address=addr,error=str(error),dumped=False)
+            if error.errno == errno.ECONNREFUSED:
+                # Recheck the exact owned executable before the diagnostic signal.
+                current=(proc/'cmdline').read_bytes().split(b'\0')
+                if current[0] == os.fsencode(w/'bin/blockvolume'):
+                    os.kill(int(proc.name),signal.SIGQUIT)
+                    row['dumped']=True
+                    time.sleep(1) # journal capture below includes the Go dump
+            records.append(row)
+    except (FileNotFoundError,ProcessLookupError,PermissionError,ValueError): continue
+print(json.dumps(records,indent=2))
+PY
   for r in master volume writer; do
     u=$(unit_of "$tag" "$r")
     "$systemctl_bin" status "$u" --no-pager > "$ev/$u.status" 2>&1 || true
@@ -500,7 +530,7 @@ cmd_evidence() {
       bad=1
     fi
   done
-  for f in ledger operator-calls promotion.json successor-status.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+  for f in ledger operator-calls promotion.json successor-status.json rejoin-peers.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ ! -f "$w/$f" ]] || cp "$w/$f" "$ev/"
   done
   chmod 0755 "$ev"
@@ -527,7 +557,7 @@ cmd_cleanup() {
     rm -f "$unitdir/$u.service"
   done
   "$systemctl_bin" daemon-reload || true
-  for f in ledger operator-calls promotion.json successor-status.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+  for f in ledger operator-calls promotion.json successor-status.json rejoin-peers.json failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ -f "$w/$f" ]] && cp "$w/$f" "$ev/"
   done
   # cleanup runs as root, while collect_path uses the inventory SSH user.
