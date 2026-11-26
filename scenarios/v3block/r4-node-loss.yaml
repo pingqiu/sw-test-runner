@@ -1,0 +1,224 @@
+# R4 node loss, standalone (systemd), 3 cloud VMs, mutual TLS.
+#
+# The release's manual-failover rule, end to end: a primary whose host loses
+# power is NOT replaced automatically; the operator's failover moves the line
+# through the fencing round; no acknowledged write is lost; the old primary,
+# powered on again, is fenced and rejoins as a replica.
+#
+# Pass line (stated before the run), each asserted below with a failing
+# control (packs/v3block/r4_scenario_test.go), for rf=3 and then rf=2:
+#   P1  the primary's VM (node-2) loses power abruptly (cloud_vm_power:
+#       az vm stop --skip-shutdown; the node no longer answers).
+#   P2  NO automatic promotion: for hold_seconds no survivor becomes primary
+#       and none leaves the line's epoch (r4.sh held).
+#   P3  the operator's failover (sw-block ops failover --expect-current
+#       --confirm-old-node-off) moves the line through the fencing round:
+#       the target is primary at epoch e+1 (r4.sh wait-role primary).
+#   P4  every acknowledged write (ledger: round offset length sha256, logged
+#       only after the write returned) reads back from the new primary:
+#       0 mismatches (r4.sh verify); the red control drops one acked write
+#       and the check must FAIL (r4.sh drop-control).
+#   P4b rf=2 only: between the failover and the rejoin no write is
+#       acknowledged (r4.sh no-ack); an ack there is a finding.
+#   P5  the old VM powered on (cloud_vm_power_restore proves a new boot); its
+#       blockvolume, started again, is fenced: it reports replica_ready at
+#       e+1 behind the new primary, never primary (r4.sh wait-role replica).
+#   P6  after the rejoin every acked write, old and new, reads back (verify).
+# The checkers C1-C3 do not judge this scenario in v1: it records no typed
+# operations; its verdict is these assertions and the fault receipts.
+#
+# Hosts: the cloud run's inventory node-1..node-3, one VM each. node-1 runs
+# SeaweedFS-free blockmaster and the client (kernel NVMe/TCP); replicas:
+#   rf=3: r1 node-2 (the primary to lose), r2 node-1, r3 node-3
+#   rf=2: r1 node-2 (the primary to lose), r2 node-3
+# The cloud run passes each host's management and private (data) address as
+# -env values (n1_ip .. n3_ip, n1_data .. n3_data) with ssh_user and ssh_key.
+#
+#   swblock run --allow-mutating -env rf=3 -env product_src=<checkout> \
+#     -env runner_src=$PWD -env product_head=<final RC sha> -env runner_head=<sha> \
+#     -env n1_ip=.. -env n2_ip=.. -env n3_ip=.. -env n1_data=.. -env n2_data=.. -env n3_data=.. \
+#     -env ssh_user=.. -env ssh_key=.. scenarios/v3block/r4-node-loss.yaml
+
+name: v3block-r4-node-loss
+timeout: 60m
+always_timeout: 10m
+
+env:
+  rf: "3"
+  product_src: ""
+  runner_src: ""
+  product_head: ""        # the final release candidate (40 hex)
+  runner_head: ""
+  n1_ip: ""
+  n2_ip: ""
+  n3_ip: ""
+  n1_data: ""
+  n2_data: ""
+  n3_data: ""
+  ssh_user: "seaweed"
+  ssh_key: ""
+  work: "/var/lib/r4"
+  local_work: "/tmp/r4-{{ run_id }}"
+  hold_seconds: "240"
+  writes: "64"
+  master_port: "19600"
+  data_port: "19601"
+  ctrl_port: "19602"
+  status_port: "19603"
+  nvme_port: "4420"
+  nqn: "nqn.2026-11.io.seaweedfs:r4-{{ run_id }}"
+  r4: "{{ work }}/r4.sh"
+
+topology:
+  nodes:
+    controller: { is_local: true }
+    node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+    node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+    node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
+
+phases:
+  - name: build
+    actions:
+      # Binaries and certificates are made once on the controller, from the
+      # checkout at product_head, and uploaded (the runner repository is
+      # private: no fetch on the VMs).
+      - action: exec
+        node: controller
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.L: "{{ local_work }}"
+        env.R4: "{{ runner_src }}/scenarios/v3block/r4.sh"
+        cmd: |
+          set -eu
+          [ "$(git -C "$SRC" rev-parse HEAD)" = "$HEAD" ] || { echo "product_src is not at product_head" >&2; exit 2; }
+          mkdir -p "$L/pkg/bin"
+          for b in blockmaster blockvolume sw-block; do (cd "$SRC" && CGO_ENABLED=0 go build -o "$L/pkg/bin/$b" ./cmd/$b); done
+          cp "$R4" "$L/pkg/r4.sh"
+          # Development certificates from the product's script (files only):
+          # blockmaster's carries DNS:blockmaster, so every node maps that
+          # name to node-1's private address and dials blockmaster by name.
+          SW_BLOCK_TLS_APPLY=0 bash "$SRC/scripts/k8s-alpha-certs.sh" standalone "$L/pkg/tls" s1 s2 s3
+          tar -C "$L/pkg" -czf "$L/r4-pkg.tgz" .
+      - {action: upload_path, node: node-1, path: "{{ local_work }}/r4-pkg.tgz", dest: "/tmp/r4-pkg.tgz"}
+      - {action: upload_path, node: node-2, path: "{{ local_work }}/r4-pkg.tgz", dest: "/tmp/r4-pkg.tgz"}
+      - {action: upload_path, node: node-3, path: "{{ local_work }}/r4-pkg.tgz", dest: "/tmp/r4-pkg.tgz"}
+      - {action: exec, node: node-1, cmd: "sudo mkdir -p {{ work }} && sudo tar -C {{ work }} -xzf /tmp/r4-pkg.tgz && echo '{{ n1_data }} blockmaster' | sudo tee -a /etc/hosts >/dev/null"}
+      - {action: exec, node: node-2, cmd: "sudo mkdir -p {{ work }} && sudo tar -C {{ work }} -xzf /tmp/r4-pkg.tgz && echo '{{ n1_data }} blockmaster' | sudo tee -a /etc/hosts >/dev/null"}
+      - {action: exec, node: node-3, cmd: "sudo mkdir -p {{ work }} && sudo tar -C {{ work }} -xzf /tmp/r4-pkg.tgz && echo '{{ n1_data }} blockmaster' | sudo tee -a /etc/hosts >/dev/null"}
+
+  - name: start
+    actions:
+      # blockmaster on node-1, the volume's replicas per rf, all as transient
+      # systemd units (restart on failure, as the example units).
+      - action: exec
+        node: node-1
+        timeout: 2m
+        env.W: "{{ work }}"
+        env.RF: "{{ rf }}"
+        cmd: |
+          set -eu
+          if [ "$RF" = 3 ]; then
+            printf 'nodes:\n  - server_id: s1\n    data_addr: {{ n1_data }}:{{ data_port }}\n    ctrl_addr: {{ n1_data }}:{{ ctrl_port }}\n  - server_id: s2\n    data_addr: {{ n2_data }}:{{ data_port }}\n    ctrl_addr: {{ n2_data }}:{{ ctrl_port }}\n  - server_id: s3\n    data_addr: {{ n3_data }}:{{ data_port }}\n    ctrl_addr: {{ n3_data }}:{{ ctrl_port }}\nvolumes:\n  - id: v1\n    size_bytes: 268435456\n    replication_factor: 3\n    placements:\n      - server_id: s2\n        replica_id: r1\n      - server_id: s1\n        replica_id: r2\n      - server_id: s3\n        replica_id: r3\n' > "$W/cluster-spec.yaml"
+          else
+            printf 'nodes:\n  - server_id: s2\n    data_addr: {{ n2_data }}:{{ data_port }}\n    ctrl_addr: {{ n2_data }}:{{ ctrl_port }}\n  - server_id: s3\n    data_addr: {{ n3_data }}:{{ data_port }}\n    ctrl_addr: {{ n3_data }}:{{ ctrl_port }}\nvolumes:\n  - id: v1\n    size_bytes: 268435456\n    replication_factor: 2\n    placements:\n      - server_id: s2\n        replica_id: r1\n      - server_id: s3\n        replica_id: r2\n' > "$W/cluster-spec.yaml"
+          fi
+          sudo systemd-run --unit r4-blockmaster --property=Restart=on-failure "$W/bin/blockmaster" \
+            --authority-store "$W/master/authority" --lifecycle-store "$W/master/lifecycle" \
+            --cluster-spec "$W/cluster-spec.yaml" --expected-slots-per-volume "$RF" \
+            --launcher-replication-ack sync-quorum --listen 0.0.0.0:{{ master_port }} \
+            --tls-cert "$W/tls/master.crt" --tls-key "$W/tls/master.key" --tls-client-ca "$W/tls/ca.crt" \
+            --role-file "$W/tls/roles" --failback-runtime-rpc
+      - {action: exec, node: node-2, timeout: 2m, cmd: "bash -c 'W={{ work }}; sudo systemd-run --unit r4-blockvolume --property=Restart=on-failure $W/bin/blockvolume --master blockmaster:{{ master_port }} --server-id s2 --volume-id v1 --replica-id r1 --data-addr {{ n2_data }}:{{ data_port }} --ctrl-addr {{ n2_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }} --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum --nvme-listen {{ n2_data }}:{{ nvme_port }} --nvme-subsysnqn {{ nqn }} --master-tls-cert $W/tls/node-s2.crt --master-tls-key $W/tls/node-s2.key --master-ca $W/tls/ca.crt'"}
+      - {action: exec, node: node-3, timeout: 2m, cmd: "bash -c 'W={{ work }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2); sudo systemd-run --unit r4-blockvolume --property=Restart=on-failure $W/bin/blockvolume --master blockmaster:{{ master_port }} --server-id s3 --volume-id v1 --replica-id $R --data-addr {{ n3_data }}:{{ data_port }} --ctrl-addr {{ n3_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }} --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum --nvme-listen {{ n3_data }}:{{ nvme_port }} --nvme-subsysnqn {{ nqn }} --master-tls-cert $W/tls/node-s3.crt --master-tls-key $W/tls/node-s3.key --master-ca $W/tls/ca.crt'"}
+      - {action: exec, node: node-1, timeout: 2m, cmd: "bash -c 'W={{ work }}; [ {{ rf }} = 3 ] || exit 0; sudo systemd-run --unit r4-blockvolume --property=Restart=on-failure $W/bin/blockvolume --master blockmaster:{{ master_port }} --server-id s1 --volume-id v1 --replica-id r2 --data-addr {{ n1_data }}:{{ data_port }} --ctrl-addr {{ n1_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }} --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum --nvme-listen {{ n1_data }}:{{ nvme_port }} --nvme-subsysnqn {{ nqn }} --master-tls-cert $W/tls/node-s1.crt --master-tls-key $W/tls/node-s1.key --master-ca $W/tls/ca.crt'"}
+      # r1 primary at epoch 1 (creation complete: its first ready answer).
+      - {action: exec, node: node-2, timeout: 3m, cmd: "bash {{ work }}/r4.sh wait-role 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 1 150"}
+
+  - name: write-before-loss
+    actions:
+      - action: exec
+        node: node-1
+        timeout: 3m
+        cmd: |
+          set -eu
+          sudo nvme connect -t tcp -a {{ n2_data }} -s {{ nvme_port }} -n {{ nqn }}
+          sleep 2
+          DEV=$(for d in /sys/class/nvme-subsystem/*; do grep -qx '{{ nqn }}' $d/subsysnqn && ls $d | grep -m1 '^nvme[0-9]*n[0-9]*$'; done)
+          echo "/dev/$DEV" > {{ work }}/dev
+          sudo bash {{ r4 }} write "/dev/$DEV" {{ work }}/ledger before {{ writes }}
+
+  - name: lose-the-primary
+    actions:
+      - action: cloud_vm_power                                   # P1
+        node: node-1
+        params: { node: node-2 }
+      - action: exec                                             # P2 (a survivor on node-3)
+        node: node-3
+        timeout: 10m
+        cmd: "bash {{ r4 }} held 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' -- {{ hold_seconds }} 1"
+      - action: exec                                             # P2 (rf=3: the survivor on node-1)
+        node: node-1
+        timeout: 2m
+        cmd: "[ {{ rf }} = 3 ] || exit 0; bash {{ r4 }} held 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' -- 5 1"
+
+  - name: operator-failover
+    actions:
+      - action: exec                                             # P3
+        node: node-1
+        timeout: 3m
+        env.SW_BLOCK_TLS_CERT: "{{ work }}/tls/failback-executor.crt"
+        env.SW_BLOCK_TLS_KEY: "{{ work }}/tls/failback-executor.key"
+        env.SW_BLOCK_TLS_CA: "{{ work }}/tls/ca.crt"
+        cmd: |
+          set -eu
+          T=r2   # rf=3: r2 on node-1; rf=2: r2 on node-3
+          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }})
+          {{ work }}/bin/sw-block ops failover --master blockmaster:{{ master_port }} --volume v1 --target "$T" \
+            --target-data "$DATA:{{ data_port }}" --target-ctrl "$DATA:{{ ctrl_port }}" \
+            --expect-current r1@1 --confirm-old-node-off v1 | tee {{ work }}/failover.txt
+      # The new primary is r2: on node-1 (rf=3) or node-3 (rf=2).
+      - {action: exec, node: node-1, timeout: 3m, cmd: "[ {{ rf }} = 3 ] || exit 0; bash {{ work }}/r4.sh wait-role 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
+      - {action: exec, node: node-3, timeout: 3m, cmd: "[ {{ rf }} = 2 ] || exit 0; bash {{ work }}/r4.sh wait-role 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
+      - action: exec                                             # P4 + its red control
+        node: node-1
+        timeout: 5m
+        cmd: |
+          set -eu
+          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }})
+          sudo nvme disconnect -n {{ nqn }} || true
+          sudo nvme connect -t tcp -a "$DATA" -s {{ nvme_port }} -n {{ nqn }}
+          sleep 2
+          DEV=$(cat {{ work }}/dev)
+          sudo bash {{ r4 }} verify "$DEV" {{ work }}/ledger | tee {{ work }}/verify-after-failover.txt
+          sudo bash {{ r4 }} drop-control "$DEV" {{ work }}/ledger
+      - action: exec                                             # P4b (rf=2)
+        node: node-1
+        timeout: 2m
+        cmd: "[ {{ rf }} = 2 ] || exit 0; sudo bash {{ r4 }} no-ack $(cat {{ work }}/dev) {{ work }}/ledger 30"
+
+  - name: rejoin
+    actions:
+      - action: cloud_vm_power_restore                           # P5: a new boot
+        node: node-1
+        params: { node: node-2 }
+      - {action: exec, node: node-2, timeout: 2m, cmd: "sudo systemctl start r4-blockvolume || sudo systemctl restart r4-blockvolume"}
+      - {action: exec, node: node-2, timeout: 5m, cmd: "bash {{ work }}/r4.sh wait-role 'curl -s http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240"}
+      - action: exec                                             # P6
+        node: node-1
+        timeout: 5m
+        cmd: |
+          set -eu
+          DEV=$(cat {{ work }}/dev)
+          sudo bash {{ r4 }} write "$DEV" {{ work }}/ledger after-rejoin {{ writes }}
+          sudo bash {{ r4 }} verify "$DEV" {{ work }}/ledger | tee {{ work }}/verify-after-rejoin.txt
+
+  - name: collect
+    always: true
+    actions:
+      - {action: exec, node: node-1, ignore_error: true, cmd: "sudo nvme disconnect -n {{ nqn }} || true"}
+      - {action: collect_path, node: node-1, ignore_error: true, path: "{{ work }}/ledger"}
+      - {action: collect_path, node: node-1, ignore_error: true, path: "{{ work }}/failover.txt"}
+      - {action: collect_path, node: node-1, ignore_error: true, path: "{{ work }}/verify-after-failover.txt"}
+      - {action: collect_path, node: node-1, ignore_error: true, path: "{{ work }}/verify-after-rejoin.txt"}
+      - {action: exec, node: controller, ignore_error: true, cmd: "rm -rf {{ local_work }}"}
