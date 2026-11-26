@@ -51,6 +51,7 @@ oflag="${R4_DD_OFLAG:-direct,dsync}"
 iflag="${R4_DD_IFLAG:-direct}"
 dd_bin="${R4_DD:-dd}"
 root="${R4_ROOT:-/var/lib/r4}"
+scratch="${R4_TMP:-/tmp}"
 unitdir="${R4_UNITDIR:-/etc/systemd/system}"
 hosts="${R4_HOSTS:-/etc/hosts}"
 systemctl_bin="${R4_SYSTEMCTL:-systemctl}"
@@ -293,7 +294,7 @@ cmd_connect() {
   cmd_dev "$nqn" "$addr" "$secs"
 }
 
-check_tag() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad tag '$1'"; }
+check_tag() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "bad tag '$1'"; }
 unit_of() { echo "r4-$1-$2"; } # TAG ROLE
 
 # A unit that is loaded in any form (a transient one too) is not absent.
@@ -455,7 +456,7 @@ cmd_purge() {
   check_tag "$tag"; w="$root/$tag"
   [[ -f "$w/.cleanup-ok" ]] || die "purge: no successful cleanup proof; retained"
   cmd_cleanup "$tag" # Recheck absence immediately before deleting owned work.
-  rm -rf "${w:?}" "/tmp/r4-$tag.tgz" "/tmp/r4-$tag-x"
+  rm -rf "${w:?}" "$scratch/r4-$tag.tgz" "$scratch/r4-$tag-x"
   echo "purge: $w removed"
 }
 

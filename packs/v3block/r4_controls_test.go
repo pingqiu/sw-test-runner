@@ -103,7 +103,7 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	ctl := r4File(t, filepath.Join(dir, "systemctl"), "#!/bin/sh\nif [ \"$1\" = is-active ]; then [ -z \"${R4_TEST_CTL_ERROR:-}\" ] || exit 1; echo \"${R4_TEST_ACTIVE:-inactive}\"; exit 0; fi\nexit 0\n")
 	journal := r4File(t, filepath.Join(dir, "journalctl"), "#!/bin/sh\nexit 0\n")
 	pgrep := r4File(t, filepath.Join(dir, "pgrep"), "#!/bin/sh\nexit ${R4_TEST_PGREP:-1}\n")
-	env := []string{"R4_ROOT=" + root, "R4_UNITDIR=" + units, "R4_HOSTS=" + hosts, "R4_SYSTEMCTL=" + ctl, "R4_JOURNALCTL=" + journal, "R4_PGREP=" + pgrep}
+	env := []string{"R4_ROOT=" + root, "R4_TMP=" + dir, "R4_UNITDIR=" + units, "R4_HOSTS=" + hosts, "R4_SYSTEMCTL=" + ctl, "R4_JOURNALCTL=" + journal, "R4_PGREP=" + pgrep}
 	w := filepath.Join(root, "test")
 	pkg := filepath.Join(dir, "pkg")
 	r4File(t, filepath.Join(pkg, "payload"), "package\n")
