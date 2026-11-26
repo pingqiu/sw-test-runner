@@ -355,7 +355,8 @@ class Evidence(unittest.TestCase):
     def test_each_checker_fails_without_its_operations(self):
         only_end = synth()
         v = verdicts(only_end)
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C7': 'FAIL'})
+        # C5 passes with a note: no refusal, so nothing a refusal changed (its definition).
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'PASS', 'C7': 'FAIL'})
         writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
         self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
         reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
@@ -562,6 +563,101 @@ class C3(unittest.TestCase):
         v = hc.check(dump(recs))
         self.assertEqual(v['C3']['verdict'], 'FAIL')
         self.assertTrue(any('not exercised' in x for x in v['C3']['findings']))
+
+
+def history(*steps):
+    """A one-at-a-time history: ('obs', volume, gen, files) is an observation
+    (gen or files None: not recorded), any other step is (verb, volume, args,
+    outcome) as an invoke and its complete. Closed by the end record."""
+    recs = []
+    for st in steps:
+        n = len(recs)
+        if st[0] == 'obs':
+            _, vol, gen, files = st
+            res = {}
+            res['head'] = {'gen': gen, 'epoch': 1, 'holder': 'a/r1', 'state': ''} if gen is not None else 'unreadable'
+            if files is not None:
+                res['files'] = list(files)
+            else:
+                res['listing_error'] = 'filer down'
+            recs.append({'seq': n + 1, 'kind': 'observe', 'verb': 'observe', 'volume': vol, 'mono_ns': n + 1, 'result': res})
+            continue
+        verb, vol, args, outcome = st
+        recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
+        recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol, 'mono_ns': n + 2, 'outcome': outcome, 'result': {}})
+    recs.append({'seq': len(recs) + 1, 'kind': 'end', 'mono_ns': len(recs) + 1})
+    return recs
+
+
+FILES = ['HEAD', 'VOLUME', 'seg/0-x']
+NEG = {'expect': 'refused'}
+
+
+class C5(unittest.TestCase):
+    def c5(self, *steps):
+        return hc.check(dump(history(*steps)))['C5']
+
+    def test_the_real_run_passes_c5_judging_its_refused_create(self):
+        v = hc.check(dump(load()))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], [], 'the refused create is judged, not a note')
+
+    def test_unchanged_passes(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], [])
+
+    def test_a_moved_generation_fails(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('seq 2 write v1', v['findings'][0])
+        self.assertIn('generation moved 4 -> 5', v['findings'][0])
+
+    def test_a_listing_that_gained_or_lost_a_file_fails(self):
+        for after in (FILES + ['pool/0/1-y'], FILES[:2]):
+            v = self.c5(('obs', 'v1', 4, FILES), ('snapshot', 'v1', NEG, 'refused'), ('obs', 'v1', 4, after))
+            self.assertEqual(v['verdict'], 'FAIL', (after, v))
+            self.assertIn('seq 2 snapshot v1', v['findings'][0])
+            self.assertIn('file listing changed', v['findings'][0])
+
+    def test_no_observation_after_is_not_judged_and_unknown_alone(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 2 write v1' in x and 'after' in x for x in v['findings']), v)
+        # an operation on the volume invoked before the observation voids it as "after"
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        # beside a judged refusal, the unjudged one is a note on a PASS
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES),
+                    ('write', 'v2', NEG, 'refused'))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertTrue(any('not judged: seq 5 write v2' in x for x in v['findings']), v)
+
+    def test_an_ok_operation_between_before_and_the_refusal_voids_before(self):
+        # The ok write moved the generation from 4 to 5: comparing against the
+        # stale observation would blame the refusal for it.
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'before' in x for x in v['findings']), v)
+        # an operation on another volume does not void it
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v2', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES))
+        self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_an_observation_without_head_or_listing_is_not_judged(self):
+        for after in (('obs', 'v1', None, FILES), ('obs', 'v1', 4, None)):
+            v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), after)
+            self.assertEqual(v['verdict'], 'UNKNOWN', (after, v))
+
+    def test_generator_records_are_not_observations(self):
+        recs = history(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))
+        recs.insert(-1, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'gen_step', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'],
+                         'result': {'head': {'gen': 4}, 'files': FILES}})
+        self.assertEqual(hc.check(dump(renumber(recs)))['C5']['verdict'], 'UNKNOWN')
+
+    def test_no_refusal_passes_with_a_note(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertIn('no refused operation', v['findings'][0])
 
 
 if __name__ == '__main__':

@@ -22,6 +22,24 @@ code is 0 only when every checker passes.
   C3  independence after a restore, both ways: no write to the source made
       after the snapshot shows in the target, and no write to the target shows
       in the source
+  C5  a refused operation changed nothing: every completed operation with
+      outcome refused (any verb) is judged between two observations of its
+      volume (records of kind and verb observe; the generator's gen_* records
+      are not observations). BEFORE is the latest observation of the volume
+      before the refusal's invoke, with no operation touching the volume
+      completing ok or unknown in between; AFTER is the first observation of
+      the volume after the refusal's complete, with no operation touching the
+      volume invoked in between. An operation touches its volume, a restore
+      also its source, and a fault operation every volume (the history does
+      not map volumes to VMs). Compared: result.head.gen (any write to HEAD
+      moves the generation) and result.files as a sorted list. Both must be
+      recorded in both observations (HEAD a record with an integer gen, files
+      a list): an observation with show_error, an unreadable HEAD or a
+      listing_error proves nothing either way. FAIL if a judged refusal shows
+      a different generation or listing; a refusal without both observations
+      is not judged (a note). UNKNOWN if there were refusals and none could be
+      judged; PASS if one was judged and none changed anything, or, with a
+      note, if there was no refusal at all
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
@@ -478,7 +496,83 @@ def c7(recs):
     return verdict(f)
 
 
-CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C7': c7}
+def touches(inv, vol):
+    """Whether an operation may change volume `vol` as far as the history
+    tells: its own volume, a restore's source, and every volume for a fault
+    operation (a VM fault is not mapped to volumes)."""
+    if inv['verb'] in FAULT_VERBS:
+        return True
+    return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
+
+
+def observed_state(obs):
+    """(HEAD generation, sorted file listing) of an observation, or the reason
+    it records no comparable state."""
+    res = obs.get('result') or {}
+    head, files = res.get('head'), res.get('files')
+    if not isinstance(head, dict) or not isinstance(head.get('gen'), int) or isinstance(head.get('gen'), bool):
+        return None, 'no HEAD generation (%r)' % (head if head is not None else res.get('show_error'))
+    if not isinstance(files, list):
+        return None, 'no file listing (%s)' % res.get('listing_error', 'none recorded')
+    return (head['gen'], sorted(files)), None
+
+
+@unknown_on_overlap
+def c5(recs):
+    """A refused operation changed nothing. Judged only when the operations
+    never overlap (unknown_on_overlap): an operation open on the volume during
+    the refusal could move HEAD between the two observations, and the
+    observations could no longer be laid to the refusal alone."""
+    ops_ = operations(recs)
+    refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] == 'refused']
+    if not refusals:
+        return {'verdict': 'PASS', 'findings': ['no refused operation in the history: C5 had nothing to judge']}
+    inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
+    f, notes, judged = [], [], 0
+    for inv, comp in refusals:
+        vol = inv.get('volume')
+        name = 'seq %d %s %s' % (inv['seq'], inv['verb'], vol or '(no volume)')
+        if not vol:
+            notes.append('not judged: %s: an operation on no volume' % name)
+            continue
+        before = after = None
+        for r in recs:   # the latest observation before the invoke; an ok or unknown completion on the volume voids it
+            if r['seq'] >= inv['seq']:
+                break
+            if r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume') == vol:
+                before = r
+            elif before is not None and r['kind'] == 'complete' and r['outcome'] in ('ok', 'unknown') and touches(inv_of[r['of']], vol):
+                before = None
+        for r in recs:   # the first observation after the complete, unless an operation on the volume is invoked first
+            if r['seq'] <= comp['seq']:
+                continue
+            if r['kind'] == 'invoke' and touches(r, vol):
+                break
+            if r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume') == vol:
+                after = r
+                break
+        if before is None or after is None:
+            notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
+            continue
+        (b, bwhy), (a, awhy) = observed_state(before), observed_state(after)
+        if b is None or a is None:
+            notes.append('not judged: %s: observation seq %d records %s' % (name, (before if b is None else after)['seq'], bwhy or awhy))
+            continue
+        judged += 1
+        if b[0] != a[0]:
+            f.append('%s refused but HEAD generation moved %d -> %d (observations seq %d, %d)' % (name, b[0], a[0], before['seq'], after['seq']))
+        if b[1] != a[1]:
+            gained, lost = sorted(set(a[1]) - set(b[1])), sorted(set(b[1]) - set(a[1]))
+            f.append('%s refused but its file listing changed: gained %s, lost %s (observations seq %d, %d)'
+                     % (name, ', '.join(gained[:8]) or 'none', ', '.join(lost[:8]) or 'none', before['seq'], after['seq']))
+    if f:
+        return {'verdict': 'FAIL', 'findings': f + notes}
+    if not judged:
+        return {'verdict': 'UNKNOWN', 'findings': notes + ['%d refusal(s), none judged' % len(refusals)]}
+    return {'verdict': 'PASS', 'findings': notes}
+
+
+CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C7': c7}
 
 
 def check(lines):
