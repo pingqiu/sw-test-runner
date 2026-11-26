@@ -85,10 +85,16 @@ The state record is one atomic local JSON record, synced before CI changes.
 Only prepare writes the prior CI state; start writes the at-most-once marker;
 only cleanup restores it. The run unit's description is the root+RC ownership
 check. Timers have a separately checked description before cancellation.
-Host unit runtime ceilings are 170/110 min; work is 180 min with a fresh shared
-20 min always budget. A 205 min host timer invokes the same cleanup verb if the
-controller disappears, five minutes after the runner's total budget. Its cleanup
-service has a five-minute runtime ceiling, keeping the proposed window at 210 min. These are configured deadlines, not proof of completion.
+The source sequence is handoff <=60 min, target <=100 min, then source-finish
+<=55 min (step 5 runs AFTER the target and can scan 1 TiB after restart).
+The three waits total 215 min; signalling adds at most 3 min. Source test/unit
+ceilings are 230/235 min; target test/unit ceilings are 95/100 min. The source's
+KZ_TARGET_WAIT is 105 min, covering target startup, wait and completion signal.
+Runner work is 250 min (including staging, collection and controller judgment),
+with a fresh shared 20 min always budget. A 275 min host timer invokes the same
+cleanup verb if the controller disappears, five minutes past the runner total.
+Its cleanup service has a five-minute ceiling: proposed window 280 min.
+These are configured deadlines, not proof of completion. The product test is unchanged.
 No source/target process is resumed by a timer.
 
 If either automatic cleanup fails, the named run operator in the launch packet

@@ -121,7 +121,7 @@ def prepare(c):
     atomic(root / "out/launch.json", s)
     # Host-side fallback uses the same cleanup verb if the controller disappears.
     env = ["KZ_"+k.upper()+"="+v for k,v in c.items() if k != "unit"]
-    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-active=205m", "--timer-property=AccuracySec=1s",
+    call("sudo", "-n", "systemd-run", "--unit="+c["unit"]+"-cleanup", "--on-active=275m", "--timer-property=AccuracySec=1s",
          "--timer-property=Description="+description(c)+" cleanup timer",
          "--property=User="+str(os.getuid()), "--property=RuntimeMaxSec=300", "--property=KillMode=control-group", "--collect",
          "/usr/bin/env", *env, sys.executable, str(root / "host.py"), "cleanup")
@@ -135,7 +135,7 @@ def start(c):
     if (root / "started").exists(): raise ValueError("role already launched")
     (root / "started").touch(exist_ok=False)
     env = ["KZ_"+k.upper()+"="+v for k,v in c.items() if k != "unit"]
-    limit = "170m" if c["role"] == "source" else "110m"
+    limit = "235m" if c["role"] == "source" else "100m"
     call("sudo", "-n", "systemd-run", "--unit="+c["unit"], "--description="+description(c), "--property=User="+str(os.getuid()),
          "--property=RuntimeMaxSec="+limit, "--property=TimeoutStopSec=30", "--property=KillMode=control-group", "--collect",
          "/usr/bin/env", *env, sys.executable, str(root / "host.py"), "run")
@@ -149,12 +149,12 @@ def run(c):
              KZ_RUN="1", KZ_RUN_ID=c["run"], KZ_SIZE="1T", KZ_DEVICE="1", KZ_FS="ext4,xfs", KZ_ROLE=c["role"],
              KZ_HANDOFF=str(root / "x/handoff.json"), KZ_REPORT=str(root / "out/report.json"),
              SWBLOCK_TEST_LISTEN_HOST=c["self"], KZ_TARGET_HOST=c["peer"], KZ_TARGET_DONE=str(root / "x/target.done"),
-             KZ_TARGET_WAIT="120m", KZ_HOLD_BIN=str(root / "bins/blockvolume-kzhold"))
+             KZ_TARGET_WAIT="105m", KZ_HOLD_BIN=str(root / "bins/blockvolume-kzhold"))
     rc = 125
     try:
         with (root / "out/test.log").open("xb") as log:
             rc = subprocess.run([str(root / "bins/kz.test"), "-test.run=^TestKnownZeroAcceptance$", "-test.v",
-                                 "-test.timeout="+("165m" if c["role"] == "source" else "105m")],
+                                 "-test.timeout="+("230m" if c["role"] == "source" else "95m")],
                                 cwd=root, env=e, stdout=log, stderr=subprocess.STDOUT).returncode
     finally:
         atomic(root / "out/exit.json", dict(rc=rc, run=c["run"], role=c["role"]))

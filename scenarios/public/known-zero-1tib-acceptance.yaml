@@ -1,5 +1,5 @@
 name: known-zero-1tib-acceptance
-timeout: 180m
+timeout: 250m
 always_timeout: 20m
 env:
   kz_run: ""
@@ -127,7 +127,7 @@ phases:
     actions:
       - action: "wait_exec_match"
         node: "source"
-        timeout: "70m"
+        timeout: "60m"
         cmd: "python3 '{{ source_root }}/host.py' handoff '{{ source_root }}'"
         match: "^HANDOFF [A-Za-z0-9+/]+={0,2}$"
         fail_match: "^DONE"
@@ -155,7 +155,7 @@ phases:
         cmd: "python3 '{{ target_root }}/host.py' start '{{ target_root }}'"
       - action: "wait_exec_match"
         node: "target"
-        timeout: "110m"
+        timeout: "100m"
         cmd: "python3 '{{ target_root }}/host.py' poll '{{ target_root }}'"
         match: "^DONE rc=0$"
         fail_match: "^DONE rc=([^0]|0[0-9])"
@@ -168,7 +168,7 @@ phases:
         cmd: "python3 '{{ source_root }}/host.py' done '{{ source_root }}'"
       - action: "wait_exec_match"
         node: "source"
-        timeout: "10m"
+        timeout: "55m"
         cmd: "python3 '{{ source_root }}/host.py' poll '{{ source_root }}'"
         match: "^DONE rc=0$"
         fail_match: "^DONE rc=([^0]|0[0-9])"
