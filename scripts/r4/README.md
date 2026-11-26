@@ -34,3 +34,40 @@ the entry does not compile or modify an alternative workload. The cloud
 controller owns deadlines and destroy/absence verification, including on failure.
 
 No-network regression: `python3 -m unittest discover -s scripts/tests -p test_r4_cloud_pack.py`.
+
+## Before any cloud create
+
+Run the local startup preflight on the controller (Linux, Python with PyYAML,
+Go on PATH, OpenSSL, tar and an existing IPv4 interface). It builds the pinned
+RC binaries from `git archive`, extracts the actual master and blockvolume argv
+from the pinned scenario, and starts both RF3 and RF2 for 10 seconds each.
+Every process must remain alive and emit its listening phase (master `listening`,
+volume `status-listening`). This catches startup refusals; it is not a replication
+or data-readiness qualification. No systemd, root, NVMe initiator or cloud API is
+used by this check. Processes are reaped by recorded PID in every outcome.
+
+Only paths, endpoints and the executable locations are substituted for local
+temporary resources; the flag set and its non-address values come from the
+scenario. TLS remains enabled. In particular, authenticated master startup
+includes `--audit-log`, documented in the product operator guide, line 65.
+The external-NVMe opt-in is preserved, so its temporary listener uses the
+controller's existing non-loopback IPv4 interface and an ephemeral port; other
+listeners use loopback. No guest writes or cloud mutations are performed.
+
+Use this entry for an authorized R4 launch, instead of invoking cloud run directly:
+
+```sh
+python3 scripts/r4/start-preflight.py /private/assets --launch-token "$LAUNCH_TOKEN"
+```
+
+Without `--launch-token` it performs only the local smoke. With the token it
+invokes `ASSET_ROOT/seaweed-cloud run` only after both rounds pass, using the
+same asset root's pinned config and pack entry. The cloud controller retains
+its own token, deadline, budget and empty-RG checks.
+Include this script in the private asset manifest. Keep its temporary directory
+private: it contains certificate keys. Publish only `receipt.json` and process
+logs, never the whole directory. The receipt records binary hashes and rendered
+argv; log paths in a refusal identify which command failed. If the scenario or
+RC changes, rerun this preflight before create.
+
+Controls: `python3 -m unittest discover -s scripts/tests -p test_r4_start_preflight.py`.
