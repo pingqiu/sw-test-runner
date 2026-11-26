@@ -1,0 +1,265 @@
+name: known-zero-1tib-acceptance
+timeout: 255m
+always_timeout: 20m
+env:
+  kz_run: ""
+  rc_sha: ""
+  archive_path: ""
+  archive_sha256: ""
+  source_host: ""
+  target_host: ""
+  ssh_user: ""
+  ssh_key: ""
+  source_host_key: ""
+  target_host_key: ""
+  source_root: ""
+  target_root: ""
+  source_ci_unit: ""
+  target_ci_unit: ""
+  min_free_bytes: ""
+  helper_path: "scripts/kz/host.py"
+  controller_python: "python3"
+  judge_path: "scripts/kz/judge.py"
+topology:
+  nodes:
+    controller:
+      host: "127.0.0.1"
+      is_native: true
+    source:
+      host: "{{ source_host }}"
+      user: "{{ ssh_user }}"
+      key: "{{ ssh_key }}"
+      host_key: "{{ source_host_key }}"
+    target:
+      host: "{{ target_host }}"
+      user: "{{ ssh_user }}"
+      key: "{{ ssh_key }}"
+      host_key: "{{ target_host_key }}"
+phases:
+  # One absolute fallback instant for both hosts, fixed before any host work.
+  - name: cleanup-deadline
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        cmd: "{{ controller_python }} -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)+timedelta(minutes=280)).strftime(\"%Y-%m-%dT%H:%M:%SZ\"))'"
+        save_as: cleanup_at
+  - name: fresh-roots
+    parallel: true
+    actions:
+      - action: "exec"
+        node: "source"
+        timeout: "20s"
+        cmd: "python3 -c 'import os,re; from pathlib import Path; p=Path(os.environ[\"KZ_ROOT\"]); r=os.environ[\"KZ_RUN\"]; assert re.fullmatch(r\"kz-[0-9]{8}t[0-9]{6}z\",r); assert re.fullmatch(r\"/[A-Za-z0-9_./-]+\",str(p)) and p.is_absolute() and p.resolve()==p and p.name==\"swb-\"+r; p.mkdir(mode=0o700)' "
+        env.KZ_ROOT: "{{ source_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "source"
+        env.KZ_SELF: "{{ source_host }}"
+        env.KZ_PEER: "{{ target_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ source_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+      - action: "exec"
+        node: "target"
+        timeout: "20s"
+        cmd: "python3 -c 'import os,re; from pathlib import Path; p=Path(os.environ[\"KZ_ROOT\"]); r=os.environ[\"KZ_RUN\"]; assert re.fullmatch(r\"kz-[0-9]{8}t[0-9]{6}z\",r); assert re.fullmatch(r\"/[A-Za-z0-9_./-]+\",str(p)) and p.is_absolute() and p.resolve()==p and p.name==\"swb-\"+r; p.mkdir(mode=0o700)' "
+        env.KZ_ROOT: "{{ target_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "target"
+        env.KZ_SELF: "{{ target_host }}"
+        env.KZ_PEER: "{{ source_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ target_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+  - name: stage-pinned-inputs
+    parallel: true
+    actions:
+      - action: "upload_path"
+        node: "source"
+        timeout: "4m"
+        path: "{{ archive_path }}"
+        dest: "{{ source_root }}/bins.tar"
+      - action: "upload_path"
+        node: "source"
+        timeout: "4m"
+        path: "{{ helper_path }}"
+        dest: "{{ source_root }}/host.py"
+      - action: "upload_path"
+        node: "target"
+        timeout: "4m"
+        path: "{{ archive_path }}"
+        dest: "{{ target_root }}/bins.tar"
+      - action: "upload_path"
+        node: "target"
+        timeout: "4m"
+        path: "{{ helper_path }}"
+        dest: "{{ target_root }}/host.py"
+  - name: admit-and-isolate-ci
+    parallel: true
+    actions:
+      - action: "exec"
+        node: "source"
+        timeout: "4m"
+        cmd: "python3 '{{ source_root }}/host.py' prepare"
+        env.KZ_ROOT: "{{ source_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "source"
+        env.KZ_SELF: "{{ source_host }}"
+        env.KZ_PEER: "{{ target_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ source_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+      - action: "exec"
+        node: "target"
+        timeout: "4m"
+        cmd: "python3 '{{ target_root }}/host.py' prepare"
+        env.KZ_ROOT: "{{ target_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "target"
+        env.KZ_SELF: "{{ target_host }}"
+        env.KZ_PEER: "{{ source_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ target_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+  - name: source-start
+    actions:
+      - action: "exec"
+        node: "source"
+        timeout: "60s"
+        cmd: "python3 '{{ source_root }}/host.py' start '{{ source_root }}'"
+  - name: source-handoff
+    actions:
+      - action: "wait_exec_match"
+        node: "source"
+        timeout: "60m"
+        cmd: "python3 '{{ source_root }}/host.py' handoff '{{ source_root }}'"
+        match: "^HANDOFF [A-Za-z0-9+/]+={0,2}$"
+        fail_match: "^DONE"
+        interval: "15s"
+        save_as: "handoff"
+  - name: target-run
+    actions:
+      - action: "exec"
+        node: "target"
+        timeout: "60s"
+        cmd: "python3 '{{ target_root }}/host.py' accept"
+        env.KZ_ROOT: "{{ target_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "target"
+        env.KZ_SELF: "{{ target_host }}"
+        env.KZ_PEER: "{{ source_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ target_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+        env.KZ_HANDOFF_B64: "{{ handoff }}"
+      - action: "exec"
+        node: "target"
+        timeout: "60s"
+        cmd: "python3 '{{ target_root }}/host.py' start '{{ target_root }}'"
+      - action: "wait_exec_match"
+        node: "target"
+        timeout: "100m"
+        cmd: "python3 '{{ target_root }}/host.py' poll '{{ target_root }}'"
+        match: "^DONE rc=0$"
+        fail_match: "^DONE rc=([^0]|0[0-9])"
+        interval: "15s"
+  - name: source-finish
+    actions:
+      - action: "exec"
+        node: "source"
+        timeout: "60s"
+        cmd: "python3 '{{ source_root }}/host.py' done '{{ source_root }}'"
+      - action: "wait_exec_match"
+        node: "source"
+        timeout: "55m"
+        cmd: "python3 '{{ source_root }}/host.py' poll '{{ source_root }}'"
+        match: "^DONE rc=0$"
+        fail_match: "^DONE rc=([^0]|0[0-9])"
+        interval: "15s"
+  - name: collect-both-reports
+    parallel: true
+    actions:
+      - action: collect_path
+        node: source
+        path: "{{ source_root }}/out"
+        name: known-zero-source
+        save_as: source_bundle
+        timeout: 3m
+      - action: collect_path
+        node: target
+        path: "{{ target_root }}/out"
+        name: known-zero-target
+        save_as: target_bundle
+        timeout: 3m
+  - name: platform-judgment
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        cmd: "{{ controller_python }} '{{ judge_path }}'"
+        env.KZ_ARCHIVE: "{{ source_bundle }}"
+        env.KZ_ROLE: "source"
+        env.KZ_ACCEPTANCE_ID: "{{ kz_run }}"
+      - action: exec
+        node: controller
+        timeout: 60s
+        cmd: "{{ controller_python }} '{{ judge_path }}'"
+        env.KZ_ARCHIVE: "{{ target_bundle }}"
+        env.KZ_ROLE: "target"
+        env.KZ_ACCEPTANCE_ID: "{{ kz_run }}"
+  - name: settle-both-hosts
+    always: true
+    parallel: true
+    actions:
+      - action: "exec"
+        node: "source"
+        timeout: "6m"
+        cmd: "python3 '{{ source_root }}/host.py' cleanup"
+        env.KZ_ROOT: "{{ source_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "source"
+        env.KZ_SELF: "{{ source_host }}"
+        env.KZ_PEER: "{{ target_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ source_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+      - action: "exec"
+        node: "target"
+        timeout: "6m"
+        cmd: "python3 '{{ target_root }}/host.py' cleanup"
+        env.KZ_ROOT: "{{ target_root }}"
+        env.KZ_RUN: "{{ kz_run }}"
+        env.KZ_ROLE: "target"
+        env.KZ_SELF: "{{ target_host }}"
+        env.KZ_PEER: "{{ source_host }}"
+        env.KZ_RC: "{{ rc_sha }}"
+        env.KZ_ARCHIVE_SHA: "{{ archive_sha256 }}"
+        env.KZ_CI_UNIT: "{{ target_ci_unit }}"
+        env.KZ_MIN_FREE_BYTES: "{{ min_free_bytes }}"
+        env.KZ_DEADLINE: "{{ cleanup_at }}"
+  - name: collect-closeout
+    always: true
+    parallel: true
+    actions:
+      - action: "collect_path"
+        node: "source"
+        timeout: "3m"
+        path: "{{ source_root }}/out"
+        name: "known-zero-source-closeout"
+      - action: "collect_path"
+        node: "target"
+        timeout: "3m"
+        path: "{{ target_root }}/out"
+        name: "known-zero-target-closeout"
