@@ -43,7 +43,7 @@ env:
   # The name pool. The product (a standalone deployment) has no online create
   # and never reuses a deleted name, so the cluster spec declares every name
   # the run may use, up front. 300 operations against a product answering ok
-  # to every ordinary operation use at most 26 names (mean 17.5) over seeds
+  # to every ordinary operation use at most 24 names (mean 16.9) over seeds
   # 1..200 (TestM1DefaultPoolLastsTheDefaultRun); 48 leaves room for names an
   # unknown outcome takes out of the run. An exhausted pool is a normal end.
   # Each name costs 10 holder ports (v3_op_spec), so 48 names fit a 1000-port

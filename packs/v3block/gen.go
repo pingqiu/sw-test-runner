@@ -23,8 +23,9 @@ import (
 
 // GenVersion is recorded in the history's first record; a replay of another
 // version is refused. m1-gen/2: the shadow follows the documented refusals
-// (reserved and bound names, stale local roots, no attach after a stop) and
-// proposes the negatives that follow from them.
+// (reserved and bound names, no attach on an earlier local root or after a
+// stop, no ordinary delete of a serving volume), proposes the negatives the
+// typed actions can answer, and names every read's lbas.
 const GenVersion = "m1-gen/2"
 
 // MaxSnapshots is the per-volume snapshot limit. No operator page states it:
@@ -33,12 +34,6 @@ const GenVersion = "m1-gen/2"
 // operation; what the product answers to it (not a typed refusal, and HEAD
 // advances) is a product result, not the generator's to settle.
 const MaxSnapshots = 10
-
-// wrongBlocks is the attach geometry of the "wrong geometry" negative. A
-// volume is created at 16 MiB (v3_op_create's default) and attached with
-// 4096 blocks of 4096 bytes (v3_op_attach's default); 2048 blocks disagrees
-// with the volume record.
-const wrongBlocks = "2048"
 
 // Volume lifecycle states of the generator's shadow.
 const (
@@ -56,6 +51,16 @@ const (
 // The limits a negative operation probes: each is a refusal an operator page
 // documents (page:line on the m1 product branch; VL volume-lifecycle.md, SD
 // standalone-deployment.md, OG operator-guide.md, all under docs/).
+//
+// Documented refusals NOT proposed, because the typed action cannot answer
+// them "refused" and an unknown outcome takes the volume out of the run:
+// every attach refusal (blockvolume exits 78 and the runner does not read the
+// reason: attach on the old host after a move VL:544, attach a deleted volume
+// VL:545, attach on a stale local root VL:155-160, attach with the wrong
+// geometry SD:682), attach after a stop (no grant, the attach times out:
+// VL:336-337), and a restore into a deleted name (VL:90-91: the restore's
+// not_admitted is not a refusal the runner can tell from a persisted one).
+// The shadow still keeps ordinary() from proposing those attaches.
 const (
 	limCreateDeleted   = "create a deleted name"                               // VL:201-204
 	limDeleteAttached  = "delete while attached"                               // VL:409-411, VL:527
@@ -63,13 +68,8 @@ const (
 	limDeleteSnapDep   = "delete a snapshot that has a restore target"         // SD:692
 	limEleventhSnap    = "an eleventh snapshot"                                // design page only: docs/design/invariants.md:1092
 	limRestoreExisting = "restore into an existing name"                       // VL:88-90, SD:672
-	limRestoreDeleted  = "restore into a deleted name"                         // VL:90-91, VL:201-204
 	limRestoreTarget   = "restore from a snapshot of a restore target"         // SD:688, SD:693 (side effect: the target name stays bound)
 	limReleaseLive     = "release a live restore target"                       // SD:696
-	limAttachOldHost   = "attach on the old host after a move"                 // VL:544
-	limAttachDeleted   = "attach a deleted volume"                             // VL:545
-	limAttachStale     = "attach on a stale local root"                        // VL:155-160, VL:190-192, VL:546
-	limAttachGeometry  = "attach with the wrong geometry"                      // SD:682, OG:110-114
 )
 
 // burnt says a name can never be created or restored into again.
@@ -123,15 +123,15 @@ type genVol struct {
 	targets  map[string]string // snapshot name -> restore target volume (live)
 	source   string            // for a restore target (or a bound name): its source volume
 	fromSnap string            // for a restore target (or a bound name): the snapshot it was restored from
-	written  bool              // a write was acknowledged (reads then have content)
+	lbas     map[int]bool      // lbas with acknowledged content (written here, or inherited by a restore target)
+	snapLBAs map[string][]int  // live snapshot name -> the lbas with content when it was taken
 	snapSeq  int
 	// held[h]: a holder on host h served this volume once, so h has a local
-	// root for it. stale[h]: HEAD's position has since advanced past that root
-	// (a write or a snapshot acknowledged while another host served it). The
-	// local root is per host and the runner never moves it aside, so an attach
-	// on a host that held the volume earlier is against the operator rule
-	// (VL:190-192) and, once stale, refused (VL:155-160).
-	held, stale [2]bool
+	// root for it. The local root is per host and the runner never moves it
+	// aside, so an attach on a host that held the volume earlier is against
+	// the operator rule (VL:190-192) and, once HEAD has advanced past that
+	// root, refused (VL:155-160): it is never proposed.
+	held [2]bool
 }
 
 // Generator proposes operations; Learn feeds back each outcome.
@@ -173,7 +173,7 @@ func NewGenerator(cfg GenConfig) (*Generator, error) {
 			return nil, fmt.Errorf("generator: pool name %q empty, repeated or not a token", n)
 		}
 		seen[n] = true
-		g.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}}
+		g.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{}}
 		g.order = append(g.order, n)
 	}
 	return g, nil
@@ -269,6 +269,38 @@ func (g *Generator) lbas() string {
 	return strings.Join(out, " ")
 }
 
+// readLBAs picks the lbas a read names, always explicitly (never "written":
+// the handler's own written set does not know a restore target's inherited
+// content): 1..4 distinct lbas with acknowledged content, or, when there are
+// none, one random lba (a block never written reads zero).
+func (g *Generator) readLBAs(v *genVol) string {
+	if len(v.lbas) == 0 {
+		return strconv.Itoa(g.rng.IntN(g.cfg.Blocks))
+	}
+	have := make([]int, 0, len(v.lbas))
+	for b := range v.lbas {
+		have = append(have, b)
+	}
+	slices.Sort(have)
+	pick := g.rng.Perm(len(have))[:1+g.rng.IntN(min(4, len(have)))]
+	slices.Sort(pick)
+	out := make([]string, len(pick))
+	for i, j := range pick {
+		out[i] = strconv.Itoa(have[j])
+	}
+	return strings.Join(out, " ")
+}
+
+// sortedLBAs lists a set of lbas in order.
+func sortedLBAs(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for b := range set {
+		out = append(out, b)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // firstName is the first pool name (in pool order) that ok accepts, or "".
 func (g *Generator) firstName(ok func(v *genVol) bool) string {
 	for _, n := range g.order {
@@ -321,9 +353,7 @@ func (g *Generator) ordinary() []candidate {
 			add(op("v3_op_delete", n))
 		case stServing:
 			add(op("v3_op_write", n, "lbas", g.lbas(), "round", fmt.Sprintf("g%d", g.no+1)))
-			if v.written {
-				add(op("v3_op_read", n, "lbas", "written"))
-			}
+			add(op("v3_op_read", n, "lbas", g.readLBAs(v)))
 			if len(v.snaps) < MaxSnapshots {
 				add(op("v3_op_snapshot", n, "name", fmt.Sprintf("%s-s%d", n, v.snapSeq+1)))
 			}
@@ -363,18 +393,9 @@ func (g *Generator) negatives() []candidate {
 		if v.state == stUnknown {
 			continue
 		}
-		host := strconv.Itoa(v.host)
 		switch v.state {
 		case stDeleted:
 			add(op("v3_op_create", n), limCreateDeleted)
-			add(op("v3_op_attach", n, "host", host), limAttachDeleted)
-		case stCreated:
-			// The first start of a volume with a record (a created volume or
-			// a restore target) with other geometry: refused before any local
-			// store is created.
-			if !v.held[v.host] {
-				add(op("v3_op_attach", n, "host", host, "blocks", wrongBlocks), limAttachGeometry)
-			}
 		case stServing:
 			add(op("v3_op_delete", n), limDeleteAttached)
 			if len(v.snaps) >= MaxSnapshots {
@@ -383,17 +404,13 @@ func (g *Generator) negatives() []candidate {
 			if len(v.snaps) > 0 {
 				s := v.snaps[0]
 				if v.source == "" {
-					// Into a name that exists (not this restore's own replay)
-					// or one that is burnt. The target's binding is checked
-					// before the source snapshot.
+					// Into a name that exists, not this restore's own replay
+					// (target_exists).
 					if t := g.firstName(func(t *genVol) bool {
 						return t.name != n && (t.state == stCreated || t.state == stServing || t.state == stStopped ||
 							t.state == stMoved || t.state == stBound) && !(t.source == n && t.fromSnap == s)
 					}); t != "" {
 						add(op("v3_op_restore", n, "snapshot", s, "target_volume", t), limRestoreExisting)
-					}
-					if t := g.firstName(func(t *genVol) bool { return t.state == stDeleted || t.state == stReserved }); t != "" {
-						add(op("v3_op_restore", n, "snapshot", s, "target_volume", t), limRestoreDeleted)
 					}
 				} else if unborn != "" {
 					add(op("v3_op_restore", n, "snapshot", s, "target_volume", unborn), limRestoreTarget)
@@ -402,13 +419,6 @@ func (g *Generator) negatives() []candidate {
 		case stStopped:
 			if len(v.targets) > 0 {
 				add(op("v3_op_delete", n), limDeleteSource)
-			}
-		case stMoved:
-			// The host it moved from holds a root at HEAD's position, but the
-			// master refuses its lease: the volume moved at a newer epoch.
-			add(op("v3_op_attach", n, "host", strconv.Itoa(1-v.host)), limAttachOldHost)
-			if v.held[v.host] && v.stale[v.host] {
-				add(op("v3_op_attach", n, "host", host), limAttachStale)
 			}
 		}
 		// Snapshots with a live restore target: their delete is refused, through
@@ -427,7 +437,7 @@ func (g *Generator) negatives() []candidate {
 	// identifies each one, so the same seed always picks the same operation.
 	key := func(c candidate) string {
 		p := c.op.Params
-		return strings.Join([]string{c.op.Action, c.op.Volume, c.op.Negative, p["name"], p["snapshot"], p["target_volume"], p["host"], p["blocks"]}, "|")
+		return strings.Join([]string{c.op.Action, c.op.Volume, c.op.Negative, p["name"], p["snapshot"], p["target_volume"]}, "|")
 	}
 	slices.SortFunc(cs, func(a, b candidate) int { return strings.Compare(key(a), key(b)) })
 	return cs
@@ -435,16 +445,37 @@ func (g *Generator) negatives() []candidate {
 
 // Learn applies an operation's outcome (ok, refused, unknown) to the shadow.
 // A refused ordinary operation changes nothing (C0 reports it as unexpected).
-// A refused negative changes nothing either, except the side effects the
-// operator pages document: a delete admitted and then refused for a snapshot
-// dependent leaves the volume reserved (OG:193-195), and a restore refused
-// for a snapshot of a restore target leaves the target name bound (SD:693).
-// A negative answered ok, and any unknown outcome, take the volumes out of
-// the run: the shadow cannot say what changed.
+// A refused negative changes nothing either. Two negatives have a documented
+// side effect, and the typed action answers them unknown, since its code
+// cannot prove nothing persisted; for these two the shadow applies the
+// documented effect instead of taking the volume out:
+//   - a source delete refused for a snapshot dependent (snapshot_has_dependents,
+//     answered unknown) has committed its reservation first: the volume is
+//     reserved (OG:193-195). Answered refused (not_admitted before
+//     persistence: the lease horizon has not passed) it reserved nothing.
+//   - a restore from a snapshot of a restore target (not_admitted, answered
+//     unknown or refused) leaves the target name bound (SD:693); the source
+//     is unchanged.
+//
+// Any other unknown outcome, and a negative answered ok, take the volumes out
+// of the run: the shadow cannot say what changed.
 func (g *Generator) Learn(o GenOp, outcome string) {
 	v := g.vols[o.Volume]
 	if outcome == "unknown" && o.Action == "v3_op_read" {
 		return // a read changes nothing, whatever its outcome
+	}
+	if outcome == "refused" || outcome == "unknown" {
+		switch o.Negative {
+		case limDeleteSource:
+			if outcome == "unknown" {
+				v.state = stReserved
+			}
+			return
+		case limRestoreTarget:
+			t := g.vols[o.Params["target_volume"]]
+			t.state, t.source, t.fromSnap = stBound, o.Volume, o.Params["snapshot"]
+			return
+		}
 	}
 	if outcome == "unknown" || (outcome == "ok" && o.Negative != "") {
 		v.state = stUnknown
@@ -454,21 +485,6 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 		return
 	}
 	if o.Negative != "" {
-		if outcome != "refused" {
-			return
-		}
-		switch o.Negative {
-		case limDeleteSource:
-			// The reservation commits before the dependent check refuses: the
-			// volume cannot serve again and its name is burnt. (A refusal for a
-			// lease still inside its horizon reserves nothing; the shadow takes
-			// the stricter reading, under which every later proposal on this
-			// volume is refused or ok either way.)
-			v.state = stReserved
-		case limRestoreTarget:
-			t := g.vols[o.Params["target_volume"]]
-			t.state, t.source, t.fromSnap = stBound, o.Volume, o.Params["snapshot"]
-		}
 		return
 	}
 	if outcome != "ok" {
@@ -480,24 +496,26 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 	case "v3_op_attach":
 		v.state = stServing
 		v.held[v.host] = true
-	case "v3_op_write", "v3_op_snapshot":
-		if o.Action == "v3_op_write" {
-			v.written = true
-		} else {
-			v.snapSeq++
-			v.snaps = append(v.snaps, o.Params["name"])
-		}
-		// HEAD's position advances past every other host's earlier root.
-		for h := range v.held {
-			if h != v.host && v.held[h] {
-				v.stale[h] = true
+	case "v3_op_write":
+		for _, f := range strings.Fields(o.Params["lbas"]) {
+			if b, err := strconv.Atoi(f); err == nil {
+				v.lbas[b] = true
 			}
 		}
+	case "v3_op_snapshot":
+		v.snapSeq++
+		v.snaps = append(v.snaps, o.Params["name"])
+		v.snapLBAs[o.Params["name"]] = sortedLBAs(v.lbas)
 	case "v3_op_snapshot_delete":
 		v.snaps = slices.DeleteFunc(v.snaps, func(s string) bool { return s == o.Params["name"] })
+		delete(v.snapLBAs, o.Params["name"])
 	case "v3_op_restore":
+		// The target's content is the source's at the snapshot.
 		t := g.vols[o.Params["target_volume"]]
-		t.state, t.source, t.fromSnap, t.host, t.written = stCreated, o.Volume, o.Params["snapshot"], v.host, v.written
+		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], v.host
+		for _, b := range v.snapLBAs[o.Params["snapshot"]] {
+			t.lbas[b] = true
+		}
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
 		v.state = stStopped
@@ -520,9 +538,11 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 // (action, state) cell, and the cells that were possible in principle but
 // never reached.
 func (g *Generator) Coverage() map[string]any {
-	// Ordinary and negative cells alike, by the state of the operation's volume.
+	// Ordinary and negative cells alike, by the state of the operation's volume
+	// (delete|serving is only the negative "delete while attached"; delete is
+	// ordinary from created, stopped, moved and reserved).
 	all := map[string][]string{
-		"v3_op_create": {stUnborn, stDeleted}, "v3_op_attach": {stCreated, stMoved, stDeleted},
+		"v3_op_create": {stUnborn, stDeleted}, "v3_op_attach": {stCreated, stMoved},
 		"v3_op_write": {stServing}, "v3_op_read": {stServing}, "v3_op_snapshot": {stServing},
 		"v3_op_snapshot_delete": {stServing, stStopped}, "v3_op_restore": {stServing}, "v3_op_stop": {stServing},
 		"v3_op_move": {stServing}, "v3_op_delete": {stCreated, stStopped, stMoved, stReserved, stServing},

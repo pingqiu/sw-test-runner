@@ -16,9 +16,23 @@ func pool(n int) []string {
 	return p
 }
 
-// run drives a generator against a product that answers ok to every
-// ordinary operation and refused to every negative one, and returns the
-// proposals.
+// answer is the outcome a product that follows its operator pages gives, as
+// the typed actions map it: ok to every ordinary operation; refused to a
+// negative one, except the three whose answer the actions cannot prove
+// changed nothing, which come back unknown (the source delete refused for a
+// snapshot dependent, the restore from a restore target's snapshot, the
+// eleventh snapshot).
+func answer(o GenOp) string {
+	switch o.Negative {
+	case "":
+		return "ok"
+	case "delete a source whose snapshot has a restore target", "restore from a snapshot of a restore target", "an eleventh snapshot":
+		return "unknown"
+	}
+	return "refused"
+}
+
+// run drives a generator against that product and returns the proposals.
 func run(t *testing.T, cfg GenConfig) ([]GenOp, *Generator) {
 	t.Helper()
 	g, err := NewGenerator(cfg)
@@ -32,11 +46,7 @@ func run(t *testing.T, cfg GenConfig) ([]GenOp, *Generator) {
 			break
 		}
 		ops = append(ops, o)
-		if o.Negative != "" {
-			g.Learn(o, "refused")
-		} else {
-			g.Learn(o, "ok")
-		}
+		g.Learn(o, answer(o))
 	}
 	return ops, g
 }
@@ -61,26 +71,47 @@ func TestGeneratorSameSeedSameRunAnotherSeedAnotherRun(t *testing.T) {
 // operation meets (the limit names are spelled out here, not taken from the
 // generator).
 type oracle struct {
-	state   map[string]string
-	snaps   map[string]map[string]bool
-	targets map[string]map[string]bool // vol -> snapshot names with a live restore target
-	target  map[string]string          // restore target (or bound name) -> its source
-	fromSn  map[string]string          // restore target (or bound name) -> the snapshot it was restored from
-	host    map[string]int             // the holder host each volume serves (or moved) on
-	held    map[string]map[int]bool    // hosts that served the volume once (a local root lies there)
-	stale   map[string]map[int]bool    // held hosts whose root HEAD has advanced past since
+	state    map[string]string
+	snaps    map[string]map[string]bool
+	targets  map[string]map[string]bool // vol -> snapshot names with a live restore target
+	target   map[string]string          // restore target (or bound name) -> its source
+	fromSn   map[string]string          // restore target (or bound name) -> the snapshot it was restored from
+	host     map[string]int             // the holder host each volume serves (or moved) on
+	held     map[string]map[int]bool    // hosts that served the volume once (a local root lies there)
+	content  map[string]map[string]bool // vol -> lbas with acknowledged content
+	snapCont map[string]map[string]bool // "vol|snapshot" -> lbas with content when it was taken
 }
 
 func newOracle() *oracle {
 	return &oracle{state: map[string]string{}, snaps: map[string]map[string]bool{},
 		targets: map[string]map[string]bool{}, target: map[string]string{}, fromSn: map[string]string{}, host: map[string]int{},
-		held: map[string]map[int]bool{}, stale: map[string]map[int]bool{}}
+		held: map[string]map[int]bool{}, content: map[string]map[string]bool{}, snapCont: map[string]map[string]bool{}}
 }
 
 func (o *oracle) init(v string) {
 	if o.snaps[v] == nil {
-		o.snaps[v], o.targets[v], o.held[v], o.stale[v] = map[string]bool{}, map[string]bool{}, map[int]bool{}, map[int]bool{}
+		o.snaps[v], o.targets[v], o.held[v], o.content[v] = map[string]bool{}, map[string]bool{}, map[int]bool{}, map[string]bool{}
 	}
+}
+
+// readOK: a read names 1..4 distinct lbas explicitly; with content on the
+// volume, only lbas that have it; without, exactly one.
+func (o *oracle) readOK(v, lbas string) bool {
+	f := strings.Fields(lbas)
+	if len(f) == 0 || len(f) > 4 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, b := range f {
+		if _, err := strconv.Atoi(b); err != nil || seen[b] {
+			return false
+		}
+		seen[b] = true
+		if len(o.content[v]) > 0 && !o.content[v][b] {
+			return false
+		}
+	}
+	return len(o.content[v]) > 0 || len(f) == 1
 }
 
 func (o *oracle) allowed(op GenOp) bool {
@@ -95,7 +126,9 @@ func (o *oracle) allowed(op GenOp) bool {
 		// earlier root lies, always on the volume's own host and geometry.
 		h, _ := strconv.Atoi(op.Params["host"])
 		return (st == "created" || st == "moved") && op.Params["host"] == fmt.Sprint(o.host[v]) && !o.held[v][h] && op.Params["blocks"] == ""
-	case "v3_op_write", "v3_op_read", "v3_op_stop":
+	case "v3_op_read":
+		return st == "serving" && o.readOK(v, op.Params["lbas"])
+	case "v3_op_write", "v3_op_stop":
 		return st == "serving"
 	case "v3_op_snapshot":
 		return st == "serving" && len(o.snaps[v]) < MaxSnapshots
@@ -106,17 +139,22 @@ func (o *oracle) allowed(op GenOp) bool {
 	case "v3_op_move":
 		return st == "serving" && o.target[v] == "" && len(o.targets[v]) == 0
 	case "v3_op_delete":
+		// Never a serving volume: the product refuses it while the lease lives.
 		return (st == "created" || st == "stopped" || st == "reserved" || st == "moved") && len(o.targets[v]) == 0
 	}
 	return false
 }
 
 // refusal is the documented refusal op meets now, "" for none. Where two
-// apply, it is the one the product checks first.
+// apply, it is the one the product checks first. A volume taken out of the
+// run (unknown) meets none: nothing may be proposed on it.
 func (o *oracle) refusal(op GenOp) string {
 	v := op.Volume
 	o.init(v)
 	st := o.state[v]
+	if st == "unknown" {
+		return ""
+	}
 	switch op.Action {
 	case "v3_op_create":
 		if st == "deleted" {
@@ -155,18 +193,6 @@ func (o *oracle) refusal(op GenOp) string {
 		if ts := o.state[t]; o.target[t] == v && (ts == "created" || ts == "serving" || ts == "stopped") {
 			return "release a live restore target"
 		}
-	case "v3_op_attach":
-		h, _ := strconv.Atoi(op.Params["host"])
-		switch {
-		case st == "deleted":
-			return "attach a deleted volume"
-		case st == "moved" && h != o.host[v]:
-			return "attach on the old host after a move"
-		case st == "moved" && o.held[v][h] && o.stale[v][h]:
-			return "attach on a stale local root"
-		case st == "created" && !o.held[v][h] && op.Params["blocks"] != "" && op.Params["blocks"] != "4096":
-			return "attach with the wrong geometry"
-		}
 	}
 	return ""
 }
@@ -175,13 +201,6 @@ func (o *oracle) refusal(op GenOp) string {
 func (o *oracle) apply(op GenOp) {
 	v := op.Volume
 	o.init(v)
-	advanced := func() {
-		for h := range o.held[v] {
-			if h != o.host[v] {
-				o.stale[v][h] = true
-			}
-		}
-	}
 	switch op.Action {
 	case "v3_op_create":
 		o.state[v] = "created"
@@ -189,16 +208,26 @@ func (o *oracle) apply(op GenOp) {
 		o.state[v] = "serving"
 		o.held[v][o.host[v]] = true
 	case "v3_op_write":
-		advanced()
+		for _, b := range strings.Fields(op.Params["lbas"]) {
+			o.content[v][b] = true
+		}
 	case "v3_op_snapshot":
 		o.snaps[v][op.Params["name"]] = true
-		advanced()
+		c := map[string]bool{}
+		for b := range o.content[v] {
+			c[b] = true
+		}
+		o.snapCont[v+"|"+op.Params["name"]] = c
 	case "v3_op_snapshot_delete":
 		delete(o.snaps[v], op.Params["name"])
 	case "v3_op_restore":
 		t := op.Params["target_volume"]
+		o.init(t)
 		o.state[t], o.target[t], o.fromSn[t], o.host[t] = "created", v, op.Params["snapshot"], o.host[v]
 		o.targets[v][op.Params["snapshot"]] = true
+		for b := range o.snapCont[v+"|"+op.Params["snapshot"]] {
+			o.content[t][b] = true
+		}
 	case "v3_op_stop":
 		o.state[v] = "stopped"
 	case "v3_op_move":
@@ -211,20 +240,25 @@ func (o *oracle) apply(op GenOp) {
 	}
 }
 
-// refused follows a negative operation answered refused: nothing changes but
-// the documented side effects.
-func (o *oracle) refused(op GenOp) {
-	switch o.refusal(op) {
-	case "delete a source whose snapshot has a restore target":
-		o.state[op.Volume] = "reserved" // OG:193-195: the reservation committed first
-	case "restore from a snapshot of a restore target":
+// answered follows a negative operation and its answer: nothing changes but
+// the documented side effects; an unknown answer without one takes the
+// volume out.
+func (o *oracle) answered(op GenOp, outcome string) {
+	switch lim := o.refusal(op); {
+	case lim == "delete a source whose snapshot has a restore target":
+		if outcome == "unknown" {
+			o.state[op.Volume] = "reserved" // OG:193-195: the reservation committed first
+		}
+	case lim == "restore from a snapshot of a restore target":
 		t := op.Params["target_volume"]
 		o.state[t], o.target[t], o.fromSn[t] = "bound", op.Volume, op.Params["snapshot"] // SD:693
+	case outcome == "unknown":
+		o.state[op.Volume] = "unknown"
 	}
 }
 
-// oracleCheck replays a run answered as run() answers it (ordinary ok,
-// negative refused) and returns the first proposal the oracle disagrees with.
+// oracleCheck replays a run answered as answer() answers it and returns the
+// first proposal the oracle disagrees with.
 func oracleCheck(ops []GenOp) error {
 	o := newOracle()
 	for _, op := range ops {
@@ -239,7 +273,7 @@ func oracleCheck(ops []GenOp) error {
 		if lim != op.Negative || op.Params["expect"] != "refused" {
 			return fmt.Errorf("op %d: negative %q, the oracle expects %q (expect=%s): %s %v", op.No, op.Negative, lim, op.Params["expect"], op.Action, op.Params)
 		}
-		o.refused(op)
+		o.answered(op, answer(op))
 	}
 	return nil
 }
@@ -261,13 +295,13 @@ func TestGeneratorOrdinaryOpsMeetTheirPreconditionNegativesBreakOne(t *testing.T
 	}
 }
 
-// allLimits are the documented refusals the generator probes.
+// allLimits are the documented refusals the generator probes: those the
+// typed actions answer refused, and the two whose unknown answer has a
+// documented side effect, and the eleventh snapshot (a product result).
 var allLimits = []string{
 	"create a deleted name", "delete while attached", "delete a source whose snapshot has a restore target",
 	"delete a snapshot that has a restore target", "an eleventh snapshot", "restore into an existing name",
-	"restore into a deleted name", "restore from a snapshot of a restore target", "release a live restore target",
-	"attach on the old host after a move", "attach a deleted volume", "attach on a stale local root",
-	"attach with the wrong geometry",
+	"restore from a snapshot of a restore target", "release a live restore target",
 }
 
 func TestGeneratorNegativeShareAndEveryLimitProbed(t *testing.T) {
@@ -292,20 +326,15 @@ func TestGeneratorNegativeShareAndEveryLimitProbed(t *testing.T) {
 			}
 		}
 	}
-	// Ten live snapshots need a run that mostly takes snapshots; a stale root
-	// needs moves there and back with writes between.
-	for _, w := range []map[string]int{
-		{"v3_op_create": 1, "v3_op_attach": 1, "v3_op_snapshot": 40},
-		{"v3_op_create": 1, "v3_op_attach": 10, "v3_op_write": 10, "v3_op_move": 100},
-	} {
-		ops, _ = run(t, GenConfig{Seed: 1, Ops: 400, Pool: pool(4), Blocks: 8, Negative: 0.3, Weights: w})
-		if err := oracleCheck(ops); err != nil {
-			t.Fatalf("weights %v: %v", w, err)
-		}
-		for _, o := range ops {
-			if o.Negative != "" {
-				limits[o.Negative]++
-			}
+	// Ten live snapshots need a run that mostly takes snapshots.
+	ops, _ = run(t, GenConfig{Seed: 1, Ops: 400, Pool: pool(4), Blocks: 8, Negative: 0.3,
+		Weights: map[string]int{"v3_op_create": 1, "v3_op_attach": 1, "v3_op_snapshot": 40}})
+	if err := oracleCheck(ops); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if o.Negative != "" {
+			limits[o.Negative]++
 		}
 	}
 	for _, l := range allLimits {
@@ -315,6 +344,34 @@ func TestGeneratorNegativeShareAndEveryLimitProbed(t *testing.T) {
 	}
 	if len(limits) != len(allLimits) {
 		t.Errorf("limits probed %v, the oracle knows %d", limits, len(allLimits))
+	}
+}
+
+// Reads always name their lbas: never "written" (the handler's own set does
+// not know a restore target's inherited content), never empty.
+func TestGeneratorReadsNameTheirLBAs(t *testing.T) {
+	reads, targetReads := 0, 0
+	for seed := uint64(1); seed <= 10; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 1000, Pool: pool(30), Blocks: 8})
+		target := map[string]bool{}
+		for _, o := range ops {
+			if o.Action == "v3_op_restore" && o.Negative == "" {
+				target[o.Params["target_volume"]] = true
+			}
+			if o.Action != "v3_op_read" {
+				continue
+			}
+			reads++
+			if target[o.Volume] {
+				targetReads++
+			}
+			if l := o.Params["lbas"]; l == "written" || strings.TrimSpace(l) == "" {
+				t.Fatalf("seed %d op %d: read lbas %q", seed, o.No, l)
+			}
+		}
+	}
+	if reads == 0 || targetReads == 0 {
+		t.Fatalf("%d reads, %d of restore targets", reads, targetReads)
 	}
 }
 
@@ -424,7 +481,8 @@ func neg(o GenOp, limit string) GenOp {
 // (the correct proposal at the same point) must pass.
 func TestGeneratorOracleRedControls(t *testing.T) {
 	base := func() []GenOp {
-		return []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_snapshot", "g1", "name", "g1-s1")}
+		return []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"),
+			op("v3_op_write", "g1", "lbas", "3 5", "round", "r"), op("v3_op_snapshot", "g1", "name", "g1-s1")}
 	}
 	withTarget := func() []GenOp {
 		return append(base(), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
@@ -447,11 +505,15 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 			red:   append(base(), op("v3_op_stop", "g1"), op("v3_op_attach", "g1", "host", "0")),
 			green: append(base(), op("v3_op_stop", "g1"), op("v3_op_delete", "g1")),
 		},
+		"an ordinary delete of a serving volume": {
+			red:   append(base(), op("v3_op_delete", "g1")),
+			green: append(base(), neg(op("v3_op_delete", "g1"), "delete while attached")),
+		},
 		"restore offered from a restore target": {
 			red:   append(targetServes(), op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3")),
 			green: row8(),
 		},
-		"a refused source delete does not reserve": {
+		"a source delete answered unknown does not reserve": {
 			// Not reserved, the volume would still be "stopped with a target"
 			// and the same negative proposed again.
 			red:   append(row3(), neg(op("v3_op_delete", "g1"), "delete a source whose snapshot has a restore target")),
@@ -465,13 +527,22 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 			red:   append(row8(), op("v3_op_create", "g3")),
 			green: append(row8(), neg(op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g3"), "restore into an existing name")),
 		},
-		"attach on a stale local root as ordinary": {
-			red:   append(movedBack(), op("v3_op_attach", "g1", "host", "0")),
-			green: append(movedBack(), neg(op("v3_op_attach", "g1", "host", "0"), "attach on a stale local root")),
+		"a bound name attached": {
+			// The bound name never serves; the source still does.
+			red:   append(row8(), op("v3_op_attach", "g3", "host", "0")),
+			green: append(row8(), op("v3_op_write", "g2", "lbas", "1", "round", "r2")),
 		},
-		"attach on the old host as ordinary": {
+		"attach on an earlier local root": {
+			red:   append(movedBack(), op("v3_op_attach", "g1", "host", "0")),
+			green: append(movedBack(), op("v3_op_delete", "g1")),
+		},
+		"attach on the old host after a move": {
 			red:   append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "0")),
-			green: append(base(), op("v3_op_move", "g1"), neg(op("v3_op_attach", "g1", "host", "0"), "attach on the old host after a move")),
+			green: append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1")),
+		},
+		"attach with other geometry": {
+			red:   []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0", "blocks", "2048")},
+			green: []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0")},
 		},
 		"a negative under the wrong limit": {
 			red:   append(base(), neg(op("v3_op_delete", "g1"), "create a deleted name")),
@@ -481,9 +552,26 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 			red:   append(withTarget(), op("v3_op_release", "g1", "target_volume", "g2")),
 			green: append(withTarget(), neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
 		},
-		"wrong geometry as ordinary": {
-			red:   []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0", "blocks", "2048")},
-			green: []GenOp{op("v3_op_create", "g1"), neg(op("v3_op_attach", "g1", "host", "0", "blocks", "2048"), "attach with the wrong geometry")},
+		"a read of the written set": {
+			red:   append(base(), op("v3_op_read", "g1", "lbas", "written")),
+			green: append(base(), op("v3_op_read", "g1", "lbas", "3 5")),
+		},
+		"a read of no lba": {
+			red:   append(base(), op("v3_op_read", "g1", "lbas", "")),
+			green: append(base(), op("v3_op_read", "g1", "lbas", "5")),
+		},
+		"a read beside the content": {
+			red:   append(base(), op("v3_op_read", "g1", "lbas", "3 4")),
+			green: append(base(), op("v3_op_read", "g1", "lbas", "3")),
+		},
+		"a restore target read without its inherited content": {
+			// g2 inherits lbas 3 and 5 from g1-s1; a read of 6 claims none.
+			red:   append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_read", "g2", "lbas", "6")),
+			green: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_read", "g2", "lbas", "5")),
+		},
+		"a never-written volume read on several lbas": {
+			red:   []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_read", "g1", "lbas", "1 2")},
+			green: []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_read", "g1", "lbas", "2")},
 		},
 	} {
 		if err := oracleCheck(seq(c.green...)); err != nil {
@@ -495,14 +583,10 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 	}
 }
 
-// drive feeds a generator a hand-built run (ordinary ok, negative refused).
+// drive feeds a generator a hand-built run, answered as answer() answers.
 func drive(g *Generator, ops ...GenOp) {
 	for _, o := range ops {
-		if o.Negative != "" {
-			g.Learn(o, "refused")
-		} else {
-			g.Learn(o, "ok")
-		}
+		g.Learn(o, answer(o))
 	}
 }
 
@@ -527,28 +611,55 @@ func has(cs []candidate, action, vol, limit string, kv ...string) bool {
 // Each check fails on the seeded defect its message names.
 func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	newG := func() *Generator {
-		g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 4})
+		g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return g
 	}
 	src := func() []GenOp {
-		return []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_snapshot", "g1", "name", "g1-s1"),
+		return []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
+			op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_write", "g1", "lbas", "7", "round", "r2"),
 			op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2")}
 	}
 
 	g := newG()
-	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"))
-	if has(g.ordinary(), "v3_op_attach", "g1", "") {
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"))
+	if has(g.ordinary(), "v3_op_delete", "g1", "") || !has(g.negatives(), "v3_op_delete", "g1", limDeleteAttached) {
+		t.Error("a serving volume offered an ordinary delete, or no negative one")
+	}
+	drive(g, op("v3_op_stop", "g1"))
+	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.negatives(), "v3_op_attach", "g1", "") {
 		t.Error("attach proposed after a stop")
 	}
 	if !has(g.ordinary(), "v3_op_delete", "g1", "") {
 		t.Error("a stopped volume without targets is not deleted")
 	}
 
+	// Reads: the target inherits the snapshot's lbas (2, 6), not the later 7.
 	g = newG()
-	drive(g, append(src(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_snapshot", "g2", "name", "g2-s1"))...)
+	drive(g, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
+	for i := 0; i < 50; i++ {
+		for _, c := range g.ordinary() {
+			if c.op.Action != "v3_op_read" {
+				continue
+			}
+			for _, b := range strings.Fields(c.op.Params["lbas"]) {
+				if (c.op.Volume == "g2" && b != "2" && b != "6") || (c.op.Volume == "g1" && b != "2" && b != "6" && b != "7") {
+					t.Fatalf("read of %s names lba %s outside its content", c.op.Volume, b)
+				}
+			}
+		}
+	}
+	g3 := newG()
+	drive(g3, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"))
+	for _, c := range g3.ordinary() {
+		if c.op.Action == "v3_op_read" && len(strings.Fields(c.op.Params["lbas"])) != 1 {
+			t.Errorf("a never-written volume read on %q", c.op.Params["lbas"])
+		}
+	}
+
+	drive(g, op("v3_op_snapshot", "g2", "name", "g2-s1"))
 	if has(g.ordinary(), "v3_op_restore", "g2", "") {
 		t.Error("a restore offered from a restore target's snapshot")
 	}
@@ -556,8 +667,9 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 		t.Error("no negative restore from a restore target's snapshot")
 	}
 	drive(g, neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), limRestoreTarget))
-	if g.vols["g3"].state != stBound || has(g.ordinary(), "v3_op_create", "g3", "") {
-		t.Errorf("a refused restore from a target's snapshot left its target %q, not bound", g.vols["g3"].state)
+	if g.vols["g3"].state != stBound || g.vols["g2"].state != stServing || has(g.ordinary(), "v3_op_create", "g3", "") {
+		t.Errorf("a restore from a target's snapshot answered unknown: target %q (want bound), source %q (want serving)",
+			g.vols["g3"].state, g.vols["g2"].state)
 	}
 	if !has(g.negatives(), "v3_op_restore", "g1", limRestoreExisting, "target_volume", "g3") {
 		t.Error("a bound name is not probed with a restore into an existing name")
@@ -568,9 +680,14 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	if !has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) || !has(g.negatives(), "v3_op_snapshot_delete", "g1", limDeleteSnapDep) {
 		t.Error("no negative source delete or store-direct snapshot delete for a stopped source with a target")
 	}
-	drive(g, neg(op("v3_op_delete", "g1"), limDeleteSource))
+	// Refused (the lease horizon not passed): nothing reserved.
+	g.Learn(neg(op("v3_op_delete", "g1"), limDeleteSource), "refused")
+	if g.vols["g1"].state != stStopped {
+		t.Errorf("a source delete refused before persistence left the source %q, not stopped", g.vols["g1"].state)
+	}
+	g.Learn(neg(op("v3_op_delete", "g1"), limDeleteSource), "unknown")
 	if g.vols["g1"].state != stReserved {
-		t.Errorf("a refused source delete left the source %q, not reserved", g.vols["g1"].state)
+		t.Errorf("a source delete answered unknown left the source %q, not reserved", g.vols["g1"].state)
 	}
 	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.ordinary(), "v3_op_delete", "g1", "") || has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) {
 		t.Error("a reserved volume with a live target offered an attach, a delete or the same negative again")
@@ -583,23 +700,29 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 		t.Error("a reserved volume is not deleted again once its target is gone")
 	}
 
+	// No attach negatives: the typed attach cannot answer refused.
 	g = newG()
-	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_move", "g1"))
-	if !has(g.ordinary(), "v3_op_attach", "g1", "", "host", "1") || !has(g.negatives(), "v3_op_attach", "g1", limAttachOldHost, "host", "0") {
-		t.Error("a moved volume offers no attach on its new host, or no negative on its old one")
+	drive(g, op("v3_op_create", "g1"))
+	for _, c := range g.negatives() {
+		if c.op.Action == "v3_op_attach" {
+			t.Errorf("an attach negative: %v", c.op)
+		}
 	}
-	drive(g, op("v3_op_attach", "g1", "host", "1"), op("v3_op_move", "g1"))
-	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.negatives(), "v3_op_attach", "g1", limAttachStale) {
-		t.Error("moved back with no advance: an attach proposed on the earlier root")
+	drive(g, op("v3_op_attach", "g1", "host", "0"), op("v3_op_move", "g1"))
+	if !has(g.ordinary(), "v3_op_attach", "g1", "", "host", "1") || has(g.ordinary(), "v3_op_attach", "g1", "", "host", "0") {
+		t.Error("a moved volume offers no attach on its new host, or one on its old host")
 	}
-	g = newG()
-	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_move", "g1"),
-		op("v3_op_attach", "g1", "host", "1"), op("v3_op_write", "g1", "lbas", "1", "round", "r"), op("v3_op_move", "g1"))
-	if has(g.ordinary(), "v3_op_attach", "g1", "") || !has(g.negatives(), "v3_op_attach", "g1", limAttachStale, "host", "0") {
-		t.Error("moved back after a write: an ordinary attach on the stale root, or no negative")
+	drive(g, op("v3_op_attach", "g1", "host", "1"), op("v3_op_write", "g1", "lbas", "1", "round", "r"), op("v3_op_move", "g1"))
+	if has(g.ordinary(), "v3_op_attach", "g1", "") {
+		t.Error("moved back: an attach proposed on the earlier root")
 	}
 	if !has(g.ordinary(), "v3_op_delete", "g1", "") {
 		t.Error("a moved volume is not deleted")
+	}
+	for _, c := range append(g.negatives(), g.ordinary()...) {
+		if c.op.Action == "v3_op_attach" {
+			t.Errorf("an attach proposed on a volume moved back: %v", c.op)
+		}
 	}
 
 	g = newG()
