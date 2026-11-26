@@ -160,15 +160,17 @@ cmd_drop_control() {
 cmd_no_ack() {
   local dev="$1" ledger="$2" secs="$3" d tmp off rc
   need_dev "$dev" no-ack
-  d=$(mktemp -d)
+  d=$(mktemp -d "$(dirname "$ledger")/no-ack.XXXXXX")
   head -c $bs /dev/urandom > "$d/block"
   off=$(( ($(blocks_of "$dev") - 1) * bs ))
-  ( set +e; "$dd_bin" if="$d/block" of="$dev" bs=$bs count=1 seek=$(( off / bs )) oflag="$oflag" conv=notrunc status=none 2>"$d/err"
-    echo $? > "$d/rc.tmp"; mv "$d/rc.tmp" "$d/rc" ) </dev/null >/dev/null 2>&1 &   # holds no fd of the step's output
+  ( set +e; "$dd_bin" if="$d/block" of="$dev" bs=$bs count=1 seek=$(( off / bs )) oflag="$oflag" conv=notrunc status=none 2>"$d/err" &
+    child=$!; echo "$child" > "$d/pid"; wait "$child"
+    echo $? > "$d/rc.tmp"; mv "$d/rc.tmp" "$d/rc" ) </dev/null >/dev/null 2>&1 &
   local pid=$! end=$(( SECONDS + secs ))
   while [[ ! -e "$d/rc" ]] && (( SECONDS < end )); do sleep 0.2; done
   if [[ ! -e "$d/rc" ]]; then
-    kill -9 "$pid" 2>/dev/null || true
+    # The waiter retains the receipt if this write completes after the window.
+    # Cleanup owns d/pid and refuses to purge while its I/O is still alive.
     need_dev "$dev" "no-ack (after the window)"
     echo "no-ack: no acknowledgement in ${secs}s (the write is still in flight at the reserved offset $off)"
     return 0
@@ -268,7 +270,7 @@ cmd_dev() {
       for c in "$s"/*; do
         n=$(basename "$c")
         if [[ "$n" =~ ^nvme[0-9]+$ && -f "$c/state" && -f "$c/address" ]]; then
-          if [[ "$(cat "$c/state")" == live ]] && grep -qE "(^|,)traddr=$addr(,|$)" "$c/address"; then live=1; fi
+          if [[ "$(cat "$c/state")" == live ]] && tr ',' '\n' < "$c/address" | grep -qxF "traddr=$addr"; then live=1; fi
         elif [[ "$n" =~ ^nvme[0-9]+n[0-9]+$ ]]; then
           nss+=("$n")
         fi
@@ -313,6 +315,7 @@ cmd_install() {
   (cd "$pkg" && sha256sum -c --quiet SHA256SUMS) || die "install: the package does not match its SHA256SUMS"
   mkdir -p "$root"
   cp -a "$pkg" "$w"
+  printf '%s\n' "$tag" > "$w/.r4-owner"
   chmod 0755 "$w"
   echo "$mip blockmaster # r4-$tag" >> "$hosts"
   sync
@@ -389,6 +392,8 @@ cmd_start() {
 cmd_cleanup() {
   local tag="$1" w ev r u f bad=0
   check_tag "$tag"; w="$root/$tag"; ev="$w/evidence"
+  [[ -f "$w/.r4-owner" && "$(cat "$w/.r4-owner")" == "$tag" ]] || die "cleanup: no ownership proof for $w; retained"
+  rm -f "$w/.cleanup-ok"
   mkdir -p "$ev"
   for r in master volume; do
     u=$(unit_of "$tag" "$r")
@@ -414,14 +419,31 @@ cmd_cleanup() {
     if unit_active "$u"; then echo "cleanup: $u is still $("$systemctl_bin" is-active "$u" 2>/dev/null)" >&2; bad=1; fi
   done
   if "$pgrep_bin" -f -- "$w/bin/" >/dev/null 2>&1; then echo "cleanup: a process from $w/bin is still running" >&2; bad=1; fi
+  for f in "$w"/no-ack.*/pid; do
+    [[ -f "$f" ]] || continue
+    local pid; pid=$(cat "$f")
+    [[ "$pid" =~ ^[0-9]+$ ]] || { bad=1; continue; }
+    if kill -0 "$pid" 2>/dev/null; then
+      # A reused pid is never killed: the input file must still name this run.
+      if tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qF "${f%/pid}/block"; then
+        kill -TERM "$pid" 2>/dev/null || true
+      fi
+      local end=$(( SECONDS + 5 ))
+      while kill -0 "$pid" 2>/dev/null && (( SECONDS < end )); do sleep 0.2; done
+      if kill -0 "$pid" 2>/dev/null; then echo "cleanup: pending window I/O $pid remains; retained" >&2; bad=1; fi
+    fi
+  done
   if grep -q "# r4-$tag\$" "$hosts" 2>/dev/null; then echo "cleanup: the blockmaster mapping is still in $hosts" >&2; bad=1; fi
   (( bad == 0 )) || die "cleanup: the run's services are not gone"
+  printf '%s\n' "$tag" > "$w/.cleanup-ok"
   echo "cleanup: r4-$tag units stopped and absent; evidence in $ev"
 }
 
 cmd_purge() {
   local tag="$1" w
   check_tag "$tag"; w="$root/$tag"
+  [[ -f "$w/.cleanup-ok" ]] || die "purge: no successful cleanup proof; retained"
+  cmd_cleanup "$tag" # Recheck absence immediately before deleting owned work.
   rm -rf "${w:?}" "/tmp/r4-$tag.tgz" "/tmp/r4-$tag-x"
   echo "purge: $w removed"
 }

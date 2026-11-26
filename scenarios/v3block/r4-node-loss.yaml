@@ -101,6 +101,37 @@ topology:
     node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}" }
 
 phases:
+  - name: preflight
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.RF: "{{ rf }}"
+        cmd: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          def show(repo,sha,path):
+              if not re.fullmatch('[0-9a-f]{40}',sha): raise SystemExit('full source pin required')
+              return subprocess.check_output(['git','-C',repo,'show',sha+':'+path],text=True,timeout=20)
+          src,head,rs,rhead=(os.environ[k] for k in ('SRC','HEAD','RS','RHEAD'))
+          assert os.environ['RF'] in ('2','3'), 'rf must be 2 or 3'
+          files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
+          for flag in ('allow-external-nvme-bind','master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
+              assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
+          for flag in ('failback-runtime-rpc','tls-cert','role-file','launcher-replication-ack'):
+              assert '"'+flag+'"' in files['cmd/blockmaster/main.go'], 'removed master flag '+flag
+          for flag in ('target-data','target-ctrl','expect-current','confirm-old-node-off'):
+              assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
+          assert 'RestartPreventExitStatus=78' in files['deploy/systemd/sw-blockvolume.service']
+          from pathlib import Path
+          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh'):
+              assert Path(rs,p).read_text()==show(rs,rhead,p), 'runner working copy differs from pin: '+p
+          print('PREFLIGHT PASS product='+head+' runner='+rhead+' rf='+os.environ['RF'])
+          PY
   - name: build
     actions:
       # Binaries and certificates are made once on the controller, from the
@@ -236,32 +267,27 @@ phases:
       - action: exec                                             # P3
         node: node-1
         timeout: 3m
-        cmd: >-
-          set -o pipefail; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }});
-          sudo env SW_BLOCK_TLS_CERT=$W/tls/failback-executor.crt SW_BLOCK_TLS_KEY=$W/tls/failback-executor.key SW_BLOCK_TLS_CA=$W/tls/ca.crt
-          $W/bin/sw-block ops failover --master blockmaster:{{ master_port }} --volume v1 --target r2
-          --target-data "$DATA:{{ data_port }}" --target-ctrl "$DATA:{{ ctrl_port }}"
-          --expect-current r1@1 --confirm-old-node-off v1 | sudo tee $W/failover.txt
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); sudo env SW_BLOCK_TLS_CERT=$W/tls/failback-executor.crt SW_BLOCK_TLS_KEY=$W/tls/failback-executor.key SW_BLOCK_TLS_CA=$W/tls/ca.crt $W/bin/sw-block ops failover --master blockmaster:{{ master_port }} --volume v1 --target r2 --target-data "$DATA:{{ data_port }}" --target-ctrl "$DATA:{{ ctrl_port }}" --expect-current r1@1 --confirm-old-node-off v1 | sudo tee $W/failover.txt
+          R4STEP
       # The new primary is r2: on node-1 (rf=3) or node-3 (rf=2).
       - {action: exec, node: node-1, timeout: 3m, cmd: "[ {{ rf }} = 3 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
       - {action: exec, node: node-3, timeout: 3m, cmd: "[ {{ rf }} = 2 ] || exit 0; bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 2 120"}
       - action: exec                                             # P4 + its red control
         node: node-1
         timeout: 5m
-        cmd: >-
-          set -o pipefail; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }});
-          DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) &&
-          sudo bash $W/r4.sh verify "$DEV" $W/ledger before | sudo tee $W/verify-after-failover.txt &&
-          sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo bash $W/r4.sh verify "$DEV" $W/ledger before | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
+          R4STEP
       - action: exec                                             # P4b (rf=2)
         node: node-1
         timeout: 2m
-        cmd: >-
-          [ {{ rf }} = 2 ] || exit 0; set -o pipefail; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n3_data }} 10) &&
-          sudo bash $W/r4.sh no-ack "$DEV" $W/ledger 30 | sudo tee $W/no-ack.txt
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          [ {{ rf }} = 2 ] || exit 0; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n3_data }} 10) && sudo bash $W/r4.sh no-ack "$DEV" $W/ledger 30 | sudo tee $W/no-ack.txt
+          R4STEP
 
   - name: rejoin
     actions:
@@ -275,12 +301,10 @@ phases:
       - action: exec                                             # P6
         node: node-1
         timeout: 5m
-        cmd: >-
-          set -o pipefail; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }});
-          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) &&
-          sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} &&
-          sudo bash $W/r4.sh verify "$DEV" $W/ledger before after-rejoin | sudo tee $W/verify-after-rejoin.txt
+        cmd: |
+          bash -e -o pipefail <<'R4STEP'
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$([ {{ rf }} = 3 ] && echo {{ n1_data }} || echo {{ n3_data }}); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before after-rejoin | sudo tee $W/verify-after-rejoin.txt
+          R4STEP
 
   - name: collect
     always: true

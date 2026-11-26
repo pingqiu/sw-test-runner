@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,7 +55,14 @@ func TestR4ScenarioUsesOnlyRegisteredActions(t *testing.T) {
 // r4 runs the scenario's check script on files (the controls): direct I/O
 // flags off, polling at once.
 func r4(t *testing.T, args ...string) (string, error) {
+	return r4Env(t, nil, args...)
+}
+
+func r4Env(t *testing.T, env []string, args ...string) (string, error) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux shell/device controls; no host resources")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
@@ -62,7 +70,8 @@ func r4(t *testing.T, args ...string) (string, error) {
 		t.Skip("no python3")
 	}
 	cmd := exec.Command("bash", append([]string{"../../scenarios/v3block/r4.sh"}, args...)...)
-	cmd.Env = append(os.Environ(), "R4_DD_OFLAG=sync", "R4_DD_IFLAG=fullblock", "R4_POLL=0")
+	cmd.Env = append(os.Environ(), "R4_DD_OFLAG=sync", "R4_DD_IFLAG=fullblock", "R4_POLL=0", "R4_ALLOW_FILE=1")
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -128,8 +137,8 @@ func TestR4NoAckFailsOnAnAcknowledgedWrite(t *testing.T) {
 		t.Fatalf("no-ack passed although the write was acknowledged: %s", out)
 	}
 	unwritable := filepath.Join(t.TempDir(), "missing-dir", "dev")
-	if out, err := r4(t, "no-ack", unwritable, ledger, "5"); err != nil {
-		t.Fatalf("no-ack on a write that is not acknowledged: %v %s", err, out)
+	if out, err := r4(t, "no-ack", unwritable, ledger, "5"); err == nil || !strings.Contains(out, "setup failure") {
+		t.Fatalf("no-ack accepted a missing device: %v %s", err, out)
 	}
 }
 
