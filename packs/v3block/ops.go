@@ -49,8 +49,8 @@ type opEnv struct {
 	// expect is the step's declared outcome ("refused"), recorded in its
 	// invocation so the checkers know which refusal the scenario expected.
 	// Per step, never per verb: any other refusal still fails the run.
-	expect string
-	lockDirs                                   bool
+	expect   string
+	lockDirs bool
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -227,16 +227,13 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if nqn == "" {
 		nqn = "nqn.2026-11.io.seaweedfs:op-"
 	}
+	vs, err := specVolumes(names, base, nqn)
+	if err != nil {
+		return nil, fmt.Errorf("v3_op_spec: %w", err)
+	}
 	var nodes, vols strings.Builder
-	for i, name := range names {
-		if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`).MatchString(name) {
-			return nil, fmt.Errorf("v3_op_spec: volume name %q", name)
-		}
-		p := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", base+(i+1)*10+k) }
-		v := &opVolume{Name: name, NQN: nqn + name, Hosts: []vsHost{
-			{Server: "a-" + name, Data: p(0), Ctrl: p(1), Status: p(2), NVMe: p(3)},
-			{Server: "b-" + name, Data: p(4), Ctrl: p(5), Status: p(6), NVMe: p(7)},
-		}}
+	for _, v := range vs {
+		name := v.Name
 		for _, h := range v.Hosts {
 			fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", h.Server, h.Data, h.Ctrl)
 		}
@@ -248,6 +245,24 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, fmt.Errorf("v3_op_spec: write %s: %s %v", path, firstLine(stderr), err)
 	}
 	return map[string]string{"value": strconv.Itoa(len(names))}, nil
+}
+
+// specVolumes lays out the named volumes: volume i (from 0) gets two hosts on
+// ports base+(i+1)*10+0..7 (data, ctrl, status, NVMe; first host, then the
+// move target) and the NQN nqn+name. So n volumes use base+10..base+10n+7.
+func specVolumes(names []string, base int, nqn string) ([]*opVolume, error) {
+	var vs []*opVolume
+	for i, name := range names {
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`).MatchString(name) {
+			return nil, fmt.Errorf("volume name %q", name)
+		}
+		p := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", base+(i+1)*10+k) }
+		vs = append(vs, &opVolume{Name: name, NQN: nqn + name, Hosts: []vsHost{
+			{Server: "a-" + name, Data: p(0), Ctrl: p(1), Status: p(2), NVMe: p(3)},
+			{Server: "b-" + name, Data: p(4), Ctrl: p(5), Status: p(6), NVMe: p(7)},
+		}})
+	}
+	return vs, nil
 }
 
 func dirOf(p string) string {
