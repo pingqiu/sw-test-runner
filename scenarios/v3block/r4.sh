@@ -495,7 +495,7 @@ cmd_evidence() {
   # Before teardown, preserve sockets and dump ONLY this run's volume if its
   # data listener refuses connections while the process is still alive.
   ss -ltnp > "$ev/listening-sockets.txt" 2>&1 || true
-  python3 - "$w" > "$ev/refused-listener-diagnostic.json" <<'PY'
+  if ! python3 - "$w" > "$ev/refused-listener-diagnostic.json" <<'PY'
 import errno,json,os,signal,socket,sys,time
 from pathlib import Path
 w=Path(sys.argv[1]); records=[]
@@ -521,7 +521,9 @@ for proc in Path('/proc').iterdir():
             records.append(row)
     except (FileNotFoundError,ProcessLookupError,PermissionError,ValueError): continue
 print(json.dumps(records,indent=2))
+if any(row.get('dumped') for row in records): raise SystemExit(1)
 PY
+  then bad=1; fi
   for r in master volume writer; do
     u=$(unit_of "$tag" "$r")
     "$systemctl_bin" status "$u" --no-pager > "$ev/$u.status" 2>&1 || true
@@ -535,7 +537,7 @@ PY
   done
   chmod 0755 "$ev"
   find "$ev" -type f -exec chmod 0644 {} +
-  (( bad == 0 )) || die "evidence: incomplete journal capture; retained"
+  (( bad == 0 )) || die "evidence: incomplete journal capture or refused live listener; retained"
 }
 
 # cleanup TAG: stop the run's units, keep each one's status and journal (and
