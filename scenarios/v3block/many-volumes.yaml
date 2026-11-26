@@ -142,15 +142,14 @@ phases:
         mode: record
         save_as: objects_before
 
-  - name: write-and-peak
-    parallel: true
+  - name: io-with-sampling
     actions:
+      - action: v3_vs_host
+        node: host
+        mode: start
       - action: v3_vs_write
         node: host
         round: r1
-      - action: v3_vs_host
-        node: host
-        save_as: peak
 
   - name: snapshot-and-write
     actions:
@@ -239,6 +238,10 @@ phases:
         timeout: 6m
       - action: v3_vs_verify
         node: host
+      - action: v3_vs_host
+        node: host
+        mode: stop
+        save_as: peak
       - action: emit_provenance
         product: seaweed-block
         __vs_count: "{{ count }}"
@@ -248,6 +251,7 @@ phases:
         __vs_freeze_p50_ms: "{{ freeze_p50_ms }}"
         __vs_freeze_max_ms: "{{ freeze_max_ms }}"
         __vs_freeze_n: "{{ freeze_n }}"
+        __vs_peak_samples: "{{ peak_samples }}"
         __vs_peak_rss_mib: "{{ peak_rss_mib }}"
         __vs_peak_open_fds: "{{ peak_open_fds }}"
         __vs_peak_cpu_busy_pct: "{{ peak_cpu_busy_pct }}"
@@ -255,6 +259,9 @@ phases:
   - name: teardown
     always: true
     actions:
+      - action: v3_vs_host
+        node: host
+        mode: cleanup
       - action: v3_vs_stop
         node: host
       - action: exec

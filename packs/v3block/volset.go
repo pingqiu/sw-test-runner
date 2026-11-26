@@ -1217,39 +1217,77 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	return report(actx, act, "v3_vs_stop", outs)
 }
 
-// v3VsHost samples the host at a peak: resident memory and open file
-// descriptors summed over the set's blockvolume processes, and the host's
-// CPU busy share over one second. Reported as vars under save_as.
+// hostSampler samples the host CPU and this run's blockvolume RSS/fds each
+// second. Matching the executable follows replacement PIDs after restarts/moves.
+const hostSampler = `import sys,time,os,json
+binary,out,stop=sys.argv[1:]
+def cpu():
+    f=[int(x) for x in open("/proc/stat").readline().split()[1:]]
+    return sum(f),f[3]+f[4]
+def processes():
+    rss=fds=0
+    for p in os.listdir("/proc"):
+        if not p.isdigit(): continue
+        try:
+            if open("/proc/"+p+"/cmdline","rb").read().split(b"\0")[0].decode()!=binary: continue
+            for line in open("/proc/"+p+"/status"):
+                if line.startswith("VmRSS:"): rss+=int(line.split()[1])
+            fds+=len(os.listdir("/proc/"+p+"/fd"))
+        except (OSError,UnicodeError): pass
+    return rss/1024,fds
+peak=dict(samples=0,rss_mib=0,open_fds=0,cpu_busy_pct=0)
+t0,i0=cpu()
+end=time.monotonic()+7200
+while True:
+    time.sleep(1)
+    t1,i1=cpu();rss,fds=processes()
+    peak["samples"]+=1
+    peak["rss_mib"]=max(peak["rss_mib"],rss)
+    peak["open_fds"]=max(peak["open_fds"],fds)
+    peak["cpu_busy_pct"]=max(peak["cpu_busy_pct"],100*(1-(i1-i0)/max(1,t1-t0)))
+    with open(out+".tmp","w") as f: json.dump(peak,f)
+    os.replace(out+".tmp",out)
+    t0,i0=t1,i1
+    if os.path.exists(stop) or time.monotonic()>=end: break
+open(out+".done","x").close()
+`
+
+// v3VsHost brackets every IO phase with start/stop. The stop reports maxima,
+// not an observation presented as a peak. Cleanup also stops a partial run.
 func v3VsHost(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	node, s, err := vsBegin(actx, act, "v3_vs_host")
 	if err != nil {
 		return nil, err
 	}
-	var pids []string
-	for _, v := range s.Volumes {
-		if v.PID != "" {
-			pids = append(pids, v.PID)
-		}
+	path := s.Root + "/host-samples.json"
+	stop := path + ".stop"
+	mode := optionalParam(act, "mode")
+	var cmd string
+	switch mode {
+	case "start":
+		cmd = fmt.Sprintf("mkdir -p %s; test ! -e %s || exit 2\nprintf %%s %s > %s\nsetsid python3 -I %s %s %s %s > %s 2>&1 < /dev/null &\n", shellQuote(s.Root), shellQuote(path+".py"), shellQuote(hostSampler), shellQuote(path+".py"), shellQuote(path+".py"), shellQuote(s.Bin+"/blockvolume"), shellQuote(path), shellQuote(stop), shellQuote(path+".log"))
+	case "stop", "cleanup":
+		cmd = fmt.Sprintf("[ -e %s ] || exit 0\ntouch %s\nfor i in $(seq 1 50); do [ -e %s ] && { cat %s; exit 0; }; sleep 0.1; done\necho 'sampler did not stop' >&2; exit 1", shellQuote(path+".py"), shellQuote(stop), shellQuote(path+".done"), shellQuote(path))
+	default:
+		return nil, fmt.Errorf("v3_vs_host: mode must be start, stop or cleanup")
 	}
-	py := `import sys,time,os
-pids=sys.argv[1:]; rss=fds=alive=0
-for p in pids:
-    try:
-        for l in open("/proc/%s/status"%p):
-            if l.startswith("VmRSS:"): rss+=int(l.split()[1])
-        fds+=len(os.listdir("/proc/%s/fd"%p)); alive+=1
-    except OSError: pass
-def cpu():
-    f=[int(x) for x in open("/proc/stat").readline().split()[1:]]
-    return sum(f), f[3]+f[4]
-t0,i0=cpu(); time.sleep(1); t1,i1=cpu()
-print("%d %d %d %.1f"%(alive,rss//1024,fds,100.0*(1-(i1-i0)/max(1,t1-t0))))`
-	stdout, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("python3 -I -c %s %s", shellQuote(py), strings.Join(pids, " ")))
-	f := strings.Fields(stdout)
-	if err != nil || code != 0 || len(f) != 4 {
-		return nil, fmt.Errorf("v3_vs_host: %s", firstLine(stderr))
+	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("v3_vs_host %s: exit %d %s %v", mode, code, firstLine(stderr), err)
 	}
-	res := map[string]string{"value": f[0], "processes": f[0], "rss_mib": f[1], "open_fds": f[2], "cpu_busy_pct": f[3]}
+	if mode == "start" || mode == "cleanup" {
+		return map[string]string{"value": mode}, nil
+	}
+	var peak struct {
+		Samples int     `json:"samples"`
+		RSS     float64 `json:"rss_mib"`
+		FDs     int     `json:"open_fds"`
+		CPU     float64 `json:"cpu_busy_pct"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &peak); err != nil || peak.Samples < 1 {
+		return nil, fmt.Errorf("v3_vs_host: missing/invalid samples: %s", firstLine(stdout))
+	}
+	res := map[string]string{"value": strconv.Itoa(peak.Samples), "samples": strconv.Itoa(peak.Samples), "rss_mib": fmt.Sprintf("%.1f", peak.RSS), "open_fds": strconv.Itoa(peak.FDs), "cpu_busy_pct": fmt.Sprintf("%.1f", peak.CPU)}
 	if act.SaveAs != "" {
 		for k, v := range res {
 			if k != "value" {
@@ -1257,9 +1295,6 @@ print("%d %d %d %.1f"%(alive,rss//1024,fds,100.0*(1-(i1-i0)/max(1,t1-t0))))`
 			}
 		}
 	}
-	actx.Log("  v3_vs_host: %s processes, RSS %s MiB, %s fds, CPU %s%%", f[0], f[1], f[2], f[3])
-	if f[0] != strconv.Itoa(len(pids)) {
-		return res, fmt.Errorf("v3_vs_host: %s of %d recorded processes alive", f[0], len(pids))
-	}
+	actx.Log("  v3_vs_host maxima: samples=%s RSS=%s MiB fds=%s CPU=%s%%", res["samples"], res["rss_mib"], res["open_fds"], res["cpu_busy_pct"])
 	return res, nil
 }

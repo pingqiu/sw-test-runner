@@ -1,6 +1,10 @@
 package v3block
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +245,58 @@ func TestClusterSpecHoldsPlacementsOnly(t *testing.T) {
 	}
 	if h := vsSpecHosts(20000, 2, "v002"); h[0].NVMe != "127.0.0.1:20023" || h[1].Status != "127.0.0.1:20026" {
 		t.Errorf("ports %+v", h)
+	}
+}
+
+func TestHostSamplerKeepsMaximaAndSampleCount(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		py, err = exec.LookPath("python3")
+	}
+	if err != nil {
+		t.Skip("Python unavailable")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "samples.json")
+	harness := `import builtins,io,os,sys,time
+realopen=builtins.open; reallist=os.listdir; realexists=os.path.exists
+step=0
+cpurows=iter(["cpu 50 0 0 50 0", "cpu 140 0 0 60 0", "cpu 160 0 0 140 0"])
+def fakeopen(path,*args,**kw):
+    if path=="/proc/stat": return io.StringIO(next(cpurows))
+    if path=="/proc/1/cmdline": return io.BytesIO(b"/owned/blockvolume\0")
+    if path=="/proc/1/status": return io.StringIO("VmRSS: %d kB\n"%(2048 if step==1 else 1024))
+    return realopen(path,*args,**kw)
+def listing(path):
+    if path=="/proc": return ["1"]
+    if path=="/proc/1/fd": return list(range(10 if step==1 else 4))
+    return reallist(path)
+def sleep(n):
+    global step
+    assert n==1
+    step+=1
+builtins.open=fakeopen; os.listdir=listing; time.sleep=sleep
+os.path.exists=lambda p: step>=2 if p==sys.argv[3] else realexists(p)
+`
+	path := filepath.Join(dir, "sampler.py")
+	if err := os.WriteFile(path, []byte(harness+hostSampler), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := exec.Command(py, path, "/owned/blockvolume", out, out+".stop").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]float64
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["samples"] != 2 || got["rss_mib"] != 2 || got["open_fds"] != 10 || got["cpu_busy_pct"] != 90 {
+		t.Fatalf("maxima/count: %s", b)
+	}
+	if _, err := os.Stat(out + ".done"); err != nil {
+		t.Fatal("sampler did not settle", err)
 	}
 }

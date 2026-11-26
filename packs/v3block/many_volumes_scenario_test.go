@@ -134,26 +134,48 @@ func TestManyVolumesKicksCleaningAfterMoves(t *testing.T) {
 	}
 }
 
-func TestManyVolumesSamplesDuringGuestIO(t *testing.T) {
+func TestManyVolumesSamplesThroughoutGuestIO(t *testing.T) {
 	s, err := tr.ParseFile("../../scenarios/v3block/many-volumes.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	active, started, stopped, cleanup := false, false, false, false
 	for _, p := range s.Phases {
-		write, sample := false, false
 		for _, a := range p.Actions {
-			write = write || a.Action == "v3_vs_write"
-			sample = sample || a.Action == "v3_vs_host"
-		}
-		if sample {
-			found = true
-			if !write || !p.Parallel {
-				t.Fatal("host sampling must run in parallel with guest IO")
+			if a.Action == "v3_vs_host" {
+				switch a.Params["mode"] {
+				case "start":
+					if started {
+						t.Fatal("sampler started twice")
+					}
+					active = true
+					started = true
+				case "stop":
+					if !active {
+						t.Fatal("sampler stopped without start")
+					}
+					active = false
+					stopped = true
+				case "cleanup":
+					if !p.Always {
+						t.Fatal("sampler cleanup is not always")
+					}
+					cleanup = true
+				default:
+					t.Fatal("unbounded one-shot sample")
+				}
+			}
+			if a.Action == "v3_vs_write" || a.Action == "v3_vs_move" || a.Action == "v3_vs_verify" || a.Action == "v3_vs_restart" {
+				if !active || p.Parallel {
+					t.Fatalf("%s is outside continuous sampling", a.Action)
+				}
+			}
+			if a.Action == "emit_provenance" && (!stopped || active) {
+				t.Fatal("report precedes sampler settlement")
 			}
 		}
 	}
-	if !found {
-		t.Fatal("missing host sample")
+	if !started || !stopped || !cleanup {
+		t.Fatal("missing sampler lifecycle")
 	}
 }
