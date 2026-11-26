@@ -74,9 +74,10 @@ code is 0 only when every checker passes.
       line); a verb without one is NOT JUDGED and listed ("no stated bound"),
       and so is an operation open while a process was down (the table holds
       no per-fault bound). Recovery: a holder (blockvolume) restart must be
-      followed by a healthy observation with healthy true within the pages'
-      recovery bound (RECOVERY, 95 s), measured on the history's clock from
-      the restart's completion; a blockmaster restart, for which the pages
+      followed by a healthy observation with healthy true by the pages'
+      deadline, on the history's clock: max(the holder kill's completion +
+      the re-grant 65 s, the restart's completion) + the start wait 30 s
+      (RECOVERY); a blockmaster restart, for which the pages
       state no bound, and a holder restart a master fault overlaps, are NOT
       JUDGED and listed. Unknowns: a resolution point is a `healthy`
       observation with healthy true and no operation in flight, or the end
@@ -868,14 +869,17 @@ def dur(recs):
 # state no bound on the duration of any operation, so the table is empty and
 # every verb is listed as not judged.
 BOUNDS = {}
-# C6 recovery bounds: fault -> (seconds, the page lines whose sum states it).
-# A bound on REACHING a healthy point, not the latency of an operation. A
-# holder (blockvolume) restarted after a crash is re-granted at most 65 s
-# after it stopped and then serves within the start wait of 30 s
-# (docs/volume-lifecycle.md "After a crash", product release 1). If the pages
-# change the numbers, this table changes with them, never the checker. The
-# pages state no restart bound for blockmaster: its restart is not judged.
-RECOVERY = {'holder restart': (95, 'docs/volume-lifecycle.md:352-356 (re-grant, 65 s) + :368-370 (start wait, 30 s)')}
+# C6 recovery bounds: term -> (seconds, the page lines stating it), product
+# docs at commit 14dff69. A bound on REACHING a healthy point, not the
+# latency of an operation. A holder (blockvolume) that crashed is re-granted
+# at most 65 s after it stopped, and its start wait ends 30 s after the
+# re-grant or after its start, whichever is later, so it is healthy again by
+#   max(kill completion + regrant, restart completion) + start_wait.
+# If the pages change the numbers, this table changes with them, never the
+# checker. The pages state no restart bound for blockmaster: its restart is
+# not judged.
+RECOVERY = {'regrant': (65, 'docs/volume-lifecycle.md:352-356'),
+            'start_wait': (30, 'docs/volume-lifecycle.md:368-370')}
 HOLDER_PREFIX = 'blockvolume'
 MASTER = 'blockmaster'
 RUNNER_VERBS = FAULT_VERBS + ('kill', 'restart')   # the environment's operations, not the product's
@@ -1023,14 +1027,17 @@ def _place_by_status(inv, obs, base):
 
 
 def recovery_findings(recs, ops_, healthy):
-    """Recovery time on the history's one clock: from a holder restart's
-    completion to the first healthy observation with healthy true, against
-    RECOVERY. A blockmaster restart has no stated bound and is listed; so is
-    a holder restart whose recovery a blockmaster kill or restart overlaps
-    (the pages then move the re-grant to after the master's restart), and a
-    restart without a known completion (no moment to measure from)."""
+    """Recovery on the history's one clock, as the pages read: the holder is
+    healthy again (the first healthy observation with healthy true after its
+    restart) by max(its kill's completion + regrant, the restart's
+    completion) + start_wait. A blockmaster restart has no stated bound and
+    is listed; so is a holder restart whose recovery a blockmaster kill or
+    restart overlaps (the pages then move the re-grant to after the master's
+    restart), a restart without an ok completion, and one with no ok kill of
+    the holder before it (no moment to measure from)."""
     f, notes = [], []
-    secs, where = RECOVERY['holder restart']
+    regrant, rwhere = RECOVERY['regrant']
+    wait, wwhere = RECOVERY['start_wait']
     for inv, comp in ops_:
         if inv['verb'] != 'restart':
             continue
@@ -1047,19 +1054,28 @@ def recovery_findings(recs, ops_, healthy):
             continue
         h = next((r for r in healthy if r['seq'] > comp['seq'] and (r.get('result') or {}).get('healthy') is True), None)
         if h is None:
-            f.append('%s: never healthy afterwards (bound %g s, %s)' % (name, secs, where))
+            f.append('%s: never healthy afterwards (bounds: re-grant %g s, %s; start wait %g s, %s)' % (name, regrant, rwhere, wait, wwhere))
             continue
-        # From the holder's stop (its latest kill before this restart) to its healthy point.
-        start = max([i2['seq'] for i2, _ in ops_ if i2['verb'] == 'kill' and i2['seq'] < inv['seq']
-                     and str((i2.get('args') or {}).get('process', '')) == proc] or [inv['seq']])
+        # The holder's stop: its latest kill before this restart.
+        kills = [(i2, c2) for i2, c2 in ops_ if i2['verb'] == 'kill' and i2['seq'] < inv['seq']
+                 and str((i2.get('args') or {}).get('process', '')) == proc]
+        start = kills[-1][0]['seq'] if kills else inv['seq']
         master = next((i2 for i2, _ in ops_ if i2['verb'] in ('kill', 'restart') and start < i2['seq'] < h['seq']
                        and str((i2.get('args') or {}).get('process', '')) == MASTER), None)
         if master is not None:
             notes.append('recovery not judged: %s (blockmaster %s seq %d before its healthy point)' % (name, master['verb'], master['seq']))
             continue
-        took = (h['mono_ns'] - comp['mono_ns']) / 1e9
-        if took > secs:
-            f.append('%s: healthy only after %.3f s (healthy seq %d), above the %g s recovery bound (%s)' % (name, took, h['seq'], secs, where))
+        if not kills or kills[-1][1] is None or kills[-1][1]['outcome'] != 'ok':
+            notes.append('recovery not judged: %s (no kill of %s completed ok before it: the stop is not known)' % (name, proc))
+            continue
+        stop = kills[-1][1]['mono_ns']
+        regranted = stop + regrant * 10**9
+        deadline = max(regranted, comp['mono_ns']) + wait * 10**9
+        if h['mono_ns'] > deadline:
+            s = lambda ns: (ns - stop) / 1e9   # seconds after the stop
+            f.append('%s: healthy at %.3f s after the stop (healthy seq %d), past the deadline %.3f s = max(re-grant: stop + %g s = %.3f s, '
+                     'restart completion %.3f s) + start wait %g s (%s; %s)'
+                     % (name, s(h['mono_ns']), h['seq'], s(deadline), regrant, s(regranted), s(comp['mono_ns']), wait, rwhere, wwhere))
     return f, notes
 
 

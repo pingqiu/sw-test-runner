@@ -1031,20 +1031,49 @@ class C6(unittest.TestCase):
                 r['mono_ns'] += delta
         return hc.check(dump(recs))['C6']
 
-    def test_the_recovery_bound_is_the_pages_sum(self):
-        secs, where = hc.RECOVERY['holder restart']
-        self.assertEqual(secs, 65 + 30)
-        self.assertIn('docs/volume-lifecycle.md', where)
+    def test_the_recovery_terms_are_the_pages_two_constants(self):
+        self.assertEqual(hc.RECOVERY['regrant'], (65, 'docs/volume-lifecycle.md:352-356'))
+        self.assertEqual(hc.RECOVERY['start_wait'], (30, 'docs/volume-lifecycle.md:368-370'))
 
-    def test_red_a_holder_healthy_96_s_after_its_restart(self):
-        v = self.healthy_after(96, KILL, RESTART, ('healthy', True))
+    def timed(self, restart_at, healthy_at, *between):
+        """Kill completed at t=0, restart completed at t=restart_at, the
+        healthy=true point at t=healthy_at (seconds on mono_ns)."""
+        recs = m2(KILL, RESTART, *between, ('healthy', True))
+        s = 10**9
+        kill_c = recs[1]
+        restart_c = recs[3]
+        h = [r for r in recs if r.get('verb') == 'healthy'][-1]
+        base = 1000 * s
+        for r in recs:   # every record keeps its order; the three moments are placed
+            if r['seq'] <= kill_c['seq']:
+                r['mono_ns'] = base - s + r['seq']
+            elif r['seq'] <= restart_c['seq']:
+                r['mono_ns'] = base + restart_at * s - (restart_c['seq'] - r['seq'])
+            elif r['seq'] < h['seq']:
+                r['mono_ns'] = base + restart_at * s + r['seq']
+            else:
+                r['mono_ns'] = base + healthy_at * s + (r['seq'] - h['seq'])
+        kill_c['mono_ns'] = base
+        return hc.check(dump(recs))['C6']
+
+    def test_red_restart_at_10_healthy_at_96_is_past_the_deadline_95(self):
+        v = self.timed(10, 96)
         self.assertEqual(v['verdict'], 'FAIL', v)
-        self.assertIn('healthy only after 96.000 s', v['findings'][0])
-        self.assertIn('above the 95 s recovery bound', v['findings'][0])
+        self.assertIn('healthy at 96.000 s after the stop', v['findings'][0])
+        self.assertIn('past the deadline 95.000 s = max(re-grant: stop + 65 s = 65.000 s, restart completion 10.000 s) + start wait 30 s', v['findings'][0])
 
-    def test_a_holder_healthy_94_s_after_its_restart_passes(self):
-        v = self.healthy_after(94, KILL, RESTART, ('healthy', False), ('healthy', True))
+    def test_restart_at_80_healthy_at_109_is_within_the_deadline_110(self):
+        v = self.timed(80, 109, ('healthy', False))
         self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_red_restart_at_80_healthy_at_111_is_past_the_deadline_110(self):
+        v = self.timed(80, 111)
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('past the deadline 110.000 s = max(re-grant: stop + 65 s = 65.000 s, restart completion 80.000 s)', v['findings'][0])
+
+    def test_a_restart_without_an_ok_kill_before_it_is_not_judged(self):
+        v = self.assert_c6('PASS', ('healthy', True), RESTART, ('healthy', True))
+        self.assertTrue(any('the stop is not known' in x for x in v['findings']), v)
 
     def test_red_a_holder_restart_never_healthy_again(self):
         # healthy=true only before the restart; the run then ends unhealthy too
