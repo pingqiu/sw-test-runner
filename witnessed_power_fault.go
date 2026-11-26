@@ -32,6 +32,13 @@ type WitnessedPowerFault struct {
 	// RestoreTimeout bounds the power-on and the wait for a running VM with
 	// a readable new boot; it must cover a real start.
 	RestoreTimeout time.Duration
+	// History, when set, records the fault as two operations of module
+	// Runner: fault_apply (Runner.VmPowerOff) and fault_restore
+	// (Runner.VmPowerOn), each invoke/complete, args {fault_key, resource,
+	// vm_id}, result the receipt's observation. The fault is active from the
+	// apply's invoke to the restore's complete.
+	History *History
+	Client  string
 }
 
 // MinPowerRestoreTimeout is the least restore bound accepted: an Azure VM
@@ -105,6 +112,33 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		s.faultReceipts[key] = receipt
 	}
 	var vmID string // the identity bound at the baseline
+	// History: invoke before the act, complete after its observation.
+	var restoreSeq uint64
+	invoke := func(verb, op string) uint64 {
+		if p.History == nil {
+			return 0
+		}
+		seq, err := p.History.Invoke(HistoryRecord{Client: p.Client, Op: op, Verb: verb, Volume: p.Node,
+			Args: map[string]any{"fault_key": key, "resource": p.Resource, "vm_id": vmID}})
+		if err != nil {
+			return 0
+		}
+		return seq
+	}
+	complete := func(seq uint64, ok bool, x FaultObservation, extra map[string]any) {
+		if p.History == nil || seq == 0 {
+			return
+		}
+		res := map[string]any{"power": x.State["power"], "node": x.State["node"], "boot_changed": x.BootID != "" && x.BootID != receipt.Before.BootID}
+		for k, v := range extra {
+			res[k] = v
+		}
+		outcome := OutcomeOK
+		if !ok {
+			outcome = OutcomeUnknown
+		}
+		_ = p.History.Complete(seq, outcome, res)
+	}
 	// observe reads the instance view (identity checked against the
 	// baseline's vmId) and, when asked, the node's boot.
 	observe := func(ctx context.Context, wantBoot bool) (FaultObservation, error) {
@@ -140,6 +174,7 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		}
 		vmID = receipt.Before.State["vm_id"]
 		baseline = true
+		applySeq := invoke("fault_apply", "Runner.VmPowerOff")
 		applyErr := p.PowerOff(ctx)
 		var probeErr error
 		receipt.Applied, probeErr = observe(ctx, true)
@@ -148,11 +183,13 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if !poweredOff(receipt.Applied.State["power"]) || receipt.Applied.State["node"] != "unreachable" {
 			probeErr = errors.Join(probeErr, errors.New("power fault effect NOT_PROVEN (not powered off, or the node still answers)"))
 		}
+		complete(applySeq, applyErr == nil && probeErr == nil, receipt.Applied, nil)
 		return errors.Join(applyErr, probeErr)
 	}, func(ctx context.Context) error {
 		if !baseline {
 			return nil
 		}
+		restoreSeq = invoke("fault_restore", "Runner.VmPowerOn")
 		ctx, cancel := context.WithTimeout(ctx, p.RestoreTimeout)
 		defer cancel()
 		current, err := observe(ctx, true)
@@ -187,6 +224,8 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if receipt.Restored.State["power"] != "running" || receipt.Restored.BootID == "" || receipt.Restored.BootID == receipt.Before.BootID {
 			err = errors.Join(err, errors.New("power fault restoration NOT_PROVEN (not running, boot unreadable, or the same boot)"))
 		}
+		complete(restoreSeq, err == nil, receipt.Restored, map[string]any{"restore_not_needed": receipt.RestoreNotNeeded})
+		restoreSeq = 0
 		return err
 	})
 }
