@@ -154,6 +154,8 @@ class AutoP2(unittest.TestCase):
                 self.assertFalse(module.peer_healthy(bad, "r2", "r1", 2))
         for field, value in [("VolumeID", "other"), ("ReplicaID", "r3")]:
             self.assertFalse(module.peer_healthy(dict(good, **{field: value}), "r2", "r1", 2))
+        for peers in (None, []):
+            self.assertFalse(module.peer_healthy(dict(good, Peers=peers), "r2", "r1", 2))
 
     def test_peers_waits_through_catching_up_without_guest_writes(self):
         pending = {"VolumeID": "v1", "ReplicaID": "r2", "Peers": [

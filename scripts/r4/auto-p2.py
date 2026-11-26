@@ -83,7 +83,7 @@ def peer_healthy(payload, primary, replica, epoch):
     """The primary's view, not supporting admission on the returning replica."""
     return (payload.get("VolumeID") == "v1" and payload.get("ReplicaID") == primary
             and any(p.get("ReplicaID") == replica and p.get("Epoch") == epoch
-                    and p.get("State") == "healthy" for p in payload.get("Peers", [])))
+                    and p.get("State") == "healthy" for p in (payload.get("Peers") or [])))
 
 
 def main():
