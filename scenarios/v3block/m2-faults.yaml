@@ -52,6 +52,11 @@ env:
   faults: "0.05"
   fault_processes: "blockmaster blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
   fault_restart_within: "20"
+  # How long a healthy point keeps looking after a restart (seconds): the
+  # product's operator pages bound a restarted holder's recovery by its lease
+  # re-grant (at most 65 s after it stopped, default flags) plus the start
+  # wait (30 s) (docs/volume-lifecycle.md). Not a latency bound.
+  fault_healthy_wait: "95"
   # The name pool. The product (a standalone deployment) has no online create
   # and never reuses a deleted name, so the cluster spec declares every name
   # the run may use, up front. 300 operations against a product answering ok
@@ -178,6 +183,7 @@ phases:
         faults: "{{ faults }}"
         fault_processes: "{{ fault_processes }}"
         fault_restart_within: "{{ fault_restart_within }}"
+        fault_healthy_wait: "{{ fault_healthy_wait }}"
 
   # Only what this run acquired: nothing at all if the claim failed.
   - name: teardown
