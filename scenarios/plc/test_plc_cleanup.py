@@ -1,0 +1,117 @@
+"""plc_owned.sh and plc_cleanup.sh controls (packet-free): an always-phase step touches only this invocation's
+run directory, and cleanup removes it only when every existing evidence/capture/lout directory is collected
+exactly; a failed or partial collection keeps it."""
+import io
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+BASH = shutil.which('bash')
+TOKEN = '0123456789abcdef0123456789abcdef'
+
+
+@unittest.skipIf(BASH is None, 'bash is required')
+class Cleanup(unittest.TestCase):
+    def setUp(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        self.t = Path(t.name)
+        self.d = self.t/'run'
+        self.payload = bytes(range(256)) * 64
+        for rel in ('evidence/judge.json', 'evidence/final/settle.txt', 'capture/out.tgz', 'lout/ext4/plc/a'):
+            (self.d/rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.d/rel).write_bytes(self.payload)
+        (self.d/'.plc-owned').write_bytes((TOKEN + '\n').encode())
+        self.art = self.t/'artifacts'
+        self.art.mkdir()
+
+    def collect(self, *subs):
+        """As collect_path does: tar -czf <name>.tgz -C <parent> <base>."""
+        for sub in subs:
+            with tarfile.open(self.art/('plc-%s.tgz' % sub), 'w:gz') as tf:
+                tf.add(self.d/sub, arcname=sub)
+
+    def run_cleanup(self, token=TOKEN):
+        return subprocess.run([BASH, str(HERE/'plc_cleanup.sh'), str(self.d), token, str(self.art), sys.executable],
+                              capture_output=True, text=True, timeout=60)
+
+    def damage_trailer(self, sub, damage):
+        a = self.art/('plc-%s.tgz' % sub)
+        raw = a.read_bytes()
+        a.write_bytes(damage(raw))
+        # The damage must leave every tar member readable: otherwise this control tests the member check.
+        with tarfile.open(a, 'r:gz') as tf:
+            for m in tf:
+                if m.isfile():
+                    tf.extractfile(m).read()
+
+    def collect_truncated(self, sub, rel):
+        """A valid tar of sub/ whose member rel carries only half its bytes (as a collection cut short would)."""
+        with tarfile.open(self.art/('plc-%s.tgz' % sub), 'w:gz') as tf:
+            for p in sorted((self.d/sub).rglob('*')):
+                if not p.is_file():
+                    continue
+                name = p.relative_to(self.d).as_posix()
+                data = p.read_bytes()
+                if name == rel:
+                    data = data[:len(data) // 2]
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+
+    def test_removed_once_everything_is_collected(self):
+        self.collect('evidence', 'capture', 'lout')
+        r = self.run_cleanup()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.d.exists())
+
+    def test_a_directory_that_never_existed_needs_no_archive(self):
+        shutil.rmtree(self.d/'lout')
+        self.collect('evidence', 'capture')
+        self.assertEqual(self.run_cleanup().returncode, 0)
+
+    def test_kept_when_collection_failed_or_is_partial(self):
+        cases = {
+            'lout not collected': lambda: self.collect('evidence', 'capture'),
+            'archive unreadable': lambda: (self.collect('evidence', 'capture'), (self.art/'plc-lout.tgz').write_bytes(b'not a tar')),
+            'archive missing a file': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'lout'/'late').write_bytes(b'y')),
+            'same name, different bytes': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'evidence'/'judge.json').write_bytes(b'{"verdict": "FAIL"}')),
+            'file changed after collection, same size': lambda: (self.collect('evidence', 'capture', 'lout'), (self.d/'capture'/'out.tgz').write_bytes(b'Y' * len(self.payload))),
+            'truncated payload in a valid tar': lambda: (self.collect('evidence', 'lout'), self.collect_truncated('capture', 'capture/out.tgz')),
+            # The tar end-of-archive comes before the gzip trailer (CRC32 + size): every member reads fine
+            # either way, so only reading the gzip stream through EOF can refuse these.
+            'gzip trailer missing': lambda: (self.collect('evidence', 'capture', 'lout'), self.damage_trailer('capture', lambda b: b[:-8])),
+            'gzip trailer corrupt': lambda: (self.collect('evidence', 'capture', 'lout'), self.damage_trailer('capture', lambda b: b[:-8] + bytes([b[-8] ^ 0xff]) + b[-7:])),
+        }
+        for name, prepare in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                prepare()
+                r = self.run_cleanup()
+                self.assertEqual(r.returncode, 1, name)
+                self.assertIn('keeping', r.stderr)
+                self.assertTrue((self.d/'evidence'/'judge.json').exists())
+
+    def test_never_touches_a_directory_this_invocation_does_not_own(self):
+        self.collect('evidence', 'capture', 'lout')
+        for name, token in {'prepare acquired nothing': '{{ plc_token }}', 'another token': 'f' * 32}.items():
+            with self.subTest(case=name):
+                r = self.run_cleanup(token)
+                self.assertEqual(r.returncode, 1, name)
+                self.assertTrue(self.d.exists())
+
+    def test_owned_check(self):
+        ok = subprocess.run([BASH, str(HERE/'plc_owned.sh'), str(self.d), TOKEN], capture_output=True, timeout=30)
+        self.assertEqual(ok.returncode, 0)
+        for token in ('', '{{ plc_token }}', 'f' * 32, TOKEN.upper()):
+            r = subprocess.run([BASH, str(HERE/'plc_owned.sh'), str(self.d), token], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 1, repr(token))
+
+
+if __name__ == '__main__':
+    unittest.main()
