@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -69,6 +70,14 @@ func OpenHistory(path string) (*History, error) {
 		return nil, fmt.Errorf("history: %w", err)
 	}
 	return &History{f: f, path: path, start: time.Now(), next: 1, open: map[uint64]HistoryRecord{}}, nil
+}
+
+// HistoryFile is the history's name in a run bundle.
+const HistoryFile = "history.jsonl"
+
+// OpenHistory creates the run's history file in the bundle directory.
+func (b *RunBundle) OpenHistory() (*History, error) {
+	return OpenHistory(filepath.Join(b.Dir, HistoryFile))
 }
 
 // Path is the history file's path.
