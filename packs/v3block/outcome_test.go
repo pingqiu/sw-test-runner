@@ -22,6 +22,7 @@ func TestParseV3ctl(t *testing.T) {
 		{"another volume", `{"outcome":"ok","volume":"v002","layout_id":"` + id + `"}`, 0, "unknown"},
 		{"no answer", ``, 0, "unknown"},
 		{"no outcome", `{"volume":"v001"}`, 0, "unknown"},
+		{"an outcome outside the three, exit 0", `{"outcome":"maybe","volume":"v001","layout_id":"` + id + `"}`, 0, "unknown"},
 	} {
 		if _, got := parseV3ctl(c.out, c.code, "v001"); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
