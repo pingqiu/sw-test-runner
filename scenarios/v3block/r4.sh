@@ -27,6 +27,7 @@
 #   r4.sh spec TAG RF N1 N2 N3 DPORT CPORT   write the cluster spec for rf 3 or 2
 #   r4.sh unit TAG ROLE -- EXEC ARG...       persistent master/volume/writer unit
 #   r4.sh start TAG ROLE                     start it (again, after a reboot)
+#   r4.sh evidence TAG                      snapshot status/journals before stopping
 #   r4.sh cleanup TAG                        stop the run's units, keep their evidence,
 #                                            remove them and prove they are gone
 #   r4.sh purge TAG                          remove the run's work dir and uploads
@@ -481,6 +482,29 @@ cmd_start() {
   echo "start: $u $("$systemctl_bin" is-active "$u" 2>/dev/null || true)"
 }
 
+# Capture independently of unit-file presence or active state: a failed unit
+# can already have disappeared while its diagnostic journal still exists.
+cmd_evidence() {
+  local tag="$1" w ev r u f bad=0
+  check_tag "$tag"; w="$root/$tag"; ev="$w/evidence"
+  [[ -f "$w/.r4-owner" && "$(cat "$w/.r4-owner")" == "$tag" ]] || die "evidence: no ownership proof for $w"
+  mkdir -p "$ev"
+  for r in master volume writer; do
+    u=$(unit_of "$tag" "$r")
+    "$systemctl_bin" status "$u" --no-pager > "$ev/$u.status" 2>&1 || true
+    if ! "$journalctl_bin" -u "$u" --no-pager --utc -o short-iso-precise > "$ev/$u.journal" 2>&1; then
+      echo "evidence: journal query failed for $u" >&2
+      bad=1
+    fi
+  done
+  for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
+    [[ ! -f "$w/$f" ]] || cp "$w/$f" "$ev/"
+  done
+  chmod 0755 "$ev"
+  find "$ev" -type f -exec chmod 0644 {} +
+  (( bad == 0 )) || die "evidence: incomplete journal capture; retained"
+}
+
 # cleanup TAG: stop the run's units, keep each one's status and journal (and
 # the run's own files) in WORK/evidence, remove the units and the blockmaster
 # mapping, then prove nothing of the run is left running.
@@ -503,6 +527,10 @@ cmd_cleanup() {
   for f in ledger failover.txt verify-after-failover.txt verify-after-rejoin.txt no-ack.txt cluster-spec.yaml SHA256SUMS; do
     [[ -f "$w/$f" ]] && cp "$w/$f" "$ev/"
   done
+  # cleanup runs as root, while collect_path uses the inventory SSH user.
+  # Publish only this evidence directory; never relax the package's TLS keys.
+  chmod 0755 "$ev"
+  find "$ev" -type f -exec chmod 0644 {} +
   if [[ -f "$hosts" ]] && grep -q "# r4-$tag\$" "$hosts"; then
     local keep; keep=$(grep -v "# r4-$tag\$" "$hosts" || true)
     printf '%s\n' "$keep" > "$hosts"
@@ -566,6 +594,7 @@ case "${1:-}" in
   spec) shift; [[ $# -eq 7 ]] || die "spec TAG RF N1 N2 N3 DPORT CPORT"; cmd_spec "$@" ;;
   unit) shift; [[ $# -ge 4 ]] || die "unit TAG ROLE -- EXEC ARG..."; cmd_unit "$@" ;;
   start) shift; [[ $# -eq 2 ]] || die "start TAG ROLE"; cmd_start "$@" ;;
+  evidence) shift; [[ $# -eq 1 ]] || die "evidence TAG"; cmd_evidence "$@" ;;
   cleanup) shift; [[ $# -eq 1 ]] || die "cleanup TAG"; cmd_cleanup "$@" ;;
   purge) shift; [[ $# -eq 1 ]] || die "purge TAG"; cmd_purge "$@" ;;
   *) die "usage: r4.sh write|stream|writer-ready|writer-stop|verify|drop-control|no-ack|held|wait-role|client-check|dev|connect|install|spec|unit|start|cleanup|purge ..." ;;
