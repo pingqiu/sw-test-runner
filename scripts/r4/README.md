@@ -19,6 +19,8 @@ All three hosts must have the same valid inventory SSH user. The entry never
 chooses a username itself. The three SSH readiness calls and both scenario
 rounds consume that inventory user and the exact per-node pins. An absent pin,
 invalid username or mixed usernames refuses before SSH.
+Python optimization (`-O` or `PYTHONOPTIMIZE`) is explicitly refused before
+reading any input because it would disable the adapter's assertion checks.
 
 Put the pinned Go toolchain required by the product on the controller's PATH.
 The existing scenario builds product binaries from its archived product commit;

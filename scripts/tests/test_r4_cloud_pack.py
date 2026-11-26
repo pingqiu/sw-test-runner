@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,18 @@ spec.loader.exec_module(pack)
 
 
 class R4CloudPack(unittest.TestCase):
+    def test_optimized_python_refuses_before_reading_inputs(self):
+        # No context or assets exist: the explicit optimization refusal must
+        # happen before a file read, SSH, git or scenario invocation.
+        env = dict(os.environ)
+        env.pop("SEAWEED_CLOUD_PACK_CONTEXT", None)
+        result = subprocess.run(
+            [sys.executable, "-O", str(Path(pack.__file__)), "missing-assets"],
+            env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("R4 launcher refuses Python optimization", result.stderr)
+        self.assertNotIn("FileNotFoundError", result.stderr)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

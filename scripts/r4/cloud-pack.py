@@ -3,6 +3,8 @@
 import hashlib, json, os, pathlib, re, subprocess, sys, time
 
 def main(root):
+    if not __debug__:
+        raise RuntimeError("R4 launcher refuses Python optimization: validation requires assertions")
     root = pathlib.Path(root).resolve()
     pins = json.loads((root/'pins.json').read_text())
     for name, sha in json.loads((root/'manifest.json').read_text()).items():
