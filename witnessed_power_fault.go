@@ -47,6 +47,9 @@ const MinPowerRestoreTimeout = 5 * time.Minute
 
 var vmResourceID = regexp.MustCompile(`(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[^/]+$`)
 
+// ErrFaultNotApplied: the fault was refused before any act on the VM.
+var ErrFaultNotApplied = errors.New("power fault NOT applied")
+
 func (p WitnessedPowerFault) Key() string { return p.Node + "/" + p.Resource }
 
 // validate is every refusal before anything is observed or changed.
@@ -113,21 +116,25 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 	}
 	var vmID string // the identity bound at the baseline
 	// History: invoke before the act, complete after its observation.
+	// A fault that cannot be recorded is not applied: a failed apply invoke
+	// refuses before the power-off. A failed restore invoke still restores
+	// (custody first) and fails the action; C0 then finds no recorded restore.
 	var restoreSeq uint64
-	invoke := func(verb, op string) uint64 {
+	var restoreRecErr error
+	invoke := func(verb, op string) (uint64, error) {
 		if p.History == nil {
-			return 0
+			return 0, nil
 		}
 		seq, err := p.History.Invoke(HistoryRecord{Client: p.Client, Op: op, Verb: verb,
 			Args: map[string]any{"fault_key": key, "resource": p.Resource, "vm_id": vmID, "node": p.Node}})
 		if err != nil {
-			return 0
+			return 0, fmt.Errorf("power fault: history invoke of %s: %w", verb, err)
 		}
-		return seq
+		return seq, nil
 	}
-	complete := func(seq uint64, ok bool, x FaultObservation, extra map[string]any) {
+	complete := func(seq uint64, ok bool, x FaultObservation, extra map[string]any) error {
 		if p.History == nil || seq == 0 {
-			return
+			return nil
 		}
 		res := map[string]any{"power": x.State["power"], "node": x.State["node"], "boot_changed": x.BootID != "" && x.BootID != receipt.Before.BootID}
 		for k, v := range extra {
@@ -137,7 +144,10 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if !ok {
 			outcome = OutcomeUnknown
 		}
-		_ = p.History.Complete(seq, outcome, res)
+		if err := p.History.Complete(seq, outcome, res); err != nil {
+			return fmt.Errorf("power fault: history complete: %w", err)
+		}
+		return nil
 	}
 	// observe reads the instance view (identity checked against the
 	// baseline's vmId) and, when asked, the node's boot.
@@ -173,8 +183,11 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 			return errors.Join(err, errors.New("power fault: baseline is not a running VM with a readable boot"))
 		}
 		vmID = receipt.Before.State["vm_id"]
+		applySeq, err := invoke("fault_apply", "Runner.VmPowerOff")
+		if err != nil {
+			return errors.Join(ErrFaultNotApplied, err) // nothing was done; nothing to restore
+		}
 		baseline = true
-		applySeq := invoke("fault_apply", "Runner.VmPowerOff")
 		applyErr := p.PowerOff(ctx)
 		var probeErr error
 		receipt.Applied, probeErr = observe(ctx, true)
@@ -183,13 +196,13 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if !poweredOff(receipt.Applied.State["power"]) || receipt.Applied.State["node"] != "unreachable" {
 			probeErr = errors.Join(probeErr, errors.New("power fault effect NOT_PROVEN (not powered off, or the node still answers)"))
 		}
-		complete(applySeq, applyErr == nil && probeErr == nil, receipt.Applied, nil)
-		return errors.Join(applyErr, probeErr)
+		recErr := complete(applySeq, applyErr == nil && probeErr == nil, receipt.Applied, nil)
+		return errors.Join(applyErr, probeErr, recErr)
 	}, func(ctx context.Context) error {
 		if !baseline {
 			return nil
 		}
-		restoreSeq = invoke("fault_restore", "Runner.VmPowerOn")
+		restoreSeq, restoreRecErr = invoke("fault_restore", "Runner.VmPowerOn")
 		ctx, cancel := context.WithTimeout(ctx, p.RestoreTimeout)
 		defer cancel()
 		current, err := observe(ctx, true)
@@ -224,8 +237,8 @@ func (s *RunScope) ApplyWitnessedPowerFault(actionCtx context.Context, key strin
 		if receipt.Restored.State["power"] != "running" || receipt.Restored.BootID == "" || receipt.Restored.BootID == receipt.Before.BootID {
 			err = errors.Join(err, errors.New("power fault restoration NOT_PROVEN (not running, boot unreadable, or the same boot)"))
 		}
-		complete(restoreSeq, err == nil, receipt.Restored, map[string]any{"restore_not_needed": receipt.RestoreNotNeeded})
-		restoreSeq = 0
+		err = errors.Join(err, restoreRecErr, complete(restoreSeq, err == nil, receipt.Restored, map[string]any{"restore_not_needed": receipt.RestoreNotNeeded}))
+		restoreSeq, restoreRecErr = 0, nil
 		return err
 	})
 }

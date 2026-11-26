@@ -172,3 +172,48 @@ func readRecords(t *testing.T, p string) []HistoryRecord {
 	}
 	return out
 }
+
+// A fault that cannot be recorded is not applied: a failing apply invoke
+// refuses before the power-off.
+func TestPowerFaultUnrecordableApplyNeverPowersOff(t *testing.T) {
+	s, err := NewBlockCloudRunScope(t.Context(), blockBinding(t), agrees)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := OpenHistory(filepath.Join(t.TempDir(), "history.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close() // every later Invoke fails
+	v := newFakeVM()
+	p := v.plan()
+	p.History = h
+	err = s.ApplyWitnessedPowerFault(t.Context(), p.Key(), p)
+	if err == nil || !errors.Is(err, ErrFaultNotApplied) {
+		t.Fatalf("an unrecordable apply: %v", err)
+	}
+	if v.offs != 0 || v.power != "running" {
+		t.Fatalf("powered off without a record: offs=%d power=%s", v.offs, v.power)
+	}
+}
+
+// A completion that cannot be recorded fails the action.
+func TestPowerFaultUnrecordableCompleteFailsTheApply(t *testing.T) {
+	s, err := NewBlockCloudRunScope(t.Context(), blockBinding(t), agrees)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := OpenHistory(filepath.Join(t.TempDir(), "history.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := newFakeVM()
+	v.afterOff = func(*fakeVM) { _ = h.Close() } // the invoke landed; the complete cannot
+	p := v.plan()
+	p.History = h
+	if err := s.ApplyWitnessedPowerFault(t.Context(), p.Key(), p); err == nil || !strings.Contains(err.Error(), "history complete") {
+		t.Fatalf("an unrecorded completion passed: %v", err)
+	}
+}
