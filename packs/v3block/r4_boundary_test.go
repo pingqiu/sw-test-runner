@@ -85,3 +85,38 @@ func TestR4OldPrimaryAtOldEpochFailsBeforeLaterReplicaReady(t *testing.T) {
 		t.Fatalf("old primary escaped observation: %v %s", e, out)
 	}
 }
+
+func TestR4EveryConnectBoundsControllerLoss(t *testing.T) {
+	dir := t.TempDir()
+	sys, devices := filepath.Join(dir, "sys"), filepath.Join(dir, "dev")
+	ours := filepath.Join(sys, "nvme-subsys1")
+	r4File(t, filepath.Join(ours, "subsysnqn"), "our-nqn\n")
+	r4File(t, filepath.Join(ours, "nvme7", "state"), "live\n")
+	r4File(t, filepath.Join(ours, "nvme7", "address"), "traddr=10.2.3.4\n")
+	r4File(t, filepath.Join(ours, "nvme7n1"), "")
+	r4File(t, filepath.Join(devices, "nvme7n1"), "")
+	log := filepath.Join(dir, "argv")
+	r4File(t, filepath.Join(dir, "nvme"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$R4_ARGV_LOG\"\n")
+	env := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"), "R4_ARGV_LOG=" + log, "R4_SYS=" + sys, "R4_DEVDIR=" + devices}
+	for _, port := range []string{"4420", "4421"} {
+		out, err := r4Env(t, env, "connect", "our-nqn", "10.2.3.4", port, "0")
+		if err != nil || !strings.Contains(out, "--fast_io_fail_tmo=5 --ctrl-loss-tmo=60") {
+			t.Fatalf("connect/settings receipt: %v %s", err, out)
+		}
+	}
+	connects := 0
+	for _, line := range strings.Split(strings.TrimSpace(mustRead(t, log)), "\n") {
+		if !strings.HasPrefix(line, "connect ") {
+			continue
+		}
+		connects++
+		for _, flag := range []string{"--fast_io_fail_tmo=5", "--ctrl-loss-tmo=60"} {
+			if !strings.Contains(" "+line+" ", " "+flag+" ") {
+				t.Fatalf("connect missing %s: %s", flag, line)
+			}
+		}
+	}
+	if connects != 2 {
+		t.Fatalf("want both connect argv, got %d", connects)
+	}
+}

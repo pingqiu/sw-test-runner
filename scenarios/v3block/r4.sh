@@ -372,7 +372,10 @@ cmd_dev() {
 cmd_connect() {
   local nqn="$1" addr="$2" port="$3" secs="$4"
   timeout 30 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
-  timeout 60 nvme connect -t tcp -a "$addr" -s "$port" -n "$nqn" >&2 || die "connect: nvme connect $addr:$port $nqn failed"
+  local args=(connect -t tcp -a "$addr" -s "$port" -n "$nqn" --fast_io_fail_tmo=5 --ctrl-loss-tmo=60)
+  # The action transcript records these fault-window settings in the bundle.
+  { printf 'nvme'; printf ' %q' "${args[@]}"; printf '\n'; } >&2
+  timeout 60 nvme "${args[@]}" >&2 || die "connect: nvme connect $addr:$port $nqn failed"
   cmd_dev "$nqn" "$addr" "$secs"
 }
 
