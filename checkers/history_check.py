@@ -38,8 +38,8 @@ code is 0 only when every checker passes.
       listing_error proves nothing either way. FAIL if a judged refusal shows
       a different generation or listing; a refusal without both observations
       is not judged (a note). UNKNOWN if there were refusals and none could be
-      judged; PASS if one was judged and none changed anything, or, with a
-      note, if there was no refusal at all
+      judged; PASS if one was judged and none changed anything; FAIL (not
+      exercised) if there was no refusal at all, like the other checkers
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
@@ -526,7 +526,7 @@ def c5(recs):
     ops_ = operations(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] == 'refused']
     if not refusals:
-        return {'verdict': 'PASS', 'findings': ['no refused operation in the history: C5 had nothing to judge']}
+        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     f, notes, judged = [], [], 0
     for inv, comp in refusals:

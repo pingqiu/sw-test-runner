@@ -355,8 +355,8 @@ class Evidence(unittest.TestCase):
     def test_each_checker_fails_without_its_operations(self):
         only_end = synth()
         v = verdicts(only_end)
-        # C5 passes with a note: no refusal, so nothing a refusal changed (its definition).
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'PASS', 'C7': 'FAIL'})
+        # C5 too: a run without a refusal did not exercise it.
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C7': 'FAIL'})
         writes_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
         self.assertEqual(verdicts(writes_only)['C1'], 'FAIL', 'no read')
         reads_only = synth(('read', 'v1', {'lba': 0}, 'ok', {'sha256': hc.ZERO}))
@@ -654,10 +654,10 @@ class C5(unittest.TestCase):
                          'result': {'head': {'gen': 4}, 'files': FILES}})
         self.assertEqual(hc.check(dump(renumber(recs)))['C5']['verdict'], 'UNKNOWN')
 
-    def test_no_refusal_passes_with_a_note(self):
+    def test_no_refusal_fails_not_exercised(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
-        self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertIn('no refused operation', v['findings'][0])
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('not exercised', v['findings'][0])
 
 
 if __name__ == '__main__':
