@@ -65,6 +65,20 @@ class R4StartPreflight(unittest.TestCase):
                     smoke.stop([child])
             self.assertIsNotNone(child.poll())
 
+    def test_ready_log_without_actual_listener_is_not_enough(self):
+        with tempfile.TemporaryDirectory() as d:
+            log=Path(d)/'child.log'
+            address='127.0.0.1:'+smoke.port('127.0.0.1')
+            script='import time; print('+repr(json.dumps({'phase':'listening'}))+',flush=True); time.sleep(30)'
+            with log.open('wb') as f:
+                child=subprocess.Popen([sys.executable,'-c',script],stdout=f,stderr=subprocess.STDOUT)
+                try:
+                    with self.assertRaises(OSError):
+                        smoke.watch([child],[log],['listening'],.2,[address])
+                finally:
+                    smoke.stop([child])
+            self.assertIsNotNone(child.poll())
+
 
 if __name__ == '__main__':
     unittest.main()
