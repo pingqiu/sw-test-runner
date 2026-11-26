@@ -130,6 +130,57 @@ class AutoP2(unittest.TestCase):
         self.assertIn('auto-p2.py verify "$PROMOTION"', source)
         self.assertIn('auto-p2.py field "$PROMOTION" host', source)
 
+    def test_recorded_supporting_admission_is_not_catchup(self):
+        # Exact readiness fields from the failed RF2 rejoin status sample:
+        # it was replica_ready at e2 when all 64 subsequent writes were refused.
+        old_status = {"VolumeID": "v1", "ReplicaID": "r1", "Epoch": 2,
+                      "AuthorityRole": "unknown", "ReplicationRole": "replica_ready",
+                      "Healthy": False, "FrontendPrimaryReady": False,
+                      "NotReadyReason": "durable backend admits no I/O: frontend: stale primary lineage"}
+        shallow = (old_status["Epoch"] == 2 and old_status["AuthorityRole"] != "primary"
+                   and old_status["ReplicationRole"] == "replica_ready")
+        self.assertTrue(shallow, "the former P5 passes this real capture too early")
+        self.assertFalse(module.peer_healthy(old_status, "r2", "r1", 2))
+
+    def test_primary_peer_requires_identity_healthy_and_new_epoch(self):
+        good = {"VolumeID": "v1", "ReplicaID": "r2", "Peers": [
+            {"ReplicaID": "r1", "State": "healthy", "Epoch": 2}]}
+        self.assertTrue(module.peer_healthy(good, "r2", "r1", 2))
+        for field, value in [("State", "catching_up"), ("State", "degraded"),
+                             ("Epoch", 1), ("Epoch", 3), ("ReplicaID", "r3")]:
+            with self.subTest(field=field, value=value):
+                bad = copy.deepcopy(good)
+                bad["Peers"][0][field] = value
+                self.assertFalse(module.peer_healthy(bad, "r2", "r1", 2))
+        for field, value in [("VolumeID", "other"), ("ReplicaID", "r3")]:
+            self.assertFalse(module.peer_healthy(dict(good, **{field: value}), "r2", "r1", 2))
+        for peers in (None, []):
+            self.assertFalse(module.peer_healthy(dict(good, Peers=peers), "r2", "r1", 2))
+
+    def test_peers_waits_through_catching_up_without_guest_writes(self):
+        pending = {"VolumeID": "v1", "ReplicaID": "r2", "Peers": [
+            {"ReplicaID": "r1", "State": "catching_up", "Epoch": 2}]}
+        healthy = copy.deepcopy(pending)
+        healthy["Peers"][0]["State"] = "healthy"
+        promotion = module.token(dict(authority=self.line, mode="automatic", operator_calls=0))
+        with tempfile.TemporaryDirectory() as root:
+            receipt = Path(root) / "peers.json"
+            argv = ["auto-p2.py", "peers", promotion, "r2", "http://127.0.0.1/status/peers?volume=v1", str(receipt)]
+            answers = [io.BytesIO(json.dumps(v).encode()) for v in (pending, healthy)]
+            with mock.patch("sys.argv", argv), mock.patch.object(module.time, "sleep"), \
+                    mock.patch.object(module.urllib.request, "urlopen", side_effect=answers) as get, \
+                    mock.patch.object(module.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+                module.main()
+                self.assertEqual(get.call_count, 2)
+                run.assert_not_called()
+            self.assertEqual(json.loads(receipt.read_text()), healthy)
+
+    def test_scenario_gates_guest_writes_on_primary_peer_view(self):
+        source = (Path(__file__).resolve().parents[2] / "scenarios/v3block/r4-node-loss.yaml").read_text()
+        rejoin = source[source.index("  - name: rejoin"):]
+        self.assertLess(rejoin.index('auto-p2.py peers "$PROMOTION"'.replace('"', '\\"')),
+                        rejoin.index("# P6"))
+
 
 if __name__ == "__main__":
     unittest.main()
