@@ -86,6 +86,8 @@ class Settle(unittest.TestCase):
         az.write_bytes(('#!/bin/bash\necho "az $*" >> "%s"\ncase "$1 $2" in\n'
                         '  "group exists") echo %s ;;\n  "resource list") cat "%s" ;;\n  *) exit 9 ;;\nesac\n'
                         % (posix(self.calls), self.exists, posix(self.t/'listed.json'))).encode())
+        for stub in (cloud, az):
+            stub.chmod(0o755)
         return cloud, az
 
     def settle(self, cls='counted', wait='4'):
@@ -182,27 +184,37 @@ class Settle(unittest.TestCase):
         self.assertEqual(self.calls_made(), '')
 
     def test_refusals(self):
+        # Each refusal must be for its own reason: an exit 1 for another cause (a stub that cannot run, say)
+        # would pass a bare rc check vacuously.
         cases = {
-            'remaining ids (real Result)': lambda: setattr(self, 'verify', json.loads(json.dumps(REMAIN))),
-            'create unresolved': lambda: self.verify.update(create_unresolved=True),
-            'create_unresolved absent': lambda: self.verify.pop('create_unresolved'),
-            'create_unresolved an empty list': lambda: self.verify.update(create_unresolved=[]),
-            'remaining not observed': lambda: self.verify.update(remaining_observed=False),
-            'remaining_observed absent': lambda: self.verify.pop('remaining_observed'),
-            'remaining ids null': lambda: self.verify.update(remaining_resource_ids=None),
-            'code not EMPTY': lambda: self.verify.update(code='CREATE_UNRESOLVED'),
-            'another schema': lambda: self.verify.update(schema='seaweed.cloud-smoke/v0'),
-            'verify failed': lambda: setattr(self, 'verify_rc', 1),
-            'group absent': lambda: setattr(self, 'exists', 'false'),
-            'a listed resource': lambda: self.listed.append({'id': '/sub/rg/disk'}),
-            'variables off their pin': lambda: self.write_config(pin='0' * 64),
+            'remaining ids (real Result)': (lambda: setattr(self, 'verify', json.loads(json.dumps(REMAIN))), 'remaining_resource_ids'),
+            'create unresolved': (lambda: self.verify.update(create_unresolved=True), 'create_unresolved'),
+            'create_unresolved absent': (lambda: self.verify.pop('create_unresolved'), 'create_unresolved'),
+            'create_unresolved an empty list': (lambda: self.verify.update(create_unresolved=[]), 'create_unresolved'),
+            'remaining not observed': (lambda: self.verify.update(remaining_observed=False), 'remaining_observed'),
+            'remaining_observed absent': (lambda: self.verify.pop('remaining_observed'), 'remaining_observed'),
+            'remaining ids null': (lambda: self.verify.update(remaining_resource_ids=None), 'remaining_resource_ids'),
+            'code not EMPTY': (lambda: self.verify.update(code='CREATE_UNRESOLVED'), 'code'),
+            'another schema': (lambda: self.verify.update(schema='seaweed.cloud-smoke/v0'), 'schema'),
+            'verify failed': (lambda: setattr(self, 'verify_rc', 1), 'verify exited 1'),
+            'group absent': (lambda: setattr(self, 'exists', 'false'), 'does not exist'),
+            'a listed resource': (lambda: self.listed.append({'id': '/sub/rg/disk'}), 'REMAINING in the independent listing'),
+            'variables off their pin': (lambda: self.write_config(pin='0' * 64), 'cannot derive the run scope'),
         }
-        for name, change in cases.items():
+        for name, (change, reason) in cases.items():
             with self.subTest(case=name):
                 self.setUp()
                 change()
                 rc, note = self.settle()
                 self.assertEqual(rc, 1, '%s: %s' % (name, note))
+                self.assertIn(reason, note, name)
+
+    def test_the_stubs_run(self):
+        """Guard for the controls above: the stub seaweed-cloud and az execute (exit 0 on the clean case)."""
+        cloud, az = self.stubs()
+        for stub, args in ((cloud, ''), (az, ' group exists')):
+            r = subprocess.run([BASH, '-c', '"$0"' + args, posix(stub)], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 0, '%s does not run: %r' % (stub.name, r.stderr))
 
 
 if __name__ == '__main__':

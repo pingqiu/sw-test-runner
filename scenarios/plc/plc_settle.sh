@@ -26,7 +26,9 @@ done_() { echo "settle: $*" > "$o/settle.txt"; exit 0; }
 [ -f "$ev/launching" ] || done_ "no cloud run was launched by this invocation ($class)"
 
 # 2. Terminal barrier.
-alive() { local st f; read -r st < "/proc/$1/stat" 2>/dev/null || return 1; f=(${st##*) }); [ "${f[19]}" = "$2" ]; }
+# Alive: /proc/PID exists with the recorded start time and is not a zombie (Z) or dead (X): a launcher that
+# exited but is not yet reaped by its parent has finished.
+alive() { local st f; read -r st < "/proc/$1/stat" 2>/dev/null || return 1; f=(${st##*) }); [ "${f[19]}" = "$2" ] && [ "${f[0]}" != Z ] && [ "${f[0]}" != X ]; }
 waited=0
 while [ ! -s "$ev/cloud.pid" ] && [ "$waited" -lt 10 ]; do sleep 1; waited=$((waited + 1)); done
 read -r pid start < "$ev/cloud.pid" 2>/dev/null \
