@@ -204,7 +204,7 @@ phases:
           sudo bash $W/r4.sh unit $T master -- $W/bin/blockmaster
           --authority-store $W/master/authority --lifecycle-store $W/master/lifecycle
           --cluster-spec $W/cluster-spec.yaml --expected-slots-per-volume {{ rf }}
-          --lifecycle-product-loop-interval 200ms
+          --lifecycle-product-loop-interval 100ms
           --launcher-replication-ack sync-quorum --listen 0.0.0.0:{{ master_port }}
           --tls-cert $W/tls/master.crt --tls-key $W/tls/master.key --tls-client-ca $W/tls/ca.crt
           --role-file $W/tls/roles --failback-runtime-rpc &&

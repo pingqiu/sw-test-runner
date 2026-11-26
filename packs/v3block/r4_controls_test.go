@@ -339,7 +339,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				cmd := a.Params["cmd"]
 				if strings.Contains(cmd, "/bin/blockmaster ") {
 					masters++
-					if !strings.Contains(cmd, "--lifecycle-product-loop-interval 200ms") {
+					if !strings.Contains(cmd, "--lifecycle-product-loop-interval 100ms") {
 						return nil, fmt.Errorf("cluster-spec assignment requires the lifecycle product loop")
 					}
 				}
