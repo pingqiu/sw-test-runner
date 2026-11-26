@@ -14,6 +14,7 @@ import (
 	"github.com/pingqiu/sw-test-runner/actions"
 	"github.com/pingqiu/sw-test-runner/cli"
 	"github.com/pingqiu/sw-test-runner/packs/block"
+	"github.com/pingqiu/sw-test-runner/packs/cloud"
 	"github.com/pingqiu/sw-test-runner/packs/kv"
 	"github.com/pingqiu/sw-test-runner/packs/rdma"
 	"github.com/pingqiu/sw-test-runner/packs/s3"
@@ -28,6 +29,7 @@ func main() {
 		s3.RegisterPack(r)      // S3 gateway
 		rdma.RegisterPack(r)    // RDMA lab gates
 		v3block.RegisterPack(r) // V3 seaweed-block
+		cloud.RegisterPack(r)   // cloud VM power fault
 	}
 	os.Exit(cli.Run(register, os.Args[1:]))
 }

@@ -48,7 +48,9 @@ func TestAzRunsOnlyCheckedArgv(t *testing.T) {
 	if err := PowerOff(context.Background(), goodVM); err != nil || len(called) != 1 || called[0][1] != "stop" {
 		t.Fatalf("power off: %v %v", err, called)
 	}
-	Az = func(context.Context, []string) (string, string, error) { return "", "ERROR: (AuthorizationFailed) no", errors.New("exit 1") }
+	Az = func(context.Context, []string) (string, string, error) {
+		return "", "ERROR: (AuthorizationFailed) no", errors.New("exit 1")
+	}
 	if err := PowerOn(context.Background(), goodVM); err == nil || !strings.Contains(err.Error(), "AuthorizationFailed") {
 		t.Fatalf("a failed az call: %v", err)
 	}
@@ -80,7 +82,7 @@ func TestParseViewReadsIdentityAndOnePowerState(t *testing.T) {
 func writeRun(t *testing.T, invMut func(string) string) string {
 	t.Helper()
 	dir := t.TempDir()
-	inv := `{"schema":"seaweed.inventory/v1","target":"azure","run_id":"r4-1","managed_resource_ids":["` + goodVM + `"],
+	inv := `{"schema":"seaweed.inventory/v1","target":"azure","run_id":"r4-1","deadlines":{"work":"2099-01-01T01:00:00Z","hard":"2099-01-01T01:20:00Z","cleanup_reserve_ms":15000},"managed_resource_ids":["` + goodVM + `"],
 	 "hosts":[{"id":"node-1","resource_id":"` + goodVM + `","management":{"address":"20.1.2.3","port":22,"user":"seaweed","host_key":""}}]}`
 	if invMut != nil {
 		inv = invMut(inv)
@@ -106,7 +108,10 @@ func TestLoadRunBindsHostsToTheirVMAndKey(t *testing.T) {
 		"no managed resources": func(s string) string { return strings.Replace(s, `["`+goodVM+`"]`, `[]`, 1) },
 		"not azure":            func(s string) string { return strings.Replace(s, `"azure"`, `"onprem"`, 1) },
 		"no resource id":       func(s string) string { return strings.Replace(s, `"resource_id":"`+goodVM+`"`, `"resource_id":""`, 1) },
-		"a host twice":         func(s string) string { return strings.Replace(s, `}]}`, `},{"id":"node-1","resource_id":"x","management":{"address":"a","user":"u"}}]}`, 1) },
+		"no deadlines":         func(s string) string { return strings.Replace(s, `"work":"2099-01-01T01:00:00Z",`, ``, 1) },
+		"a host twice": func(s string) string {
+			return strings.Replace(s, `}]}`, `},{"id":"node-1","resource_id":"x","management":{"address":"a","user":"u"}}]}`, 1)
+		},
 	} {
 		if _, err := LoadRun(writeRun(t, mut)); err == nil {
 			t.Errorf("%s: accepted", name)

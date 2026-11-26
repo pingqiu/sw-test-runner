@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // ContextEnv names the pack context seaweed-cloud hands an exec pack.
@@ -28,6 +29,8 @@ type Run struct {
 	Hosts   map[string]Host
 	SSHKey  string // private key path (never read here)
 	Context string // the context file's path, for the record
+	// The run's declared deadlines (inventory deadlines.work and .hard).
+	Work, Hard time.Time
 }
 
 // LoadRun reads the pack context and its inventory. Anything missing or
@@ -35,6 +38,7 @@ type Run struct {
 func LoadRun(contextPath string) (Run, error) {
 	var ctx struct {
 		Schema    string            `json:"schema"`
+		RunID     string            `json:"run_id"`
 		Inventory string            `json:"inventory"`
 		SSHKey    string            `json:"ssh_key"`
 		HostKey   string            `json:"host_key"`
@@ -47,11 +51,15 @@ func LoadRun(contextPath string) (Run, error) {
 		return Run{}, errors.New("pack context: not a seaweed.cloud-pack-context/v1 with an inventory and an ssh key")
 	}
 	var inv struct {
-		Schema  string   `json:"schema"`
-		RunID   string   `json:"run_id"`
-		Target  string   `json:"target"`
-		Owned   []string `json:"managed_resource_ids"`
-		Hosts   []struct {
+		Schema    string   `json:"schema"`
+		RunID     string   `json:"run_id"`
+		Target    string   `json:"target"`
+		Owned     []string `json:"managed_resource_ids"`
+		Deadlines struct {
+			Work time.Time `json:"work"`
+			Hard time.Time `json:"hard"`
+		} `json:"deadlines"`
+		Hosts []struct {
 			ID         string `json:"id"`
 			ResourceID string `json:"resource_id"`
 			Management struct {
@@ -68,7 +76,13 @@ func LoadRun(contextPath string) (Run, error) {
 	if inv.Schema != "seaweed.inventory/v1" || inv.Target != "azure" || inv.RunID == "" || len(inv.Owned) == 0 || len(inv.Hosts) == 0 {
 		return Run{}, errors.New("inventory: not an azure seaweed.inventory/v1 with a run id, managed resources and hosts")
 	}
-	r := Run{RunID: inv.RunID, Owned: inv.Owned, Hosts: map[string]Host{}, SSHKey: ctx.SSHKey, Context: contextPath}
+	if inv.Deadlines.Work.IsZero() || !inv.Deadlines.Hard.After(inv.Deadlines.Work) {
+		return Run{}, errors.New("inventory: no work deadline before a hard deadline")
+	}
+	if ctx.RunID != "" && ctx.RunID != inv.RunID {
+		return Run{}, fmt.Errorf("pack context: run %q, but its inventory is run %q", ctx.RunID, inv.RunID)
+	}
+	r := Run{RunID: inv.RunID, Owned: inv.Owned, Hosts: map[string]Host{}, SSHKey: ctx.SSHKey, Context: contextPath, Work: inv.Deadlines.Work, Hard: inv.Deadlines.Hard}
 	for _, h := range inv.Hosts {
 		key := h.Management.HostKey
 		if k := ctx.HostKeys[h.ID]; k != "" {
@@ -87,6 +101,11 @@ func LoadRun(contextPath string) (Run, error) {
 			port = 22
 		}
 		r.Hosts[h.ID] = Host{ID: h.ID, ResourceID: h.ResourceID, Address: h.Management.Address, Port: port, User: h.Management.User, HostKey: strings.TrimSpace(key)}
+	}
+	for id := range ctx.HostKeys {
+		if _, ok := r.Hosts[id]; !ok {
+			return Run{}, fmt.Errorf("pack context: a host key for %q, which is not an inventory host", id)
+		}
 	}
 	return r, nil
 }

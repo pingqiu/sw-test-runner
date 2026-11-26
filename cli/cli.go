@@ -47,6 +47,7 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
 	"github.com/pingqiu/sw-test-runner/infra"
+	"github.com/pingqiu/sw-test-runner/packs/cloud"
 )
 
 // pkgRegister is set by Run; subcommand handlers below call it
@@ -312,6 +313,23 @@ func runCmd(args []string) {
 		}
 		actx.History = h
 		defer h.Close()
+	}
+	// A cloud run whose scenario applies a VM power fault gets the fault
+	// custody of its pack context (the block cloud scope); the engine's Close
+	// restores what is left. Without such an action nothing is opened.
+	if p := os.Getenv(cloud.ContextEnv); p != "" && actx.Safety == nil && cloud.UsesFaults(scenario) {
+		if bundle == nil {
+			logger.Fatalf("cloud fault custody: a run bundle is required")
+		}
+		dir, err := filepath.Abs(bundle.Dir)
+		if err != nil {
+			logger.Fatalf("cloud fault custody: %v", err)
+		}
+		s, err := cloud.OpenScope(ctx, p, dir)
+		if err != nil {
+			logger.Fatalf("cloud fault custody: %v", err)
+		}
+		actx.Safety = s
 	}
 
 	// Cluster lifecycle: try attach, fall back to managed if needed.

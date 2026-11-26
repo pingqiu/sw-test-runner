@@ -31,7 +31,9 @@ const cmdUnsafe = "|&<>^%\"'"
 func powerOffArgv(id string) []string {
 	return []string{"vm", "stop", "--ids", id, "--skip-shutdown", "--only-show-errors"}
 }
-func powerOnArgv(id string) []string { return []string{"vm", "start", "--ids", id, "--only-show-errors"} }
+func powerOnArgv(id string) []string {
+	return []string{"vm", "start", "--ids", id, "--only-show-errors"}
+}
 func viewArgv(id string) []string {
 	return []string{"vm", "get-instance-view", "--ids", id, "--output", "json", "--only-show-errors"}
 }
