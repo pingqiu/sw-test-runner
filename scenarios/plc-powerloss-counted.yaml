@@ -198,8 +198,10 @@ phases:
         node: controller
         timeout: 15m
         env.PLC_DIR: "{{ scratch_root }}/{{ run_id }}"
+        # POSIX sh (the controller's /bin/sh is dash; test_plc_posix_steps runs this step under dash). No pipefail:
+        # a tar -t that fails leaves grep no lines (no false refusal), and the tar -x below then fails under -e.
         cmd: |
-          set -euf -o pipefail
+          set -euf
           fail() { echo "unpack: $*" >&2; exit 1; }
           d="$PLC_DIR"
           tar -tzf "$d/capture/out.tgz" | grep -qvE '^(\./)?out(/|$)' && fail 'out.tgz holds paths outside out/'
@@ -273,7 +275,7 @@ phases:
         env.PLC_PY: "{{ python }}"
         save_as: plc_gate
         cmd: |
-          set -euf -o pipefail
+          set -euf
           settled=$(tar -xzO -f - evidence/settle.txt < "$PLC_ARCHIVE") || { echo 'no collected settle.txt' >&2; exit 1; }
           case "$settled" in 'settle: teardown verified'*|'settle: no cloud run to settle (rehearsal)') ;; *) echo "teardown not proven: $settled" >&2; exit 1 ;; esac
           bash "$PLC_TOOLS/plc_gate.sh" "$PLC_ARCHIVE" "$PLC_CLASS" "$PLC_PY"
@@ -323,7 +325,10 @@ phases:
         env.PLC_TOOLS: "{{ plc_tools }}"
         cmd: |
           set -uf
-          bash "$PLC_TOOLS/plc_owned.sh" "$PLC_DIR" "$PLC_OWNER"
+          bash "$PLC_TOOLS/plc_owned.sh" "$PLC_DIR" "$PLC_OWNER" || exit 1
+          # A run that stopped before produce has no lout/: record that, so lout/ is collected (and compared by
+          # cleanup) like the rest instead of failing the collection.
+          [ -d "$PLC_DIR/lout" ] || { mkdir "$PLC_DIR/lout" && echo 'no produced cases: produce did not run' > "$PLC_DIR/lout/ABSENT.txt"; }
       - action: collect_path
         node: controller
         timeout: 5m
