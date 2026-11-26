@@ -550,6 +550,11 @@ func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("v3_op_read: %w", err)
 	}
+	if len(lbas) == 0 {
+		// Nothing to read records no operation and has no outcome: a runner
+		// error, never a silent empty answer.
+		return nil, fmt.Errorf("v3_op_read: no lba to read on %s (lbas %q)", v.Name, requireParam(act, actx, "lbas"))
+	}
 	var last map[string]string
 	for _, lba := range lbas {
 		last, err = record(actx, e, "read", v.Name, map[string]any{"lba": lba}, func() (string, map[string]any) {
