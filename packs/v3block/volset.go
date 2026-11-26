@@ -442,13 +442,39 @@ func (s *vsSet) attach(ctx context.Context, node runner, v *vsVolume, minEpoch u
 	}
 	v.Epoch = epoch
 	host, port, _ := strings.Cut(h.NVMe, ":")
-	if _, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("nvme connect -t tcp -a %s -s %s -n %s", host, port, shellQuote(v.NQN))); err != nil || code != 0 {
-		return outcome{Result: "unknown", Detail: "nvme connect: " + firstLine(stderr)}
+	if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
+		return outcome{Result: "unknown", Detail: why}
 	}
 	if _, why := deviceOf(ctx, node, v.NQN, 20*time.Second); why != "" {
 		return outcome{Result: "unknown", Detail: why}
 	}
 	return outcome{Result: "ok"}
+}
+
+// nvmeConnect connects the kernel NVMe/TCP host to nqn at host:port through
+// the kernel's fabrics interface, the call nvme-cli makes (no tool needed).
+func nvmeConnect(ctx context.Context, node runner, host, port, nqn string) string {
+	if !regexp.MustCompile(`^[0-9.]+$`).MatchString(host) || !regexp.MustCompile(`^[0-9]+$`).MatchString(port) || !regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`).MatchString(nqn) {
+		return "nvme connect: malformed address or nqn"
+	}
+	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s", host, port, nqn)
+	if _, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("printf %%s %s > /dev/nvme-fabrics", shellQuote(opts))); err != nil || code != 0 {
+		return "nvme connect: " + firstLine(stderr)
+	}
+	return ""
+}
+
+// nvmeDisconnect deletes every kernel controller of subsystem nqn through
+// sysfs (what `nvme disconnect -n` does) and confirms none remains.
+func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
+	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ "$(cat "$d/subsysnqn" 2>/dev/null)" = %s ] && echo 1 > "$d/delete_controller"; done; true`, shellQuote(nqn))
+	if _, stderr, code, err := node.RunRoot(ctx, cmd); err != nil || code != 0 {
+		return "nvme disconnect: " + firstLine(stderr)
+	}
+	if _, why := deviceOf(ctx, node, nqn, 500*time.Millisecond); why == "" {
+		return "nvme disconnect: a controller of " + nqn + " remains"
+	}
+	return ""
 }
 
 // deviceOf finds the block device of the connected subsystem nqn in sysfs.
@@ -873,8 +899,8 @@ func v3VsRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	start := time.Now()
 	o := func() outcome {
-		if _, stderr, code, err := node.RunRoot(ctx, "nvme disconnect -n "+shellQuote(v.NQN)); err != nil || code != 0 {
-			return outcome{Result: "unknown", Detail: "nvme disconnect: " + firstLine(stderr)}
+		if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
+			return outcome{Result: "unknown", Detail: why}
 		}
 		if why := stopPID(ctx, node, v.PID, sig, 30*time.Second); why != "" {
 			return outcome{Result: "unknown", Detail: why}
@@ -1054,8 +1080,8 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if v.Moved || v.Cur != 0 {
 			return outcome{Result: "refused", Detail: "already moved"}
 		}
-		if _, stderr, code, err := node.RunRoot(ctx, "nvme disconnect -n "+shellQuote(v.NQN)); err != nil || code != 0 {
-			return outcome{Result: "unknown", Detail: "nvme disconnect: " + firstLine(stderr)}
+		if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
+			return outcome{Result: "unknown", Detail: why}
 		}
 		start := time.Now()
 		src, dst := v.Hosts[0], v.Hosts[1]
@@ -1139,7 +1165,7 @@ func v3VsStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, err
 	}
 	outs := s.forEach(ctx, s.selectVolumes(act), func(ctx context.Context, v *vsVolume) outcome {
-		_, _, _, _ = node.RunRoot(ctx, "nvme disconnect -n "+shellQuote(v.NQN)+" >/dev/null 2>&1")
+		_ = nvmeDisconnect(ctx, node, v.NQN)
 		if v.PID != "" {
 			if why := stopPID(ctx, node, v.PID, "TERM", 15*time.Second); why != "" {
 				if why = stopPID(ctx, node, v.PID, "KILL", 10*time.Second); why != "" {
