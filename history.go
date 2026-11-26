@@ -1,7 +1,9 @@
 package testrunner
 
 // The run history (runner spec S2): one JSONL file per run, a record per
-// operation invocation, per completion, per observation and per fault. The
+// operation invocation, per completion and per observation. A fault is not a
+// kind of its own: it is an operation of the module Runner (its apply and its
+// restore each an invoke/complete pair), so one mechanism records everything. The
 // checkers judge this file alone, after the run.
 //
 // One clock: every record is stamped by THIS process's monotonic clock when
@@ -27,7 +29,6 @@ const (
 	HistoryInvoke   = "invoke"
 	HistoryComplete = "complete"
 	HistoryObserve  = "observe"
-	HistoryFault    = "fault"
 	HistoryEnd      = "end" // the last record, written when the run closes its history
 )
 
@@ -128,10 +129,10 @@ func (h *History) Complete(of uint64, outcome string, result map[string]any) err
 	return nil
 }
 
-// Observe records an observation (HEAD, the authority line, a listing) or,
-// with kind HistoryFault, a fault and its receipt.
+// Observe records an observation (HEAD, the authority line, a listing). An
+// observation decides nothing; the checkers read it.
 func (h *History) Observe(kind string, r HistoryRecord) error {
-	if kind != HistoryObserve && kind != HistoryFault {
+	if kind != HistoryObserve {
 		return fmt.Errorf("history: kind %q is not an observation", kind)
 	}
 	h.mu.Lock()

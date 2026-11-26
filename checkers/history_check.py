@@ -37,7 +37,7 @@ import json
 import sys
 
 ZERO = hashlib.sha256(bytes(4096)).hexdigest()
-KINDS = {'invoke', 'complete', 'observe', 'fault', 'end'}
+KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
 # The master's answer to a create of a deleted name (v1: the name's deletion
 # reservation). C7 requires this reason, not any FailedPrecondition.
 RESERVED_NAME = 'is being deleted or was deleted'
@@ -314,9 +314,9 @@ def c2(recs):
 @unknown_on_overlap
 def c3(recs):
     """Independence after a restore, both ways. A direction is exercised only
-    by an ACKNOWLEDGED (ok) write on one side at a block whose content the
-    other side may not already hold there, followed by an ok read of the SAME
-    block on the other side. A write that cannot tell propagation from
+    by the LATEST write on one side at a block being acknowledged (ok) and of
+    a content the other side may not already hold there, followed by an ok read
+    of the SAME block on the other side; an overwritten value counts for nothing. A write that cannot tell propagation from
     isolation (the other side may hold the same content anyway), an unknown or
     refused write, a read before the write, or a read of another block
     exercises nothing. A direction not exercised is a FAIL: C3 judged nothing."""
@@ -327,7 +327,7 @@ def c3(recs):
     for target, source, snap, at in restores(recs):
         image = images.get(at) or {}
         written = {source: {}, target: {}}   # volume -> lba -> {sha: completion seq} after the restore (ok or unknown)
-        acked = {source: {}, target: {}}     # volume -> lba -> {sha} of ok writes only
+        latest = {source: {}, target: {}}    # volume -> lba -> its LATEST write's value if acknowledged, else None
         exercised = {source: False, target: False}   # keyed by the WRITTEN side
         for ev in events:
             if ev[0] not in ('read', 'write') or ev[2]['seq'] <= at or ev[1].get('volume') not in written:
@@ -336,13 +336,14 @@ def c3(recs):
             other = target if vol == source else source
             if ev[0] == 'write' and ev[2]['outcome'] in ('ok', 'unknown'):
                 written[vol].setdefault(lba, {})[ev[1]['args']['sha256']] = ev[2]['seq']
-                if ev[2]['outcome'] == 'ok':
-                    acked[vol].setdefault(lba, set()).add(ev[1]['args']['sha256'])
+                # Only the latest write counts: an earlier value was overwritten;
+                # an unknown latest write leaves the content ambiguous.
+                latest[vol][lba] = ev[1]['args']['sha256'] if ev[2]['outcome'] == 'ok' else None
             elif ev[0] == 'read':
                 got = (ev[2].get('result') or {}).get('sha256')
                 # ev[3]: what the reading volume may hold here by its own history.
-                if acked[other].get(lba, set()) - ev[3]:
-                    exercised[other] = True   # a distinguishing acknowledged write on the other side came first
+                if latest[other].get(lba) is not None and latest[other][lba] not in ev[3]:
+                    exercised[other] = True   # the other side's latest write is acknowledged and distinguishable here
                 foreign = set(written[other].get(lba, {})) - (image.get(lba, set()) if vol == target else set())
                 if got in foreign:
                     if vol == target:
