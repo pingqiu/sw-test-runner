@@ -76,7 +76,7 @@ func TestThreeNodePinsOneKeyPerNodeBeforeCreate(t *testing.T) {
 			}
 			var v struct {
 				Keys  map[string]map[string]string `json:"node_host_keys"`
-				RunID string                        `json:"run_id"`
+				RunID string                       `json:"run_id"`
 			}
 			if e = json.Unmarshal(b, &v); e != nil || v.RunID == "" {
 				t.Fatalf("host vars %v run %q", e, v.RunID)
