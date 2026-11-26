@@ -132,6 +132,24 @@ func TestParseMoved(t *testing.T) {
 	}
 }
 
+// Every shell-special character is quoted; plain words stay bare.
+func TestShellQuote(t *testing.T) {
+	for _, s := range []string{"v001|r1|0|", "a;b", "a&b", "a>b", "a<b", "(a)", "a*", "a?", "[a]", "~a", "#a", "a!b", "a b", "it's", "$x", "`x`", "a\nb"} {
+		q := shellQuote(s)
+		if !strings.HasPrefix(q, "'") {
+			t.Errorf("%q left bare as %q", s, q)
+		}
+	}
+	for _, s := range []string{"v001", "127.0.0.1:20013", "/root/x-y_z", "nqn.2026-11.io.seaweedfs:vs-v001", "a=b,c@d%e+f"} {
+		if q := shellQuote(s); q != s {
+			t.Errorf("%q quoted as %q", s, q)
+		}
+	}
+	if q := shellQuote("it's"); q != `'it'\''s'` {
+		t.Errorf("embedded quote: %q", q)
+	}
+}
+
 // A write whose outcome is unknown leaves the block's earlier values or the
 // attempted one, nothing else; an acknowledged write leaves only its value.
 func TestUnknownWriteKeepsTheSet(t *testing.T) {

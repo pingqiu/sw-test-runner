@@ -251,8 +251,9 @@ phases:
           set -u; rc=0
           for p in "$WORK"/weed-filer.pid "$WORK"/weed-volume.pid "$WORK"/weed-master.pid; do
             [ -f "$p" ] || continue; pid=$(cat "$p"); kill "$pid" 2>/dev/null
-            for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-            kill -0 "$pid" 2>/dev/null && { echo "pid $pid of $p still running" >&2; rc=1; }
+            for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+            kill -0 "$pid" 2>/dev/null && { kill -9 "$pid"; sleep 1; }
+            kill -0 "$pid" 2>/dev/null && { echo "pid $pid of $p still running after KILL" >&2; rc=1; }
           done
           exit $rc
       - action: exec
