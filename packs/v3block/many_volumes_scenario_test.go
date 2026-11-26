@@ -93,31 +93,43 @@ func TestManyVolumesScenarioWiring(t *testing.T) {
 	}
 }
 
-// A stopped holder's store-direct snapshot delete is cleaned at the shipped
-// hourly maintenance pass. Do not declare a leak before that pass can run.
-func TestManyVolumesDefaultCleaningObservation(t *testing.T) {
+// Every volume needs a holder-routed delete after the moves, including the
+// volume whose earlier snapshot was deleted while stopped. That delete kicks
+// cleaning; the scenario must not wait for the hourly maintenance timer.
+func TestManyVolumesKicksCleaningAfterMoves(t *testing.T) {
 	s, err := tr.ParseFile("../../scenarios/v3block/many-volumes.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	snap, deleted, checked := false, false, false
 	for _, phase := range s.Phases {
+		if phase.Name != "snapshot-delete-and-cleaning" {
+			continue
+		}
 		for _, a := range phase.Actions {
-			if a.Action != "v3_vs_objects" || a.Params["mode"] != "live" {
-				continue
+			if a.Action == "v3_vs_snapshot" && a.Params["name"] == "s2" {
+				snap = true
 			}
-			found = true
-			seconds, err := strconv.Atoi(a.Params["bound_seconds"])
-			if err != nil || seconds <= 3600 {
-				t.Fatalf("default hourly cleaning needs observation beyond a pass: %q", a.Params["bound_seconds"])
+			if a.Action == "v3_vs_snapshot_delete" && a.Params["name"] == "s2" {
+				if !snap {
+					t.Fatal("delete precedes final snapshot")
+				}
+				deleted = true
 			}
-			limit, err := time.ParseDuration(a.Timeout)
-			if err != nil || limit <= time.Duration(seconds)*time.Second {
-				t.Fatalf("action timeout %q must exceed observation %ds", a.Timeout, seconds)
+			if a.Action == "v3_vs_objects" && a.Params["mode"] == "live" {
+				checked = true
+				seconds, err := strconv.Atoi(a.Params["bound_seconds"])
+				if !deleted || err != nil || seconds <= 0 || seconds > 300 {
+					t.Fatalf("need kicked cleaning with <=300s observation: deleted=%v bound=%q", deleted, a.Params["bound_seconds"])
+				}
+				limit, err := time.ParseDuration(a.Timeout)
+				if err != nil || limit <= time.Duration(seconds)*time.Second {
+					t.Fatalf("action timeout %q must exceed observation", a.Timeout)
+				}
 			}
 		}
 	}
-	if !found {
+	if !checked {
 		t.Fatal("missing live-set observation")
 	}
 }

@@ -43,16 +43,16 @@ type vsHost struct {
 }
 
 type vsVolume struct {
-	Name     string            `json:"name"`
-	NQN      string            `json:"nqn"`
-	LayoutID string            `json:"layout_id,omitempty"`
-	Hosts    [2]vsHost         `json:"hosts"` // [0] the first placement, [1] the move target
-	Cur      int               `json:"cur"`   // index of the host serving now
-	PID      string            `json:"pid,omitempty"`
-	Epoch    uint64            `json:"epoch,omitempty"`
+	Name     string              `json:"name"`
+	NQN      string              `json:"nqn"`
+	LayoutID string              `json:"layout_id,omitempty"`
+	Hosts    [2]vsHost           `json:"hosts"` // [0] the first placement, [1] the move target
+	Cur      int                 `json:"cur"`   // index of the host serving now
+	PID      string              `json:"pid,omitempty"`
+	Epoch    uint64              `json:"epoch,omitempty"`
 	Expect   map[string][]string `json:"expect,omitempty"`  // lba -> the sha256 values the block may hold
 	Deleted  map[string]bool     `json:"deleted,omitempty"` // snapshots deleted by an earlier step
-	Moved    bool              `json:"moved,omitempty"`
+	Moved    bool                `json:"moved,omitempty"`
 }
 
 // vsSet is the set and the configuration every action shares.
@@ -721,7 +721,7 @@ func v3VsSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		if v.Deleted[name] {
 			return outcome{Result: "ok", Detail: "deleted by an earlier step"}
 		}
-		r, d := s.snapshotDelete(ctx, node, v, name)
+		r, d := s.snapshotDelete(ctx, node, v, name, true)
 		return outcome{Result: r, Detail: d}
 	})
 	s.save(actx)
@@ -733,12 +733,13 @@ func v3VsSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 // that holder (POST /chunk/snapshot/delete), which runs the cleaning right
 // after it; the product's documentation says a delete through `sw-block ops
 // chunk` (store direct) is cleaned only at the next periodic pass, hourly by
-// default. A stopped volume has no holder, so its delete is store direct.
-func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, name string) (string, string) {
+// default. Only the move probe permits store-direct deletion while stopped;
+// holderOnly never falls back if the serving holder becomes unavailable.
+func (s *vsSet) snapshotDelete(ctx context.Context, node runner, v *vsVolume, name string, holderOnly bool) (string, string) {
 	var stdout string
 	var code int
 	var err error
-	if alive(ctx, node, v.PID) {
+	if holderOnly || alive(ctx, node, v.PID) {
 		body, _ := json.Marshal(map[string]string{"volumeID": v.Name, "name": name})
 		// The body, then the HTTP status alone on the last line.
 		var out string
@@ -1148,7 +1149,7 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		// An operator write of HEAD between the stop and the move: the clean
 		// move must still be admitted (MoveAdmission.WitCleanAfterOpWrite).
 		if opWrite != "" && v.Name == s.Volumes[sel[0]].Name {
-			if r, d := s.snapshotDelete(ctx, node, v, opWrite); r != "ok" {
+			if r, d := s.snapshotDelete(ctx, node, v, opWrite, false); r != "ok" {
 				return outcome{Result: r, Detail: "snapshot delete between the stop and the move: " + d}
 			}
 		}

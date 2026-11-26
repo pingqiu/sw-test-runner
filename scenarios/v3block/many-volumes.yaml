@@ -215,17 +215,24 @@ phases:
 
   - name: snapshot-delete-and-cleaning
     actions:
+      # All holders now serve, including the moved one whose s1 was deleted
+      # store-direct. A fresh holder-routed delete kicks cleaning on every volume.
+      - action: v3_vs_snapshot
+        node: host
+        name: s2
       - action: v3_vs_snapshot_delete
         node: host
         name: s1
+      - action: v3_vs_snapshot_delete
+        node: host
+        name: s2
       - action: v3_vs_objects
         node: host
         mode: live
         save_as: objects_after
-        # The first moved volume lost s1 while stopped (store-direct delete).
-        # Keep default hourly cleaning; observe through a pass plus 5 min.
-        bound_seconds: "3900"
-        timeout: 70m
+        # A kicked pass must reclaim within five minutes; otherwise FAIL.
+        bound_seconds: "300"
+        timeout: 6m
       - action: v3_vs_verify
         node: host
       - action: emit_provenance
