@@ -30,16 +30,22 @@ code is 0 only when every checker passes.
   C3  independence after a restore, both ways: no write to the source made
       after the snapshot shows in the target, and no write to the target shows
       in the source
-  C4  epoch fencing, from the holder each write and read went through and its
-      status epoch sampled before the invoke and after the completion (the
-      operation's possible epochs: both, and all between, "either" when they
-      differ), and the master's line (replica, epoch) per volume from the
-      observations. FAIL: two acknowledged writes of one volume through
-      different holders at the same epoch (an "either" write only when every
-      epoch it may have had is taken by another holder); an acknowledged
-      write all of whose possible epochs are below a line observed before its
-      invoke. A read answered so is a "stale read", reported on PASS. FAIL
-      (not exercised) when no acknowledged write carries both samples
+  C4  epoch fencing, from the holder each write and read went through, its
+      status epoch and process identity sampled before the invoke and after
+      the completion (the operation's possible epochs: both, and all
+      between, "either" when they differ), the master's line (replica,
+      epoch) per volume from the observations, and each volume's
+      acknowledgement mode from the header. FAIL, for acknowledged writes:
+      two holders at one epoch (an "either" write only when every epoch it
+      may have had is taken by another holder); every possible epoch below a
+      line observed before the invoke; a single-epoch write through a
+      replica other than the one a line at that epoch names; a write through
+      a holder below a successor whose write completed before it (a stale
+      primary; reported, not failed, on a best-effort volume). FAIL: an epoch
+      going down within one operation with the same process identity. A read
+      below the line is a "stale read", reported on PASS. FAIL (not
+      exercised) unless a line changed epoch with acknowledged writes on both
+      sides
   C5  a refused operation changed nothing: every completed operation with
       outcome refused (any verb) is judged between two observations of its
       volume (records of kind and verb observe; the generator's gen_* records
@@ -1480,19 +1486,23 @@ def mo(recs):
 
 
 # C4, epoch fencing. The record shape (the product reader reads it:
-# holder_sample and master_lines):
-#   write or read invoke   args.holder   = {server, replica, epoch_before}
-#   its complete           result.holder = {epoch_after}
+# holder_sample, master_lines and ack_modes):
+#   write or read invoke   args.holder   = {server, replica, epoch_before, pid, start}
+#   its complete           result.holder = {epoch_after, pid, start}
 #   observe record         result.line   = {replica, epoch}, the master's line for
 #                          the record's volume (a healthy record: result.lines,
 #                          {volume: {replica, epoch}}); the block reader also
-#                          derives it from an observation's workspace answer.
-# Runner side: sample the holder's own status epoch immediately before
-# writing the invoke record and immediately after the completion returns,
-# on the history's one clock; sample the holder the operation actually goes
-# through (the server and replica the guest's path names), not the master's
-# view of it. Observe the line after every operation that can change it
-# (attach, move, a holder kill or restart) and at every healthy point.
+#                          derives it from an observation's workspace answer
+#   the run's header       result.ack_modes = {volume: acknowledging | best_effort}
+# Runner side: sample the holder's own status epoch and its process identity
+# (pid and start time) immediately before writing the invoke record and
+# immediately after the completion returns, on the history's one clock;
+# sample the holder the operation actually goes through (the server and
+# replica the guest's path names), not the master's view of it. Observe the
+# line after every operation that can change it (attach, move, a holder kill
+# or restart) and at every healthy point. Write each volume's
+# acknowledgement mode in the header; a volume with none is judged as
+# acknowledging, the strict default.
 #
 # A holder is (server, replica). An operation's epoch is the set of epochs
 # it may have been served at: [min, max] of its two samples ("either" when
@@ -1501,15 +1511,20 @@ def mo(recs):
 # EVERY epoch it may have been served at breaks a rule.
 
 def c4(recs):
-    """Epoch fencing. FAIL when (1) acknowledged writes of one volume went
-    through different holders at the same epoch: a write is blamed when every
-    epoch it may have been served at was also acknowledged, at that single
-    epoch, through another holder; or (2) an acknowledged write went through a
-    holder whose every possible epoch is below a line epoch observed before the
-    write's invoke. A read answered ok by a holder whose every possible
-    epoch is below the line observed before its invoke is a "stale read",
-    reported, not failed. FAIL (not exercised) when no acknowledged write
-    carries both samples."""
+    """Epoch fencing. FAIL when, for acknowledged writes of one volume:
+    (1) two went through different holders at the same epoch (a write with
+    two possible epochs only when every one was taken by another holder);
+    (2) one's every possible epoch is below a line observed before its
+    invoke; (3) one with a single epoch went through a replica other than
+    the one a line at that epoch names, observed at any time; (4) one went
+    through a holder whose every possible epoch is below the lowest epoch of
+    a write through another holder completed before its invoke (a stale
+    primary): FAIL in an acknowledging volume, reported and counted in a
+    best-effort one. Also FAIL: a holder epoch decreasing within one
+    operation with the same process identity. A read answered ok below an
+    observed line is a "stale read", reported, not failed. FAIL (not
+    exercised) unless a volume's line changed epoch with acknowledged
+    writes on both sides of the change."""
     lines = []   # (seq, volume, replica, epoch), in file order
     for r in recs:
         if r['kind'] == 'observe':
@@ -1526,8 +1541,12 @@ def c4(recs):
                 best = (ep, rep, s)
         return best
 
-    f, notes, stale = [], [], []
-    writes = {}   # volume -> [(invoke, holder, lo, hi)] acknowledged and judged
+    def at_epoch(lo, hi):
+        return lo if lo == hi else 'either %d..%d' % (lo, hi)
+
+    modes, notes = PRODUCT.ack_modes(recs)
+    f, stale, stale_primary = [], [], []
+    writes = {}   # volume -> [(invoke, complete, holder, lo, hi)] acknowledged and judged
     either = skipped = 0
     for inv, comp in operations(recs):
         if inv['verb'] not in ('write', 'read'):
@@ -1539,17 +1558,23 @@ def c4(recs):
         if got[0] == 'bad':
             notes.append('not judged: %s: %s' % (name, got[1]))
             continue
+        _, holder, before, after, id_before, id_after = got
+        if after is not None and after < before:
+            if id_before is not None and id_before == id_after:
+                f.append('holder epoch went down within one operation: %s through %s/%s, epoch %d -> %d, same process %r' % (
+                    name, holder[0], holder[1], before, after, id_before))
+            else:
+                notes.append('%s: the holder epoch went down while it was open (%d -> %d), process %r -> %r: %s' % (
+                    name, before, after, id_before, id_after,
+                    'another process' if id_before is not None and id_after is not None else 'identity not recorded'))
         if comp is None or comp['outcome'] != 'ok':
-            skipped += 1   # not acknowledged: neither rule speaks of it
+            skipped += 1   # not acknowledged: no rule speaks of it
             continue
-        _, holder, before, after = got
         if after is None:
             notes.append('not judged: %s: answered ok without its epoch after the completion' % name)
             continue
-        if after < before:
-            notes.append('%s: the holder epoch went down while it was open (%d -> %d)' % (name, before, after))
         lo, hi = min(before, after), max(before, after)
-        who = '%s/%s at epoch %s' % (holder[0], holder[1], lo if lo == hi else 'either %d..%d' % (lo, hi))
+        who = '%s/%s at epoch %s' % (holder[0], holder[1], at_epoch(lo, hi))
         line = fence(inv.get('volume'), inv['seq'])
         if inv['verb'] == 'read':
             if line and line[0] > hi:
@@ -1560,20 +1585,20 @@ def c4(recs):
         if line and line[0] > hi:
             f.append('write acknowledged below the line: %s through %s, the line %s@%d observed before its invoke (seq %d)' % (
                 name, who, line[1], line[0], line[2]))
-        writes.setdefault(inv.get('volume'), []).append((inv, holder, lo, hi))
+        writes.setdefault(inv.get('volume'), []).append((inv, comp, holder, lo, hi))
     judged = sum(len(w) for w in writes.values())
-    if not judged:
-        return verdict(['no acknowledged write carries holder and epoch samples (args.holder, result.holder): C4 not exercised'] + notes)
+
     for vol, ws in sorted(writes.items()):
+        # Rule 1: one holder per epoch.
         at = {}   # epoch -> {holder: first write seq} of writes with one possible epoch
-        for inv, holder, lo, hi in ws:
+        for inv, comp, holder, lo, hi in ws:
             if lo == hi:
                 at.setdefault(lo, {}).setdefault(holder, inv['seq'])
         for ep, hs in sorted(at.items()):
             if len(hs) > 1:
                 f.append('two holders at one epoch: %s epoch %d acknowledged writes through %s' % (
                     vol, ep, ', '.join('%s/%s (write seq %d)' % (h[0], h[1], s) for h, s in sorted(hs.items(), key=lambda x: x[1]))))
-        for inv, holder, lo, hi in ws:
+        for inv, comp, holder, lo, hi in ws:
             if lo == hi or hi - lo + 1 > len(at):
                 continue
             others = []
@@ -1585,11 +1610,67 @@ def c4(recs):
             else:
                 f.append('two holders at one epoch: write seq %d %s through %s/%s at epoch either %d..%d, every epoch taken by another holder: %s' % (
                     inv['seq'], vol, holder[0], holder[1], lo, hi, '; '.join(others)))
+        # Rule 3: a line at an epoch names one replica, whenever it was observed.
+        named = {}   # epoch -> {replica: first observation seq}
+        for s, v, rep, ep in lines:
+            if v == vol:
+                named.setdefault(ep, {}).setdefault(rep, s)
+        for ep, reps in sorted(named.items()):
+            if len(reps) > 1:
+                notes.append('%s: the lines name %d replicas at epoch %d: %s' % (
+                    vol, len(reps), ep, ', '.join('%s (seq %d)' % x for x in sorted(reps.items(), key=lambda x: x[1]))))
+        for inv, comp, holder, lo, hi in ws:
+            if lo != hi:
+                continue
+            for rep, s in sorted(named.get(lo, {}).items(), key=lambda x: x[1]):
+                if rep != holder[1]:
+                    f.append('write through a replica the line does not name: write seq %d %s through %s/%s at epoch %d, the line at epoch %d names %s (seq %d)' % (
+                        inv['seq'], vol, holder[0], holder[1], lo, lo, rep, s))
+        # Rule 4: no write through an older holder after its successor's write completed.
+        mode = modes.get(vol)
+        if mode is None:
+            notes.append('%s: no acknowledgement mode in the header: judged as acknowledging (the strict default)' % vol)
+        for inv, comp, holder, lo, hi in ws:
+            succ = [(c2['seq'], i2, h2, lo2) for i2, c2, h2, lo2, hi2 in ws
+                    if h2 != holder and c2['seq'] < inv['seq'] and lo2 > hi]
+            if not succ:
+                continue
+            cs, i2, h2, lo2 = min(succ, key=lambda x: x[0])
+            msg = 'stale primary write: write seq %d %s through %s/%s at epoch %s, after write seq %d through %s/%s at epoch %d completed (seq %d)' % (
+                inv['seq'], vol, holder[0], holder[1], at_epoch(lo, hi), i2['seq'], h2[0], h2[1], lo2, cs)
+            stale_primary.append(msg)
+            if mode == 'best_effort':
+                notes.append(msg + ': best-effort volume, reported')
+            else:
+                f.append(msg)
+
+    # Exercised: a volume's line changed epoch, with acknowledged writes on
+    # both sides of the change (one completed before the observation that
+    # shows the new epoch, one invoked after it).
+    changes = 0
+    for vol in sorted({v for _, v, _, _ in lines}):
+        prev, ws = None, writes.get(vol, [])
+        for s, v, rep, ep in lines:
+            if v != vol:
+                continue
+            if prev is not None and ep != prev:
+                if any(c['seq'] < s for _, c, _, _, _ in ws) and any(i['seq'] > s for i, _, _, _, _ in ws):
+                    changes += 1
+            prev = ep
+    counts = ['either: %d of %d acknowledged writes' % (either, judged),
+              'not acknowledged: %d' % skipped,
+              'stale reads: %d' % len(stale),
+              'stale primary writes: %d' % len(stale_primary),
+              'line changes with writes on both sides: %d' % changes]
     if not lines:
-        notes.append('no line of the master observed: rule 2 and stale reads not judged')
-    counts = ['writes judged: %d (either: %d, not acknowledged: %d)' % (judged, either, skipped), 'stale reads: %d' % len(stale)]
-    if f:
-        return {'verdict': 'FAIL', 'findings': f + stale + notes + counts}
+        notes.append('no line of the master observed: rules 2 and 3 and stale reads not judged')
+    unexercised = []
+    if not judged:
+        unexercised.append('no acknowledged write carries holder and epoch samples (args.holder, result.holder): C4 not exercised')
+    elif not changes:
+        unexercised.append('no line changed epoch with acknowledged writes on both sides of the change: C4 not exercised')
+    if f or unexercised:
+        return {'verdict': 'FAIL', 'findings': f + unexercised + stale + notes + counts}
     return {'verdict': 'PASS', 'findings': stale + notes + counts}
 
 
