@@ -283,30 +283,6 @@ type setRunner interface {
 	RunRoot(ctx context.Context, cmd string) (string, string, int, error)
 }
 
-// v3ctlAnswer is v3ctl's JSON answer.
-type setV3ctlAnswer struct {
-	Outcome    string `json:"outcome"`
-	Volume     string `json:"volume"`
-	LayoutID   string `json:"layout_id"`
-	StoreReady bool   `json:"store_ready"`
-	CallNs     int64  `json:"call_ns"`
-	Error      string `json:"error"`
-}
-
-// parseV3ctl maps v3ctl's exit code and answer to an outcome. The exit code
-// and the answer must agree; anything else is unknown.
-func setParseV3ctl(stdout string, code int, volume string) (setV3ctlAnswer, string) {
-	var a setV3ctlAnswer
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil || a.Volume != volume {
-		return a, "unknown"
-	}
-	want := map[string]int{"ok": 0, "refused": 1, "unknown": 3}[a.Outcome]
-	if a.Outcome == "" || want != code || (a.Outcome == "ok" && len(a.LayoutID) != 32) {
-		return a, "unknown"
-	}
-	return a, a.Outcome
-}
-
 // v3VsCreate creates every volume with one timed CreateVolume call each.
 // The latency is the call alone, as v3ctl measures it.
 func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
@@ -320,7 +296,7 @@ func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		if err != nil {
 			return outcome{Result: "unknown", Detail: err.Error()}
 		}
-		a, r := setParseV3ctl(stdout, code, v.Name)
+		a, r := parseV3ctl(stdout, code, v.Name)
 		if r != "ok" {
 			return outcome{Result: r, Detail: setFirstLine(a.Error + " " + stderr)}
 		}
@@ -508,7 +484,7 @@ func v3VsAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			if err != nil {
 				return outcome{Result: "unknown", Detail: err.Error()}
 			}
-			a, r := setParseV3ctl(stdout, code, v.Name)
+			a, r := parseV3ctl(stdout, code, v.Name)
 			if r != "ok" {
 				return outcome{Result: r, Detail: "resolve: " + a.Error}
 			}

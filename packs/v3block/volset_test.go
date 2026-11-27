@@ -32,8 +32,13 @@ func TestVolumeSetParseV3ctl(t *testing.T) {
 		{"another volume", `{"outcome":"ok","volume":"v002","layout_id":"` + id + `"}`, 0, "unknown"},
 		{"no answer", ``, 0, "unknown"},
 		{"no outcome", `{"volume":"v001"}`, 0, "unknown"},
+		// Red controls: an outcome outside the three is unknown, whatever exit
+		// it comes with.
+		{"an outcome outside the three, exit 0", `{"outcome":"maybe","volume":"v001","layout_id":"` + id + `"}`, 0, "unknown"},
+		{"an outcome outside the three, exit 1", `{"outcome":"maybe","volume":"v001"}`, 1, "unknown"},
+		{"refused answer, unknown's exit", `{"outcome":"refused","volume":"v001"}`, 3, "unknown"},
 	} {
-		if _, got := setParseV3ctl(c.out, c.code, "v001"); got != c.want {
+		if _, got := parseV3ctl(c.out, c.code, "v001"); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
