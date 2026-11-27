@@ -19,7 +19,8 @@ package randomrun
 //     after every negative operation and every refusal, so "a refused
 //     operation changed nothing" is judged from the observations around it;
 //   - after the last operation (in a fault run, after the final healthy
-//     point), the end-of-run sweep: an observe record "gen_sweep" listing the
+//     point), the model's coverage tail (Model.Tail: gen_steps forced
+//     "tail"), then the end-of-run sweep: an observe record "gen_sweep" listing the
 //     model's sweep operations, then each through Exec (reads of every block
 //     with acknowledged content, and the last observations the checkers need);
 //   - last, an observe record "gen_coverage" (also written to the bundle as
@@ -317,6 +318,23 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 	}
 	if err := g.feed(actx.History); err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name, err)
+	}
+	// The coverage tail: forced operations decided from the state, each
+	// recorded as a gen_step ("forced": "tail") and learnt. Not after a run
+	// stopped at a false healthy point: nothing more against dead volumes.
+	for g.Ended() != "unhealthy" {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		outcome, err := r.Step(ctx, actx, o)
+		if err != nil {
+			return nil, fmt.Errorf("%s: tail operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
+		}
+		g.Learn(o, outcome)
+		if err := g.feed(actx.History); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
 	}
 	if err := r.sweep(ctx, actx, g.m.Sweep()); err != nil {
 		return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)

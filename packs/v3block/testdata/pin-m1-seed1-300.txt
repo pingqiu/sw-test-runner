@@ -1448,6 +1448,22 @@ complete  write g16 ok null null
 observe gen gen_step g16  null {"action":"v3_op_read","opno":333,"params":{"lbas":"6","volume":"g16"}}
 invoke  read g16  null null
 complete  read g16 ok null null
+observe gen gen_step g19  null {"action":"v3_op_delete","forced":"tail","opno":334,"params":{"volume":"g19"}}
+invoke  delete g19  null null
+complete  delete g19 ok null null
+observe gen gen_step g2  null {"action":"v3_op_delete","forced":"tail","opno":335,"params":{"volume":"g2"}}
+invoke  delete g2  null null
+complete  delete g2 ok null null
+observe gen gen_step g19  null {"action":"v3_op_observe","forced":"tail","opno":336,"params":{"volume":"g19"}}
+observe  observe g19  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g2  null {"action":"v3_op_observe","forced":"tail","opno":337,"params":{"volume":"g2"}}
+observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g2  null {"action":"v3_op_create","forced":"tail","negative":"create a deleted name","opno":338,"params":{"expect":"refused","volume":"g2"}}
+observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  create g2  null null
+complete  create g2 refused null null
+observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g3"},"volume":"g3"},{"action":"v3_op_observe","params":{"volume":"g4"},"volume":"g4"},{"action":"v3_op_observe","params":{"volume":"g5"},"volume":"g5"},{"action":"v3_op_observe","params":{"volume":"g6"},"volume":"g6"},{"action":"v3_op_observe","params":{"volume":"g7"},"volume":"g7"},{"action":"v3_op_observe","params":{"volume":"g8"},"volume":"g8"},{"action":"v3_op_observe","params":{"volume":"g9"},"volume":"g9"},{"action":"v3_op_observe","params":{"volume":"g10"},"volume":"g10"},{"action":"v3_op_observe","params":{"volume":"g11"},"volume":"g11"},{"action":"v3_op_observe","params":{"volume":"g12"},"volume":"g12"},{"action":"v3_op_observe","params":{"volume":"g13"},"volume":"g13"},{"action":"v3_op_observe","params":{"volume":"g14"},"volume":"g14"},{"action":"v3_op_observe","params":{"volume":"g15"},"volume":"g15"},{"action":"v3_op_read","params":{"lbas":"0 1 2 4","volume":"g16"},"volume":"g16"},{"action":"v3_op_read","params":{"lbas":"5 6 7","volume":"g16"},"volume":"g16"},{"action":"v3_op_observe","params":{"volume":"g16"},"volume":"g16"},{"action":"v3_op_observe","params":{"volume":"g17"},"volume":"g17"},{"action":"v3_op_observe","params":{"volume":"g18"},"volume":"g18"},{"action":"v3_op_observe","params":{"volume":"g19"},"volume":"g19"}]}
 observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
@@ -1472,5 +1488,5 @@ observe  observe g16  null {"workspace":{"exit":0,"text":["lease state: expired"
 observe  observe g17  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g18  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g19  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_coverage   null {"actions":{"v3_op_attach":14,"v3_op_create":22,"v3_op_delete":21,"v3_op_observe":10,"v3_op_read":109,"v3_op_release":4,"v3_op_restore":9,"v3_op_snapshot":14,"v3_op_snapshot_delete":7,"v3_op_stop":13,"v3_op_write":110},"cells":{"v3_op_attach|created":14,"v3_op_create|deleted":8,"v3_op_create|unborn":14,"v3_op_delete|created":4,"v3_op_delete|serving":8,"v3_op_delete|stopped":9,"v3_op_observe|stopped":10,"v3_op_read|serving":109,"v3_op_release|serving":1,"v3_op_release|stopped":3,"v3_op_restore|serving":9,"v3_op_snapshot_delete|serving":6,"v3_op_snapshot_delete|stopped":1,"v3_op_snapshot|serving":14,"v3_op_stop|serving":13,"v3_op_write|serving":110},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving"],"drawn":300,"ended":"ops","estimated_ops_per_hour":642,"forced":33,"proposed":333}
+observe gen gen_coverage   null {"actions":{"v3_op_attach":14,"v3_op_create":23,"v3_op_delete":23,"v3_op_observe":12,"v3_op_read":109,"v3_op_release":4,"v3_op_restore":9,"v3_op_snapshot":14,"v3_op_snapshot_delete":7,"v3_op_stop":13,"v3_op_write":110},"cells":{"v3_op_attach|created":14,"v3_op_create|deleted":9,"v3_op_create|unborn":14,"v3_op_delete|created":5,"v3_op_delete|serving":8,"v3_op_delete|stopped":10,"v3_op_observe|deleted":2,"v3_op_observe|stopped":10,"v3_op_read|serving":109,"v3_op_release|serving":1,"v3_op_release|stopped":3,"v3_op_restore|serving":9,"v3_op_snapshot_delete|serving":6,"v3_op_snapshot_delete|stopped":1,"v3_op_snapshot|serving":14,"v3_op_stop|serving":13,"v3_op_write|serving":110},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving"],"drawn":300,"ended":"ops","estimated_ops_per_hour":608,"forced":38,"ordinary_never_ran":["v3_op_move"],"proposed":338}
 end     null {"open_invocations":0}

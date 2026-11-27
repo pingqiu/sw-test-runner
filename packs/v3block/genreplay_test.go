@@ -150,6 +150,25 @@ func TestGenRunSweepsAtTheEndAndTheReplayReExecutesIt(t *testing.T) {
 	if lastVerb(t, a, "gen_coverage").Result["drawn"] != float64(300) {
 		t.Fatal("the sweep counted as proposals")
 	}
+	// The coverage tail: its steps come after every drawn one and before the
+	// sweep, and its last is the create of a deleted name.
+	var kinds []string
+	for _, r := range records(t, a) {
+		if r.Verb == "gen_step" {
+			f, _ := r.Result["forced"].(string)
+			kinds = append(kinds, f+"|"+r.Result["action"].(string))
+		}
+		if r.Verb == "gen_sweep" {
+			break
+		}
+	}
+	n := 0
+	for n < len(kinds) && strings.HasPrefix(kinds[len(kinds)-1-n], "tail|") {
+		n++
+	}
+	if n == 0 || kinds[len(kinds)-1] != "tail|v3_op_create" {
+		t.Fatalf("the steps before the sweep end %q", kinds[max(0, len(kinds)-6):])
+	}
 	out, b, err := replayInto(t, a)
 	if err != nil || out["value"] != "match" {
 		t.Fatalf("%v %v", out, err)

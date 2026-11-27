@@ -129,6 +129,11 @@ type Model interface {
 	// OutageWrites lists the writes of a short master outage after operation
 	// after: one on every serving subject. Learnt like any outcome.
 	OutageWrites(after int) []Op
+	// Tail is the next operation of the coverage tail, run after the last
+	// operation (and a fault run's final healthy point) and before the sweep:
+	// deterministic from the state, each learnt before the next is asked
+	// for; false when the tail is done.
+	Tail() (Op, bool)
 	// Sweep lists the operations of the end-of-run sweep, in order: reads of
 	// every block with acknowledged content of each live subject, and one
 	// observation of each subject the checkers need to see last (deleted ones

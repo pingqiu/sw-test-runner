@@ -217,6 +217,15 @@ type blockModel struct {
 	vols   map[string]*genVol
 	order  []string // pool order
 	drawn  int      // drawn (not forced) operations learnt
+	tail   tailState
+}
+
+// tailState is where the coverage tail stands (Tail).
+type tailState struct {
+	stage    int
+	observe  []string // volumes to observe next
+	deleted  []string // volumes the tail deleted
+	stoppedC string   // the stopped candidate observed for its lease
 }
 
 var _ randomrun.Model = (*blockModel)(nil)
@@ -809,6 +818,69 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 
 // VerbHealthyRecord is the healthy record's verb (randomrun's contract).
 const VerbHealthyRecord = randomrun.VerbHealthy
+
+// Tail is the coverage tail (C7), deterministic from the state, one
+// operation at a time:
+//  1. delete one created volume that was never attached (pool order), if any;
+//  2. delete one stopped volume without targets whose observation shows its
+//     lease expired; when none does yet, observe the first candidate once
+//     and delete it if that observation shows it expired;
+//  3. observe each volume the tail deleted;
+//  4. create a deleted name (the first in pool order): a negative, refused.
+func (m *blockModel) Tail() (GenOp, bool) {
+	t := &m.tail
+	for {
+		switch t.stage {
+		case 0:
+			t.stage = 1
+			if n := m.firstName(func(v *genVol) bool {
+				return v.state == stCreated && !v.held[0] && !v.held[1] && len(v.targets) == 0 && v.source == ""
+			}); n != "" {
+				t.deleted = append(t.deleted, n)
+				return op("v3_op_delete", n), true
+			}
+		case 1:
+			stopped := func(v *genVol) bool { return v.state == stStopped && len(v.targets) == 0 }
+			if n := m.firstName(func(v *genVol) bool { return stopped(v) && v.leaseLapsed }); n != "" {
+				t.stage = 3
+				t.deleted = append(t.deleted, n)
+				return op("v3_op_delete", n), true
+			}
+			t.stage = 3
+			if n := m.firstName(stopped); n != "" {
+				t.stage, t.stoppedC = 2, n
+				return m.Observe(n), true
+			}
+		case 2:
+			t.stage = 3
+			if v := m.vols[t.stoppedC]; v.state == stStopped && v.leaseLapsed {
+				t.deleted = append(t.deleted, v.name)
+				return op("v3_op_delete", v.name), true
+			}
+		case 3:
+			t.stage, t.observe = 4, nil
+			for _, n := range t.deleted {
+				if m.vols[n].state == stDeleted {
+					t.observe = append(t.observe, n)
+				}
+			}
+		case 4:
+			if len(t.observe) > 0 {
+				n := t.observe[0]
+				t.observe = t.observe[1:]
+				return m.Observe(n), true
+			}
+			t.stage = 5
+			if n := m.firstName(func(v *genVol) bool { return v.state == stDeleted }); n != "" {
+				o := op("v3_op_create", n)
+				o.Params["expect"], o.Negative = "refused", limCreateDeleted
+				return o, true
+			}
+		default:
+			return GenOp{}, false
+		}
+	}
+}
 
 // Driver side: how a block proposal is executed.
 

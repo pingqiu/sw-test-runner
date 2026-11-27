@@ -1629,6 +1629,22 @@ observe gen gen_step g46  null {"action":"v3_op_read","opno":309,"params":{"lbas
 invoke  read g46  null null
 complete  read g46 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+observe gen gen_step g48  null {"action":"v3_op_delete","forced":"tail","opno":310,"params":{"volume":"g48"}}
+invoke  delete g48  null null
+complete  delete g48 ok null null
+observe gen gen_step g4  null {"action":"v3_op_delete","forced":"tail","opno":311,"params":{"volume":"g4"}}
+invoke  delete g4  null null
+complete  delete g4 ok null null
+observe gen gen_step g48  null {"action":"v3_op_observe","forced":"tail","opno":312,"params":{"volume":"g48"}}
+observe  observe g48  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g4  null {"action":"v3_op_observe","forced":"tail","opno":313,"params":{"volume":"g4"}}
+observe  observe g4  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g4  null {"action":"v3_op_create","forced":"tail","negative":"create a deleted name","opno":314,"params":{"expect":"refused","volume":"g4"}}
+observe  observe g4  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g4  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  create g4  null null
+complete  create g4 refused null null
+observe  observe g4  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g4"},"volume":"g4"},{"action":"v3_op_observe","params":{"volume":"g6"},"volume":"g6"},{"action":"v3_op_observe","params":{"volume":"g12"},"volume":"g12"},{"action":"v3_op_observe","params":{"volume":"g26"},"volume":"g26"},{"action":"v3_op_observe","params":{"volume":"g41"},"volume":"g41"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g46"},"volume":"g46"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g46"},"volume":"g46"},{"action":"v3_op_observe","params":{"volume":"g46"},"volume":"g46"},{"action":"v3_op_observe","params":{"volume":"g47"},"volume":"g47"},{"action":"v3_op_observe","params":{"volume":"g48"},"volume":"g48"}]}
 observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
@@ -1644,5 +1660,5 @@ complete  read g46 ok null null
 observe  observe g46  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g47  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g48  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_coverage   null {"actions":{"v3_op_attach":15,"v3_op_create":47,"v3_op_delete":25,"v3_op_observe":3,"v3_op_read":85,"v3_op_release":8,"v3_op_restore":7,"v3_op_snapshot":13,"v3_op_snapshot_delete":10,"v3_op_stop":4,"v3_op_write":92},"cells":{"v3_op_attach|created":15,"v3_op_create|deleted":1,"v3_op_create|unborn":46,"v3_op_delete|serving":16,"v3_op_delete|stopped":9,"v3_op_observe|stopped":3,"v3_op_read|serving":85,"v3_op_release|serving":1,"v3_op_release|stopped":7,"v3_op_restore|serving":7,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":6,"v3_op_snapshot|serving":13,"v3_op_stop|serving":4,"v3_op_write|serving":92},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|created","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","while_down|v3_op_move","while_down|v3_op_stop"],"drawn":300,"ended":"ops","estimated_ops_per_hour":526,"fault_cells":{"kill|blockvolume:0":10,"master_outage|blockmaster":8,"restart|blockvolume:0":10,"while_down|v3_op_attach":4,"while_down|v3_op_create":31,"while_down|v3_op_delete":8,"while_down|v3_op_read":22,"while_down|v3_op_release":2,"while_down|v3_op_restore":2,"while_down|v3_op_snapshot":3,"while_down|v3_op_snapshot_delete":2,"while_down|v3_op_write":26},"forced":9,"proposed":309}
+observe gen gen_coverage   null {"actions":{"v3_op_attach":15,"v3_op_create":48,"v3_op_delete":27,"v3_op_observe":5,"v3_op_read":85,"v3_op_release":8,"v3_op_restore":7,"v3_op_snapshot":13,"v3_op_snapshot_delete":10,"v3_op_stop":4,"v3_op_write":92},"cells":{"v3_op_attach|created":15,"v3_op_create|deleted":2,"v3_op_create|unborn":46,"v3_op_delete|created":1,"v3_op_delete|serving":16,"v3_op_delete|stopped":10,"v3_op_observe|deleted":2,"v3_op_observe|stopped":3,"v3_op_read|serving":85,"v3_op_release|serving":1,"v3_op_release|stopped":7,"v3_op_restore|serving":7,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":6,"v3_op_snapshot|serving":13,"v3_op_stop|serving":4,"v3_op_write|serving":92},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","while_down|v3_op_move","while_down|v3_op_stop"],"drawn":300,"ended":"ops","estimated_ops_per_hour":502,"fault_cells":{"kill|blockvolume:0":10,"master_outage|blockmaster":8,"restart|blockvolume:0":10,"while_down|v3_op_attach":4,"while_down|v3_op_create":31,"while_down|v3_op_delete":8,"while_down|v3_op_read":22,"while_down|v3_op_release":2,"while_down|v3_op_restore":2,"while_down|v3_op_snapshot":3,"while_down|v3_op_snapshot_delete":2,"while_down|v3_op_write":26},"forced":14,"ordinary_never_ran":["v3_op_move"],"proposed":314}
 end     null {"open_invocations":0}

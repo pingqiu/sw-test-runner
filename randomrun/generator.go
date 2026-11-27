@@ -56,9 +56,22 @@ type Generator struct {
 	drawn  int            // operations drawn (the budget counts these only)
 	forced int            // forced operations proposed (Model.Before, Model.Due, the tail)
 	queue  []queued
-	// ordinary counts the operations proposed as ordinary (not negative, not
-	// forced), per action.
+	// ordinary counts the operations proposed as ordinary (not negative,
+	// drawn or forced), per action.
 	ordinary map[string]int
+}
+
+// Tail proposes the next operation of the coverage tail (Model.Tail), or
+// false when it is done. Forced, outside the budget.
+func (g *Generator) Tail() (Op, bool) {
+	o, ok := g.m.Tail()
+	if !ok {
+		return Op{}, false
+	}
+	if o.Forced == "" {
+		o.Forced = "tail"
+	}
+	return g.propose(o), true
 }
 
 // feed hands the model every observe record appended to the history since
@@ -332,7 +345,8 @@ func (g *Generator) propose(o Op) Op {
 	g.counts[o.Action]++
 	if o.Forced != "" {
 		g.forced++
-	} else if o.Negative == "" {
+	}
+	if o.Negative == "" {
 		g.ordinary[o.Action]++
 	}
 	if g.down != "" {
@@ -396,8 +410,17 @@ func (g *Generator) Coverage() map[string]any {
 	if est > 0 {
 		perHour = float64(g.no) * 3600 / est
 	}
+	// The actions of the run's weights never proposed as ordinary (drawn or
+	// forced, not negative).
+	neverRan := []string{}
+	for a, w := range g.cfg.Weights {
+		if w > 0 && g.ordinary[a] == 0 {
+			neverRan = append(neverRan, a)
+		}
+	}
+	slices.Sort(neverRan)
 	cov := map[string]any{"proposed": g.no, "drawn": g.drawn, "forced": g.forced, "ended": g.ended, "actions": counts, "cells": cells,
-		"cells_never_reached": missed, "estimated_ops_per_hour": int(perHour)}
+		"cells_never_reached": missed, "ordinary_never_ran": neverRan, "estimated_ops_per_hour": int(perHour)}
 	if fcells != nil {
 		cov["fault_cells"] = fcells
 	}

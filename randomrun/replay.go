@@ -294,6 +294,13 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		fr.kills = sc.Kills
 		fr.stopOnUnhealthy = true
 	}
+	// The coverage tail's steps ran after the run's end (the final healthy
+	// point): the replay runs them there too.
+	var tail []ReplayStep
+	for len(steps) > 0 && steps[len(steps)-1].Op.Forced == "tail" {
+		tail = append([]ReplayStep{steps[len(steps)-1]}, tail...)
+		steps = steps[:len(steps)-1]
+	}
 	diffs := []replayDiff{}
 	for i, st := range steps {
 		if ctx.Err() != nil {
@@ -332,6 +339,21 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 			return nil, fmt.Errorf("%s: end of run: %w", r.Name, err)
 		}
 	}
+	for _, st := range tail {
+		o := st.Op
+		replayed, err := r.Step(ctx, actx, o)
+		if err != nil {
+			return nil, fmt.Errorf("%s: tail operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
+		}
+		if replayed != st.Recorded {
+			rec := st.Recorded
+			if rec == "" {
+				rec = "none"
+			}
+			diffs = append(diffs, replayDiff{OpNo: o.No, Action: o.Action, Volume: o.Volume, Recorded: rec, Replayed: replayed})
+		}
+	}
+	steps = append(steps, tail...)
 	if sc.Sweep != nil {
 		if err := r.sweep(ctx, actx, sc.Sweep); err != nil {
 			return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)

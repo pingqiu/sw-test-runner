@@ -1302,3 +1302,55 @@ func TestGeneratorWaitsForTheLeaseHorizonFromObservations(t *testing.T) {
 		t.Fatal("the horizon check's red control")
 	}
 }
+
+// C7's coverage tail: a created volume never attached deleted, a stopped
+// volume past its lease deleted, both observed, then a create of a deleted
+// name, refused. Deterministic from the state.
+func TestCoverageTailDeletesObservesAndProbesADeletedName(t *testing.T) {
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(5), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"), op("v3_op_stop", "g2"),
+		op("v3_op_create", "g3"), op("v3_op_attach", "g3", "host", "0"))
+	var got []string
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, fmt.Sprintf("%s %s %s %s", o.Forced, o.Action, o.Volume, o.Negative))
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
+	}
+	want := []string{"tail v3_op_delete g1 ", "tail v3_op_observe g2 ", "tail v3_op_delete g2 ",
+		"tail v3_op_observe g1 ", "tail v3_op_observe g2 ", "tail v3_op_create g1 create a deleted name"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tail\n%q\nwant\n%q", got, want)
+	}
+
+	// A stopped volume whose observation does not show the lease expired is
+	// not deleted; nothing deleted, no create probe.
+	g, _ = NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(2), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"))
+	got = nil
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, o.Action+" "+o.Volume)
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "revoking"))
+		}
+	}
+	if !slices.Equal(got, []string{"v3_op_observe g1"}) {
+		t.Fatalf("tail with the lease live: %q", got)
+	}
+	// Coverage names the ordinary actions that never ran.
+	ops, g2 := run(t, GenConfig{Seed: 3, Ops: 30, Pool: pool(10), Blocks: 4, Weights: map[string]int{"v3_op_create": 1, "v3_op_move": 1}})
+	_ = ops
+	if nr, _ := g2.Coverage()["ordinary_never_ran"].([]string); !slices.Equal(nr, []string{"v3_op_move"}) {
+		t.Fatalf("ordinary_never_ran %v", g2.Coverage()["ordinary_never_ran"])
+	}
+}
