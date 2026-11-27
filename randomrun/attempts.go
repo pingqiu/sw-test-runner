@@ -18,16 +18,23 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 )
 
-// Attempts runs one call act of handler h: one attempt, or, when rr
-// declares a rerun of act.Action (RequestArg not ""), attempt 1 and, while
-// rr.Rerun says so, attempt n+1 after its pause, each with AttemptParam set.
-// observe records the subject's observation; it runs after a refused
-// attempt that is re-issued (none: nothing is observed). It returns the last
+// VerbRerunGuard is the observe record the driver writes when the
+// wall-clock guard (not the count) ended a request's attempts: {action,
+// attempt, elapsed_ms}, on the subject. The checkers take the limit that
+// request probed as not judged (C5 UNKNOWN).
+const VerbRerunGuard = "rerun_guard"
+
+// Attempts runs one call act of handler h on subject: one attempt, or, when
+// rr declares a rerun of act.Action (RequestArg not ""), attempt 1 and,
+// while rr.Rerun says so, attempt n+1 after its pause, each with
+// AttemptParam set. observe records the subject's observation; it runs
+// after a refused attempt that is re-issued (none: nothing is observed).
+// When the guard ends the attempts, a VerbRerunGuard record says so. It returns the last
 // attempt's output and the number of attempts made (0 for an action with no
 // declared rerun). A step that sets AttemptParam itself is a runner error:
 // only the driver numbers attempts. A context ended during a pause returns
 // the last attempt's output, as an attempt that was not made.
-func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFunc, act tr.Action, rr Rerunner, observe func() error) (map[string]string, int, error) {
+func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFunc, act tr.Action, rr Rerunner, subject string, observe func() error) (map[string]string, int, error) {
 	if _, set := act.Params[AttemptParam]; set {
 		return nil, 0, fmt.Errorf("%s: %s is the driver's to set, not a step's", act.Action, AttemptParam)
 	}
@@ -48,10 +55,15 @@ func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFun
 		if err != nil {
 			return nil, n, err
 		}
-		again, pause, why := rr.Rerun(act.Action, act.Params, n, time.Since(start), out)
+		elapsed := time.Since(start)
+		again, pause, why := rr.Rerun(act.Action, act.Params, n, elapsed, out)
 		if !again {
 			if why == "guard" {
 				actx.Log("  %s: the wall-clock guard ended the reruns after attempt %d", act.Action, n)
+				if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: VerbRerunGuard, Volume: subject,
+					Result: map[string]any{"action": act.Action, "attempt": n, "elapsed_ms": elapsed.Milliseconds()}}); err != nil {
+					return nil, n, err
+				}
 			}
 			return out, n, nil
 		}

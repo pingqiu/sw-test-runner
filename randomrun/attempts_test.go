@@ -141,12 +141,12 @@ func TestAttemptsRefusesACallerSetAttempt(t *testing.T) {
 	r := rerunRunner([]string{"refused"}, &calls)
 	actx, _ := rerunHistory(t)
 	defer actx.History.Close()
-	_, _, err := Attempts(context.Background(), actx, r.Handlers["delete"], tr.Action{Action: "delete", Params: map[string]string{"volume": "v1", AttemptParam: "2"}}, rerunDriver{}, nil)
+	_, _, err := Attempts(context.Background(), actx, r.Handlers["delete"], tr.Action{Action: "delete", Params: map[string]string{"volume": "v1", AttemptParam: "2"}}, rerunDriver{}, "v1", nil)
 	if err == nil || calls != 0 {
 		t.Fatalf("%v after %d calls", err, calls)
 	}
 	// An action with no declared rerun is one call, numbered by nobody.
-	out, n, err := Attempts(context.Background(), actx, r.Handlers["observe"], tr.Action{Action: "observe", Params: map[string]string{"volume": "v1"}}, rerunDriver{}, nil)
+	out, n, err := Attempts(context.Background(), actx, r.Handlers["observe"], tr.Action{Action: "observe", Params: map[string]string{"volume": "v1"}}, rerunDriver{}, "v1", nil)
 	if err != nil || n != 0 || out["value"] != "observed" {
 		t.Fatalf("observe: %v %d %v", out, n, err)
 	}
@@ -186,5 +186,49 @@ func TestReplayNotesADifferingAttemptCount(t *testing.T) {
 	ra.History.Close()
 	if err == nil || !strings.Contains(err.Error(), "recorded ok, replayed refused") {
 		t.Fatalf("a last outcome that differs: %v", err)
+	}
+}
+
+// guardDriver's guard ends the attempts after the second (the count would
+// allow a third).
+type guardDriver struct{ rerunDriver }
+
+func (guardDriver) Rerun(action string, _ map[string]string, n int, _ time.Duration, out map[string]string) (bool, time.Duration, string) {
+	if out["value"] != tr.OutcomeRefused {
+		return false, 0, ""
+	}
+	if n >= 2 {
+		return false, 0, "guard"
+	}
+	return true, time.Millisecond, ""
+}
+
+// A guard trip is its own record: an observe record rerun_guard on the
+// subject with the action, the attempt it ended at and the elapsed time.
+// An end by the count writes none (TestDriverReissuesAndObserves...).
+func TestDriverRecordsAGuardTrip(t *testing.T) {
+	calls := 0
+	r := rerunRunner([]string{"refused"}, &calls)
+	r.Driver = guardDriver{}
+	actx, p := rerunHistory(t)
+	got, err := r.Exec(context.Background(), actx, Op{Action: "delete", Volume: "v1", Params: map[string]string{"volume": "v1"}})
+	actx.History.Close()
+	if err != nil || got != tr.OutcomeRefused || calls != 2 {
+		t.Fatalf("%q %v after %d calls", got, err, calls)
+	}
+	b, _ := os.ReadFile(p)
+	var guard *tr.HistoryRecord
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var rec tr.HistoryRecord
+		_ = json.Unmarshal([]byte(l), &rec)
+		if rec.Verb == VerbRerunGuard {
+			guard = &rec
+		}
+	}
+	if guard == nil || guard.Kind != tr.HistoryObserve || guard.Volume != "v1" || guard.Result["action"] != "delete" || guard.Result["attempt"] != float64(2) {
+		t.Fatalf("guard record %+v in %s", guard, b)
+	}
+	if _, ok := guard.Result["elapsed_ms"].(float64); !ok {
+		t.Fatalf("no elapsed_ms: %+v", guard.Result)
 	}
 }

@@ -748,7 +748,7 @@ func TestDeclaredSnapshotUnknownsAreNotReissued(t *testing.T) {
 func reissued(name string) tr.ActionHandlerFunc {
 	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 		act.Action = name
-		out, _, err := randomrun.Attempts(ctx, actx, blockActions.Handler(name), act, &blockModel{}, nil)
+		out, _, err := randomrun.Attempts(ctx, actx, blockActions.Handler(name), act, &blockModel{}, act.Params["volume"], nil)
 		return out, err
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 // recordShape is a run's records as "kind verb volume [attempt] [outcome]".
@@ -139,6 +140,24 @@ func TestRerunGuardIsAboveTheCount(t *testing.T) {
 		}
 		if _, _, why := blockActions.Rerun(a.Action, params, r.MaxAttempts, slowest, refused); why != "max_attempts" {
 			t.Errorf("%s: attempt %d ended by %q, not the count", a.Action, r.MaxAttempts, why)
+		}
+	}
+}
+
+// A run of max_attempts refusals ends by the COUNT: 41 delete attempts, and
+// no rerun_guard record (the guard did not decide).
+func TestDeleteRefusalsEndByTheCount(t *testing.T) {
+	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
+	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
+	live := chunkErr("not_admitted", "layout: delete reservation: workspace: deletion refused before persistence: live until T")
+	r := runEq(t, reissued("v3_op_delete"), eqCase{params: map[string]string{"volume": "v1"}, rules: []eqRule{{"volume-delete", []eqAnswer{live}}}}, true)
+	max := blockActions.File.Actions[5].Retry.MaxAttempts
+	if r.err != nil || r.ret["value"] != tr.OutcomeRefused || len(r.calls) != max || max != 41 {
+		t.Fatalf("%v %v, %d calls of %d", r.ret, r.err, len(r.calls), max)
+	}
+	for _, rec := range r.records {
+		if rec.Verb == randomrun.VerbRerunGuard {
+			t.Fatalf("a guard record: %+v", rec)
 		}
 	}
 }

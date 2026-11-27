@@ -56,7 +56,7 @@ func driven(name string) tr.ActionHandlerFunc {
 	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 		act.Action = name
 		o := GenOp{Action: name, Volume: opParam(act, actx, "volume"), Params: act.Params}
-		out, _, err := randomrun.Attempts(ctx, actx, h, act, m, func() error {
+		out, _, err := randomrun.Attempts(ctx, actx, h, act, m, o.Volume, func() error {
 			for _, s := range m.ObserveSubjects(o) {
 				obs := m.Observe(s)
 				if _, err := observe(ctx, actx, tr.Action{Action: obs.Action, Node: act.Node, Params: obs.Params}); err != nil {

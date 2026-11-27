@@ -90,7 +90,7 @@ func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 	worst, attempts := "", 0
 	rr := rerunnerOf(r.Driver)
 	for _, p := range r.Driver.Calls(o) {
-		out, n, err := Attempts(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, func() error { return r.observeSubjects(ctx, actx, o) })
+		out, n, err := Attempts(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, o.Volume, func() error { return r.observeSubjects(ctx, actx, o) })
 		if err != nil {
 			return "", 0, err
 		}

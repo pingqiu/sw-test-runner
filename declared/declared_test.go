@@ -17,7 +17,7 @@ import (
 func driven(x *Executor, name string) tr.ActionHandlerFunc {
 	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 		act.Action = name
-		out, _, err := randomrun.Attempts(ctx, actx, x.Handler(name), act, x, nil)
+		out, _, err := randomrun.Attempts(ctx, actx, x.Handler(name), act, x, act.Params["volume"], nil)
 		return out, err
 	}
 }

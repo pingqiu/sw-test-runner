@@ -75,6 +75,10 @@ code is 0 only when every checker passes.
       limit a negative operation probes; other refusals are "ordinary <verb>".
       Every refused attempt of a rerun request is a refusal of its limit
       (a refusal a later attempt replaced is still judged and counted).
+      RERUN_GUARD: an observe record "rerun_guard" {action, attempt,
+      elapsed_ms} says the wall-clock guard, not the declared count, ended a
+      request's attempts; the limit that request probed (its latest invoke on
+      the volume before the record) is then UNKNOWN, whatever was judged.
       The findings report judged / refusals per limit. FAIL if a judged
       refusal shows a different state; UNKNOWN if a limit that occurred has
       no judged refusal; PASS only if every limit that occurred was judged at
@@ -796,6 +800,24 @@ def baseline(recs):
     return checked, f
 
 
+def guard_trips(recs, limit):
+    """{limit: finding} for each rerun_guard record: the wall-clock guard
+    ended a request's attempts before its declared count, so the limit its
+    request probed (the latest invoke on the record's volume before it) is
+    not judged."""
+    out, last = {}, {}
+    for r in recs:
+        if r['kind'] == 'invoke':
+            last[r.get('volume')] = r
+        elif r['kind'] == 'observe' and r.get('verb') == 'rerun_guard':
+            res = r.get('result') or {}
+            inv = last.get(r.get('volume'))
+            lim = limit[inv['seq']] if inv is not None else 'rerun of %s' % res.get('action')
+            out.setdefault(lim, 'limit %s: the rerun guard ended %s on %s at attempt %s after %s ms (seq %d), before its declared count: not judged'
+                           % (lim, res.get('action'), r.get('volume'), res.get('attempt'), res.get('elapsed_ms'), r['seq']))
+    return out
+
+
 @unknown_on_overlap
 def c5(recs):
     """A refused operation changed nothing; a refused_effect changed exactly
@@ -900,14 +922,17 @@ def c5(recs):
         notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged), each counted under its limit'
                      % (replaced, attempts_judged))
     judged = sum(j for _, j in per.values())   # judged: refused attempts judged
+    guarded = guard_trips(recs, limit)
+    report += [guarded[lim] for lim in sorted(guarded)]
     checked, bf = baseline(recs)
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:
         return {'verdict': 'FAIL', 'judged': judged, 'findings': f + report + notes}
     unjudged = [lim for lim, (n, j) in sorted(per.items()) if not j]
-    if unjudged:
-        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] + report + notes}
+    if unjudged or guarded:
+        head = (['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] if unjudged else [])             + (['limit(s) a rerun guard left not judged: %s' % ', '.join(sorted(guarded))] if guarded else [])
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': head + report + notes}
     return {'verdict': 'PASS', 'judged': judged, 'findings': report + notes}
 
 

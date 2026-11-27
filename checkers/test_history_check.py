@@ -1967,6 +1967,30 @@ class Attempts(unittest.TestCase):
         self.assertTrue(any('replaced: 3 (3 judged)' in x for x in v['C5']['findings']), v['C5'])
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
 
+    def case_refused_to_the_end(self, guard):
+        # v1: a delete refused three times (the driver's observations between
+        # and after), then, when guard, the driver's rerun_guard record: the
+        # wall-clock guard, not the count, ended the attempts.
+        steps = BASE + (('obs', 'v1', 4, FILES, WS),) \
+            + tuple(self.attempts('v1', ['refused'] * 3, between=('obs', 'v1', 4, FILES, WS))) + (('obs', 'v1', 4, FILES, WS),)
+        recs = self.finish(history(*steps), lambda r: {'detail': HORIZON})
+        if guard:
+            at = max(i for i, r in enumerate(recs) if r['kind'] == 'complete' and r['verb'] == 'delete') + 1
+            recs.insert(at, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'rerun_guard', 'volume': 'v1', 'mono_ns': recs[at - 1]['mono_ns'],
+                             'result': {'action': 'v3_op_delete', 'attempt': 3, 'elapsed_ms': 3813500}})
+            recs = renumber(recs)
+        return recs
+
+    def test_red_a_rerun_guard_trip_leaves_its_limit_unknown(self):
+        v = hc.check(dump(self.case_refused_to_the_end(guard=False)))
+        self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
+        self.assertIn('limit ordinary delete: 3 of 3 refusal(s) judged', v['C5']['findings'])
+        v = hc.check(dump(self.case_refused_to_the_end(guard=True)))
+        self.assertEqual(v['C5']['verdict'], 'UNKNOWN', v['C5'])
+        self.assertEqual(v['C5']['findings'][0], 'limit(s) a rerun guard left not judged: ordinary delete', v['C5'])
+        self.assertTrue(any(x.startswith('limit ordinary delete: the rerun guard ended v3_op_delete on v1 at attempt 3 after 3813500 ms')
+                            for x in v['C5']['findings']), v['C5'])
+
     def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
         # An unknown first attempt rerun to a refused second: C6 has no
         # unknown to place (the request was answered), C0 no unknown.
