@@ -29,7 +29,8 @@ must list that old r1 as `State=healthy, Epoch=2`. Its own supporting admission
 is not completion of catch-up. No guest writes are sent between those gates.
 The existing 240-second catch-up budget decides failure, never eligibility.
 
-Host connects follow the product operator guide's Host connect settings:
+Host connects follow the product operator guide's
+[Host connect settings at RC e7a7b117](https://github.com/seaweedfs/seaweed-block/blob/e7a7b1179b41ca75ae50bfbc25524416c15b21a1/docs/operator-guide.md#host-connect-settings):
 `--ctrl-loss-tmo=180 --reconnect-delay=2`, with fast I/O failure left off by
 omitting that option. Record the exact argv. A pending old-controller write
 may consequently take longer to finish; the writer unit has a 210s stop
