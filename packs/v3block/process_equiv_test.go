@@ -161,8 +161,8 @@ func TestDeclaredAttachEquivalent(t *testing.T) {
 		{name: "a declared guest connect variant", params: p, vars: map[string]string{"guest_connect_variant": "fast_faults"},
 			rules: attachRules(map[string][]eqAnswer{"fast_io_fail_tmo kato": {{out: "ctrl nvme3\nctrl_loss_tmo 60\nfast_io_fail_tmo 5\nkato 5\nreconnect_delay 10\nend\n"}}})},
 		{name: "an undeclared guest connect", params: p, vars: map[string]string{"guest_connect_variant": "nope"}, rules: attachRules(nil)},
-		{name: "blocks given", params: with("blocks", "64"), rules: attachRules(nil)},
-		{name: "blocks not a number", params: with("blocks", "many"), rules: attachRules(nil)},
+		{name: "durable_blocks given", params: with("durable_blocks", "64"), rules: attachRules(nil)},
+		{name: "durable_blocks not a number", params: with("durable_blocks", "many"), rules: attachRules(nil)},
 		{name: "expected refusal recorded", params: with("expect", "refused"), rules: attachRules(nil)},
 	}
 	// A recorded epoch: ready only above it.
