@@ -772,6 +772,18 @@ func (m *blockModel) Version(faults bool) string {
 	return GenVersion
 }
 
+// ObserveSubjects: a restore or a release names its source and its target
+// (the typed restore records the target as its subject); every other
+// operation its own volume.
+func (m *blockModel) ObserveSubjects(o GenOp) []string {
+	if o.Action == "v3_op_restore" || o.Action == "v3_op_release" {
+		return []string{o.Volume, o.Params["target_volume"]}
+	}
+	return []string{o.Volume}
+}
+
+var _ randomrun.SubjectNamer = (*blockModel)(nil)
+
 // Calls issues a write over several lbas one lba per call (the handler
 // records one operation per lba either way), so that every lba's outcome
 // counts.

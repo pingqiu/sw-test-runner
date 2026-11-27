@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -97,14 +98,31 @@ func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 // a replay both run every step through here, so a replayed history has the
 // same shape as a recorded one.
 func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
-	observe := func() error {
-		obs := r.Driver.Observe(o.Volume)
+	subjects := []string{o.Volume}
+	if sn, ok := r.Driver.(SubjectNamer); ok {
+		subjects = nil
+		for _, s := range sn.ObserveSubjects(o) {
+			if s != "" && !slices.Contains(subjects, s) {
+				subjects = append(subjects, s)
+			}
+		}
+	}
+	observeOne := func(s string) error {
+		obs := r.Driver.Observe(s)
 		h, ok := r.Handlers[obs.Action]
 		if !ok {
 			return fmt.Errorf("%s: no handler for %s", r.Name, obs.Action)
 		}
 		_, err := h(ctx, actx, tr.Action{Action: obs.Action, Node: r.Node, Params: obs.Params})
 		return err
+	}
+	observe := func() error {
+		for _, s := range subjects {
+			if err := observeOne(s); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
 	if o.Negative != "" {
@@ -116,13 +134,17 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
 		return "", err
 	}
-	// Two observations before a negative operation: with nothing between
-	// them they must be equal (the product's background work shows there,
-	// not at the refusal), and the second is the refusal's "before".
+	// Two observations of each subject before a negative operation: with
+	// nothing between them they must be equal (the product's background work
+	// shows there, not at the refusal), and the second is the refusal's
+	// "before". The subjects are every volume the operation names
+	// (SubjectNamer), observed pair by pair, and once each after.
 	if o.Negative != "" {
-		for i := 0; i < 2; i++ {
-			if err := observe(); err != nil {
-				return "", err
+		for _, s := range subjects {
+			for i := 0; i < 2; i++ {
+				if err := observeOne(s); err != nil {
+					return "", err
+				}
 			}
 		}
 	}

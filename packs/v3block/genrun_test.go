@@ -123,8 +123,9 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every operation record follows its gen_step; a negative is preceded by two
-	// observations of its volume (C5's baseline pair) and followed by one.
-	steps, refusals := 0, 0
+	// observations of each volume it names (C5's baseline pair; a restore or a
+	// release names its source and its target) and followed by one of each.
+	steps, refusals, pairs := 0, 0, 0
 	for i, r := range recs {
 		if r.Verb != "gen_step" {
 			continue
@@ -134,22 +135,36 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 		}
 		next := recs[i+1]
 		if r.Result["negative"] != nil {
-			for _, o := range recs[i+1 : i+3] {
-				if o.Verb != "observe" || o.Volume != r.Volume {
-					t.Fatalf("negative step %v not observed twice before: %+v", r.Result, o)
+			subjects := []string{r.Volume}
+			if a := r.Result["action"]; a == "v3_op_restore" || a == "v3_op_release" {
+				subjects = append(subjects, r.Result["params"].(map[string]any)["target_volume"].(string))
+				pairs++
+			}
+			j := i + 1
+			for _, s := range subjects {
+				for k := 0; k < 2; k++ {
+					if o := recs[j]; o.Verb != "observe" || o.Volume != s {
+						t.Fatalf("negative step %v: %s not observed twice before: %+v", r.Result, s, o)
+					}
+					j++
 				}
 			}
 			refusals++
-			// invoke, complete(refused), then the observation after it
-			if recs[i+3].Kind != tr.HistoryInvoke || recs[i+4].Outcome != tr.OutcomeRefused || recs[i+5].Verb != "observe" || recs[i+5].Volume != r.Volume {
-				t.Fatalf("refusal at step %v not observed after", r.Result)
+			// invoke, complete(refused), then the observations after it
+			if recs[j].Kind != tr.HistoryInvoke || recs[j+1].Outcome != tr.OutcomeRefused {
+				t.Fatalf("negative step %v: %+v %+v", r.Result, recs[j], recs[j+1])
+			}
+			for k, s := range subjects {
+				if o := recs[j+2+k]; o.Verb != "observe" || o.Volume != s {
+					t.Fatalf("refusal at step %v: %s not observed after: %+v", r.Result, s, o)
+				}
 			}
 		} else if next.Kind != tr.HistoryInvoke {
 			t.Fatalf("step %v not followed by its invocation: %+v", r.Result, next)
 		}
 	}
-	if steps != 300 || refusals == 0 {
-		t.Fatalf("%d steps, %d refusals", steps, refusals)
+	if steps != 300 || refusals == 0 || pairs == 0 {
+		t.Fatalf("%d steps, %d refusals, %d of them on a pair", steps, refusals, pairs)
 	}
 }
 

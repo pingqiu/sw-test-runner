@@ -75,9 +75,12 @@ complete  read g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":19,"params":{"expect":"refused","snapshot":"g1-s1","target_volume":"g2","volume":"g1"}}
 observe  observe g1  null null
 observe  observe g1  null null
+observe  observe g2  null null
+observe  observe g2  null null
 invoke  restore g1  null null
 complete  restore g1 refused null null
 observe  observe g1  null null
+observe  observe g2  null null
 observe gen gen_step g1  null {"action":"v3_op_read","opno":20,"params":{"lbas":"5","volume":"g1"}}
 invoke  read g1  null null
 complete  read g1 ok null null
@@ -158,9 +161,12 @@ complete  restore g6 ok null null
 observe gen gen_step g1  null {"action":"v3_op_release","negative":"release a live restore target","opno":39,"params":{"expect":"refused","target_volume":"g4","volume":"g1"}}
 observe  observe g1  null null
 observe  observe g1  null null
+observe  observe g4  null null
+observe  observe g4  null null
 invoke  release g1  null null
 complete  release g1 refused null null
 observe  observe g1  null null
+observe  observe g4  null null
 observe gen gen_step g6  null {"action":"v3_op_snapshot","opno":40,"params":{"name":"g6-s2","volume":"g6"}}
 invoke  snapshot g6  null null
 complete  snapshot g6 ok null null
@@ -231,9 +237,12 @@ complete  read g5 ok null null
 observe gen gen_step g1  null {"action":"v3_op_release","negative":"release a live restore target","opno":55,"params":{"expect":"refused","target_volume":"g4","volume":"g1"}}
 observe  observe g1  null null
 observe  observe g1  null null
+observe  observe g4  null null
+observe  observe g4  null null
 invoke  release g1  null null
 complete  release g1 refused null null
 observe  observe g1  null null
+observe  observe g4  null null
 observe gen gen_step g6  null {"action":"v3_op_read","opno":56,"params":{"lbas":"4 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
@@ -260,9 +269,12 @@ complete  read g6 ok null null
 observe gen gen_step g6  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":62,"params":{"expect":"refused","snapshot":"g6-s1","target_volume":"g1","volume":"g6"}}
 observe  observe g6  null null
 observe  observe g6  null null
+observe  observe g1  null null
+observe  observe g1  null null
 invoke  restore g6  null null
 complete  restore g6 refused null null
 observe  observe g6  null null
+observe  observe g1  null null
 observe gen gen_step g5  null {"action":"v3_op_write","opno":63,"params":{"lbas":"1 5","round":"g63","volume":"g5"}}
 invoke  write g5  null null
 complete  write g5 ok null null
@@ -469,9 +481,12 @@ complete  read g6 ok null null
 observe gen gen_step g6  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":114,"params":{"expect":"refused","snapshot":"g6-s3","target_volume":"g1","volume":"g6"}}
 observe  observe g6  null null
 observe  observe g6  null null
+observe  observe g1  null null
+observe  observe g1  null null
 invoke  restore g6  null null
 complete  restore g6 refused null null
 observe  observe g6  null null
+observe  observe g1  null null
 observe gen gen_step g1  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":115,"params":{"expect":"refused","volume":"g1"}}
 observe  observe g1  null null
 observe  observe g1  null null
@@ -721,9 +736,12 @@ complete  read g12 ok null null
 observe gen gen_step g6  null {"action":"v3_op_release","negative":"release a live restore target","opno":167,"params":{"expect":"refused","target_volume":"g10","volume":"g6"}}
 observe  observe g6  null null
 observe  observe g6  null null
+observe  observe g10  null null
+observe  observe g10  null null
 invoke  release g6  null null
 complete  release g6 refused null null
 observe  observe g6  null null
+observe  observe g10  null null
 observe gen gen_step g12  null {"action":"v3_op_write","opno":168,"params":{"lbas":"1","round":"g168","volume":"g12"}}
 invoke  write g12  null null
 complete  write g12 ok null null
@@ -854,9 +872,12 @@ complete  write g13 ok null null
 observe gen gen_step g11  null {"action":"v3_op_release","negative":"release a live restore target","opno":198,"params":{"expect":"refused","target_volume":"g17","volume":"g11"}}
 observe  observe g11  null null
 observe  observe g11  null null
+observe  observe g17  null null
+observe  observe g17  null null
 invoke  release g11  null null
 complete  release g11 refused null null
 observe  observe g11  null null
+observe  observe g17  null null
 observe gen gen_step g11  null {"action":"v3_op_snapshot","opno":199,"params":{"name":"g11-s2","volume":"g11"}}
 invoke  snapshot g11  null null
 complete  snapshot g11 ok null null

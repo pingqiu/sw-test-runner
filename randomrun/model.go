@@ -70,6 +70,14 @@ type Driver interface {
 	OutageRestart() Op
 }
 
+// SubjectNamer is an optional part of a Driver: the subjects an operation
+// names, observed around a negative or a refusal (default: its Volume).
+// An operation on a pair (a restore into a target) names both, so the
+// refusal is shown to have changed neither.
+type SubjectNamer interface {
+	ObserveSubjects(o Op) []string
+}
+
 // Model is the product's side of proposing: its state, preconditions and
 // effects, and its coverage cells.
 type Model interface {
