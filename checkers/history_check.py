@@ -949,7 +949,8 @@ def unknown_windows(recs):
     closes it. A kill of the holder closes nothing: the guest's kernel keeps
     the request while the target is away and sends it again after
     reconnecting. An unknown write is a write whose outcome is unknown or
-    that never completed. DUR and LIN read the windows only here."""
+    that never completed. DUR and LIN read the windows only here, and what
+    a window says of the write's effect only through unknown_effect()."""
     comp_of = {r['of']: r for r in recs if r['kind'] == 'complete'}
     out, open_, before, last = {}, {}, {}, {}   # open_: volume -> {invoke seq}
     for r in recs:
@@ -982,6 +983,23 @@ def unknown_windows(recs):
                     close(useq, 'line advanced')
             last[vol] = e
     return out
+
+
+NEVER_LANDED, LANDED, MAY_LAND = 'never landed', 'landed', 'may land'
+
+
+def unknown_effect(window):
+    """What an unknown write's window (one value of unknown_windows) says of
+    its effect, the one consequence DUR and LIN both apply: NEVER_LANDED
+    (its child exited failed: it changed nothing, at any time), LANDED (its
+    child exited ok: it took effect at or before the exit), or MAY_LAND (it
+    may take effect until the window closes, or never)."""
+    how = window[2]
+    if how == 'exited failed':
+        return NEVER_LANDED
+    if how == 'exited ok':
+        return LANDED
+    return MAY_LAND
 
 
 def kill_fallback(durable, newer, open_=()):
@@ -1018,7 +1036,9 @@ def dur(recs):
                 (unknown_windows: until its child exited, its device
                 disconnected or the line advanced; a kill closes nothing):
                 such a write may take effect at any time until then, also
-                after a later durable write and after a kill.
+                after a later durable write and after a kill. One whose child
+                exited failed never landed: like a refused write it changed
+                nothing (unknown_effect, the rule LIN applies too).
       may hold  what a read may return: C1's shadow (an ok write its value
                 only, an unknown write adds its value), with open unknowns.
     A kill (verb kill, outcome not refused, applied at its invoke) reaches
@@ -1129,7 +1149,7 @@ def dur(recs):
             b = st.get((w['volume'], (w.get('args') or {}).get('lba')))
             if b is not None and useq in b['open']:
                 sha = b['open'].pop(useq)
-                if how == 'exited ok':   # it landed by now: a write completed here
+                if unknown_effect(windows[useq]) == LANDED:   # it landed by now: a write completed here
                     b['cur'].add(sha)
                     b['volatile'].append((sha, False))
         for k in kill_at.get(r['seq'], ()):
@@ -1141,6 +1161,9 @@ def dur(recs):
             continue
         inv = inv_of[r['of']]
         verb, out, vol, args = inv['verb'], r['outcome'], inv.get('volume'), inv.get('args') or {}
+        if verb == 'write' and out == 'unknown' and unknown_effect(windows[r['of']]) == NEVER_LANDED:
+            # Its child exited failed: like a refused write, it changed nothing.
+            continue
         if verb == 'write' and out in ('ok', 'unknown'):
             sha, fl = args['sha256'], flushed(args)
             b = block(vol, args['lba'])
@@ -1309,9 +1332,10 @@ def _lin_blocks(recs):
                 close, _, how = windows[inv['seq']]
                 if how is not None:
                     closed[how] = closed.get(how, 0) + 1
-                if how == 'exited failed':   # it never landed
+                effect = unknown_effect(windows[inv['seq']])
+                if effect == NEVER_LANDED:   # its child exited failed
                     continue
-                if how == 'exited ok':       # it landed at or before the exit
+                if effect == LANDED:         # it landed at or before the exit
                     op = _LinOp('write', inv['seq'], inv['mono_ns'], close, args['sha256'], False)
                 else:
                     op = _LinOp('write', inv['seq'], inv['mono_ns'], _INF, args['sha256'], flushed(args), optional=True, close=close)

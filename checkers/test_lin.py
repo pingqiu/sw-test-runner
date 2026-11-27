@@ -306,6 +306,33 @@ class Budget(Base):
             self.assertNotEqual(lin(synth(w(0, A), rd(0, A)))['verdict'], 'PASS')
 
 
+class OneRuleWithDUR(Base):
+    """A failed child exit means the write never landed: DUR and LIN apply the
+    same consequence (unknown_effect), so they cannot disagree."""
+
+    def both(self, recs):
+        v = hc.check(dump(recs))
+        return v['DUR'], v['LIN']
+
+    def test_red_a_read_of_a_write_whose_child_exited_failed_fails_both(self):
+        # Unflushed (DUR is exercised); the read after the failed exit shows U.
+        recs = hist(wi('a', A), ok('a'), wi('u', U, flush=False), ('c', 'u', 'unknown', {}), ('x', 'u', 'failed'), ri('r'), ok('r', U))
+        dur, lin_ = self.both(recs)
+        self.assert_fail(dur, 'not one of')
+        self.assert_fail(lin_)
+        # Also when the read comes before the exit: it never landed at all.
+        recs = hist(wi('a', A), ok('a'), wi('u', U, flush=False), ('c', 'u', 'unknown', {}), ri('r'), ok('r', U), ('x', 'u', 'failed'))
+        dur, lin_ = self.both(recs)
+        self.assert_fail(dur, 'not one of')
+        self.assert_fail(lin_)
+
+    def test_the_same_with_the_child_exited_ok_passes_both(self):
+        recs = hist(wi('a', A), ok('a'), wi('u', U, flush=False), ('c', 'u', 'unknown', {}), ('x', 'u', 'ok'), ri('r'), ok('r', U))
+        dur, lin_ = self.both(recs)
+        self.assert_pass(dur)
+        self.assert_pass(lin_)
+
+
 class Notes(Base):
     def test_pieces_in_flight_are_counted_and_a_sequential_history_says_so(self):
         v = lin(synth(w(0, A), rd(0, A)))
