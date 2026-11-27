@@ -18,6 +18,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   recreate_finding(vol, comp)       C7: a create of a deleted name must be refused
   process_of(inv)               the process a kill or restart names
   kill_scope(inv)               the volumes a kill reaches on the data path
+  holder_identity(healthy_obs)  {volume: (pid, start)} of each holder, from a healthy record
 """
 
 TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
@@ -221,6 +222,15 @@ def recreate_finding(vol, comp):
 def process_of(inv):
     """The process a kill or restart names (args.process), as a string."""
     return str((inv.get('args') or {}).get('process', ''))
+
+
+def holder_identity(healthy_obs):
+    """{volume: (pid, start)} of each volume's holder process, from a healthy
+    record's result.holders; empty when the record names none. A volume
+    whose identity changes between two healthy records with no kill or
+    restart reaching it had its holder restarted (DUR decides that)."""
+    seen = (healthy_obs.get('result') or {}).get('holders') or {}
+    return {vol: (h.get('pid'), h.get('start')) for vol, h in seen.items()}
 
 
 def kill_scope(inv):

@@ -901,9 +901,10 @@ def dur(recs):
                 apply_kill(r['seq'], scope)
             continue
         if r['kind'] == 'observe' and r.get('verb') == 'healthy':
-            seen = ((r.get('result') or {}).get('holders') or {})
-            for hv, h in sorted(seen.items()):
-                ident = (h.get('pid'), h.get('start'))
+            # The product reader names each volume's holder identity in the
+            # healthy record; a changed identity is a restarted holder.
+            seen = PRODUCT.holder_identity(r)
+            for hv, ident in sorted(seen.items()):
                 if hv in holders and holders[hv] != ident and hv not in covered and None not in covered:
                     restarted.append('holder of %s restarted with no recorded kill (healthy seq %d -> %d)' % (hv, holder_seq[hv], r['seq']))
                     kinds[r['seq']] = ' (holder of %s restarted with no recorded kill)' % hv

@@ -131,6 +131,14 @@ class Data(unittest.TestCase):
         self.assertEqual(hc.PRODUCT.__name__, self.checks['reader']['module'])
 
 
+class Reader(unittest.TestCase):
+    def test_holder_identity_reads_the_healthy_record(self):
+        obs = {'result': {'healthy': True, 'holders': {'v1': {'pid': 7, 'start': 'a'}, 'v2': {'pid': 9}}}}
+        self.assertEqual(hc.PRODUCT.holder_identity(obs), {'v1': (7, 'a'), 'v2': (9, None)})
+        self.assertEqual(hc.PRODUCT.holder_identity({'result': {'healthy': True}}), {})
+        self.assertEqual(hc.PRODUCT.holder_identity({}), {})
+
+
 class ProductFlag(unittest.TestCase):
     """--product names the description directory; without it, block."""
 
