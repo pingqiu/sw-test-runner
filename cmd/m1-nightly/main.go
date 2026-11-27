@@ -142,6 +142,7 @@ func main() {
 			r.Bundle = dir
 			r.Coverage = findFile(dir, "gen-coverage.json")
 			r.Checks = findFile(dir, "checks.json")
+			r.History = findFile(dir, "history.jsonl")
 		}(&runs[i])
 	}
 	wg.Wait()

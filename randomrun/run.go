@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -181,9 +182,15 @@ func ParseConfig(name string, get func(string) string) (Config, error) {
 	return c, nil
 }
 
+// checkerSet is the form of a run's required checker set: names separated by
+// commas, as the checkers' own --checkers takes them.
+var checkerSet = regexp.MustCompile(`^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$`)
+
 // Run drives generator g to its end. get reads the run's own parameters
 // beyond the config: nightly_seed (the nightly seed the run's seed was drawn
-// from) and fault_healthy_wait (the seconds the healthy action polls).
+// from), fault_healthy_wait (the seconds the healthy action polls) and
+// checkers (the scenario's required checker set, the same list its judge
+// passes to --checkers; recorded in the header for the nightly judge).
 func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, get func(string) string) (map[string]string, error) {
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", r.Name)
@@ -194,6 +201,12 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: nightly_seed: %w", r.Name, err)
 		}
 		header["nightly_seed"] = ns
+	}
+	if cs := get("checkers"); cs != "" {
+		if !checkerSet.MatchString(cs) {
+			return nil, fmt.Errorf("%s: checkers %q is not a comma-separated list of checker names", r.Name, cs)
+		}
+		header["checkers"] = cs
 	}
 	// In the header, so a replay waits the same.
 	if w := get("fault_healthy_wait"); w != "" && g.Faulty() {
