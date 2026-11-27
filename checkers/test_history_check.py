@@ -358,7 +358,7 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C4': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL'})
         # DUR: flushed writes read back, no kill: not exercised.
         flushed_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))

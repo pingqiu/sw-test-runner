@@ -27,6 +27,8 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   intended_states(recs, seq)    {volume: held | not_held | unsettled} before a record
   third_state(healthy_obs)      [(volume, why)] of volumes in neither consistent state
   settled(obs)                  (volume, state, evidence) of a settled record, else None
+  holder_sample(inv, comp)      C4: the holder an operation went through and its epochs before and after
+  master_lines(obs)             C4: {volume: (replica, epoch)} the master's line an observation shows
 """
 import re
 
@@ -442,6 +444,83 @@ def settled(obs):
     if res.get('state') not in SETTLED_STATES or not res.get('volume'):
         return None
     return res['volume'], res['state'], res.get('evidence')
+
+
+# --- C4 (epoch fencing) ----------------------------------------------------
+#
+# The record shape C4 reads (the runner writes it from M3 on):
+#   a write's (or read's) invoke: args.holder = {"server": "a-v1", "replica": "r1",
+#       "epoch_before": 3}: the holder the operation goes through and that
+#       holder's status epoch, sampled BEFORE the invoke;
+#   its complete: result.holder = {"epoch_after": 3}: the same holder's status
+#       epoch sampled AFTER the completion;
+#   an observe record: result.line = {"replica": "r1", "epoch": 3}: the
+#       master's line for the record's volume; a healthy record may carry
+#       result.lines = {volume: {"replica", "epoch"}} for every volume.
+# Without result.line, an observe record of verb observe whose workspace
+# answer exited 0 gives the line from its "replica:" and "epoch:" facts, so
+# today's observations already carry it.
+
+def _epoch(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def holder_sample(inv, comp):
+    """The holder an operation went through and its status epochs: None when
+    the invoke carries no args.holder; ('bad', why) when the sample is there
+    but unreadable; else ('ok', (server, replica), epoch_before, epoch_after),
+    epoch_after None when the completion carries no result.holder (an
+    operation that never completed, or a runner that did not sample)."""
+    h = (inv.get('args') or {}).get('holder')
+    if h is None:
+        return None
+    if not isinstance(h, dict) or not h.get('server') or not h.get('replica') or _epoch(h.get('epoch_before')) is None:
+        return 'bad', 'args.holder %r is not {server, replica, epoch_before}' % (h,)
+    after = None
+    if comp is not None:
+        ch = (comp.get('result') or {}).get('holder')
+        if ch is not None:
+            if not isinstance(ch, dict) or _epoch(ch.get('epoch_after')) is None:
+                return 'bad', 'result.holder %r is not {epoch_after}' % (ch,)
+            after = ch['epoch_after']
+    return 'ok', (str(h['server']), str(h['replica'])), h['epoch_before'], after
+
+
+def _line(row):
+    if isinstance(row, dict) and row.get('replica') and _epoch(row.get('epoch')) is not None:
+        return str(row['replica']), row['epoch']
+    return None
+
+
+def master_lines(obs):
+    """{volume: (replica, epoch)}: the master's line for each volume an
+    observe record shows; empty for a record that shows none (a generator
+    record, a failed workspace answer, a volume without a lease)."""
+    if obs.get('kind') != 'observe' or str(obs.get('verb', '')).startswith('gen_'):
+        return {}
+    res = obs.get('result') or {}
+    out = {}
+    if isinstance(res.get('lines'), dict):
+        for vol, row in res['lines'].items():
+            got = _line(row)
+            if got:
+                out[str(vol)] = got
+    vol = obs.get('volume')
+    if not vol:
+        return out
+    got = _line(res.get('line'))
+    if got:
+        out[vol] = got
+        return out
+    ws = res.get('workspace')
+    if obs.get('verb') == 'observe' and isinstance(ws, dict) and ws.get('exit') == 0:
+        facts = workspace_facts(ws.get('text'))
+        if facts:
+            d = dict(facts)
+            rep, ep = d.get('replica'), d.get('epoch', '')
+            if rep and rep != 'none' and ep.isdigit():
+                out[vol] = (rep, int(ep))
+    return out
 
 
 def kill_scope(inv):
