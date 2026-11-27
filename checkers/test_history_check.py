@@ -1979,6 +1979,22 @@ class Attempts(unittest.TestCase):
         self.assertTrue(any('replaced: 3' in x for x in v['C5']['findings']), v['C5'])
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
 
+    def test_a_write_request_rerun_is_one_write_for_the_data_checkers(self):
+        # Unflushed (so DUR judges it), attempt 1 unknown, attempt 2 ok: every attempt of a request carries
+        # the same value, so the earlier attempt adds no other value. A read
+        # of it passes C1, DUR and LIN; a read of anything else fails each.
+        def run(got):
+            w1 = ('write', 'v1', {'lba': 0, 'sha256': A, 'flush': False, 'request': 'w-1', 'attempt': 1}, 'unknown', {})
+            w2 = ('write', 'v1', {'lba': 0, 'sha256': A, 'flush': False, 'request': 'w-1', 'attempt': 2}, 'ok', {})
+            return hc.check(dump(synth(w1, w2, ('read', 'v1', {'lba': 0}, 'ok', {'sha256': got}))))
+        v = run(A)
+        for name in [n for n in ('C1', 'DUR', 'LIN') if n in hc.CHECKERS]:
+            self.assertEqual(v[name]['verdict'], 'PASS', (name, v[name]))
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])   # the request answered ok
+        v = run(B)
+        for name in [n for n in ('C1', 'DUR', 'LIN') if n in hc.CHECKERS]:
+            self.assertEqual(v[name]['verdict'], 'FAIL', (name, v[name]))
+
     def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
         # An unknown first attempt rerun to a refused second: C6 has no
         # unknown to place (the request was answered), C0 no unknown.
