@@ -357,7 +357,7 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL'})
         # DUR: flushed writes read back, no kill: not exercised.
         flushed_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))
@@ -571,6 +571,20 @@ class C3(unittest.TestCase):
         self.assertTrue(any('not exercised' in x for x in v['C3']['findings']))
 
 
+def ws_text(volume='v1', state='granted', epoch=1, replica='r1', ack='none', validity=14849887534, lease=True):
+    """The lines `ops workspace show` prints (exit 0). The lease expiry and the
+    validity at query change on their own; the checker ignores them."""
+    lines = ['volume: %s (query snapshot, not authority to serve)' % volume]
+    if lease:
+        lines += ['replica: %s' % replica, 'epoch: %d' % epoch, 'lease state: %s' % state,
+                  'holder: %s@%d (logical replica)' % (replica, epoch),
+                  'lease expiry_ns: 1795738167151366324; host validity_ns at query: %d' % validity]
+    else:
+        lines += ['replica: none', 'epoch: none', 'lease state: none', 'holder: none']
+    return lines + ['recorded ACK: %s' % ack,
+                    'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
+
+
 def history(*steps):
     """A one-at-a-time history: ('obs', volume, gen, files) is an observation
     (gen or files None: not recorded), any other step is (verb, volume, args,
@@ -580,7 +594,8 @@ def history(*steps):
         n = len(recs)
         if st[0] == 'obs':
             _, vol, gen, files = st[:4]
-            res = dict(st[4]) if len(st) > 4 else {}
+            # Without an extra dict, the control plane's answer C5 requires.
+            res = dict(st[4]) if len(st) > 4 else {'workspace': {'exit': 0, 'text': ws_text(validity=10**10 - n)}}
             res['head'] = {'gen': gen, 'epoch': 1, 'holder': 'a/r1', 'state': ''} if gen is not None else 'unreadable'
             if files is not None:
                 res['files'] = list(files)
@@ -600,7 +615,7 @@ NEG = {'expect': 'refused'}
 
 
 BASE = (('obs', 'v0', 1, FILES), ('obs', 'v0', 1, FILES))   # a baseline pair on another volume
-WS = {'workspace': {'exit': 0, 'text': 'v1 serving epoch 1'}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
+WS = {'workspace': {'exit': 0, 'text': ws_text()}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
 
 
 class C5(unittest.TestCase):
@@ -633,7 +648,7 @@ class C5(unittest.TestCase):
 
     def test_a_control_plane_change_fails(self):
         # A refused delete that left the control plane changed (e.g. reserved).
-        moved = {'workspace': {'exit': 0, 'text': 'v1 deleting (reserved)'}, 'dirs': WS['dirs'], 'snapshots': []}
+        moved = {'workspace': {'exit': 0, 'text': ws_text(state='revoking', ack='r1@1 HEAD generation 4')}, 'dirs': WS['dirs'], 'snapshots': []}
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, moved))
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its workspace changed', v['findings'][0])
@@ -644,13 +659,13 @@ class C5(unittest.TestCase):
 
     def test_a_refused_create_of_a_never_existing_name_is_judged_on_no_directory(self):
         # No HEAD (a show error) and no directory are observations too.
-        none = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': []}
+        none = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': [], 'workspace': {'exit': 1, 'text': 'v9 not found'}}
         recs = history(*(BASE + (('obs', 'v9', 4, FILES), ('create', 'v9', NEG, 'refused'), ('obs', 'v9', 4, FILES))))
         for i in (-5, -2):
             recs[i]['result'] = dict(none)
         v = hc.check(dump(recs))['C5']
         self.assertEqual(v['verdict'], 'PASS', v)
-        recs[-2]['result'] = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': ['v9-0badc0de']}
+        recs[-2]['result'] = dict(none, dirs=['v9-0badc0de'])
         v = hc.check(dump(recs))['C5']
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its dirs changed', v['findings'][0])
@@ -688,6 +703,37 @@ class C5(unittest.TestCase):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('obs', 'v1', 4, FILES), base=False)
         self.assertEqual(v['verdict'], 'PASS', v)
 
+    def test_the_workspace_lease_clock_is_no_baseline_change(self):
+        # From a host run: the lease expiry and the validity at query change
+        # between two queries with nothing between them; the baseline holds.
+        tick = lambda n: {'workspace': {'exit': 0, 'text': ws_text(validity=n)}, 'dirs': WS['dirs'], 'snapshots': []}
+        v = self.c5(('obs', 'v0', 1, FILES, tick(14849887534)), ('obs', 'v0', 1, FILES, tick(14716527984)),
+                    ('obs', 'v1', 4, FILES, tick(14600000000)), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, tick(14500000000)), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        # red control: the lease state moving is a baseline change
+        v = self.c5(('obs', 'v0', 1, FILES, tick(1)), ('obs', 'v0', 1, FILES, dict(tick(2), workspace={'exit': 0, 'text': ws_text(state='revoking')})),
+                    ('obs', 'v1', 4, FILES, tick(3)), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, tick(4)), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
+
+    def test_a_lease_running_out_by_time_is_no_baseline_change(self):
+        # From a host run: revoking -> expired on a stopped volume, nothing in between.
+        lease = lambda state, n: {'workspace': {'exit': 0, 'text': ws_text(state=state, validity=n)}, 'dirs': WS['dirs'], 'snapshots': []}
+        steps = lambda a, b: (('obs', 'v0', 1, FILES, lease(a, 5)), ('obs', 'v0', 1, FILES, lease(b, 0)),
+                              ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
+        v = self.c5(*steps('revoking', 'expired'), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        # red control: the reverse is a change
+        v = self.c5(*steps('expired', 'revoking'), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
+
+    def test_a_garbled_workspace_text_leaves_the_refusal_not_judged(self):
+        bad = dict(WS, workspace={'exit': 0, 'text': ['lease state granted']})
+        v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, bad))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'key: value' in x for x in v['findings']), v)
+
     def test_every_limit_must_be_judged(self):
         # One judged refusal does not carry another limit that was never judged.
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('snapshot', 'v2', NEG, 'refused'))
@@ -703,10 +749,32 @@ class C5(unittest.TestCase):
         self.assertEqual(v['verdict'], 'PASS', v)
         self.assertIn('limit delete while attached: 1 of 1 refusal(s) judged', v['findings'])
 
-    def test_a_negative_not_refused_is_a_note(self):
+    def test_red_a_negative_answered_ok_fails(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'ok'))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertTrue(v['findings'][0].startswith('negative not refused: seq 7 delete v1'), v)
+        self.assertTrue(v['findings'][0].endswith('answered ok'), v)
+
+    def test_a_negative_answered_unknown_is_a_note(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'unknown'))
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertTrue(any(x.startswith('negative not refused: seq 7 delete v1') for x in v['findings']), v)
+        self.assertTrue(any(x.startswith('negative not refused: seq 7 delete v1') and x.endswith('answered unknown') for x in v['findings']), v)
+
+    def test_red_a_required_part_recorded_by_no_observation_allows_no_pass(self):
+        # Neither observation records the workspace answer: not judged, so
+        # the limit has no judged refusal and C5 cannot PASS.
+        nows = {'dirs': WS['dirs'], 'snapshots': []}
+        v = self.c5(('obs', 'v1', 4, FILES, nows), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, nows))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'record no workspace (required)' in x for x in v['findings']), v)
+        # nor HEAD (no head and no show error in either)
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))))
+        for i in (-5, -2):
+            del recs[i]['result']['head']
+        v = hc.check(dump(recs))['C5']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('record no head (required)' in x for x in v['findings']), v)
+        self.assertEqual(hc.REQUIRED_PARTS, ('head', 'workspace'))
 
     def test_no_observation_after_is_not_judged(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))
@@ -730,9 +798,9 @@ class C5(unittest.TestCase):
         self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
         # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
         for name, ws, state, part in (
-                ('revoked', dict(WS, workspace={'exit': 0, 'text': 'v1 revoking epoch 1'}), '', 'workspace'),
-                ('no live lease', dict(WS, workspace={'exit': 0, 'text': 'v1 no live lease (recorded ACK r1@1)'}), '', 'workspace'),
-                ('workspace show failing', dict(WS, workspace={'exit': 3, 'text': 'v1 serving epoch 1'}), '', 'workspace'),
+                ('revoked', dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')}), '', 'workspace'),
+                ('no live lease', dict(WS, workspace={'exit': 0, 'text': ws_text(lease=False, ack='r1@1 HEAD generation 4')}), '', 'workspace'),
+                ('workspace show failing', dict(WS, workspace={'exit': 3, 'text': ws_text()}), '', 'workspace'),
                 ('HEAD sealed', WS, 'detached', 'head')):
             v = run(ws, state)
             self.assertEqual(v['verdict'], 'FAIL', (name, v))
@@ -874,9 +942,30 @@ class DUR(unittest.TestCase):
         # An unknown invoked after the durable point, settled as not taken
         # effect (read ZERO), does not come back at a second kill.
         self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), HKILL, rd(0, A)), 'no open unknown explains')
-        # An acknowledged unflushed write not read stays allowed (a kill of
-        # another process may have left it in a live holder).
-        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), w(0, C, outcome='unknown'), HKILL, rd(0, A), HKILL, rd(0, B)), lost=1)
+
+    # Review r1, change 1: the first read after a kill fixes what the next
+    # kill may leave (the durable set before the kill plus the value read).
+    def test_red_a_write_lost_at_one_kill_does_not_come_back_at_the_next(self):
+        # A flushed, B acknowledged unflushed; kill, read A (B lost); kill,
+        # read B: B was lost and comes back.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A), HKILL, rd(0, B)), 'no open unknown explains')
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), w(0, C, outcome='unknown'), HKILL, rd(0, A), HKILL, rd(0, B)), 'no open unknown explains')
+        # Green: what the first read showed, or the durable value, may stay.
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A), HKILL, rd(0, A)), lost=1)
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, B), HKILL, rd(0, B)), lost=0)
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, B), HKILL, rd(0, A)), lost=0)
+
+    def test_red_a_durable_value_read_after_a_kill_does_not_vanish_at_the_next(self):
+        # An unknown unflushed U, then an acknowledged flush: durable is ZERO
+        # or U. The read after the kill shows U, so U is the durable value;
+        # ZERO at the next kill is a durable value vanishing.
+        steps = [w(0, C, outcome='unknown', flush=False), fl(), HKILL, rd(0, C), HKILL]
+        self.assert_fail(self.dur(*steps, rd(0, hc.ZERO)), 'ZERO although a durable write exists')
+        self.assert_pass(self.dur(*steps, rd(0, C)), lost=0)
+        # Unless a later write explains it: B written after the first read.
+        self.assert_pass(self.dur(*steps[:4], w(0, B, flush=False), HKILL, rd(0, B)), lost=0)
+        # A flushed A read after kill 1 does not vanish to ZERO at kill 2.
+        self.assert_fail(self.dur(w(0, A), HKILL, rd(0, A), HKILL, rd(0, hc.ZERO)), 'ZERO although a durable write exists')
 
     def test_red_a_value_that_changes_between_two_reads_after_a_kill(self):
         # Both A and B are allowed after the kill; the first read fixes B, a
@@ -947,6 +1036,64 @@ class DUR(unittest.TestCase):
     def test_only_master_kills_is_a_run_without_a_kill(self):
         v = self.dur(w(0, A), MKILL, rd(0, A))
         self.assert_fail(v, 'not exercised')
+
+    # Review r1, change 2: a holder restarted with no recorded kill.
+    def durh(self, *steps):
+        """Like dur(); ('healthy', {volume: (pid, start)}) is a healthy
+        observation carrying the holders' identities."""
+        plain = [st for st in steps if st[0] != 'healthy']
+        recs = synth(*plain)
+        out, k = [], 0
+        for st in steps:
+            if st[0] == 'healthy':
+                out.append({'seq': 0, 'kind': 'observe', 'client': 'runner', 'verb': 'healthy', 'volume': '', 'mono_ns': 0,
+                            'result': {'healthy': True, 'down': [], 'not_serving': [],
+                                       'holders': {v: {'pid': p, 'start': t} for v, (p, t) in st[1].items()}}})
+            else:
+                out += recs[k:k + 2]
+                k += 2
+        out.append(recs[-1])
+        for i, r in enumerate(out, 1):
+            r['mono_ns'] = i
+        return hc.check(dump(renumber(out)))['DUR']
+
+    def test_red_a_holder_restarted_with_no_recorded_kill_is_a_kill(self):
+        h1, h2 = ('healthy', {'v1': (100, 's100')}), ('healthy', {'v1': (200, 's200')})
+        # B unflushed; the holder's pid changes between two healthy records
+        # with no kill: B may be lost (a PASS), and the finding says so.
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), h2, rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertIn('holder of v1 restarted with no recorded kill (healthy seq 3 -> 6)', v['findings'])
+        # Its settling applies too: A then B with no write between is a change.
+        self.assert_fail(self.durh(w(0, A), h1, w(0, B, flush=False), h2, rd(0, A), rd(0, B)), 'restarted with no recorded kill')
+        # The same start time with another pid, or the same pid with another
+        # start time (a recycled pid), is a restart as well.
+        for h in (('healthy', {'v1': (200, 's100')}), ('healthy', {'v1': (100, 's999')})):
+            v = self.durh(w(0, A), h1, w(0, B, flush=False), h, rd(0, A))
+            self.assertTrue(any('restarted with no recorded kill' in x for x in v['findings']), v)
+
+    def test_red_the_same_holder_or_a_recorded_kill_is_no_silent_restart(self):
+        h1 = ('healthy', {'v1': (100, 's100')})
+        # Same holder: nothing restarted, B must read back.
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), h1, rd(0, A))
+        self.assert_fail(v, 'not one of')
+        self.assertFalse(any('restarted' in x for x in v['findings']), v)
+        # A recorded kill and restart of v1 explain the new pid: no finding.
+        restart = ('restart', '', {'process': 'blockvolume:0', 'volume': 'v1'}, 'ok', {})
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), HKILL, restart, ('healthy', {'v1': (200, 's200')}), rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertFalse(any('restarted with no recorded kill' in x for x in v['findings']), v)
+        # A kill of v2 does not explain a new holder of v1.
+        k2 = ('kill', '', {'process': 'blockvolume:1', 'volume': 'v2', 'pid': 7, 'signal': 'KILL'}, 'ok', {})
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), k2, ('healthy', {'v1': (200, 's200')}), rd(0, A))
+        self.assertTrue(any('holder of v1 restarted with no recorded kill' in x for x in v['findings']), v)
+
+    # Review r1, change 3: the scope is stated.
+    def test_the_scope_is_stated_on_pass(self):
+        v = self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertIn("scope: same holder, same store, one replica (M2); replicated volumes are M3's and not judged here", v['findings'])
+        self.assertIn('one replica', hc.dur.__doc__)
 
 def m2(*steps):
     """A one-at-a-time history with healthy points: ('healthy', bool) is a
@@ -1112,6 +1259,21 @@ class C6(unittest.TestCase):
     def test_a_kill_restored_to_health_passes(self):
         self.assert_c6('PASS', KILL, ('healthy', False), RESTART, ('healthy', True))
 
+    def test_unknowns_resolved_is_reported_in_its_exact_form(self):
+        # zero unknowns with healthy points: PASS, n = 0 stated, not silent
+        v = self.assert_c6('PASS', KILL, RESTART, ('healthy', True))
+        self.assertIn('unknowns resolved: 0', v['findings'])
+        # two placed unknowns (one took effect, one did not)
+        v = self.assert_c6('PASS', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), ('write', 'v1', {'lba': 1, 'sha256': T}, 'unknown', {}),
+                           KILL, RESTART, ('healthy', True),
+                           ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}), ('read', 'v1', {'lba': 1}, 'ok', {'sha256': hc.ZERO}))
+        self.assertIn('unknowns resolved: 2', v['findings'])
+        self.assertEqual([x for x in v['findings'] if x.startswith('unknowns resolved')], ['unknowns resolved: 2'])
+        # a third state is not counted as resolved
+        v = self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                           ('read', 'v1', {'lba': 0}, 'ok', {'sha256': JUNK}))
+        self.assertIn('unknowns resolved: 0', v['findings'])
+
     def test_red_the_run_ends_unhealthy(self):
         self.assert_c6('FAIL', KILL, RESTART, ('healthy', True), KILL, ('healthy', False), contains='ended unhealthy')
 
@@ -1224,6 +1386,128 @@ class C6(unittest.TestCase):
             kv = hc.check(dump(m2(KILL, ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), RESTART, ('healthy', True))))['C6']
             self.assertEqual(kv['verdict'], 'PASS', kv)
             self.assertTrue(any('latency not judged' in x for x in kv['findings']), kv)
+
+
+HOLDERS = {'v1': {'pid': 101, 'start': 's101'}, 'v2': {'pid': 102, 'start': 's102'}}
+MRESTART = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
+
+
+def mo_history(window, secs=5, holders=HOLDERS):
+    """A short master outage: a healthy record naming the holders, an ok
+    master kill, the window's steps, the master's ok restart `secs` seconds
+    after the kill's completion, a healthy point. Window steps: an operation
+    (verb, volume, args, outcome, result), or ('look', not_serving, holders)
+    for a single-look healthy record."""
+    recs = []
+
+    def add(r):
+        r['seq'] = len(recs) + 1
+        recs.append(r)
+
+    def op(verb, vol, args, outcome, result):
+        add({'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args})
+        add({'kind': 'complete', 'of': recs[-1]['seq'], 'op': 'X.Y', 'verb': verb, 'volume': vol, 'outcome': outcome, 'result': result})
+
+    def healthy(ok, ns, hs, look=None):
+        res = {'healthy': ok, 'down': [] if ok else ['blockmaster'], 'not_serving': ns, 'holders': hs}
+        if look:
+            res['look'] = look
+        add({'kind': 'observe', 'client': 'runner', 'verb': 'healthy', 'volume': '', 'result': res})
+
+    s = 10**9
+    healthy(True, [], holders)
+    op(*MKILL)
+    kill_c = recs[-1]
+    for st in window:
+        if st[0] == 'look':
+            healthy(False, st[1], st[2], look='single')
+        else:
+            op(*st)
+    op(*MRESTART)
+    restart_c = recs[-1]
+    healthy(True, [], holders)
+    add({'kind': 'end'})
+    for r in recs:   # one clock: 1 ns per record, the restart's completion `secs` after the kill's
+        r['mono_ns'] = r['seq'] if r['seq'] <= restart_c['seq'] - 1 else r['seq'] + secs * s
+    restart_c['mono_ns'] = kill_c['mono_ns'] + secs * s
+    return recs
+
+
+class MO(unittest.TestCase):
+    def mo(self, window, **kw):
+        return hc.check(dump(mo_history(window, **kw)))['MO']
+
+    def assert_mo(self, want, window, contains=None, **kw):
+        v = self.mo(window, **kw)
+        self.assertEqual(v['verdict'], want, v)
+        if contains:
+            self.assertTrue(any(contains in x for x in v['findings']), v)
+        return v
+
+    GOOD = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('write', 'v2', {'lba': 0, 'sha256': A}, 'ok', {}),
+            ('look', [], HOLDERS), ('look', [], HOLDERS)]
+
+    def test_the_bound_is_the_pages_number_from_the_data(self):
+        self.assertEqual(hc.MASTER_OUTAGE, (10, 'docs/standalone-deployment.md:670'))
+
+    def test_a_short_outage_with_writes_ok_and_volumes_serving_passes(self):
+        v = self.assert_mo('PASS', self.GOOD)
+        self.assertEqual(v['findings'], ['short master outages judged: 1'])
+        self.assert_mo('PASS', self.GOOD, secs=10)   # the page's number itself is short
+
+    def test_red_a_refused_write_in_the_window(self):
+        w = list(self.GOOD)
+        w[1] = ('write', 'v2', {'lba': 0, 'sha256': A}, 'refused', {})
+        self.assert_mo('FAIL', w, contains='write seq 6 v2 lba 0 answered refused inside the window')
+
+    def test_red_an_unknown_write_in_the_window(self):
+        w = list(self.GOOD)
+        w[0] = ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {})
+        self.assert_mo('FAIL', w, contains='answered unknown inside the window')
+
+    def test_red_a_look_showing_a_volume_not_serving(self):
+        w = list(self.GOOD)
+        w[3] = ('look', ['v2'], HOLDERS)
+        self.assert_mo('FAIL', w, contains='shows not serving: v2')
+
+    def test_red_a_holder_pid_change(self):
+        w = list(self.GOOD)
+        w[3] = ('look', [], dict(HOLDERS, v1={'pid': 999, 'start': 's999'}))
+        self.assert_mo('FAIL', w, contains="holder of v1 is (999, 's999'), was (101, 's101') before the kill")
+
+    def test_red_a_12_s_outage_is_listed_not_judged(self):
+        w = list(self.GOOD)
+        w[1] = ('write', 'v2', {'lba': 0, 'sha256': A}, 'refused', {})   # would fail if judged
+        v = self.assert_mo('UNKNOWN', w, secs=12, contains='12.000 s to the restart, above the 10 s short outage')
+        self.assertIn('short master outages judged: 0', v['findings'])
+
+    def test_red_a_window_with_no_write_is_unknown(self):
+        v = self.assert_mo('UNKNOWN', [('look', [], HOLDERS)], contains='short master outage not exercised in window')
+        self.assertIn('(0 write(s), 1 look(s))', v['findings'][0])
+
+    def test_a_window_with_no_look_is_unknown(self):
+        self.assert_mo('UNKNOWN', self.GOOD[:2], contains='(2 write(s), 0 look(s))')
+
+    def test_each_look_is_evidence_and_a_waiting_record_is_no_look(self):
+        # the bad look is the first of two: not folded into the good second one
+        w = self.GOOD[:2] + [('look', ['v1'], HOLDERS), ('look', [], HOLDERS)]
+        self.assert_mo('FAIL', w, contains='shows not serving: v1')
+        # a healthy record without look "single" is not a look
+        recs = mo_history(self.GOOD[:2] + [('look', [], HOLDERS)])
+        for r in recs:
+            r.get('result', {}).pop('look', None) if isinstance(r.get('result'), dict) else None
+        self.assertIn('0 look(s)', hc.check(dump(recs))['MO']['findings'][0])
+
+    def test_a_kill_never_restarted_is_not_judged(self):
+        recs = synth(MKILL, ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
+        v = hc.check(dump(recs))['MO']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('no ok restart of blockmaster after it' in x for x in v['findings']), v)
+
+    def test_no_master_kill_is_not_exercised(self):
+        v = hc.check(dump(synth(KILL, RESTART)))['MO']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('MO not exercised', v['findings'][0])
 
 
 if __name__ == '__main__':
