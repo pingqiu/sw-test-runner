@@ -375,7 +375,7 @@ cmd_dev() {
 cmd_connect() {
   local nqn="$1" addr="$2" port="$3" secs="$4"
   timeout 30 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
-  # Product e7a7b1179b41ca75ae50bfbc25524416c15b21a1: operator-guide Host connect settings.
+  # Product 032eb1971cfddd6622ddeb46d20e17854d12c205: operator-guide Host connect settings.
   # Fast I/O failure stays off
   # by omitting its option, exactly as in the documented command.
   local args=(connect -t tcp -a "$addr" -s "$port" -n "$nqn" --ctrl-loss-tmo=180 --reconnect-delay=2)
