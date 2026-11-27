@@ -41,17 +41,14 @@ func TestConnectSettingsScenario(t *testing.T) {
 	if strings.Fields(s.Env["gen_pool"])[0] != "c1" || len(strings.Fields(s.Env["gen_pool"])) != 1 {
 		t.Errorf("pool %q: one volume, c1", s.Env["gen_pool"])
 	}
-	if s.Env["guest_connect_variant"] == "" {
-		t.Error("no guest_connect_variant: the connect under test must be a declared variant")
-	}
-	// The declared variant resolves to exactly the documented values, and is
-	// never release evidence.
+	// The connect under test is the documented one: the default, the
+	// release-evidence configuration, with the page's values.
 	c, err := selectConnect(s.Env["guest_connect_variant"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Options != ",ctrl_loss_tmo=180,reconnect_delay=2" || !strings.HasPrefix(c.Label, "guest connect variant: ") {
-		t.Errorf("variant %s: options %q label %q", c.Name, c.Options, c.Label)
+	if !c.Evidence || c.Options != ",ctrl_loss_tmo=180,reconnect_delay=2" {
+		t.Errorf("connect %s: options %q, evidence %v", c.Name, c.Options, c.Evidence)
 	}
 	if strings.Contains(c.Options, "fast_io_fail_tmo") {
 		t.Errorf("fast_io_fail_tmo set (%q): the documented settings leave it off", c.Options)

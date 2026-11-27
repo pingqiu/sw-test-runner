@@ -18,8 +18,8 @@ package v3block
 // vocabulary; their values are walked. The guest section is the product's
 // own settings, read by the pack, not by the executor.
 //
-// Pending, and kept as it is until it moves: the delete's "retry" (to the
-// driver, in a separate change).
+// Pending, and kept as it is until it moves: the "retry" of the delete and
+// of the snapshot (to the driver, in a separate change).
 
 import (
 	"encoding/json"
@@ -40,7 +40,7 @@ var freeMaps = map[string]bool{"derived": true, "lines": true, "fields": true, "
 	"absent": true, "one": true, "map": true, "exits": true, "ok_length": true, "result": true, "result_ok": true,
 	"result_failure": true, "result_not_run": true, "result_answered": true, "result_launched": true, "result_ready": true,
 	"result_unanswered": true, "aliases": true, "device_resolvers": true, "failure_body": true, "on_unreadable": true,
-	"on_failure": true, "on_not_run": true, "object": true}
+	"on_failure": true, "on_not_run": true, "object": true, "files": true, "record_fields": true}
 
 // typesOnly are maps of names (to types, or to maps of names) with no
 // vocabulary below them.
@@ -69,8 +69,10 @@ var vocabulary = map[string][]string{
 	".actions[].plus_param":    {"name", "default"},
 	".actions[].derived.*":     {"kind", "from", "offset", "min_port", "error", "chars", "length", "map"},
 	// Pending: moves to the driver after the rc.2 pin.
-	".actions[].retry":                  {"while_code", "within_param", "every_seconds", "attempts", "expected_refusal"},
-	".actions[].retry.expected_refusal": {"param", "while_message_contains", "why"},
+	".actions[].retry": {"while_code", "while_message_contains", "answers", "max_attempts", "every_seconds", "within_param",
+		"request_arg", "page_cite", "expected_refusal", "note"},
+	".actions[].retry.answers[]":        {"code", "message_contains"},
+	".actions[].retry.expected_refusal": {"param", "why"},
 	".actions[].variants[]":             {"name", "when", "command", "runner_deadline_seconds", "decode", "cite"},
 	".actions[].variants[].when":        when,
 	".actions[].variants[].command[]":   word,
@@ -142,7 +144,8 @@ var vocabulary = map[string][]string{
 }
 
 var probe = []string{"name", "kind", "when", "command", "as_root", "decode", "failure", "on_ok_set", "addresses", "schema",
-	"holds", "capture", "address", "subsystem", "options", "unless_present", "resolver", "within_seconds", "into", "cite"}
+	"holds", "capture", "address", "subsystem", "options", "unless_present", "resolver", "within_seconds", "into", "cite",
+	"expect", "files", "fail_run", "record_verb", "record_fields"}
 
 // vocabularyErrors lists every key of the description d outside the
 // vocabulary.

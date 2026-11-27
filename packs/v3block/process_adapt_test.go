@@ -19,7 +19,10 @@ import (
 // params is e as a step's configuration params.
 func (e opEnv) params() map[string]string {
 	p := map[string]string{"bin_dir": e.bin, "master": e.master, "filer": e.filer, "chunk_path": e.chunkPath, "root": e.root,
-		"client": e.client, "own_script": e.ownScript, "work": e.work, "owner": e.owner}
+		"client": e.client, "own_script": e.ownScript, "work": e.work, "owner": e.owner,
+		// The plain connect: these tests script no read-back of declared
+		// values (the read-back has its own tests).
+		"guest_connect_variant": "csi_plain"}
 	if p["chunk_path"] == "" {
 		p["chunk_path"] = "/chunks"
 	}

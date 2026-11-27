@@ -171,7 +171,7 @@ func v3OpAttachFrozen(ctx context.Context, actx *tr.ActionContext, act tr.Action
 		}
 		v.Cur = i
 	}
-	blocks := uint64(actions.ParseInt(optionalParam(act, "blocks"), 4096))
+	blocks := uint64(actions.ParseInt(optionalParam(act, "durable_blocks"), 4096))
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	h := v.Hosts[v.Cur]
 	defer saveVolume(actx, v)

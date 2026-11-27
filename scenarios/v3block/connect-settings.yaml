@@ -1,6 +1,7 @@
 # Guest connect settings, measured: what a guest's I/O does while its
-# holder is away, under the connect options the scenario declares (env
-# guest_connect_variant; empty = plain connect, as shipped). Two cases on one
+# holder is away, under the connect the scenario declares (env
+# guest_connect_variant; empty = the documented connect, the release-evidence
+# configuration). Two cases on one
 # volume:
 #   positive: the holder is killed, a guest write is started, the holder is
 #     restarted after restart_after seconds; the write must wait and complete;
@@ -25,10 +26,11 @@ env:
   work_prefix: "/root/connect-run-"
   # The generator. gen_seed is the run's seed; nightly_seed, when a nightly
   # driver drew gen_seed from one, is recorded next to it in the header.
-  # The guest connect under test: a variant declared in the product's
-  # actions.json (guest.connect.variants); empty = the plain connect, as the
-  # product ships it.
-  guest_connect_variant: "host_connect_settings"
+  # The guest connect under test: empty = the documented connect of the
+  # standalone deployment (actions.json guest.connect.default, the page's
+  # --ctrl-loss-tmo=180 --reconnect-delay=2); a declared variant's name
+  # otherwise.
+  guest_connect_variant: ""
   restart_after: "5"
   # How long a guest write may take before this scenario stops waiting.
   io_wait: "420"

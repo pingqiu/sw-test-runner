@@ -41,7 +41,19 @@ func checkProcEquivalentTo(t *testing.T, rep reporter, action string, frozen tr.
 	nowFn = func() time.Time { return at }
 	h := registered(action)
 	for _, c := range cases {
+		// The frozen handlers read no connect back: the cases run the plain
+		// connect unless they name one, and the declared run's read-back (its
+		// command, its result field, the run's guest_connect record) is the
+		// one deliberate addition, set aside here and tested on its own.
+		if _, named := c.vars["guest_connect_variant"]; !named {
+			vars := map[string]string{"guest_connect_variant": "csi_plain"}
+			for k, v := range c.vars {
+				vars[k] = v
+			}
+			c.vars = vars
+		}
 		want, got := runEq(t, frozen, c, false), runEq(t, h, c, false)
+		got = withoutReadback(got)
 		if (want.err == nil) != (got.err == nil) {
 			rep.Errorf("%s %s: error %v, frozen %v", action, c.name, got.err, want.err)
 			continue
@@ -155,10 +167,11 @@ func TestDeclaredAttachEquivalent(t *testing.T) {
 		{name: "host out of range", params: with("host", "2"), rules: attachRules(nil)},
 		{name: "host not a number", params: with("host", "x"), rules: attachRules(nil)},
 		{name: "lock directories", params: p, vars: map[string]string{"lock_dirs_test_only": "true"}, rules: attachRules(nil)},
-		{name: "a declared guest connect variant", params: p, vars: map[string]string{"guest_connect_variant": "host_connect_settings"}, rules: attachRules(nil)},
+		{name: "a declared guest connect variant", params: p, vars: map[string]string{"guest_connect_variant": "fast_faults"},
+			rules: attachRules(map[string][]eqAnswer{"fast_io_fail_tmo kato": {{out: "ctrl nvme3\nctrl_loss_tmo 60\nfast_io_fail_tmo 5\nkato 5\nreconnect_delay 10\nend\n"}}})},
 		{name: "an undeclared guest connect", params: p, vars: map[string]string{"guest_connect_variant": "nope"}, rules: attachRules(nil)},
-		{name: "blocks given", params: with("blocks", "64"), rules: attachRules(nil)},
-		{name: "blocks not a number", params: with("blocks", "many"), rules: attachRules(nil)},
+		{name: "durable_blocks given", params: with("durable_blocks", "64"), rules: attachRules(nil)},
+		{name: "durable_blocks not a number", params: with("durable_blocks", "many"), rules: attachRules(nil)},
 		{name: "expected refusal recorded", params: with("expect", "refused"), rules: attachRules(nil)},
 	}
 	// A recorded epoch: ready only above it.
@@ -364,4 +377,34 @@ func TestProcessEquivalenceRedControls(t *testing.T) {
 			t.Errorf("%s: green twin: %d reports", name, rep.n)
 		}
 	}
+}
+
+// withoutReadback sets aside a declared run's connect read-back: its
+// command, its result field and the run's guest_connect record.
+func withoutReadback(r eqRun) eqRun {
+	var calls []string
+	for _, c := range r.calls {
+		if !strings.Contains(c, "fast_io_fail_tmo kato") {
+			calls = append(calls, c)
+		}
+	}
+	r.calls = calls
+	var recs []tr.HistoryRecord
+	renum := map[uint64]uint64{}
+	for _, rec := range r.records {
+		if rec.Verb == "guest_connect" {
+			continue
+		}
+		if rec.Kind == tr.HistoryComplete {
+			delete(rec.Result, "guest_connect_effective")
+		}
+		renum[rec.Seq] = uint64(len(recs) + 1)
+		rec.Seq = renum[rec.Seq]
+		if rec.Of != 0 {
+			rec.Of = renum[rec.Of]
+		}
+		recs = append(recs, rec)
+	}
+	r.records = recs
+	return r
 }

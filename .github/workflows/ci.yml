@@ -37,10 +37,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - name: citations at the pin
+      - name: citations and the documented connect at the pin
         env:
           PRODUCT_SRC: ${{ github.workspace }}/product-src
-        run: go test ./packs/v3block/ -run 'TestCitations' -count=1 -v
+        run: go test ./packs/v3block/ -run 'TestCitations|TestConnectMatchesThePageAtThePin' -count=1 -v
 
   build-matrix:
     strategy:

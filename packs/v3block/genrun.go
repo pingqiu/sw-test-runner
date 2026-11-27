@@ -87,7 +87,7 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 // attach records the connect in effect either way.
 func guestHeader(get func(string) string) (map[string]any, error) {
 	c, err := selectConnect(get(guest.Connect.SelectVar))
-	if err != nil || c.Options == "" {
+	if err != nil || c.Evidence {
 		return nil, err
 	}
 	return map[string]any{"guest_connect": c.Label}, nil

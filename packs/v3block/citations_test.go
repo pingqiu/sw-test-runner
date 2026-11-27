@@ -32,7 +32,7 @@ type citeRef struct {
 
 // citeFields are the keys whose values are citations.
 var citeFields = map[string]bool{"cite": true, "side_effect_cite": true, "code_cite": true, "page_read": true,
-	"pinned_by": true, "shared_source": true, "source": true}
+	"pinned_by": true, "shared_source": true, "source": true, "page_cite": true}
 
 var (
 	citeToken = regexp.MustCompile(`(?P<path>[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:go|md|sh|yaml|yml|json|proto))(?::(?P<r1>\d+(?:-\d+)?))?` +
