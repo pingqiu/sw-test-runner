@@ -10,7 +10,10 @@ package randomrun
 //   - every kill is followed by the restart of the same process within
 //     `within` operations, and no later than after operation ops;
 //   - at most one process is down at a time;
-//   - a process is killed only when it runs, restarted only when it is down.
+//   - a process is killed only when it runs, restarted only when it is down;
+//   - a short master outage (one event: kill of the master, writes and
+//     single looks, restart; see faultRun) comes only while nothing is down,
+//     and never inside a kill's interval.
 //
 // Which process names exist is the product's: valid says it.
 
@@ -29,6 +32,10 @@ const DefaultRestartWithin = 20
 const (
 	FaultKill    = "kill"
 	FaultRestart = "restart"
+	// FaultMasterOutage is one short master outage: the master killed and
+	// restarted within the product's outage bound, with one write on every
+	// serving subject and single health looks in between.
+	FaultMasterOutage = "master_outage"
 )
 
 // FaultEvent is one scheduled process fault.
@@ -86,6 +93,44 @@ func NewFaultSchedule(seed uint64, ops int, processes []string, rate float64, wi
 	return s, nil
 }
 
+// AddMasterOutages adds short master outages to a schedule. rate is the
+// chance, after each operation k (1..ops-1) that lies outside every kill's
+// interval [kill, restart], of an outage of master after operation k. Its own
+// stream: the schedule's kills and restarts are unchanged, and a rate of 0
+// returns the schedule as it was.
+func AddMasterOutages(s FaultSchedule, ops int, master string, rate float64, valid func(string) bool) (FaultSchedule, error) {
+	if rate < 0 || rate > 1 {
+		return s, fmt.Errorf("fault schedule: master outage rate %v outside 0..1", rate)
+	}
+	if rate == 0 {
+		return s, nil
+	}
+	if master == "" || !valid(master) {
+		return s, fmt.Errorf("fault schedule: master outages on, but the master %q is no process", master)
+	}
+	busy := map[int]bool{}
+	start := 0
+	for _, e := range s.Events {
+		switch e.Action {
+		case FaultKill:
+			start = e.AfterOp
+		case FaultRestart:
+			for k := start; k <= e.AfterOp; k++ {
+				busy[k] = true
+			}
+		}
+	}
+	rng := rand.New(rand.NewPCG(s.Seed^0x6d6f757461676500, s.Seed+0x7f4a7c159e3779b9))
+	events := slices.Clone(s.Events)
+	for k := 1; k < ops; k++ {
+		if rng.Float64() < rate && !busy[k] {
+			events = append(events, FaultEvent{k, FaultMasterOutage, master})
+		}
+	}
+	slices.SortStableFunc(events, func(a, b FaultEvent) int { return a.AfterOp - b.AfterOp })
+	return FaultSchedule{Seed: s.Seed, Events: events}, nil
+}
+
 // CheckFaultSchedule judges a schedule against the rules above; it is used
 // on every recorded schedule a replay reads, and its red controls are in the
 // tests.
@@ -113,6 +158,10 @@ func CheckFaultSchedule(events []FaultEvent, ops, within int, valid func(string)
 				return fmt.Errorf("event %d: %s restarted %d operations after its kill, bound 1..%d", i, e.Process, e.AfterOp-since, within)
 			}
 			down = ""
+		case FaultMasterOutage:
+			if down != "" {
+				return fmt.Errorf("event %d: master outage of %s while %s is down (one process down at a time)", i, e.Process, down)
+			}
 		default:
 			return fmt.Errorf("event %d: action %q", i, e.Action)
 		}

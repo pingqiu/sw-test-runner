@@ -21,6 +21,9 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   kill_scope(inv)               the volumes a kill reaches on the data path
   holder_identity(healthy_obs)  {volume: (pid, start)} of each holder, from a healthy record
   not_serving(healthy_obs)      the volumes a healthy record shows not serving, or None
+  LIFECYCLE                     verb -> the intended state (held, not_held) its ok answer sets
+  third_state(healthy_obs)      [(volume, why)] of volumes in neither consistent state
+  settled(obs)                  (volume, state, evidence) of a settled record, else None
 """
 import re
 
@@ -317,6 +320,32 @@ def not_serving(healthy_obs):
     list; None when the record does not say."""
     ns = (healthy_obs.get('result') or {}).get('not_serving')
     return sorted(ns) if isinstance(ns, list) else None
+
+
+# The intended state a lifecycle operation answered ok sets on its volume: an
+# attach or a move leaves it held, a stop or a delete not held. One answered
+# unknown leaves the volume unsettled until a settled record places it.
+LIFECYCLE = {'attach': 'held', 'move': 'held', 'stop': 'not_held', 'delete': 'not_held'}
+SETTLED_STATES = ('held', 'not_held')
+
+
+def third_state(healthy_obs):
+    """[(volume, why)] of each volume a healthy record shows in neither
+    consistent state (result.third_state: a holder alive but not serving, or
+    the holder gone while the workspace is still live past the bound)."""
+    rows = (healthy_obs.get('result') or {}).get('third_state') or []
+    return [(str(r.get('volume')), str(r.get('why', ''))) for r in rows if isinstance(r, dict)] if isinstance(rows, list) else [('?', 'third_state %r' % (rows,))]
+
+
+def settled(obs):
+    """(volume, state, evidence) of an observe record of verb settled whose
+    state is one of SETTLED_STATES; None for any other record."""
+    if obs.get('kind') != 'observe' or obs.get('verb') != 'settled':
+        return None
+    res = obs.get('result') or {}
+    if res.get('state') not in SETTLED_STATES or not res.get('volume'):
+        return None
+    return res['volume'], res['state'], res.get('evidence')
 
 
 def kill_scope(inv):

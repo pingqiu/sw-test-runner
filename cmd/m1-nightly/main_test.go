@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -41,5 +43,24 @@ func TestArgvPassesTheRunsSeedNightlySeedPortsAndTag(t *testing.T) {
 		if !strings.Contains(strings.ReplaceAll(a, "\\", "/"), want) {
 			t.Errorf("argv lacks %q: %s", want, a)
 		}
+	}
+}
+
+func TestFindFileFindsTheRunsCoverageAndChecks(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"r/gen-coverage.json", "r/artifacts/checks.json"} {
+		full := filepath.Join(dir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.HasSuffix(filepath.ToSlash(findFile(dir, "checks.json")), "r/artifacts/checks.json") || findFile(dir, "gen-coverage.json") == "" {
+		t.Fatal("not found")
+	}
+	if findFile(dir, "nightly.json") != "" {
+		t.Fatal("found a file that is not there")
 	}
 }

@@ -1108,6 +1108,9 @@ def m2(*steps):
                          'result': {'healthy': st[1], 'down': [] if st[1] else ['blockvolume:0'], 'not_serving': []}})
         elif st[0] == 'obs':
             recs.append({'seq': n + 1, 'kind': 'observe', 'client': 'c1', 'verb': 'observe', 'volume': st[1], 'mono_ns': n + 1, 'result': st[2]})
+        elif st[0] == 'settled':   # ('settled', volume, state)
+            recs.append({'seq': n + 1, 'kind': 'observe', 'client': 'runner', 'verb': 'settled', 'volume': st[1], 'mono_ns': n + 1,
+                         'result': {'volume': st[1], 'state': st[2], 'evidence': 'status and listing'}})
         else:
             verb, vol, args, outcome, result = st
             recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
@@ -1218,28 +1221,98 @@ class C6(unittest.TestCase):
 
     # deletes
     def test_an_unknown_delete_placed_by_status_and_listing_passes(self):
-        for after in (live(['HEAD', 'VOLUME'], state='deleted'), live(['HEAD', 'VOLUME', ROOT1])):
-            self.assert_c6('PASS', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after))
+        # a lifecycle unknown also needs its settled record (the settled rule)
+        for after, state in ((live(['HEAD', 'VOLUME'], state='deleted'), 'not_held'), (live(['HEAD', 'VOLUME', ROOT1]), 'held')):
+            v = self.assert_c6('PASS', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                               ('settled', 'v1', state), ('obs', 'v1', after))
+            self.assertIn('unknowns resolved: 1', v['findings'], 'counted once, not by both rules')
 
     def test_red_an_unknown_delete_stuck_half_way(self):
+        # settled in time, yet the observation shows a third state: still a FAIL
         for after, why in ((live(['HEAD', 'VOLUME'], state='deleting'), 'state deleting'),
                            (live(['HEAD', 'VOLUME', ROOT1], state='deleted'), 'deleted but'),
                            ({'show_error': {'exit': 1, 'code': 'volume_not_found'}}, 'absent instead')):
-            self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after),
-                           contains=why)
+            self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                           ('settled', 'v1', 'not_held'), ('obs', 'v1', after), contains=why)
 
-    def test_red_an_unknown_delete_never_observed(self):
+    def test_red_an_unknown_delete_neither_settled_nor_observed(self):
         self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), ('obs', 'v1', live(state='deleted')), KILL, RESTART,
-                       ('healthy', True), contains='no observation of v1 after healthy point')
+                       ('healthy', True), contains='unsettled: seq 1 delete v1: never settled')
 
     # moves
     def test_an_unknown_move_placed_by_holder_and_epoch_passes(self):
         for after in (live(holder='b-v1/r1', epoch=2), live(holder='a-v1/r1', epoch=1)):
-            self.assert_c6('PASS', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after))
+            self.assert_c6('PASS', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'held'), ('obs', 'v1', after))
 
     def test_red_an_unknown_move_in_a_third_state(self):
         for after in (live(holder='b-v1/r1', epoch=1), live(holder='a-v1/r1', epoch=2)):
-            self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after), contains='third state')
+            self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'held'),
+                           ('obs', 'v1', after), contains='third state')
+
+    # settled (lifecycle unknowns)
+    def timed_settle(self, op, kill_at, op_end_at, settle_at):
+        """An unknown lifecycle op; times in seconds on mono_ns: a holder kill
+        of v1 completing at kill_at (None: no kill), the op completing at
+        op_end_at, a settled record of v1 at settle_at (None: none)."""
+        steps = []
+        if kill_at is not None:
+            steps.append(('kill', '', {'process': 'blockvolume:0', 'volume': 'v1', 'pid': 42, 'signal': 'KILL'}, 'ok', {}))
+        steps.append(op)
+        if kill_at is not None:
+            steps.append(RESTART)
+        steps.append(('healthy', True))
+        if settle_at is not None:
+            steps.append(('settled', 'v1', 'not_held'))
+        recs = m2(*steps)
+        s, base = 10**9, 1000 * 10**9   # t = 0 is `base` on the clock
+        times = {}
+        if kill_at is not None:
+            times[recs[1]['seq']] = base + kill_at * s
+        op_c = next(r for r in recs if r['kind'] == 'complete' and r['verb'] == op[0])
+        times[op_c['seq']] = base + op_end_at * s
+        if settle_at is not None:
+            times[next(r for r in recs if r.get('verb') == 'settled')['seq']] = base + settle_at * s
+        clock = 0
+        for r in recs:   # the named moments; every other record 1 ns after its predecessor
+            clock = times.get(r['seq'], clock + 1)
+            r['mono_ns'] = clock
+        return hc.check(dump(recs))['C6']
+
+    STOP = ('stop', 'v1', {}, 'unknown', {})
+
+    def test_red_a_third_state_entry_fails(self):
+        recs = m2(KILL, RESTART, ('healthy', True))
+        recs[4]['result']['third_state'] = [{'volume': 'v2', 'why': 'holder alive but not serving'}]
+        v = hc.check(dump(recs))['C6']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('third state: v2 at healthy seq 5: holder alive but not serving', v['findings'][0])
+
+    def test_red_an_unknown_stop_never_settled(self):
+        v = self.timed_settle(self.STOP, None, 1, None)
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('unsettled: seq 1 stop v1: never settled within the deadline 95.000 s after its end = the end + 65 s + 30 s (no kill)', v['findings'][0])
+
+    def test_red_an_unknown_stop_settled_after_the_deadline(self):
+        # no kill: deadline = end + 65 + 30 = 96 s
+        v = self.timed_settle(self.STOP, None, 1, 97)
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('settled only at seq 4, 96.000 s after its end, past the deadline 95.000 s', v['findings'][0])
+        # with a kill at 0 and the op ending at 80: deadline max(65, 80) + 30 = 110 s
+        v = self.timed_settle(self.STOP, 0, 80, 111)
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('past the deadline 30.000 s = max(kill seq 1 + 65 s, the end) + 30 s', v['findings'][0])
+
+    def test_an_unknown_stop_settled_in_time_passes_and_is_counted(self):
+        for kill_at, end, settle in ((None, 1, 95), (0, 80, 109), (0, 10, 95)):
+            v = self.timed_settle(self.STOP, kill_at, end, settle)
+            self.assertEqual(v['verdict'], 'PASS', (kill_at, end, settle, v))
+            self.assertIn('unknowns resolved: 1', v['findings'])
+
+    def test_a_settled_record_of_another_volume_resolves_nothing(self):
+        recs = m2(self.STOP, ('healthy', True), ('settled', 'v2', 'not_held'))
+        v = hc.check(dump(recs))['C6']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('never settled', v['findings'][0])
 
     def test_red_an_unknown_move_and_a_later_move_before_the_observation(self):
         self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True),

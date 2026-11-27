@@ -120,3 +120,65 @@ func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
 		}
 	}
 }
+
+func TestMasterOutagesComeOnlyWhileNothingIsDown(t *testing.T) {
+	outages := 0
+	for seed := uint64(1); seed <= 100; seed++ {
+		base, err := NewFaultSchedule(seed, 200, faultProcs, 0.05, 20, testProcess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := AddMasterOutages(base, 200, "p0", 0.05, testProcess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckFaultSchedule(s.Events, 200, 20, testProcess); err != nil {
+			t.Fatalf("seed %d: %v\n%v", seed, err, s.Events)
+		}
+		// The kills and restarts are the base schedule's, in order.
+		var kr []FaultEvent
+		for _, e := range s.Events {
+			if e.Action == FaultMasterOutage {
+				outages++
+				continue
+			}
+			kr = append(kr, e)
+		}
+		if !reflect.DeepEqual(kr, base.Events) {
+			t.Fatalf("seed %d: the outages changed the kills", seed)
+		}
+		again, _ := AddMasterOutages(base, 200, "p0", 0.05, testProcess)
+		if !reflect.DeepEqual(again, s) {
+			t.Fatal("not deterministic")
+		}
+	}
+	if outages < 100 {
+		t.Fatalf("only %d outages over the sweep", outages)
+	}
+	base, _ := NewFaultSchedule(3, 60, faultProcs, 0.08, 20, testProcess)
+	if s, err := AddMasterOutages(base, 60, "p0", 0, testProcess); err != nil || !reflect.DeepEqual(s, base) {
+		t.Fatal("rate 0 changed the schedule")
+	}
+	for name, f := range map[string]func() error{
+		"rate above 1":   func() error { _, err := AddMasterOutages(base, 60, "p0", 2, testProcess); return err },
+		"no master":      func() error { _, err := AddMasterOutages(base, 60, "", 0.1, testProcess); return err },
+		"unknown master": func() error { _, err := AddMasterOutages(base, 60, "q", 0.1, testProcess); return err },
+	} {
+		if f() == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Red controls for the checker: an outage while a process is down.
+	for name, ev := range map[string][]FaultEvent{
+		"outage while down":    {{2, FaultKill, "p1"}, {3, FaultMasterOutage, "p0"}, {4, FaultRestart, "p1"}},
+		"outage of an unknown": {{3, FaultMasterOutage, "q"}},
+		"outage out of order":  {{5, FaultMasterOutage, "p0"}, {3, FaultMasterOutage, "p0"}},
+	} {
+		if CheckFaultSchedule(ev, 30, 20, testProcess) == nil {
+			t.Errorf("red control %q not caught", name)
+		}
+	}
+	if err := CheckFaultSchedule([]FaultEvent{{2, FaultKill, "p1"}, {4, FaultRestart, "p1"}, {5, FaultMasterOutage, "p0"}}, 30, 20, testProcess); err != nil {
+		t.Errorf("green: %v", err)
+	}
+}

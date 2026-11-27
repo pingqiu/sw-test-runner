@@ -11,10 +11,15 @@ package randomrun
 //   - the long run is never dropped for time (drop a parallel run instead).
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // splitmix64 is a fixed, well-mixed function: run i's seed is
@@ -46,8 +51,63 @@ type NightRun struct {
 	Exit     int    `json:"exit"`
 	Bundle   string `json:"bundle"`
 	Coverage string `json:"coverage"` // the run's gen-coverage.json, if found
+	Checks   string `json:"checks"`   // the run's checks.json (artifacts/), if found
+	History  string `json:"history"`  // the run's history.jsonl, if found
 	Verdict  string `json:"verdict"`  // PASS only on exit 0 with a coverage file
 	Error    string `json:"error,omitempty"`
+	// Filled by Judge: a fault run (its coverage has fault cells), and the n
+	// of its C6 finding "unknowns resolved: <n>" (0 when absent; ChecksNote
+	// says why).
+	Faults           bool   `json:"faults"`
+	UnknownsResolved int    `json:"unknowns_resolved"`
+	ChecksNote       string `json:"checks_note,omitempty"`
+	// The run's required checker set, from its header's "checkers", and the
+	// ones in it that its checks.json does not hold (not run: the run FAILs).
+	Checkers []string `json:"checkers"`
+	NotRun   []string `json:"not_run,omitempty"`
+}
+
+// requiredCheckers reads the checker set from a history's gen_header.
+func requiredCheckers(path string) ([]string, error) {
+	if path == "" {
+		return nil, fmt.Errorf("no history.jsonl in the bundle")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 1<<20), 16<<20)
+	for s.Scan() {
+		var r tr.HistoryRecord
+		if json.Unmarshal(s.Bytes(), &r) != nil || r.Kind != tr.HistoryObserve || r.Verb != "gen_header" {
+			continue
+		}
+		cs, _ := r.Result["checkers"].(string)
+		if !checkerSet.MatchString(cs) {
+			return nil, fmt.Errorf("the run's header names no checker set (param checkers)")
+		}
+		return strings.Split(cs, ","), nil
+	}
+	return nil, fmt.Errorf("the history has no gen_header")
+}
+
+// checkersRun lists the checkers a checks.json holds a verdict for.
+func checkersRun(path string) (map[string]bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var checks map[string]json.RawMessage
+	if err := json.Unmarshal(b, &checks); err != nil {
+		return nil, fmt.Errorf("checks.json does not parse")
+	}
+	out := map[string]bool{}
+	for k := range checks {
+		out[k] = true
+	}
+	return out, nil
 }
 
 // NightReport is the night's verdict and the union coverage.
@@ -57,21 +117,60 @@ type NightReport struct {
 	UnionCells        map[string]int `json:"union_cells"`
 	UnionNeverReached []string       `json:"union_cells_never_reached"`
 	Verdict           string         `json:"verdict"`
+	Findings          []string       `json:"findings,omitempty"` // night-level reasons for FAIL
+}
+
+// resolvedPrefix is the C6 finding that counts the unknowns resolved by
+// observation at a healthy point.
+const resolvedPrefix = "unknowns resolved: "
+
+// unknownsResolved reads n from a checks.json's C6 finding
+// "unknowns resolved: <n>".
+func unknownsResolved(path string) (int, string) {
+	if path == "" {
+		return 0, "no checks.json in the bundle"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err.Error()
+	}
+	var checks map[string]struct {
+		Findings []string `json:"findings"`
+	}
+	if err := json.Unmarshal(b, &checks); err != nil {
+		return 0, "checks.json does not parse"
+	}
+	for _, f := range checks["C6"].Findings {
+		if s, ok := strings.CutPrefix(f, resolvedPrefix); ok {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 0 {
+				return 0, fmt.Sprintf("C6 finding %q", f)
+			}
+			return n, ""
+		}
+	}
+	return 0, "C6 has no finding \"" + resolvedPrefix + "<n>\""
 }
 
 // Judge fills each run's verdict and the night's: a run PASSes only with
-// exit 0 and a readable coverage file; the night PASSes only if every run
-// does. Union coverage sums the runs' cells; a cell is never reached in the
-// union only if no run reached it.
+// exit 0, a readable coverage file, and a checks.json that holds every
+// checker of the run's required set (its header's checkers; one missing is
+// "not run"; one present but not in the set is ignored); the night PASSes
+// only if every run does. Union coverage sums the runs' cells; a cell is never reached in the
+// union only if no run reached it. A night with fault runs also needs one run
+// whose C6 resolved at least one unknown ("unknowns resolved: <n>", n > 0):
+// otherwise the faults exercised nothing C6 can judge, and the night FAILs.
 func Judge(nightly uint64, runs []NightRun) NightReport {
 	rep := NightReport{NightlySeed: nightly, UnionCells: map[string]int{}, Verdict: "PASS"}
 	never := map[string]int{} // cell -> number of runs that never reached it
 	for _, r := range runs {
 		r.Verdict = "FAIL"
 		var cov struct {
-			Cells map[string]int `json:"cells"`
-			Never []string       `json:"cells_never_reached"`
+			Cells  map[string]int `json:"cells"`
+			Never  []string       `json:"cells_never_reached"`
+			Faults map[string]int `json:"fault_cells"`
 		}
+		r.UnknownsResolved, r.ChecksNote = unknownsResolved(r.Checks)
 		b, err := os.ReadFile(r.Coverage)
 		switch {
 		case r.Coverage == "":
@@ -87,10 +186,37 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 			for _, c := range cov.Never {
 				never[c]++
 			}
-			if r.Exit == 0 {
+			r.Faults = cov.Faults != nil
+			req, rerr := requiredCheckers(r.History)
+			r.Checkers = req
+			var ran map[string]bool
+			if rerr == nil {
+				if r.Checks == "" {
+					rerr = fmt.Errorf("no checks.json in the bundle")
+				} else {
+					ran, rerr = checkersRun(r.Checks)
+				}
+			}
+			for _, c := range req {
+				if rerr == nil && !ran[c] {
+					r.NotRun = append(r.NotRun, c)
+				}
+			}
+			why := ""
+			switch {
+			case rerr != nil:
+				why = "checker set: " + rerr.Error()
+			case len(r.NotRun) > 0:
+				why = "not run: " + strings.Join(r.NotRun, ", ")
+			case r.Exit != 0:
+				why = fmt.Sprintf("run exited %d", r.Exit)
+			default:
 				r.Verdict = "PASS"
-			} else if r.Error == "" {
-				r.Error = fmt.Sprintf("run exited %d", r.Exit)
+			}
+			if why != "" && r.Error == "" {
+				r.Error = why
+			} else if why != "" && why != r.Error {
+				r.Error += "; " + why
 			}
 		}
 		if r.Verdict != "PASS" {
@@ -106,6 +232,19 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 		}
 	}
 	slices.Sort(rep.UnionNeverReached)
+	faults, resolved := 0, 0
+	for _, r := range rep.Runs {
+		if r.Faults {
+			faults++
+		}
+		if r.UnknownsResolved > 0 {
+			resolved++
+		}
+	}
+	if faults > 0 && resolved == 0 {
+		rep.Verdict = "FAIL"
+		rep.Findings = append(rep.Findings, fmt.Sprintf("%d fault runs, and no run's C6 resolved an unknown (%s<n> with n > 0)", faults, resolvedPrefix))
+	}
 	if len(runs) == 0 {
 		rep.Verdict = "FAIL"
 	}

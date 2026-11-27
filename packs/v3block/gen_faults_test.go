@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 // The schedule itself is generic (randomrun, with its pin and red
@@ -52,6 +54,12 @@ type faultFake struct {
 	healthyCall int
 	log         []string
 	waits       []string // wait_seconds of each healthy call
+	// A short master outage: from a single look while the master is down to
+	// its restart, writes answer as the product should (ok), or unknown when
+	// outageUnknown seeds the defect MO must catch.
+	inOutage      bool
+	outageUnknown bool
+	ready         []string // ready_seconds of each restart
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -62,7 +70,7 @@ func (f *faultFake) install(t *testing.T) {
 			continue
 		}
 		genHandlers[name] = func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-			if f.down == "" || act.Params["expect"] != "" {
+			if f.down == "" || act.Params["expect"] != "" || (f.inOutage && !f.outageUnknown) {
 				return inner(ctx, actx, act)
 			}
 			f.calls = append(f.calls, act)
@@ -82,7 +90,8 @@ func (f *faultFake) install(t *testing.T) {
 				f.down = p
 				f.maxDown = max(f.maxDown, 1)
 			} else if f.down == p {
-				f.down = ""
+				f.down, f.inOutage = "", false
+				f.ready = append(f.ready, act.Params["ready_seconds"])
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Process." + verb, Verb: verb, Args: map[string]any{"process": p}})
 			_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
@@ -92,6 +101,13 @@ func (f *faultFake) install(t *testing.T) {
 	genHandlers["v3_op_kill"] = fault(FaultKill)
 	genHandlers["v3_op_restart"] = fault(FaultRestart)
 	genHandlers["v3_op_healthy"] = func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		if act.Params["look"] == "single" {
+			f.inOutage = f.inOutage || f.down == "blockmaster"
+			f.log = append(f.log, "look")
+			_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{
+				"healthy": false, "down": []string{f.down}, "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
+			return map[string]string{"value": tr.OutcomeOK, "healthy": "false"}, nil
+		}
 		f.healthyCall++
 		ok := f.down == "" && f.healthyCall > f.unhealthy
 		f.log = append(f.log, fmt.Sprintf("healthy %v", ok))
@@ -528,5 +544,185 @@ func TestGenExecTakesAnObservationsAnswerAsNoOutcome(t *testing.T) {
 	actx, _ := genRunCtx(t)
 	if _, err := genExec(context.Background(), actx, "host", GenOp{Action: "v3_op_observe", Volume: "g1", Params: map[string]string{"volume": "g1"}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func outageAct(ops string) tr.Action {
+	a := faultAct(ops, "0.05")
+	a.Params["fault_master_outage"] = "0.05"
+	// Holder kills only: a kill of the master by the schedule is a window MO
+	// judges too, and this fake answers unknown while a process is down.
+	a.Params["fault_processes"] = "blockvolume:0"
+	return a
+}
+
+// judgeOutages states checker MO's rule on a history, independently of the
+// runner: each window from an ok kill of blockmaster's completion to its next
+// ok restart's completion holds at least one write and one single look; every
+// write in it answers ok; every single look says which volumes serve and
+// shows none not serving. It returns the windows judged and the findings.
+func judgeOutages(recs []tr.HistoryRecord) (int, []string) {
+	var f []string
+	windows := 0
+	open := map[uint64]tr.HistoryRecord{}
+	kill := uint64(0)
+	writes, looks := 0, 0
+	for _, r := range recs {
+		switch r.Kind {
+		case tr.HistoryInvoke:
+			open[r.Seq] = r
+		case tr.HistoryComplete:
+			inv := open[r.Of]
+			switch {
+			case inv.Verb == FaultKill && inv.Args["process"] == "blockmaster" && r.Outcome == tr.OutcomeOK:
+				kill, writes, looks = r.Seq, 0, 0
+			case inv.Verb == FaultRestart && inv.Args["process"] == "blockmaster" && kill != 0 && r.Outcome == tr.OutcomeOK:
+				if writes == 0 || looks == 0 {
+					f = append(f, fmt.Sprintf("window from seq %d: %d writes, %d looks", kill, writes, looks))
+				}
+				windows++
+				kill = 0
+			case inv.Verb == "write" && kill != 0:
+				writes++
+				if r.Outcome != tr.OutcomeOK {
+					f = append(f, fmt.Sprintf("write seq %d %s answered %s in the window", inv.Seq, inv.Volume, r.Outcome))
+				}
+			}
+		case tr.HistoryObserve:
+			if r.Verb == "healthy" && kill != 0 && r.Result["look"] == "single" {
+				looks++
+				ns, ok := r.Result["not_serving"].([]any)
+				if !ok || len(ns) != 0 {
+					f = append(f, fmt.Sprintf("look seq %d not_serving %v", r.Seq, r.Result["not_serving"]))
+				}
+			}
+		}
+	}
+	return windows, f
+}
+
+func TestGenRunWithMasterOutagesHasTheShapesMOReads(t *testing.T) {
+	f := &faultFake{}
+	f.install(t)
+	actx, a := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx, outageAct("300")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	recs := records(t, a)
+	if recs[0].Result["fault_master_outage"] != 0.05 {
+		t.Fatalf("header %v", recs[0].Result)
+	}
+	base, _ := NewFaultSchedule(5, 300, []string{"blockvolume:0"}, 0.05, DefaultRestartWithin)
+	want, err := randomrun.AddMasterOutages(base, 300, "blockmaster", 0.05, ValidFaultProcess)
+	if err != nil || !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.Record())) {
+		t.Fatalf("fault_schedule %v, want %v (%v)", recs[1].Result, want.Record(), err)
+	}
+	outages := 0
+	for _, e := range want.Events {
+		if e.Action == randomrun.FaultMasterOutage {
+			outages++
+		}
+	}
+	if outages == 0 {
+		t.Fatal("the pinned run has no master outage")
+	}
+	// Each marker is followed by exactly: a normal healthy record, the kill, a
+	// single look, its writes, a single look, the restart, a healthy record.
+	markers, wrote := 0, 0
+	for i, r := range recs {
+		if r.Verb != "master_outage" {
+			continue
+		}
+		markers++
+		if r.Result["max_seconds"] != float64(genOutage.maxSeconds) || r.Result["process"] != "blockmaster" {
+			t.Fatalf("marker %v", r.Result)
+		}
+		var shape []string
+		shape = append(shape, "observe healthy ", "invoke kill blockmaster", "complete kill blockmaster", "observe healthy single")
+		for _, w := range r.Result["writes"].([]any) {
+			v := w.(map[string]any)["volume"].(string)
+			shape = append(shape, "invoke write "+v, "complete write "+v)
+			wrote++
+		}
+		shape = append(shape, "observe healthy single", "invoke restart blockmaster", "complete restart blockmaster", "observe healthy ")
+		for j, s := range shape {
+			x := recs[i+1+j]
+			got := x.Kind + " " + x.Verb + " "
+			switch {
+			case x.Verb == "healthy":
+				look, _ := x.Result["look"].(string)
+				got += look
+			case x.Kind == tr.HistoryInvoke && x.Args["process"] != nil:
+				got += x.Args["process"].(string)
+			case x.Kind == tr.HistoryComplete && (x.Verb == FaultKill || x.Verb == FaultRestart):
+				got += "blockmaster"
+			default:
+				got += x.Volume
+			}
+			if got != s {
+				t.Fatalf("outage at record %d, record %d: %q, want %q", i, j, got, s)
+			}
+		}
+	}
+	if markers != outages || wrote == 0 {
+		t.Fatalf("%d markers for %d outages, %d writes", markers, outages, wrote)
+	}
+	for _, r := range f.ready {
+		if r != "" && r != strconv.Itoa(genOutage.maxSeconds) {
+			t.Fatalf("restart ready_seconds %v", f.ready)
+		}
+	}
+	if n, bad := judgeOutages(recs); n != outages || len(bad) != 0 {
+		t.Fatalf("MO's rule: %d windows, %v", n, bad)
+	}
+	if left := unresolvedUnknowns(recs); len(left) != 0 {
+		t.Fatalf("unknowns not resolved: %v", left)
+	}
+	fc, _ := lastVerb(t, a, "gen_coverage").Result["fault_cells"].(map[string]any)
+	if fc["master_outage|blockmaster"] != float64(outages) {
+		t.Fatalf("fault cells %v", fc)
+	}
+	// The replay matches and re-runs the same outages.
+	recLog := f.log
+	f.log = nil
+	out, b, err := replayInto(t, a)
+	if err != nil || out["value"] != "match" || !reflect.DeepEqual(f.log, recLog) {
+		t.Fatalf("%v %v\n%v\n%v", out, err, f.log, recLog)
+	}
+	if n, bad := judgeOutages(records(t, b)); n != outages || len(bad) != 0 {
+		t.Fatalf("replay, MO's rule: %d windows, %v", n, bad)
+	}
+
+	// Red control: a product whose writes fail in the outage is caught.
+	f2 := &faultFake{outageUnknown: true}
+	f2.install(t)
+	actx2, a2 := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx2, outageAct("300")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx2.History.Close()
+	if _, bad := judgeOutages(records(t, a2)); len(bad) == 0 {
+		t.Fatal("red control: writes unknown inside the outage passed MO's rule")
+	}
+}
+
+// The outage bound and the master are read from product/checks.json.
+func TestOutageFactsComeFromChecksJSON(t *testing.T) {
+	if !genOutageOK || genOutage.master != "blockmaster" || genOutage.maxSeconds <= 0 {
+		t.Fatalf("%+v %v", genOutage, genOutageOK)
+	}
+	for name, b := range map[string]string{
+		"no master_outage": `{"fault_targets": [{"name": "blockmaster", "role": "master"}]}`,
+		"no cite":          `{"master_outage": {"max_seconds": 10}, "fault_targets": [{"name": "blockmaster", "role": "master"}]}`,
+		"zero seconds":     `{"master_outage": {"max_seconds": 0, "cite": "x"}, "fault_targets": [{"name": "blockmaster", "role": "master"}]}`,
+		"no master":        `{"master_outage": {"max_seconds": 10, "cite": "x"}, "fault_targets": []}`,
+	} {
+		if _, ok := readOutageFacts([]byte(b)); ok {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if f, ok := readOutageFacts([]byte(`{"master_outage": {"max_seconds": 7, "cite": "x"}, "fault_targets": [{"name": "blockmaster", "role": "master"}]}`)); !ok || f.maxSeconds != 7 {
+		t.Errorf("%+v %v", f, ok)
 	}
 }

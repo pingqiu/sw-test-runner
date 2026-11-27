@@ -102,4 +102,21 @@ func TestGenProposalPin(t *testing.T) {
 		}
 		checkPin(t, "pin-m2-faults-seed1-300.txt", got)
 	})
+	t.Run("master-outage", func(t *testing.T) {
+		f := &faultFake{}
+		f.install(t)
+		actx, p := genRunCtx(t)
+		act := outageAct("300")
+		act.Params["seed"] = "1"
+		if _, err := v3GenRun(context.Background(), actx, act); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		got := pinLines(t, p)
+		if n := strings.Count(got, " gen_step "); n != 300 || !strings.Contains(got, " master_outage ") {
+			t.Fatalf("%d proposals, or no master outage", n)
+		}
+
+		checkPin(t, "pin-m2-outage-seed1-300.txt", got)
+	})
 }

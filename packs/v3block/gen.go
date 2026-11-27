@@ -33,13 +33,15 @@ import (
 // version is refused. m1-gen/2: the shadow follows the documented refusals
 // (reserved and bound names, no attach on an earlier local root or after a
 // stop, no ordinary delete of a serving volume), proposes the negatives the
-// typed actions can answer, and names every read's lbas.
-const GenVersion = "m1-gen/2"
+// typed actions can answer, and names every read's lbas. m1-gen/3: a restore
+// from a target's snapshot and a release of a target are negatives only while
+// the target still names a source chunk.
+const GenVersion = "m1-gen/3"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
-// history replays as before.
-const GenVersionFaults = "m2-gen/1"
+// history replays as before. m2-gen/2: as m1-gen/3.
+const GenVersionFaults = "m2-gen/2"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -116,6 +118,11 @@ var (
 	limReleaseLive     = genLimit("release_live").Name              // SD:696
 )
 
+// placementHost is the holder host every volume of the run's cluster spec is
+// placed on: its first host (the spec's placements name v.Hosts[0]; ops.go,
+// volset.go). A move takes a volume to the other one.
+const placementHost = 0
+
 // burnt says a name can never be created or restored into again.
 func burnt(state string) bool {
 	return state == stDeleted || state == stReserved || state == stBound
@@ -136,6 +143,18 @@ type genVol struct {
 	lbas     map[int]bool      // lbas with acknowledged content (written here, or inherited by a restore target)
 	snapLBAs map[string][]int  // live snapshot name -> the lbas with content when it was taken
 	snapSeq  int
+	// A restore target's root names the source's chunk until the target
+	// rewrites that chunk and the write is committed (a read fill does not
+	// re-own it); every lba here lies in one chunk. inherited: the source
+	// snapshot had content, so the target's root names a source chunk.
+	// rewrote: the target has had a write answered ok (or, in a fault run,
+	// unknown) since its restore; snapRewrote: the same, as it stood when
+	// each live snapshot was taken. While a root names a source chunk the
+	// product refuses a restore from that snapshot and a release of the
+	// target (layout/snapshots.go:102-107, layout/delete.go:250-257).
+	inherited   bool
+	rewrote     bool
+	snapRewrote map[string]bool
 	// held[h]: a holder on host h served this volume once, so h has a local
 	// root for it. The local root is per host and the runner never moves it
 	// aside, so an attach on a host that held the volume earlier is against
@@ -168,7 +187,8 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	}
 	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
 	for _, n := range pool {
-		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{}}
+		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
+			snapRewrote: map[string]bool{}}
 		m.order = append(m.order, n)
 	}
 	return nil
@@ -341,6 +361,17 @@ func (m *blockModel) Negatives() []GenOp {
 			}
 			if len(v.snaps) > 0 {
 				s := v.snaps[0]
+				if v.source != "" {
+					// Only a snapshot taken before the target's first write still
+					// names a source chunk, and only if it inherited one.
+					s = ""
+					for _, x := range v.snaps {
+						if v.inherited && !v.snapRewrote[x] {
+							s = x
+							break
+						}
+					}
+				}
 				if v.source == "" {
 					// Into a name that exists, not this restore's own replay
 					// (target_exists).
@@ -350,7 +381,7 @@ func (m *blockModel) Negatives() []GenOp {
 					}); t != "" {
 						add(op("v3_op_restore", n, "snapshot", s, "target_volume", t), limRestoreExisting)
 					}
-				} else if unborn != "" {
+				} else if unborn != "" && s != "" {
 					add(op("v3_op_restore", n, "snapshot", s, "target_volume", unborn), limRestoreTarget)
 				}
 			}
@@ -361,11 +392,13 @@ func (m *blockModel) Negatives() []GenOp {
 		}
 		// Snapshots with a live restore target: their delete is refused, through
 		// the holder while it serves, store direct otherwise; a live target is
-		// not released.
+		// not released while it names a source chunk (it inherited one and has
+		// not written since its restore).
 		if v.state == stServing || v.state == stStopped || v.state == stReserved {
 			for s, t := range v.targets {
 				add(op("v3_op_snapshot_delete", n, "name", s), limDeleteSnapDep)
-				if ts := m.vols[t].state; ts == stCreated || ts == stServing || ts == stStopped {
+				tv := m.vols[t]
+				if ts := tv.state; (ts == stCreated || ts == stServing || ts == stStopped) && tv.inherited && !tv.rewrote {
 					add(op("v3_op_release", n, "target_volume", t), limReleaseLive)
 				}
 			}
@@ -414,6 +447,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			}
 		}
 		v.unresolved++
+		v.rewrote = true // it may have persisted: the target may no longer name the source
 		return
 	}
 	if outcome == "refused" || outcome == "unknown" {
@@ -454,20 +488,26 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 				v.lbas[b] = true
 			}
 		}
+		v.rewrote = true
 	case "v3_op_snapshot":
 		v.snapSeq++
 		v.snaps = append(v.snaps, o.Params["name"])
 		v.snapLBAs[o.Params["name"]] = sortedLBAs(v.lbas)
+		v.snapRewrote[o.Params["name"]] = v.rewrote
 	case "v3_op_snapshot_delete":
 		v.snaps = slices.DeleteFunc(v.snaps, func(s string) bool { return s == o.Params["name"] })
 		delete(v.snapLBAs, o.Params["name"])
+		delete(v.snapRewrote, o.Params["name"])
 	case "v3_op_restore":
 		// The target's content is the source's at the snapshot.
 		t := m.vols[o.Params["target_volume"]]
-		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], v.host
+		// A restore target serves where its own placement says, as any volume
+		// (SD:664-672), not on its source's current host.
+		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], placementHost
 		for _, b := range v.snapLBAs[o.Params["snapshot"]] {
 			t.lbas[b] = true
 		}
+		t.inherited, t.rewrote = len(v.snapLBAs[o.Params["snapshot"]]) > 0, false
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
 		v.state = stStopped
@@ -497,6 +537,37 @@ func (m *blockModel) Cells() map[string][]string {
 		"v3_op_move": {stServing}, "v3_op_delete": {stCreated, stStopped, stMoved, stReserved, stServing},
 		"v3_op_release": {stServing, stStopped},
 	}
+}
+
+// sweepReadSize is the most lbas one sweep read names (a read's size).
+const sweepReadSize = 4
+
+// Sweep is the end-of-run sweep (C1, C2/C3, C7 need it): for every serving
+// volume, reads of every lba with acknowledged content (written, or inherited
+// by a restore target) in batches of a read's size, then one observation; one
+// observation of every other volume that exists or was deleted (created,
+// stopped, moved, reserved, deleted). An unborn or bound name has nothing to
+// see, and a volume whose state is unknown is out of the run.
+func (m *blockModel) Sweep() []GenOp {
+	var out []GenOp
+	for _, n := range m.order {
+		v := m.vols[n]
+		switch v.state {
+		case stServing:
+			have := sortedLBAs(v.lbas)
+			for i := 0; i < len(have); i += sweepReadSize {
+				var f []string
+				for _, b := range have[i:min(i+sweepReadSize, len(have))] {
+					f = append(f, strconv.Itoa(b))
+				}
+				out = append(out, op("v3_op_read", n, "lbas", strings.Join(f, " ")))
+			}
+			out = append(out, m.Observe(n))
+		case stCreated, stStopped, stMoved, stReserved, stDeleted:
+			out = append(out, m.Observe(n))
+		}
+	}
+	return out
 }
 
 // Driver side: how a block proposal is executed.
@@ -561,6 +632,34 @@ func (m *blockModel) Healthy(wait string) GenOp {
 
 func (m *blockModel) ValidProcess(p string) bool { return ValidFaultProcess(p) }
 
+// MasterOutage: the master and the short-outage bound, from
+// product/checks.json (master_outage, fault_targets).
+func (m *blockModel) MasterOutage() (string, int, bool) {
+	return genOutage.master, genOutage.maxSeconds, genOutageOK
+}
+
+// Look is v3_op_healthy look=single: one look, no wait.
+func (m *blockModel) Look() GenOp {
+	return GenOp{Action: "v3_op_healthy", Params: map[string]string{"look": "single"}}
+}
+
+// OutageRestart is v3_op_restart of the master, ready within the outage bound.
+func (m *blockModel) OutageRestart() GenOp {
+	return GenOp{Action: "v3_op_restart", Params: map[string]string{"process": genOutage.master, "ready_seconds": strconv.Itoa(genOutage.maxSeconds)}}
+}
+
+// OutageWrites is one write on every serving volume, of one lba (after mod
+// blocks: no draw from the run's random stream), in pool order.
+func (m *blockModel) OutageWrites(after int) []GenOp {
+	var out []GenOp
+	for _, n := range m.order {
+		if m.vols[n].state == stServing {
+			out = append(out, op("v3_op_write", n, "lbas", strconv.Itoa(after%m.blocks), "round", fmt.Sprintf("o%d", after)))
+		}
+	}
+	return out
+}
+
 // GenConfig sets a block run: the generic config and the lbas used.
 type GenConfig struct {
 	Seed     uint64
@@ -574,6 +673,7 @@ type GenConfig struct {
 	Faults         float64  // chance of a kill after each operation while nothing is down
 	FaultProcesses []string // the processes the schedule may kill
 	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
+	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
 }
 
 // Generator is the generic generator over the block model; the model's
@@ -591,7 +691,7 @@ func NewGenerator(cfg GenConfig) (*Generator, error) {
 	}
 	m := &blockModel{blocks: cfg.Blocks}
 	g, err := randomrun.New(randomrun.Config{Seed: cfg.Seed, Ops: cfg.Ops, Pool: cfg.Pool, Negative: cfg.Negative, Weights: cfg.Weights,
-		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin}, m)
+		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin, MasterOutage: cfg.MasterOutage}, m)
 	if err != nil {
 		return nil, err
 	}

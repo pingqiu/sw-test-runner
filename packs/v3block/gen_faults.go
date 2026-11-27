@@ -8,11 +8,49 @@ package v3block
 // together: one process down at a time).
 
 import (
+	_ "embed"
+	"encoding/json"
 	"strconv"
 	"strings"
 
 	"github.com/pingqiu/sw-test-runner/randomrun"
 )
+
+//go:embed product/checks.json
+var checksJSON []byte
+
+// outageFacts are the product facts a short master outage needs, from
+// product/checks.json: the master (the fault target whose role is master)
+// and the short-outage bound (master_outage.max_seconds, with its cite).
+type outageFacts struct {
+	master     string
+	maxSeconds int
+}
+
+func readOutageFacts(b []byte) (outageFacts, bool) {
+	var c struct {
+		MasterOutage *struct {
+			MaxSeconds int    `json:"max_seconds"`
+			Cite       string `json:"cite"`
+		} `json:"master_outage"`
+		FaultTargets []struct {
+			Name string `json:"name"`
+			Role string `json:"role"`
+		} `json:"fault_targets"`
+	}
+	if json.Unmarshal(b, &c) != nil || c.MasterOutage == nil || c.MasterOutage.MaxSeconds <= 0 || c.MasterOutage.Cite == "" {
+		return outageFacts{}, false
+	}
+	f := outageFacts{maxSeconds: c.MasterOutage.MaxSeconds}
+	for _, t := range c.FaultTargets {
+		if t.Role == "master" {
+			f.master = t.Name
+		}
+	}
+	return f, f.master != "" && ValidFaultProcess(f.master)
+}
+
+var genOutage, genOutageOK = readOutageFacts(checksJSON)
 
 // DefaultRestartWithin is the default bound, in operations, between a kill
 // and the restart of the same process.

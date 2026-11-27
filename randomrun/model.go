@@ -48,10 +48,21 @@ type Driver interface {
 	Fault(e FaultEvent) Op
 	// Healthy is the operation that asks for a healthy point (wait: the
 	// seconds it may poll, "" for its default). Its handler records an
-	// observation with verb "healthy" and answers healthy="true" at one.
+	// observation with verb "healthy" and answers healthy="true" at one (the
+	// handler verb contract: doc.go).
 	Healthy(wait string) Op
 	// ValidProcess says whether a fault schedule may name process p.
 	ValidProcess(p string) bool
+	// MasterOutage names the product's master process and its short-outage
+	// bound in seconds (an outage this short interrupts nothing); ok false
+	// when the product states none.
+	MasterOutage() (master string, maxSeconds int, ok bool)
+	// Look is a single-look health record: one look, no wait; its record
+	// says so (result.look "single").
+	Look() Op
+	// OutageRestart is the master's restart in a short outage, bounded by
+	// the outage bound.
+	OutageRestart() Op
 }
 
 // Model is the product's side of proposing: its state, preconditions and
@@ -85,4 +96,12 @@ type Model interface {
 	// Cells lists, per action, the states in which it can be proposed: the
 	// cells a run reports as never reached.
 	Cells() map[string][]string
+	// OutageWrites lists the writes of a short master outage after operation
+	// after: one on every serving subject. Learnt like any outcome.
+	OutageWrites(after int) []Op
+	// Sweep lists the operations of the end-of-run sweep, in order: reads of
+	// every block with acknowledged content of each live subject, and one
+	// observation of each subject the checkers need to see last (deleted ones
+	// included). They are recorded as ordinary operations, not proposals.
+	Sweep() []Op
 }

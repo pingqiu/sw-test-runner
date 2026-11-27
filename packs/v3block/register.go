@@ -58,6 +58,9 @@ func RegisterPack(r *tr.Registry) {
 	// The M1 random run (gen.go, genrun.go): proposals through the same typed operations.
 	r.RegisterFunc("v3_gen_run", tr.TierBlock, v3GenRun)
 	r.RegisterFunc("v3_gen_replay", tr.TierBlock, v3GenReplay) // genreplay.go: re-execute a recorded run, compare outcomes
+	// The tier-1 declared workload loop (looprun.go, product/loops.json): no model.
+	r.RegisterFunc("v3_loop_run", tr.TierBlock, v3LoopRun)
+	r.RegisterFunc("v3_loop_replay", tr.TierBlock, v3LoopReplay)
 	// One run's ports, work directory and NQN prefix (runplan.go), for concurrent runs.
 	r.RegisterFunc("v3_run_plan", tr.TierDevOps, v3RunPlan)
 	for name, f := range map[string]tr.ActionHandlerFunc{

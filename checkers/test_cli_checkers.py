@@ -54,7 +54,10 @@ class Checkers(unittest.TestCase):
                 'm2-faults': 'C0,C1,C2,C3,C5,C6,C7,DUR,MO'}
         for name, cs in want.items():
             text = (root / (name + '.yaml')).read_text(encoding='utf-8')
-            self.assertIn('--checkers ' + cs, text, name)
+            # One source: a literal list in the judge line, or the env value the judge line reads.
+            literal = '--checkers ' + cs in text
+            from_env = 'checkers: "%s"' % cs in text and '--checkers "{{ checkers }}"' in text
+            self.assertTrue(literal or from_env, name)
             self.assertTrue(set(cs.split(',')) <= set(hc.CHECKERS), name)
 
 
