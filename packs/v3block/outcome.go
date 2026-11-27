@@ -6,13 +6,17 @@ package v3block
 // product states that; anything else that is not ok is unknown, for a read
 // of the state to decide.
 //
-// Product citations (path:line) are read at seaweed-block
-// 14dff69b0f7cc139f9bde7849dec6ab34063c947; re-read them when the runner's
-// product pin moves.
+// Which failed answers are refused is a product fact, one row each with its
+// citation, in product/outcomes.json (read at the product commit its header
+// names; re-read the rows when the runner's product pin moves). This file
+// holds only the mechanism: parse the answer, look up the row; no row means
+// unknown.
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -27,7 +31,8 @@ type v3ctlAnswer struct {
 }
 
 // parseV3ctl maps v3ctl's exit code and answer to an outcome. The exit code
-// and the answer must agree; anything else is unknown.
+// and the answer must agree; anything else is unknown. The exits are v3ctl's
+// own (v3ctl/main.go), not a product table.
 func parseV3ctl(stdout string, code int, volume string) (v3ctlAnswer, string) {
 	var a v3ctlAnswer
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil || a.Volume != volume {
@@ -40,122 +45,134 @@ func parseV3ctl(stdout string, code int, volume string) (v3ctlAnswer, string) {
 	return a, a.Outcome
 }
 
-// chunkRefusals are the `sw-block ops chunk` error codes the product states
-// change nothing, whatever the operation. The `retryable` flag is about
-// retrying, not about effect (detach_aborted is retryable and applied
-// nothing; outcome_unknown is retryable and may have applied), so it decides
-// nothing here.
-var chunkRefusals = map[string]bool{
-	// core/host/volume/chunk_control.go chunkErrorCode, ErrDetachAborted:
-	// "nothing was published and serving resumed here".
-	"detach_aborted": true,
-	// cmd/sw-block/chunk.go: bad usage or a local start check, answered
-	// before the operation is sent (chunkFail with VolumeStatusExitInvalid).
-	"bad_request": true,
+//go:embed product/outcomes.json
+var outcomesJSON []byte
+
+// outcomeRow is one row of product/outcomes.json.
+type outcomeRow struct {
+	Action          string `json:"action"`  // runner action, or "*"
+	Path            string `json:"path"`    // product command or route, or "*"
+	Code            string `json:"code"`    // ops chunk error code, or ops workspace exit
+	Outcome         string `json:"outcome"` // refused | unknown
+	MessageContains string `json:"message_contains,omitempty"`
+	Cite            string `json:"cite"`
+	Why             string `json:"why,omitempty"`
 }
 
-// The operations whose answers chunkOutcome maps, as the product routes them.
-const (
-	chunkDetach         = "detach"                 // holder POST /chunk/detach
-	chunkSnapshot       = "snapshot"               // holder POST /chunk/snapshot
-	chunkSnapDelHolder  = "snapshot_delete.holder" // holder POST /chunk/snapshot/delete
-	chunkSnapDelStore   = "snapshot_delete.store"  // ops chunk snapshot-delete, store direct
-	chunkRestore        = "restore"                // ops chunk restore, master CreateVolume
-	chunkRelease        = "release"                // ops chunk release, store direct
-	chunkVolumeDelete   = "delete"                 // ops chunk volume-delete
-	refusedBeforeChange = "workspace: deletion refused before persistence"
+type outcomeTable struct {
+	Product string       `json:"product"`
+	ReadAt  string       `json:"read_at"`
+	About   string       `json:"about"`
+	Rows    []outcomeRow `json:"rows"`
+}
+
+// opPath names one call: the runner action and the product path it calls.
+// The zero opPath is an action the table does not name: only "*" rows apply.
+type opPath struct{ action, path string }
+
+func (r outcomeRow) matches(p opPath, code string) bool {
+	return r.Code == code && (r.Action == "*" || r.Action == p.action) && (r.Path == "*" || r.Path == p.path)
+}
+
+// loadOutcomes parses a table and checks it: every row has a code, a cite and
+// a known outcome; no two rows share (action, path, code); and no code is
+// refused for a call that another row keeps unknown.
+func loadOutcomes(b []byte) (outcomeTable, error) {
+	var t outcomeTable
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&t); err != nil {
+		return t, fmt.Errorf("outcomes: %w", err)
+	}
+	if t.Product == "" || t.ReadAt == "" {
+		return t, fmt.Errorf("outcomes: the header needs product and read_at")
+	}
+	seen := map[[3]string]bool{}
+	for i, r := range t.Rows {
+		at := fmt.Sprintf("outcomes row %d (%s %q %s)", i, r.Action, r.Path, r.Code)
+		switch {
+		case r.Action == "" || r.Path == "" || r.Code == "":
+			return t, fmt.Errorf("%s: action, path and code are required", at)
+		case strings.TrimSpace(r.Cite) == "":
+			return t, fmt.Errorf("%s: no cite", at)
+		case r.Outcome != "refused" && r.Outcome != "unknown":
+			return t, fmt.Errorf("%s: outcome %q is not refused or unknown", at, r.Outcome)
+		case r.MessageContains != "" && r.Outcome != "refused":
+			return t, fmt.Errorf("%s: message_contains narrows a refusal only", at)
+		}
+		k := [3]string{r.Action, r.Path, r.Code}
+		if seen[k] {
+			return t, fmt.Errorf("%s: duplicate (action, path, code)", at)
+		}
+		seen[k] = true
+	}
+	for i, r := range t.Rows {
+		if r.Outcome != "refused" {
+			continue
+		}
+		for j, u := range t.Rows {
+			if u.Outcome == "unknown" && u.Code == r.Code && overlap(r.Action, u.Action) && overlap(r.Path, u.Path) {
+				return t, fmt.Errorf("outcomes rows %d and %d: %s %q %s is both refused and unknown", i, j, r.Action, r.Path, r.Code)
+			}
+		}
+	}
+	return t, nil
+}
+
+func overlap(a, b string) bool { return a == "*" || b == "*" || a == b }
+
+// lookup decides a failed answer: refused only when a matching refused row
+// holds for the message and no matching row says unknown.
+func (t outcomeTable) lookup(p opPath, code, message string) string {
+	refused := false
+	for _, r := range t.Rows {
+		if !r.matches(p, code) {
+			continue
+		}
+		if r.Outcome != "refused" {
+			return "unknown"
+		}
+		if r.MessageContains == "" || strings.Contains(message, r.MessageContains) {
+			refused = true
+		}
+	}
+	if refused {
+		return "refused"
+	}
+	return "unknown"
+}
+
+// outcomes is the embedded table. A table that does not load stops the pack:
+// a bad table must not decide outcomes.
+var outcomes = func() outcomeTable {
+	t, err := loadOutcomes(outcomesJSON)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}()
+
+// The calls whose `sw-block ops chunk` answers (or holder route answers)
+// chunkOutcome maps, as the runner issues them.
+var (
+	chunkDetach        = opPath{"detach", "ops chunk detach"}                     // holder POST /chunk/detach, inside the planned stop
+	chunkSnapshot      = opPath{"snapshot", "ops chunk snapshot"}                 // holder POST /chunk/snapshot
+	chunkSnapDelHolder = opPath{"snapshot_delete", "POST /chunk/snapshot/delete"} // holder route
+	chunkSnapDelStore  = opPath{"snapshot_delete", "ops chunk snapshot-delete"}   // store direct
+	chunkRestore       = opPath{"restore", "ops chunk restore"}                   // master CreateVolume
+	chunkRelease       = opPath{"release", "ops chunk release"}                   // store direct
+	chunkVolumeDelete  = opPath{"delete", "ops chunk volume-delete"}
 )
 
-// opRefusals are the codes refused for one operation only: the same code
-// comes from other operations, or from other paths of this one, after a
-// state change, and is unknown there. A rule sees the error message; nil
-// means every answer with the code.
-//
-// Kept unknown on purpose (each can follow a change):
-//   - snapshot: every refusal. The name rides on a cut that commits first,
-//     unnamed, and advances HEAD (core/frontend/durable/
-//     provider_layout_snapshot.go:56-66; the eleventh snapshot is
-//     layout.ErrTooManySnapshots there, answered as internal).
-//   - delete: snapshot_has_dependents, conflict, volume_deleting, and
-//     not_admitted without the reservation sentinel. layout.DeleteVolume
-//     commits the master's delete reservation first (core/frontend/
-//     chunkstore/layout/delete.go:173-177; cmd/sw-block/
-//     chunk_volume_delete.go:21-25: "A refused delete leaves the volume
-//     reserved"), then RunMarkDeleting refuses (delete.go:60-71, 134-135).
-//   - restore: not_admitted. FailedPrecondition is also answered after the
-//     target's record is created (core/host/master/services.go:147-153,
-//     169-198: restore target ErrForeignSource / ErrVolumeDeleting /
-//     ErrExists), and the target name stays bound.
-//   - release: conflict. A target without HEAD gets its tombstone first;
-//     only then can the source's update lose (layout/delete.go:243-259).
-//   - snapshot_exists, snapshot_deleting: no product code at the pinned commit
-//     emits them (only core/frontend/chunkstore/control_types.go:44,46
-//     defines them), so there is no path to show they change nothing.
-var opRefusals = map[string]map[string]func(message string) bool{
-	chunkSnapDelHolder: {
-		// core/host/volume/chunk_control.go:307-308 maps ErrHasDependents,
-		// ErrVolumeDeleting, ErrDetached and ErrIdentity to layout_refused.
-		// On this route (chunk_control.go:529-546, 719-726) they come from
-		// catalogVolume (:643-646), Head.DeleteSnapshot (layout/
-		// snapshots.go:26-36) or UpdateHead's identity check (core/frontend/
-		// chunkstore/layout_store.go:100-101), all before the one
-		// conditional update (layout/head.go:519-535) writes.
-		"layout_refused": nil,
-	},
-	chunkSnapDelStore: {
-		// Head.DeleteSnapshot refuses before runTransition updates
-		// (layout/snapshots.go:27-35, layout/head.go:527-529); codes from
-		// cmd/sw-block/chunk_b.go:333,337.
-		"snapshot_has_dependents": nil,
-		"volume_deleting":         nil,
-		// The one conditional update lost (chunk_b.go:343): the filer
-		// refused the expected generation, so this call wrote nothing
-		// (layout/head.go:534; layout_store.go:115-117; core/frontend/
-		// chunkstore/swfs.go:124-134: FailedPrecondition is the definite
-		// answer, anything else is returned unwrapped).
-		"conflict": nil,
-	},
-	chunkRestore: {
-		// gRPC AlreadyExists (cmd/sw-block/chunk_b.go:279-280) comes from
-		// services.go:89-91 before any write, or from lifecycleError on
-		// lifecycle.ErrVolumeConflict (services.go:158, 520-521): store.go
-		// :140-148 and :175-176 return before putLocked; :218-219 cannot
-		// differ from the record CreateVolume just wrote, as every writer
-		// of the records holds workspaceMu (services.go:68-69, 243-244).
-		"target_exists": nil,
-	},
-	chunkRelease: {
-		// OperatorReleaseDependent refuses a live target before writing the
-		// source (layout/delete.go:250-257), or when the tombstone's
-		// exclusive create found a HEAD, so wrote nothing (:243-247);
-		// code from chunk_b.go:340.
-		"target_live": nil,
-	},
-	chunkVolumeDelete: {
-		// Only the reservation's own refusal changes nothing: the
-		// publisher refuses while a lease is live before calling persist
-		// (core/authority/workspace_delete_reservation.go:12-14, 52-60),
-		// the master answers FailedPrecondition for that sentinel alone
-		// (core/host/master/volume_delete_authority.go:74-78), the CLI
-		// wraps it as ErrNotAdmitted (chunk_volume_delete.go:85-90) and
-		// answers not_admitted with err.Error() as the message (chunk_b.go
-		// :339; cmd/sw-block/chunk.go:310-311). Reserve runs first
-		// (layout/delete.go:173-175). The same code after the reservation
-		// committed (RunMarkDeleting, delete.go:134-135) carries no such
-		// text, and a rerun after a commit replays the reservation
-		// (workspace_delete_reservation.go:49-51), so it never carries it.
-		// The product has no separate code for this refusal; the sentinel
-		// is its error text.
-		"not_admitted": func(m string) bool { return strings.Contains(m, refusedBeforeChange) },
-	},
+// chunkOutcome maps one call's `sw-block ops chunk` exit (or holder route
+// answer) and its JSON error body to an outcome: exit 0 ok; an error code the
+// table refuses for this call, refused; every other answer, outcome_unknown
+// included whatever its retryable flag says, unknown.
+func chunkOutcome(op opPath, stdout string, code int) (string, string) {
+	return chunkOutcomeIn(outcomes, op, stdout, code)
 }
 
-// chunkOutcome maps one operation's `sw-block ops chunk` exit (or holder
-// route answer) and its JSON error body to an outcome: exit 0 ok; a code in
-// chunkRefusals, or in the operation's opRefusals whose rule holds, refused;
-// every other answer, outcome_unknown included whatever its flag says,
-// unknown, for a read of the state to decide.
-func chunkOutcome(op, stdout string, code int) (string, string) {
+func chunkOutcomeIn(t outcomeTable, op opPath, stdout string, code int) (string, string) {
 	if code == 0 {
 		return "ok", ""
 	}
@@ -167,50 +184,29 @@ func chunkOutcome(op, stdout string, code int) (string, string) {
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
 		return "unknown", fmt.Sprintf("exit %d without an error body", code)
 	}
-	if chunkRefusals[e.Code] {
-		return "refused", e.Code + ": " + e.Message
-	}
-	if rule, ok := opRefusals[op][e.Code]; ok && (rule == nil || rule(e.Message)) {
-		return "refused", e.Code + ": " + e.Message
-	}
-	return "unknown", e.Code + ": " + e.Message
+	return t.lookup(op, e.Code, e.Message), e.Code + ": " + e.Message
 }
 
-// The runner operations that issue `sw-block ops workspace` commands.
+// The runner actions that issue `sw-block ops workspace` commands, and the
+// commands. Both actions run the planned hand-over (handOver in ops.go)
+// before any workspace command.
 const (
-	wsStop = "stop" // revoke, inside the planned stop (handOver)
-	wsMove = "move" // revoke inside handOver, then move --clean
+	wsStop      = "stop" // revoke, inside the planned stop (handOver)
+	wsMove      = "move" // revoke inside handOver, then move --clean
+	wsRevoke    = "ops workspace revoke"
+	wsMoveClean = "ops workspace move --clean"
 )
 
-// wsRefusals are the `sw-block ops workspace` exits refused per runner
-// operation. The CLI's own exits say its one command did nothing: 1 "the
-// master refused; nothing moved", 2 "bad usage or confirmation; no RPC was
-// sent", 5 "blockmaster did not accept this caller; nothing was done"
-// (cmd/sw-block/workspace.go:17-22). But no runner operation is that one
-// command: both run the planned hand-over first (handOver in ops.go: guest
-// disconnect, then `ops chunk detach --plain`, which seals HEAD and answers
-// the sealed generation (cmd/sw-block/chunk_plain.go:35; core/frontend/
-// durable/provider_chunk.go:1209-1221), then the revoke). So:
-//   - stop: a revoke exit 1, 2 or 5 comes after the seal: unknown.
-//   - move: a revoke exit comes after the seal, and a move --clean exit
-//     after the seal, the revoke, the holder's exit and the recorded ACK
-//     (the planned order, workspace.go:46-48): unknown.
-//
-// The sets are empty on purpose. An operation that issues a workspace command
-// as its first write would add its exits here, with that evidence.
-var wsRefusals = map[string]map[int]bool{
-	wsStop: {},
-	wsMove: {},
+// wsOutcome maps one `sw-block ops workspace` exit of a runner action: 0 ok;
+// an exit the table refuses for that action and command, refused; anything
+// else unknown.
+func wsOutcome(action, path string, code int) string {
+	return wsOutcomeIn(outcomes, action, path, code)
 }
 
-// wsOutcome maps one runner operation's `sw-block ops workspace` exit: 0 ok;
-// an exit in the operation's wsRefusals refused; anything else unknown.
-func wsOutcome(op string, code int) string {
+func wsOutcomeIn(t outcomeTable, action, path string, code int) string {
 	if code == 0 {
 		return "ok"
 	}
-	if wsRefusals[op][code] {
-		return "refused"
-	}
-	return "unknown"
+	return t.lookup(opPath{action, path}, strconv.Itoa(code), "")
 }

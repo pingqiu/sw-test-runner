@@ -66,9 +66,11 @@ func TestVolumeSetChunkOutcome(t *testing.T) {
 func TestVolumeSetWsOutcome(t *testing.T) {
 	// Red control: 1, 2 and 5 stay unknown; the move sealed HEAD before them.
 	want := map[int]string{0: "ok", 1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 5: "unknown", 9: "unknown", -1: "unknown"}
-	for code, w := range want {
-		if got := setWsOutcome(code); got != w {
-			t.Errorf("exit %d: %s, want %s", code, got, w)
+	for _, path := range []string{wsRevoke, wsMoveClean} {
+		for code, w := range want {
+			if got := wsOutcomeOr(nil, path, code); got != w {
+				t.Errorf("%s exit %d: %s, want %s", path, code, got, w)
+			}
 		}
 	}
 }
