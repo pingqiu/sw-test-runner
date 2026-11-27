@@ -44,7 +44,9 @@ func (f *fakeProduct) install(t *testing.T) {
 			}
 			verb := strings.TrimPrefix(name, "v3_op_")
 			if name == "v3_op_observe" {
-				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"]})
+				// The product past the lease horizon: every observation shows it.
+				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"],
+					Result: map[string]any{"workspace": map[string]any{"exit": 0, "text": []any{"lease state: expired"}}}})
 				return map[string]string{"value": "observed"}, nil // as v3OpObserve: an observation, not an outcome
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + verb, Verb: verb, Volume: act.Params["volume"]})
@@ -159,7 +161,7 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 					t.Fatalf("refusal at step %v: %s not observed after: %+v", r.Result, s, o)
 				}
 			}
-		} else if next.Kind != tr.HistoryInvoke {
+		} else if next.Kind != tr.HistoryInvoke && r.Result["action"] != "v3_op_observe" {
 			t.Fatalf("step %v not followed by its invocation: %+v", r.Result, next)
 		}
 	}

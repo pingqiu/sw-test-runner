@@ -197,7 +197,17 @@ type genVol struct {
 	attached      bool
 	// pairDone: the restore pairs (source|target) whose pair window ran.
 	pairDone map[string]bool
+	// leaseLapsed: the volume's latest observation shows its lease expired
+	// ("lease state: expired" in the workspace part); leaseObsAt: the drawn
+	// count at its last lease observation (Due observes a stopped volume
+	// every leaseObserveEvery drawn operations until it lapses).
+	leaseLapsed bool
+	leaseObsAt  int
 }
+
+// leaseObserveEvery is how many drawn operations apart a stopped volume
+// whose lease is not seen expired is observed (Due).
+const leaseObserveEvery = 10
 
 // blockModel is the block product's randomrun.Model. Its zero value is a
 // Driver (replay needs no state).
@@ -206,6 +216,7 @@ type blockModel struct {
 	faulty bool
 	vols   map[string]*genVol
 	order  []string // pool order
+	drawn  int      // drawn (not forced) operations learnt
 }
 
 var _ randomrun.Model = (*blockModel)(nil)
@@ -326,7 +337,10 @@ func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
 			// a clean move to the same host, which v3_op_move cannot issue. A
 			// reserved volume never serves again (OG:193-195); its delete is
 			// rerun with the same request id once its dependents are gone.
-			if len(v.targets) == 0 {
+			// After a stop the lease horizon refuses a delete first
+			// (VL:409-411): it is proposed once an observation shows the
+			// lease expired (a reserved volume is past it).
+			if len(v.targets) == 0 && (v.state == stReserved || v.leaseLapsed) {
 				add(op("v3_op_delete", n))
 			}
 		case stMoved:
@@ -419,7 +433,9 @@ func (m *blockModel) Negatives() []GenOp {
 				}
 			}
 		case stStopped:
-			if len(v.targets) > 0 {
+			// Within the lease horizon the horizon refuses first, not this
+			// limit: probed only once an observation shows the lease expired.
+			if len(v.targets) > 0 && v.leaseLapsed {
 				add(op("v3_op_delete", n), limDeleteSource)
 			}
 		}
@@ -472,6 +488,12 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	v := m.vols[o.Volume]
 	if o.Forced != "" && v != nil && len(v.due) > 0 && sameOp(v.due[0], o) {
 		v.due = v.due[1:] // learnt, whatever its outcome: no longer due
+	}
+	if o.Forced == "" {
+		m.drawn++
+	}
+	if o.Forced == "lease" && v != nil {
+		v.leaseObsAt = m.drawn
 	}
 	if o.Action == "v3_op_read" && outcome == "ok" && v != nil {
 		for _, f := range strings.Fields(o.Params["lbas"]) {
@@ -530,7 +552,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_create":
 		v.state = stCreated
 	case "v3_op_attach":
-		v.state, v.fenced = stServing, false // a new holder: no earlier not_serving applies
+		v.state, v.fenced, v.leaseLapsed = stServing, false, false // a new holder and lease
 		v.held[v.host] = true
 		if v.source != "" && !v.attached && len(v.inheritedLBAs) > 0 {
 			// C2: a restore target's first reads are its inherited lbas,
@@ -574,7 +596,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		t.inheritedLBAs = slices.Clone(v.snapLBAs[o.Params["snapshot"]])
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
-		v.state = stStopped
+		v.state, v.leaseLapsed, v.leaseObsAt = stStopped, false, m.drawn
 	case "v3_op_move":
 		v.state, v.host, v.moved = stMoved, 1-v.host, true
 	case "v3_op_delete":
@@ -679,6 +701,17 @@ func (m *blockModel) Due() []GenOp {
 			return []GenOp{v.due[0]}
 		}
 	}
+	// The lease horizon is learnt from observations, never from the clock: a
+	// stopped volume whose lease is not seen expired is observed every
+	// leaseObserveEvery drawn operations.
+	for _, n := range m.order {
+		v := m.vols[n]
+		if v.state == stStopped && !v.leaseLapsed && m.drawn-v.leaseObsAt >= leaseObserveEvery {
+			o := m.Observe(n)
+			o.Forced = "lease"
+			return []GenOp{o}
+		}
+	}
 	return nil
 }
 
@@ -715,6 +748,9 @@ func (m *blockModel) Sweep() []GenOp {
 }
 
 // Observed learns from observe records (not from the invokes):
+//   - observe (a volume's observation): its workspace part's lease state;
+//     "lease state: expired" lets a stopped volume be deleted, and the
+//     source negative be probed, past the lease horizon;
 //   - settled {volume, state, evidence}: an unsettled volume placed by
 //     observation; held means serving again (ordinary operations offered),
 //     not_held means stopped. A volume that is not unsettled is not moved;
@@ -723,6 +759,17 @@ func (m *blockModel) Sweep() []GenOp {
 //     result.third_state [{volume, why}] takes the volume out of the run.
 func (m *blockModel) Observed(r tr.HistoryRecord) {
 	switch r.Verb {
+	case "observe":
+		// The workspace part of a volume's observation: its lease state.
+		if v := m.vols[r.Volume]; v != nil {
+			ws, _ := r.Result["workspace"].(map[string]any)
+			text, _ := ws["text"].([]any)
+			lapsed := false
+			for _, l := range text {
+				lapsed = lapsed || l == "lease state: expired"
+			}
+			v.leaseLapsed = lapsed
+		}
 	case "settled":
 		vol, _ := r.Result["volume"].(string)
 		v := m.vols[vol]

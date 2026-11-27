@@ -51,8 +51,19 @@ func run(t *testing.T, cfg GenConfig) ([]GenOp, *Generator) {
 		}
 		ops = append(ops, o)
 		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			// The product past the lease horizon: an observation shows it.
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
 	}
 	return ops, g
+}
+
+// leaseRec is a volume observation whose workspace part shows its lease
+// state.
+func leaseRec(vol, state string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Volume: vol, Result: map[string]any{
+		"workspace": map[string]any{"exit": 0, "text": []any{"volume: " + vol, "lease state: " + state}}}}
 }
 
 func TestGeneratorSameSeedSameRunAnotherSeedAnotherRun(t *testing.T) {
@@ -137,6 +148,8 @@ func (o *oracle) allowed(op GenOp) bool {
 		// earlier root lies, always on the volume's own host and geometry.
 		h, _ := strconv.Atoi(op.Params["host"])
 		return (st == "created" || st == "moved") && op.Params["host"] == fmt.Sprint(o.host[v]) && !o.held[v][h] && op.Params["blocks"] == ""
+	case "v3_op_observe":
+		return true // an observation changes nothing
 	case "v3_op_read":
 		if op.Forced != "" { // a forced read names the lbas its reason needs (C2, C3)
 			return st == "serving"
@@ -711,8 +724,16 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.negatives(), "v3_op_attach", "g1", "") {
 		t.Error("attach proposed after a stop")
 	}
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted within its lease horizon (no observation shows it expired)")
+	}
+	g.m.Observed(leaseRec("g1", "revoking"))
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted while its lease is revoking")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.ordinary(), "v3_op_delete", "g1", "") {
-		t.Error("a stopped volume without targets is not deleted")
+		t.Error("a stopped volume without targets past its lease is not deleted")
 	}
 
 	// Reads: the target inherits the snapshot's lbas (2, 6), not the later 7.
@@ -756,6 +777,10 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 
 	g = newG()
 	drive(g, append(src(), op("v3_op_stop", "g1"))...)
+	if has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) {
+		t.Error("a source delete probed within the lease horizon (the horizon refuses first)")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) || !has(g.negatives(), "v3_op_snapshot_delete", "g1", limDeleteSnapDep) {
 		t.Error("no negative source delete or store-direct snapshot delete for a stopped source with a target")
 	}
@@ -926,6 +951,7 @@ func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
 		t.Fatal("an unknown stop is not unsettled")
 	}
 	g.m.Observed(settledRec("g1", "not_held"))
+	g.m.Observed(leaseRec("g1", "expired"))
 	if g.vols["g1"].state != stStopped || !offered(g, "g1")["v3_op_delete"] || offered(g, "g1")["v3_op_write"] {
 		t.Fatalf("settled not_held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
 	}
@@ -1228,3 +1254,51 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 
 // d0 is the first due operation of g.
 func d0(g *Generator) GenOp { return g.m.Due()[0] }
+
+// horizonGaps: an ordinary delete of a stopped volume, or the negative
+// "delete a source whose snapshot has a restore target", proposed with no
+// observation of the volume since its stop (the lease horizon is learnt
+// from observations only).
+func horizonGaps(ops []GenOp) []string {
+	stoppedUnseen := map[string]bool{}
+	var bad []string
+	for _, o := range ops {
+		switch {
+		case o.Action == "v3_op_stop" && o.Negative == "" && answer(o) == "ok":
+			stoppedUnseen[o.Volume] = true
+		case o.Action == "v3_op_observe":
+			delete(stoppedUnseen, o.Volume)
+		case o.Action == "v3_op_delete" && (o.Negative == "" || o.Negative == "delete a source whose snapshot has a restore target") && stoppedUnseen[o.Volume]:
+			bad = append(bad, fmt.Sprintf("op %d delete %s (%q) with no observation since its stop", o.No, o.Volume, o.Negative))
+		}
+	}
+	return bad
+}
+
+// The lease horizon: a delete after a stop (ordinary, or the source
+// negative) waits for an observation that shows the lease expired; the
+// model observes a stopped volume every leaseObserveEvery drawn operations.
+func TestGeneratorWaitsForTheLeaseHorizonFromObservations(t *testing.T) {
+	deletes, observed := 0, 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 600, Pool: pool(30), Blocks: 8, Negative: 0.3})
+		if bad := horizonGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			observed += btoi(o.Forced == "lease")
+			deletes += btoi(o.Action == "v3_op_delete" && o.Negative == "")
+		}
+	}
+	if observed == 0 || deletes == 0 {
+		t.Fatalf("%d lease observations, %d ordinary deletes", observed, deletes)
+	}
+	red := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_delete", "g1"))
+	green := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_observe", "g1"), op("v3_op_delete", "g1"))
+	if len(horizonGaps(red)) == 0 || len(horizonGaps(green)) != 0 {
+		t.Fatal("the horizon check's red control")
+	}
+}
