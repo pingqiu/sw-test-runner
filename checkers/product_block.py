@@ -14,6 +14,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
   NOTED                         of those, the verbs whose placement C6 names in a note
+  effect_state(part, to, after)   whether a part shows a refused_effect's state: (mismatches, cannot)
   place_by_status(inv, obs, base)   C6's per-verb placement rules
   after_delete_findings(vol, obs)   C7: the tombstone shape after an ok delete
   recreate_finding(vol, comp)       C7: a create of a deleted name must be refused
@@ -190,6 +191,67 @@ def show_part(state, part):
     if part in ('dirs', 'files'):
         return '%d entries' % len(v)
     return repr(v)[:120]
+
+
+# --- refused_effect ----------------------------------------------------------
+
+# The conditions effect.to may state, per kind of part. Each names a state
+# the observation can show; there is deliberately no "exit non-zero": a
+# crashed master or a wrong flag answers that too, so an effect must name
+# the state by the answer it gives (its exit status AND its text).
+RECORD_CONDITIONS = ('stderr_contains', 'text_contains')   # besides a field's exact value
+LIST_CONDITIONS = ('has', 'lacks')
+
+
+def effect_state(part, to, after):
+    """Whether the observation `after` shows `part` in the state effect.to
+    names: (mismatches, cannot). `mismatches` lists what the part shows
+    instead ([] when it is in that state); `cannot` lists the conditions the
+    observation cannot evaluate (a stderr not recorded, a part not recorded,
+    a condition this reader does not accept), which leaves the refusal NOT
+    JUDGED, never passed. The effect is a state that stays: what the part
+    held before does not matter (another value, or already this one).
+    `to` is an object of conditions on the part as the observation records it:
+      a record part (head, workspace): each key a field and its exact value
+        (e.g. "exit": 1), "stderr_contains": a phrase in result.<part>.stderr
+        (the first lines of the command's stderr, a list or a string), and
+        "text_contains": a phrase in result.<part>.text;
+      a list part (snapshots, dirs, files): "has" and "lacks", entries the
+        part holds and does not hold."""
+    if not isinstance(to, dict) or not to:
+        return [], ['effect.to %r is not an object of conditions' % (to,)]
+    a = (after.get('result') or {}).get(part)
+    out, cannot = [], []
+    if part in ('dirs', 'files', 'snapshots'):
+        if not isinstance(a, list):
+            return [], ['%s not recorded as a list after it' % part]
+        for key, val in to.items():
+            if key not in LIST_CONDITIONS:
+                cannot.append('%s: condition %r not accepted for a list part (%s)' % (part, key, ', '.join(LIST_CONDITIONS)))
+            elif key == 'has' and sorted(set(val) - set(a)):
+                out.append('%s lacks %s' % (part, sorted(set(val) - set(a))))
+            elif key == 'lacks' and sorted(set(val) & set(a)):
+                out.append('%s holds %s' % (part, sorted(set(val) & set(a))))
+        return out, cannot
+    if not isinstance(a, dict):
+        return [], ['%s not recorded as a record after it (%r)' % (part, a)]
+    for key, val in to.items():
+        if key in RECORD_CONDITIONS:
+            field = key[:-len('_contains')]
+            got = a.get(field)
+            if got is None:
+                cannot.append('%s.%s not recorded' % (part, field))
+                continue
+            text = '\n'.join(got) if isinstance(got, list) else str(got)
+            if val not in text:
+                out.append('%s.%s does not contain %r: %r' % (part, field, val, text[:200]))
+        elif key.endswith('_contains') or key == 'exit_nonzero':
+            cannot.append('%s: condition %r not accepted (fields, %s)' % (part, key, ', '.join(RECORD_CONDITIONS)))
+        elif key not in a:
+            cannot.append('%s.%s not recorded' % (part, key))
+        elif a.get(key) != val:
+            out.append('%s.%s is %r, effect %r' % (part, key, a.get(key), val))
+    return out, cannot
 
 
 # --- C6 placement ----------------------------------------------------------
