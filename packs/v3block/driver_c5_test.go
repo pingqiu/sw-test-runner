@@ -132,7 +132,9 @@ func judgeFile(t *testing.T, py, hist string) map[string]map[string]any {
 // and places the attempt by the placement row; C6 places each head_conflict
 // attempt by the same row and the same observation. Name absent: attempt 1
 // placed "did not", re-issued, attempt 2 ok. Name present: placed "took
-// effect", not re-issued, the request stays unknown.
+// effect", not re-issued, the request stays unknown, and C0 passes it (no
+// outcome stays unresolved: C0 resolves it by C6's same placement). A third
+// state fails C6 and C0.
 func TestSnapshotPlacementJudgedByC6(t *testing.T) {
 	py := checkerPython()
 	if py == "" {
@@ -162,19 +164,19 @@ func TestSnapshotPlacementJudgedByC6(t *testing.T) {
 	show := func(v map[string]any) string { b, _ := json.MarshalIndent(v, "", " "); return string(b) }
 
 	absent, r := run(`{}`, `{}`, `{"s1":{}}`)
-	if r.ret["value"] != tr.OutcomeOK || absent["C6"]["verdict"] != "PASS" ||
+	if r.ret["value"] != tr.OutcomeOK || absent["C6"]["verdict"] != "PASS" || absent["C0"]["verdict"] != "PASS" ||
 		!strings.Contains(show(absent["C6"]), "seq 2 snapshot v1 (attempt 1, replaced by a later attempt) placed did not: by snapshot names: 's1' absent") {
 		t.Fatalf("name absent: %v\nC6 %s", r.ret, show(absent["C6"]))
 	}
 	t.Logf("name absent, C6: %s\nC0: %s", show(absent["C6"]), show(absent["C0"]))
 	present, r := run(`{}`, `{"s1":{}}`)
-	if r.ret["value"] != tr.OutcomeUnknown || present["C6"]["verdict"] != "PASS" ||
+	if r.ret["value"] != tr.OutcomeUnknown || present["C6"]["verdict"] != "PASS" || present["C0"]["verdict"] != "PASS" ||
 		!strings.Contains(show(present["C6"]), "seq 2 snapshot v1 placed took effect: by snapshot names: 's1' present") {
 		t.Fatalf("name present: %v\nC6 %s", r.ret, show(present["C6"]))
 	}
 	t.Logf("name present, C6: %s\nC0: %s", show(present["C6"]), show(present["C0"]))
 	third, _ := run(`{"s0":{}}`, `{}`)
-	if third["C6"]["verdict"] != "FAIL" || !strings.Contains(show(third["C6"]), "unknown in a third state: seq 2 snapshot v1") {
+	if third["C6"]["verdict"] != "FAIL" || !strings.Contains(show(third["C6"]), "unknown in a third state: seq 2 snapshot v1") || third["C0"]["verdict"] != "FAIL" {
 		t.Fatalf("third: C6 %s", show(third["C6"]))
 	}
 }

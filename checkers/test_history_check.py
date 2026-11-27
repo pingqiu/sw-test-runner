@@ -2034,5 +2034,63 @@ class Attempts(unittest.TestCase):
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
         self.assertTrue(v['C6']['findings'][0].startswith('unknown not resolved: seq 1 delete v1 (attempt 1, replaced by a later attempt) (due at its re-issue)'), v['C6'])
 
+CONFLICT = 'head_conflict: storage: capture CAS not applied: storage: chunk HEAD precondition failed'
+
+
+class C0Resolved(unittest.TestCase):
+    """C0: no outcome stays UNRESOLVED. An unknown that C6's resolution
+    (resolve_unknown, the one function both call) places passes C0; one
+    unresolved or in a third state fails it. The completion stays unknown
+    as answered: nothing is rewritten."""
+
+    def snapshot(self, before, afters, outcomes):
+        """v1's snapshot s1 answered outcomes in turn (head_conflict for an
+        unknown), the observation before it showing the names before, and
+        one after each attempt showing afters[n] (None: no observation)."""
+        steps = list(BASE) + [('obs', 'v1', 4, FILES, dict(WS, snapshots=before))]
+        for n, o in enumerate(outcomes, 1):
+            steps.append(('snapshot', 'v1', {'name': 's1', 'request': 'v1-s1', 'attempt': n}, o))
+            if afters[n - 1] is not None:
+                steps.append(('obs', 'v1', 4, FILES, dict(WS, snapshots=afters[n - 1])))
+        recs = history(*steps)
+        for r in recs:
+            if r['kind'] == 'complete' and r['outcome'] == 'unknown':
+                r['result'] = {'detail': CONFLICT}
+        return hc.check(dump(recs))
+
+    def test_head_conflict_then_the_name_present_passes_c0(self):
+        v = self.snapshot([], [['s1']], ['unknown'])
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
+        self.assertEqual(v['C0']['judged'], 1)
+        self.assertEqual(v['C6']['verdict'], 'PASS', v['C6'])
+        self.assertIn('seq 4 snapshot v1 placed took effect: by snapshot names: \'s1\' present', v['C6']['findings'])
+
+    def test_head_conflict_then_the_name_absent_then_ok_passes_c0(self):
+        v = self.snapshot([], [[], ['s1']], ['unknown', 'ok'])
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
+        self.assertEqual(v['C6']['verdict'], 'PASS', v['C6'])
+        self.assertTrue(any('(attempt 1, replaced by a later attempt) placed did not' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_head_conflict_with_no_observation_after_it_fails_c0(self):
+        v = self.snapshot([], [None], ['unknown'])
+        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])
+        self.assertEqual(v['C0']['findings'], ['outcome unknown: snapshot v1 seq 4: ' + CONFLICT], v['C0'])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])   # and C6 does not resolve it either
+
+    def test_red_a_third_state_fails_c0(self):
+        v = self.snapshot(['s0'], [[]], ['unknown'])
+        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])
+        self.assertEqual(v['C0']['findings'], ['outcome unknown: snapshot v1 seq 4: ' + CONFLICT + ' (third)'], v['C0'])
+        self.assertTrue(any(x.startswith('unknown in a third state: seq 4 snapshot v1') for x in v['C6']['findings']), v['C6'])
+
+    def test_c0_and_c6_call_one_resolution(self):
+        # A mutant resolution that resolves nothing: C0 and C6 both stop
+        # resolving the placed unknown (they cannot disagree).
+        with mock.patch.object(hc, 'resolve_unknown', lambda recs, ops_, inv, comp, points, earlier: ('n', 'unresolved', ['x'], [], 0)):
+            v = self.snapshot([], [['s1']], ['unknown'])
+        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+
+
 if __name__ == '__main__':
     unittest.main()

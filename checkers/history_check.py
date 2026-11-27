@@ -33,7 +33,12 @@ does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
 
-  C0  every invoke has its complete; no outcome is unknown; a refusal
+  C0  every invoke has its complete; no outcome stays UNRESOLVED: an
+      unknown completion passes only when C6's resolution of it (one
+      function, resolve_unknown, through the product's placement: for a
+      snapshot the checks.json placement row) places it (took effect or did
+      not) or a settled record resolves it; an unknown left unresolved, in a
+      third state, unsettled, or of a verb with no rule fails; a refusal
       (refused or refused_effect) only
       where its own step declared it (args.expect = refused), never by verb;
       a declared refusal answered ok is a finding (half of the spec's C6);
@@ -400,12 +405,21 @@ def verdict(findings, unknown=False, judged=0):
 
 def c0(recs):
     """A refusal is expected only where its own invocation declares it
-    (args.expect == "refused", one step of the scenario), never by verb."""
-    f, judged = [], 0   # judged: operations (requests, by their last attempt) with a known outcome checked
-    if not operations(recs):
+    (args.expect == "refused", one step of the scenario), never by verb.
+    No outcome stays UNRESOLVED: an unknown completion that C6's resolution
+    resolves (resolve_unknown, the same function: placed took effect or
+    did not, or settled) passes; one unresolved, in a third state,
+    unsettled, or of a verb with no rule fails."""
+    f, judged = [], 0   # judged: operations (requests, by their last attempt) with a known or resolved outcome checked
+    ops_ = operations(recs)
+    if not ops_:
         return verdict(['no operation in the history: nothing was exercised'])
     earlier = superseded(recs)
-    for inv, comp in operations(recs):
+    points = healthy_points(recs)
+    # C6 places nothing where it does not judge (an unknown environment, or
+    # overlapping operations): there no unknown is resolved for C0 either.
+    placing = unknown_environment(recs) is None and not overlaps(recs)
+    for inv, comp in ops_:
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
         if inv['seq'] in earlier:
             # An attempt a later attempt of its request replaced: the
@@ -427,7 +441,12 @@ def c0(recs):
         if comp is None:
             f.append('no completion: ' + name)
         elif comp['outcome'] == 'unknown':
-            f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
+            state = resolve_unknown(recs, ops_, inv, comp, points, earlier)[1] if placing else 'not placed: C6 does not judge this history'
+            if state == 'resolved':
+                judged += 1   # placed (took effect or did not) or settled: resolved, not unknown
+            else:
+                f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', ''))
+                         + ('' if state == 'unresolved' else ' (%s)' % state))
         elif comp['outcome'] in REFUSALS and not expected:
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'ok' and expected:
@@ -1386,6 +1405,69 @@ def _settle(recs, ops_, inv, comp):
     return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
 
 
+def resolve_unknown(recs, ops_, inv, comp, points, earlier):
+    """The resolution of one unknown operation: the ONE function C6 and C0
+    both call, so they cannot disagree. A lifecycle verb (NEEDS_SETTLED) by
+    its settled record; a write by reading its block; a verb the product
+    places by status (PLACED_BY_OBSERVATION) by the observation after it
+    (the one right after it for an attempt a later attempt replaced; else
+    the first after the next healthy point, or after it at the end) against
+    the one before it where the verb needs one, through the product
+    reader's place_by_status (for a snapshot, the checks.json placement row
+    it reads). Returns (name, state, findings, notes, resolved): state is
+    'resolved' (it took effect or it did not, or it settled), 'third',
+    'unresolved', 'unsettled' or 'unruled' (no rule for its verb); resolved
+    the count of resolutions (0 or 1)."""
+    name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+    replaced = inv['seq'] in earlier
+    if replaced:
+        name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
+    notes = []
+    settled_ok = False
+    if inv['verb'] in PRODUCT.NEEDS_SETTLED:
+        # An unknown lifecycle operation is resolved by the settled record;
+        # a verb with its own placement rule is still checked by it below
+        # for a third state.
+        how, why = _settle(recs, ops_, inv, comp)
+        if how == 'fail':
+            return name, 'unsettled', ['unsettled: %s: %s' % (name, why)], notes, 0
+        if how == 'resolved':
+            settled_ok = True
+            if inv['verb'] not in PLACED_BY_OBSERVATION:
+                return name, 'resolved', [], notes, 1
+        else:
+            notes.append('not settled: %s: %s; placed by its own rule' % (name, why))
+    if inv['verb'] not in PLACED_BY_OBSERVATION:
+        return name, 'unruled', [], notes, 0
+    done = inv['seq'] if comp is None else comp['seq']
+    due = None if replaced else next((p for p in points if p > done), None)   # a replaced attempt: the observation right after it
+    after = done if due is None else due
+    at = ('its re-issue' if replaced else 'the end') if due is None else 'healthy point seq %d' % due
+    if inv['verb'] == 'write':
+        how, why = _place_write(recs, inv, done, after)
+    else:
+        obs = _observation(recs, inv['volume'], after)
+        base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] in PRODUCT.NEEDS_BASELINE else None
+        if obs is None:
+            how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
+        elif inv['verb'] in PRODUCT.NEEDS_BASELINE and base is None:
+            how, why = None, 'no clean observation of %s before it' % inv['volume']
+        elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
+            ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
+            how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
+        else:
+            how, why = PRODUCT.place_by_status(inv, obs, base)
+    if how is None:
+        if settled_ok:   # the settled record already resolved it
+            return name, 'resolved', [], notes, 1
+        return name, 'unresolved', ['unknown not resolved: %s (due at %s): %s' % (name, at, why)], notes, 0
+    if how == 'third':
+        return name, 'third', ['unknown in a third state: %s (due at %s): %s' % (name, at, why)], notes, (1 if settled_ok else 0)
+    if not settled_ok and inv['verb'] in PRODUCT.NOTED:
+        notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
+    return name, 'resolved', [], notes, 1
+
+
 @unknown_on_overlap
 def c6(recs):
     """Bounds and "none stays unknown" (see the module docstring)."""
@@ -1439,56 +1521,12 @@ def c6(recs):
             f.append('third state: %s at healthy seq %d: %s' % (vol, r['seq'], why))
     # None stays unknown.
     for inv, comp in unknowns:
-        name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
-        replaced = inv['seq'] in earlier
-        if replaced:
-            name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
-        settled_ok = False
-        if inv['verb'] in PRODUCT.NEEDS_SETTLED:
-            # An unknown lifecycle operation is resolved by the settled record;
-            # a verb with its own placement rule is still checked by it below
-            # for a third state.
-            how, why = _settle(recs, ops_, inv, comp)
-            if how == 'fail':
-                f.append('unsettled: %s: %s' % (name, why))
-                continue
-            if how == 'resolved':
-                resolved += 1
-                settled_ok = True
-                if inv['verb'] not in PLACED_BY_OBSERVATION:
-                    continue
-            else:
-                notes.append('not settled: %s: %s; placed by its own rule' % (name, why))
-        if inv['verb'] not in PLACED_BY_OBSERVATION:
+        name, state, ff, nn, r = resolve_unknown(recs, ops_, inv, comp, points, earlier)
+        f += ff
+        notes += nn
+        resolved += r
+        if state == 'unruled':
             unruled.append(name)
-            continue
-        done = inv['seq'] if comp is None else comp['seq']
-        due = None if replaced else next((p for p in points if p > done), None)   # a replaced attempt: the observation right after it
-        after = done if due is None else due
-        at = ('its re-issue' if replaced else 'the end') if due is None else 'healthy point seq %d' % due
-        if inv['verb'] == 'write':
-            how, why = _place_write(recs, inv, done, after)
-        else:
-            obs = _observation(recs, inv['volume'], after)
-            base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] in PRODUCT.NEEDS_BASELINE else None
-            if obs is None:
-                how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
-            elif inv['verb'] in PRODUCT.NEEDS_BASELINE and base is None:
-                how, why = None, 'no clean observation of %s before it' % inv['volume']
-            elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
-                ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
-                how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
-            else:
-                how, why = PRODUCT.place_by_status(inv, obs, base)
-        if how is None:
-            if not settled_ok:   # the settled record already resolved it
-                f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
-        elif how == 'third':
-            f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
-        elif not settled_ok:
-            resolved += 1
-            if inv['verb'] in PRODUCT.NOTED:
-                notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
     # Always reported, in this exact form, so a night can require n > 0 in
     # at least one run; a single run with n = 0 and its healthy points PASSes.
     count = 'unknowns resolved: %d' % resolved
