@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,6 +72,31 @@ func TestVolumeSetWsOutcome(t *testing.T) {
 			if got := wsOutcomeOr(nil, path, code); got != w {
 				t.Errorf("%s exit %d: %s, want %s", path, code, got, w)
 			}
+		}
+	}
+}
+
+// Red control: a revoke that exits 0 without the CLI's answer is unknown, not
+// ok; the runner cannot say what the product did.
+func TestVolumeSetRevokeOutcome(t *testing.T) {
+	const answer = "revocation requested: volume v001 holder r1@2 expiry_ns 123\n"
+	for _, c := range []struct {
+		name   string
+		err    error
+		code   int
+		stdout string
+		want   string
+	}{
+		{"exit 0 with the answer", nil, 0, answer, "ok"},
+		{"exit 0 without the answer", nil, 0, "", "unknown"},
+		{"exit 0 with another answer", nil, 0, "revocation refused: volume v001\n", "unknown"},
+		{"exit 0, a warning line first", nil, 0, "warning\n" + answer, "unknown"},
+		{"exit 1 with the answer", nil, 1, answer, "unknown"},
+		{"exit 5", nil, 5, "", "unknown"},
+		{"no exit", errors.New("ssh: lost"), 0, answer, "unknown"},
+	} {
+		if got := revokeOutcome(c.err, c.code, c.stdout); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
 }
