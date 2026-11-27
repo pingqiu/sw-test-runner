@@ -65,6 +65,7 @@ type Script struct {
 type ReplayStep struct {
 	Op       Op
 	Recorded string // "" until a complete record is seen
+	Attempts int    // the step's invokes that carry an attempt number
 }
 
 // replayDiff is one step whose replayed outcome differs from the recorded one.
@@ -100,9 +101,8 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	// A step's outcome is the worst of its operations', where the attempts
 	// of one request (its invokes carry "attempt") count once, as their
 	// last attempt: a rerun's earlier answers are history, not the
-	// operation's outcome.
-	parts := map[int][]string{}
-	slotOf := map[int]map[string]int{}
+	// operation's outcome (stepFold).
+	folds := map[int]*stepFold{}
 	attemptOf := map[uint64]string{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 16<<20)
@@ -186,27 +186,19 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
 				cur = -1
 			}
-			if _, ok := r.Args["attempt"]; ok {
-				attemptOf[r.Seq] = fmt.Sprintf("%s|%s|%v", r.Verb, r.Volume, r.Args["request"])
+			if cur >= 0 {
+				if key, ok := requestKey(rerunnerOf(d), steps[cur].Op.Action, r); ok {
+					attemptOf[r.Seq] = key
+					steps[cur].Attempts++
+				}
 			}
 		case tr.HistoryComplete:
 			if cur >= 0 {
+				if folds[cur] == nil {
+					folds[cur] = &stepFold{}
+				}
 				key, retried := attemptOf[r.Of]
-				if slotOf[cur] == nil {
-					slotOf[cur] = map[string]int{}
-				}
-				if i, seen := slotOf[cur][key]; retried && seen {
-					parts[cur][i] = r.Outcome
-				} else {
-					if retried {
-						slotOf[cur][key] = len(parts[cur])
-					}
-					parts[cur] = append(parts[cur], r.Outcome)
-				}
-				steps[cur].Recorded = ""
-				for _, o := range parts[cur] {
-					steps[cur].Recorded = worseOutcome(steps[cur].Recorded, o)
-				}
+				steps[cur].Recorded = folds[cur].complete(key, retried, r.Outcome)
 			}
 		case tr.HistoryEnd:
 			cur = -1
@@ -236,6 +228,67 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 		}
 	}
 	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills}, nil
+}
+
+// requestKey is the request an attempt record belongs to: its verb, volume
+// and the value of the arg the action declares as its request id
+// (Rerunner.RequestArg); without a Rerunner it is keyed by every arg
+// but "attempt" (the checkers' rule). ok is false for an invoke that carries
+// no attempt.
+func requestKey(rr Rerunner, action string, r tr.HistoryRecord) (string, bool) {
+	if _, ok := r.Args[AttemptParam]; !ok {
+		return "", false
+	}
+	arg := ""
+	if rr != nil {
+		arg = rr.RequestArg(action)
+	}
+	if arg != "" {
+		return fmt.Sprintf("%s|%s|%v", r.Verb, r.Volume, r.Args[arg]), true
+	}
+	rest := map[string]any{}
+	for k, v := range r.Args {
+		if k != AttemptParam {
+			rest[k] = v
+		}
+	}
+	b, _ := json.Marshal(rest) // map keys marshal sorted
+	return fmt.Sprintf("%s|%s|%s", r.Verb, r.Volume, b), true
+}
+
+// rerunnerOf is d's Rerunner, nil when it declares no rerun.
+func rerunnerOf(d Driver) Rerunner {
+	rr, _ := d.(Rerunner)
+	return rr
+}
+
+// stepFold folds a step's complete records into its recorded outcome: the
+// worst over its operations, where the attempts of one request count once,
+// as their LAST attempt.
+type stepFold struct {
+	parts []string
+	slot  map[string]int
+}
+
+// complete takes one complete record (key: its request when retried) and
+// returns the step's recorded outcome so far.
+func (f *stepFold) complete(key string, retried bool, outcome string) string {
+	if f.slot == nil {
+		f.slot = map[string]int{}
+	}
+	if i, seen := f.slot[key]; retried && seen {
+		f.parts[i] = outcome
+	} else {
+		if retried {
+			f.slot[key] = len(f.parts)
+		}
+		f.parts = append(f.parts, outcome)
+	}
+	got := ""
+	for _, o := range f.parts {
+		got = worseOutcome(got, o)
+	}
+	return got
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.

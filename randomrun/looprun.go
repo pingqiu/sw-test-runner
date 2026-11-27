@@ -354,8 +354,9 @@ type loopScript struct {
 // CheckFaultSchedule over fault_ops), and its phases with their steps and
 // recorded outcomes (the random run's rule, replay.go: the worst complete
 // record after a gen_step up to the next step, loop_phase, healthy, kill or
-// restart, loop_coverage, loop_replay or end record).
-func readLoopScript(name, path string, valid func(string) bool) (*loopScript, error) {
+// restart, loop_coverage, loop_replay or end record, the attempts of one
+// request counted once, as their last; rr names each action's request arg).
+func readLoopScript(name, path string, valid func(string) bool, rr Rerunner) (*loopScript, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
@@ -364,6 +365,8 @@ func readLoopScript(name, path string, valid func(string) bool) (*loopScript, er
 	sc := &loopScript{}
 	needSchedule := false
 	var cur *ReplayStep
+	var fold *stepFold
+	attemptOf := map[uint64]string{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 64<<20)
 	line := 0
@@ -434,6 +437,7 @@ func readLoopScript(name, path string, valid func(string) bool) (*loopScript, er
 				seg := &sc.segments[len(sc.segments)-1]
 				seg.Steps = append(seg.Steps, ReplayStep{Op: o})
 				cur = &seg.Steps[len(seg.Steps)-1]
+				fold = &stepFold{}
 			case "loop_coverage":
 				sc.coverage = r.Result
 			}
@@ -441,9 +445,16 @@ func readLoopScript(name, path string, valid func(string) bool) (*loopScript, er
 			if sc.events != nil && (r.Verb == FaultKill || r.Verb == FaultRestart) {
 				cur = nil
 			}
+			if cur != nil {
+				if key, ok := requestKey(rr, cur.Op.Action, r); ok {
+					attemptOf[r.Seq] = key
+					cur.Attempts++
+				}
+			}
 		case tr.HistoryComplete:
 			if cur != nil {
-				cur.Recorded = worseOutcome(cur.Recorded, r.Outcome)
+				key, retried := attemptOf[r.Of]
+				cur.Recorded = fold.complete(key, retried, r.Outcome)
 			}
 		case tr.HistoryEnd:
 			cur = nil
@@ -472,7 +483,7 @@ func (r LoopRunner) ReplayLoop(ctx context.Context, actx *tr.ActionContext, src 
 	if src == "" {
 		return nil, fmt.Errorf("%s: param history (the recorded history.jsonl) is required", r.Name)
 	}
-	sc, err := readLoopScript(r.Name, src, r.Driver.ValidProcess)
+	sc, err := readLoopScript(r.Name, src, r.Driver.ValidProcess, rerunnerOf(r.Driver))
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +580,7 @@ func checkPhases(sc *loopScript) error {
 // observe is the product's observation of a subject (Driver.Observe), valid
 // its fault process names.
 func CheckLoop(path string, observe func(string) Op, valid func(string) bool) error {
-	sc, err := readLoopScript("check", path, valid)
+	sc, err := readLoopScript("check", path, valid, nil)
 	if err != nil {
 		return err
 	}
