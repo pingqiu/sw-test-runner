@@ -100,8 +100,8 @@ func historyFile(t *testing.T, cs string) string {
 }
 
 func checksFile(t *testing.T, c6 ...string) string {
-	return writeJSON(t, "checks.json", map[string]any{"C0": map[string]any{"findings": []string{}, "verdict": "PASS"},
-		"C6": map[string]any{"findings": c6, "verdict": "PASS"}})
+	return writeJSON(t, "checks.json", map[string]any{"C0": map[string]any{"findings": []string{}, "verdict": "PASS", "judged": 3},
+		"C6": map[string]any{"findings": c6, "verdict": "PASS", "judged": 1}})
 }
 
 // A night with fault runs needs one run whose C6 resolved an unknown.
@@ -163,5 +163,38 @@ func TestNightRequiresTheRunsCheckerSet(t *testing.T) {
 		if r := Judge(7, []NightRun{run}); r.Verdict != "FAIL" {
 			t.Errorf("%s: night %s %+v", name, r.Verdict, r.Runs)
 		}
+	}
+}
+
+// The fault scenario's condition: every required checker PASSes with its
+// own count above zero in every run; each run reports checker -> judged.
+func TestNightRequiresEachCheckerToJudgeSomething(t *testing.T) {
+	cov := coverageFile(t, map[string]int{"write|up": 1}, nil)
+	h := historyFile(t, "C0,C6")
+	checks := func(c0, c6 map[string]any) string {
+		return writeJSON(t, "checks.json", map[string]any{"C0": c0, "C6": c6})
+	}
+	pass := map[string]any{"verdict": "PASS", "judged": 4}
+	rep := Judge(7, []NightRun{{Exit: 0, Coverage: cov, History: h, Checks: checks(pass, map[string]any{"verdict": "PASS", "judged": 2})}})
+	if rep.Verdict != "PASS" || rep.Runs[0].Judged["C0"] != 4 || rep.Runs[0].Judged["C6"] != 2 {
+		t.Fatalf("green: %+v", rep.Runs[0])
+	}
+	for name, c := range map[string]struct {
+		c6   map[string]any
+		want string
+	}{
+		"judged 0":        {map[string]any{"verdict": "PASS", "judged": 0}, "C6 judged nothing"},
+		"a missing count": {map[string]any{"verdict": "PASS"}, "C6 judged nothing"},
+		"not PASS":        {map[string]any{"verdict": "UNKNOWN", "judged": 5}, "C6 verdict UNKNOWN"},
+	} {
+		r := Judge(7, []NightRun{{Exit: 0, Coverage: cov, History: h, Checks: checks(pass, c.c6)}})
+		if r.Verdict != "FAIL" || r.Runs[0].Verdict != "FAIL" || !strings.Contains(r.Runs[0].Error, c.want) {
+			t.Errorf("%s: %s, %q", name, r.Verdict, r.Runs[0].Error)
+		}
+	}
+	// A checker not required may judge nothing.
+	r := Judge(7, []NightRun{{Exit: 0, Coverage: cov, History: historyFile(t, "C0"), Checks: checks(pass, map[string]any{"verdict": "FAIL", "judged": 0})}})
+	if r.Verdict != "PASS" {
+		t.Fatalf("a checker outside the set decided the run: %+v", r.Runs[0])
 	}
 }
