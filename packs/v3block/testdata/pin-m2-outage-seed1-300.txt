@@ -1621,8 +1621,12 @@ observe gen gen_step g24  null {"action":"v3_op_create","opno":300,"params":{"vo
 invoke  create g24  null null
 complete  create g24 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
-observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g13"},"volume":"g13"},{"action":"v3_op_observe","params":{"volume":"g15"},"volume":"g15"},{"action":"v3_op_observe","params":{"volume":"g16"},"volume":"g16"},{"action":"v3_op_observe","params":{"volume":"g19"},"volume":"g19"},{"action":"v3_op_observe","params":{"volume":"g20"},"volume":"g20"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g21"},"volume":"g21"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g21"},"volume":"g21"},{"action":"v3_op_observe","params":{"volume":"g21"},"volume":"g21"},{"action":"v3_op_observe","params":{"volume":"g23"},"volume":"g23"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"}]}
+observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g4"},"volume":"g4"},{"action":"v3_op_observe","params":{"volume":"g6"},"volume":"g6"},{"action":"v3_op_observe","params":{"volume":"g9"},"volume":"g9"},{"action":"v3_op_observe","params":{"volume":"g13"},"volume":"g13"},{"action":"v3_op_observe","params":{"volume":"g15"},"volume":"g15"},{"action":"v3_op_observe","params":{"volume":"g16"},"volume":"g16"},{"action":"v3_op_observe","params":{"volume":"g19"},"volume":"g19"},{"action":"v3_op_observe","params":{"volume":"g20"},"volume":"g20"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g21"},"volume":"g21"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g21"},"volume":"g21"},{"action":"v3_op_observe","params":{"volume":"g21"},"volume":"g21"},{"action":"v3_op_observe","params":{"volume":"g23"},"volume":"g23"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"}]}
 observe  observe g1  null null
+observe  observe g2  null null
+observe  observe g4  null null
+observe  observe g6  null null
+observe  observe g9  null null
 observe  observe g13  null null
 observe  observe g15  null null
 observe  observe g16  null null

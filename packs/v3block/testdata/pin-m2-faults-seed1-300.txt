@@ -1446,9 +1446,19 @@ observe gen gen_step g52  null {"action":"v3_op_read","opno":300,"params":{"lbas
 invoke  read g52  null null
 complete  read g52 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
-observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g52"},"volume":"g52"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g53"},"volume":"g53"},{"action":"v3_op_read","params":{"lbas":"1 4 6","volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g55"},"volume":"g55"},{"action":"v3_op_read","params":{"lbas":"0 1 3 5","volume":"g56"},"volume":"g56"},{"action":"v3_op_read","params":{"lbas":"6 7","volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g57"},"volume":"g57"},{"action":"v3_op_observe","params":{"volume":"g58"},"volume":"g58"},{"action":"v3_op_observe","params":{"volume":"g59"},"volume":"g59"},{"action":"v3_op_observe","params":{"volume":"g60"},"volume":"g60"}]}
+observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g9"},"volume":"g9"},{"action":"v3_op_observe","params":{"volume":"g12"},"volume":"g12"},{"action":"v3_op_observe","params":{"volume":"g23"},"volume":"g23"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"},{"action":"v3_op_observe","params":{"volume":"g25"},"volume":"g25"},{"action":"v3_op_observe","params":{"volume":"g26"},"volume":"g26"},{"action":"v3_op_observe","params":{"volume":"g27"},"volume":"g27"},{"action":"v3_op_observe","params":{"volume":"g28"},"volume":"g28"},{"action":"v3_op_observe","params":{"volume":"g44"},"volume":"g44"},{"action":"v3_op_observe","params":{"volume":"g45"},"volume":"g45"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g52"},"volume":"g52"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g53"},"volume":"g53"},{"action":"v3_op_read","params":{"lbas":"1 4 6","volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g55"},"volume":"g55"},{"action":"v3_op_read","params":{"lbas":"0 1 3 5","volume":"g56"},"volume":"g56"},{"action":"v3_op_read","params":{"lbas":"6 7","volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g57"},"volume":"g57"},{"action":"v3_op_observe","params":{"volume":"g58"},"volume":"g58"},{"action":"v3_op_observe","params":{"volume":"g59"},"volume":"g59"},{"action":"v3_op_observe","params":{"volume":"g60"},"volume":"g60"}]}
 observe  observe g1  null null
+observe  observe g2  null null
+observe  observe g9  null null
+observe  observe g12  null null
+observe  observe g23  null null
 observe  observe g24  null null
+observe  observe g25  null null
+observe  observe g26  null null
+observe  observe g27  null null
+observe  observe g28  null null
+observe  observe g44  null null
+observe  observe g45  null null
 invoke  read g52  null null
 complete  read g52 ok null null
 invoke  read g52  null null

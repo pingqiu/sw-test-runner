@@ -241,9 +241,16 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
 		g.Learn(o, outcome)
+		if err := g.feed(actx.History); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
 		if fr != nil {
 			fr.note(o, outcome)
-			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+			err := fr.afterOp(ctx, actx, o.No)
+			if ferr := g.feed(actx.History); ferr != nil {
+				return nil, fmt.Errorf("%s: %w", r.Name, ferr)
+			}
+			if errors.Is(err, errUnhealthy) {
 				// No more operations against dead subjects: record it, then
 				// finish, sweep and end.
 				if err := stopRun(actx, o.No); err != nil {
@@ -260,6 +267,9 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		if err := fr.finish(ctx, actx); err != nil {
 			return nil, fmt.Errorf("%s: end of run: %w", r.Name, err)
 		}
+	}
+	if err := g.feed(actx.History); err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name, err)
 	}
 	if err := r.sweep(ctx, actx, g.m.Sweep()); err != nil {
 		return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)

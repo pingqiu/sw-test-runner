@@ -12,11 +12,17 @@ package randomrun
 // and fast ones do not swamp the run.
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // Config sets a run.
@@ -46,6 +52,39 @@ type Generator struct {
 	counts map[string]int // action -> count proposed
 	down   string         // the process a fault holds down now ("" for none)
 	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
+	fed    int64          // the history's bytes already handed to the model (feed)
+}
+
+// feed hands the model every observe record appended to the history since
+// the last feed. The history is synced on every record, so its file is the
+// run's record as it stands.
+func (g *Generator) feed(h *tr.History) error {
+	if h == nil {
+		return nil
+	}
+	f, err := os.Open(h.Path())
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(g.fed, io.SeekStart); err != nil {
+		return err
+	}
+	rd := bufio.NewReader(f)
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err == io.EOF {
+			return nil // a line without its newline is not whole yet
+		}
+		if err != nil {
+			return err
+		}
+		g.fed += int64(len(line))
+		var r tr.HistoryRecord
+		if json.Unmarshal(line, &r) == nil && r.Kind == tr.HistoryObserve {
+			g.m.Observed(r)
+		}
+	}
 }
 
 // New validates the config and starts a run of model m.

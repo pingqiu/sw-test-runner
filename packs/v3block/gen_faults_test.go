@@ -63,6 +63,14 @@ type faultFake struct {
 	// alsoDown is a process a look finds down that this run never killed
 	// (a holder fenced on its own): looks report it.
 	alsoDown string
+	// settle: at each normal healthy point, a settled record with this state
+	// for every volume whose attach or stop answered unknown since ("": none,
+	// they stay unsettled). fenceAll: the first n normal healthy records list
+	// every pool name not serving.
+	settle    string
+	unsettled []string
+	fenceAll  int
+	pool      []string
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -77,6 +85,9 @@ func (f *faultFake) install(t *testing.T) {
 				return inner(ctx, actx, act)
 			}
 			f.calls = append(f.calls, act)
+			if name == "v3_op_attach" || name == "v3_op_stop" {
+				f.unsettled = append(f.unsettled, act.Params["volume"])
+			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"]})
 			_ = actx.History.Complete(seq, tr.OutcomeUnknown, nil)
 			return map[string]string{"value": tr.OutcomeUnknown}, nil
@@ -115,7 +126,17 @@ func (f *faultFake) install(t *testing.T) {
 		ok := f.down == "" && f.healthyCall > f.unhealthy
 		f.log = append(f.log, fmt.Sprintf("healthy %v", ok))
 		f.waits = append(f.waits, act.Params["wait_seconds"])
-		_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{"healthy": ok, "down": []string{}, "not_serving": []string{}}})
+		ns := []string{}
+		if f.healthyCall <= f.fenceAll {
+			ns = f.pool
+		}
+		_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{"healthy": ok, "down": []string{}, "not_serving": ns}})
+		if ok && f.settle != "" {
+			for _, v := range f.unsettled {
+				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "settled", Result: map[string]any{"volume": v, "state": f.settle, "evidence": "fake"}})
+			}
+			f.unsettled = nil
+		}
 		return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(ok)}, nil
 	}
 }
@@ -860,4 +881,101 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 		t.Fatalf("replay of the skips: %v %v, log %v", out, err, f2.log)
 	}
 
+}
+
+// The run hands the model the records its handlers write: a volume whose
+// attach or stop answered unknown is offered nothing until a settled record
+// places it; a healthy record's not_serving fences reads and writes.
+func TestGenRunLearnsFromSettledAndHealthyRecords(t *testing.T) {
+	type window struct{ from, to uint64 }
+	run := func(f *faultFake) []tr.HistoryRecord {
+		f.install(t)
+		actx, p := genRunCtx(t)
+		if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		return records(t, p)
+	}
+	// unsettledSteps: steps on a volume after its unknown attach or stop
+	// and before its settled record (none may exist), and the volumes that
+	// had an operation after their settled record.
+	check := func(recs []tr.HistoryRecord) (bad []string, served int) {
+		since := map[string]bool{}
+		settledOnce := map[string]bool{}
+		var stepVol, stepAct string
+		for _, r := range recs {
+			switch {
+			case r.Verb == "gen_step":
+				stepVol, stepAct = r.Volume, r.Result["action"].(string)
+				if since[stepVol] {
+					bad = append(bad, fmt.Sprintf("%s %s while unsettled", stepAct, stepVol))
+				}
+				if settledOnce[stepVol] && r.Result["negative"] == nil {
+					served++
+					delete(settledOnce, stepVol)
+				}
+			case r.Kind == tr.HistoryComplete && r.Outcome == tr.OutcomeUnknown && r.Volume == stepVol && (stepAct == "v3_op_attach" || stepAct == "v3_op_stop") && (r.Verb == "attach" || r.Verb == "stop"):
+				since[stepVol] = true
+			case r.Verb == "settled":
+				v := r.Result["volume"].(string)
+				delete(since, v)
+				settledOnce[v] = true
+			case r.Verb == "gen_sweep":
+				stepVol = ""
+			}
+		}
+		return bad, served
+	}
+	recs := run(&faultFake{settle: "held"})
+	bad, served := check(recs)
+	if len(bad) != 0 || served == 0 {
+		t.Fatalf("settled held: %v, %d volumes served again after their settled record", bad, served)
+	}
+	// Red control: without settled records the volumes stay unsettled.
+	bad, served = check(run(&faultFake{}))
+	if len(bad) != 0 || served != 0 {
+		t.Fatalf("no settled records: %v, %d served", bad, served)
+	}
+	// not_serving: no write or read between the fencing record and the next
+	// healthy record that leaves the volumes out.
+	// The volumes written before it (serving then) and not attached again
+	// since are the fenced ones.
+	recs = run(&faultFake{fenceAll: 1, pool: pool(100)})
+	fenced, wrote := map[string]bool{}, map[string]bool{}
+	n, during := 0, 0
+	inWindow := false
+	for _, r := range recs {
+		if r.Verb == "healthy" && r.Result["look"] == nil {
+			ns, _ := r.Result["not_serving"].([]any)
+			inWindow = len(ns) > 0
+			if inWindow {
+				n++
+				for v := range wrote {
+					fenced[v] = true
+				}
+			} else {
+				fenced = map[string]bool{}
+			}
+		}
+		if r.Verb != "gen_step" {
+			continue
+		}
+		a := r.Result["action"]
+		switch {
+		case a == "v3_op_attach":
+			delete(fenced, r.Volume)
+		case (a == "v3_op_write" || a == "v3_op_read") && fenced[r.Volume]:
+			t.Fatalf("%v on %s while not serving", a, r.Volume)
+		case a == "v3_op_write":
+			wrote[r.Volume] = true
+		}
+		if inWindow {
+			during++
+		}
+	}
+	if n != 1 || during == 0 {
+		t.Fatalf("%d fencing records, %d steps in the window", n, during)
+	}
+	_ = window{}
 }

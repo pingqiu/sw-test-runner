@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
@@ -35,13 +36,15 @@ import (
 // stop, no ordinary delete of a serving volume), proposes the negatives the
 // typed actions can answer, and names every read's lbas. m1-gen/3: a restore
 // from a target's snapshot and a release of a target are negatives only while
-// the target still names a source chunk.
-const GenVersion = "m1-gen/3"
+// the target still names a source chunk. m1-gen/4: an attach or stop
+// answered unknown leaves its volume unsettled until a settled record places
+// it, and a volume a healthy record lists not serving gets no reads or writes.
+const GenVersion = "m1-gen/4"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
-// kill of the master.
+// kill of the master; it also learns as m1-gen/4.
 const GenVersionFaults = "m2-gen/3"
 
 //go:embed product/operations.json
@@ -93,6 +96,10 @@ const (
 	stReserved = "reserved" // a delete was admitted (the name reserved) and then refused: never serves again, the name is burnt
 	stBound    = "bound"    // a pool name bound by a refused restore: never created, the name is burnt
 	stUnknown  = "unknown"  // an outcome the runner could not decide: no further op on it
+	// unsettled: an attach or stop answered unknown; offered nothing but
+	// observation until a "settled" record places it (held: serving again;
+	// not_held: stopped).
+	stUnsettled = "unsettled"
 )
 
 // The limits a negative operation probes: each is a refusal an operator page
@@ -163,6 +170,9 @@ type genVol struct {
 	// writable, but is not stopped or moved until they are resolved, so the
 	// resolving read finds it where the write left it.
 	unresolved int
+	// fenced: a healthy record listed it not serving; it is offered no reads
+	// or writes until a later healthy record does not.
+	fenced bool
 }
 
 // blockModel is the block product's randomrun.Model. Its zero value is a
@@ -304,8 +314,10 @@ func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
 			}
 			add(op("v3_op_delete", n))
 		case stServing:
-			add(op("v3_op_write", n, "lbas", m.lbas(r), "round", fmt.Sprintf("g%d", next)))
-			add(op("v3_op_read", n, "lbas", m.readLBAs(r, v)))
+			if !v.fenced {
+				add(op("v3_op_write", n, "lbas", m.lbas(r), "round", fmt.Sprintf("g%d", next)))
+				add(op("v3_op_read", n, "lbas", m.readLBAs(r, v)))
+			}
 			if len(v.snaps) < MaxSnapshots {
 				add(op("v3_op_snapshot", n, "name", fmt.Sprintf("%s-s%d", n, v.snapSeq+1)))
 			}
@@ -460,6 +472,12 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			return
 		}
 	}
+	// An attach or stop answered unknown: its volume's intended state is
+	// unsettled until a settled record places it (Observed).
+	if outcome == "unknown" && o.Negative == "" && (o.Action == "v3_op_attach" || o.Action == "v3_op_stop") {
+		v.state = stUnsettled
+		return
+	}
 	if outcome == "unknown" || (outcome == "ok" && o.Negative != "") {
 		v.state = stUnknown
 		if t := o.Params["target_volume"]; t != "" {
@@ -477,7 +495,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_create":
 		v.state = stCreated
 	case "v3_op_attach":
-		v.state = stServing
+		v.state, v.fenced = stServing, false // a new holder: no earlier not_serving applies
 		v.held[v.host] = true
 	case "v3_op_write":
 		for _, f := range strings.Fields(o.Params["lbas"]) {
@@ -551,6 +569,10 @@ func (m *blockModel) Sweep() []GenOp {
 		v := m.vols[n]
 		switch v.state {
 		case stServing:
+			if v.fenced {
+				out = append(out, m.Observe(n))
+				continue
+			}
 			have := sortedLBAs(v.lbas)
 			for i := 0; i < len(have); i += sweepReadSize {
 				var f []string
@@ -560,12 +582,61 @@ func (m *blockModel) Sweep() []GenOp {
 				out = append(out, op("v3_op_read", n, "lbas", strings.Join(f, " ")))
 			}
 			out = append(out, m.Observe(n))
-		case stCreated, stStopped, stMoved, stReserved, stDeleted:
+		case stCreated, stStopped, stMoved, stReserved, stDeleted, stUnsettled:
 			out = append(out, m.Observe(n))
 		}
 	}
 	return out
 }
+
+// Observed learns from observe records (not from the invokes):
+//   - settled {volume, state, evidence}: an unsettled volume placed by
+//     observation; held means serving again (ordinary operations offered),
+//     not_held means stopped. A volume that is not unsettled is not moved;
+//   - healthy (any look): a serving volume in result.not_serving is fenced
+//     (no reads or writes) until a later healthy record leaves it out;
+//     result.third_state [{volume, why}] takes the volume out of the run.
+func (m *blockModel) Observed(r tr.HistoryRecord) {
+	switch r.Verb {
+	case "settled":
+		vol, _ := r.Result["volume"].(string)
+		v := m.vols[vol]
+		if v == nil || v.state != stUnsettled {
+			return
+		}
+		switch r.Result["state"] {
+		case "held":
+			v.state, v.fenced = stServing, false
+			v.held[v.host] = true
+		case "not_held":
+			v.state = stStopped
+		}
+	case VerbHealthyRecord:
+		ns, ok := r.Result["not_serving"].([]any)
+		if ok {
+			out := map[string]bool{}
+			for _, x := range ns {
+				if s, ok := x.(string); ok {
+					out[s] = true
+				}
+			}
+			for _, v := range m.vols {
+				v.fenced = out[v.name] && v.state == stServing
+			}
+		}
+		third, _ := r.Result["third_state"].([]any)
+		for _, x := range third {
+			e, _ := x.(map[string]any)
+			vol, _ := e["volume"].(string)
+			if v := m.vols[vol]; v != nil {
+				v.state = stUnknown
+			}
+		}
+	}
+}
+
+// VerbHealthyRecord is the healthy record's verb (randomrun's contract).
+const VerbHealthyRecord = randomrun.VerbHealthy
 
 // Driver side: how a block proposal is executed.
 
