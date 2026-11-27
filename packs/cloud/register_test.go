@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -145,10 +146,37 @@ func TestPowerActionAppliesRestoresAndLeavesTheReceiptInTheBundle(t *testing.T) 
 	c := &fakeCloud{power: "running"}
 	c.install(t)
 	actx := &tr.ActionContext{Safety: s, History: h, Bundle: &tr.RunBundle{Dir: bundleDir}}
+	var dispatched int64
+	az := Az
+	Az = func(ctx context.Context, args []string) (string, string, error) {
+		if args[1] == "stop" {
+			raw, err := os.ReadFile(filepath.Join(bundleDir, "faults", "power-dispatch-node-1.json"))
+			if err != nil {
+				t.Fatal("power dispatched without its record:", err)
+			}
+			var row struct {
+				Node string `json:"node"`
+				Key  string `json:"fault_key"`
+				At   int64  `json:"at_unix_ns"`
+			}
+			if err := json.Unmarshal(raw, &row); err != nil {
+				t.Fatal(err)
+			}
+			if row.Node != "node-1" || row.Key != "node-1/"+goodVM || row.At <= 0 || row.At > time.Now().UnixNano() {
+				t.Fatalf("wrong dispatch binding: %+v", row)
+			}
+			dispatched = row.At
+		}
+		return az(ctx, args)
+	}
 	act := tr.Action{Action: "cloud_vm_power", Params: map[string]string{"vm": "node-1"}}
 	out, err := vmPowerOff(t.Context(), actx, act)
 	if err != nil || out["fault_key"] != "node-1/"+goodVM {
 		t.Fatalf("apply: %v %v", out, err)
+	}
+	stamp, parseErr := strconv.ParseInt(out["__fault_dispatch_unix_ns"], 10, 64)
+	if parseErr != nil || dispatched == 0 || stamp != dispatched {
+		t.Fatalf("dispatch output not bound to actual power call: %v %d", out, dispatched)
 	}
 	if c.power != "stopped" {
 		t.Fatalf("not powered off: %s", c.power)

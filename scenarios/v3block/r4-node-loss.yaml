@@ -220,7 +220,7 @@ phases:
   - name: lose-the-primary
     actions:
       - {action: cloud_vm_power, node: node-1, vm: node-2}
-      - {action: exec, node: controller, timeout: 90s, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json stream-ended"}
+      - {action: exec, node: controller, timeout: 90s, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json stream-ended --fault-dispatch-unix-ns {{ __fault_dispatch_unix_ns }} --fault-key '{{ __fault_key }}'"}
 
   - name: operator-call-count
     actions:

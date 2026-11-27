@@ -225,7 +225,7 @@ func TestR4GuestExitBlocksReconnectAndReadback(t *testing.T) {
 			ended, reconnected, readback := 0, 0, 0
 			h := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
 				cmd := a.Params["cmd"]
-				if strings.HasSuffix(cmd, " stream-ended") {
+				if strings.Contains(cmd, " stream-ended --fault-dispatch-unix-ns ") {
 					ended++
 					if mode != "success" {
 						return nil, fmt.Errorf("old guest not ended: %s", mode)
@@ -387,6 +387,9 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 			rejoin := false
 			post := false
 			handler := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+				if a.Action == "cloud_vm_power" {
+					return map[string]string{"__fault_key": "node-2/owned-vm", "__fault_dispatch_unix_ns": "100"}, nil
+				}
 				for k, v := range a.Params {
 					if strings.Contains(v, "{{") {
 						return nil, fmt.Errorf("unresolved %s=%s", k, v)
@@ -424,7 +427,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				if a.Action == "cloud_vm_power" && !writer {
 					return nil, fmt.Errorf("power-off precedes continuous writer")
 				}
-				if strings.Contains(cmd, "guest-io.py") && strings.HasSuffix(cmd, " stream-ended") {
+				if strings.Contains(cmd, "guest-io.py") && strings.Contains(cmd, " stream-ended --fault-dispatch-unix-ns ") {
 					writerStopped = true
 				}
 				if strings.Contains(cmd, "/bin/blockvolume ") {

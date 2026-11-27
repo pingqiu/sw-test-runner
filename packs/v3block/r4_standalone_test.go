@@ -21,7 +21,7 @@ func TestR4StandaloneUsesOnlyLocalGuestsAndOffHostLedger(t *testing.T) {
 		}
 		if strings.Contains(cmd, "guest-io.py") {
 			for _, op := range []string{"before", "stream-start", "stream-ended", "verify", "after-rejoin"} {
-				if strings.HasSuffix(strings.TrimSpace(cmd), " "+op) {
+				if strings.HasSuffix(strings.TrimSpace(cmd), " "+op) || (op == "stream-ended" && strings.Contains(cmd, " stream-ended --fault-dispatch-unix-ns ")) {
 					if a.Node != "controller" {
 						return nil, fmt.Errorf("guest ACK ledger must be off-host")
 					}

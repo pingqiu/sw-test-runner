@@ -7,6 +7,12 @@ Actions (mutating, chaos tier; the run needs `--allow-mutating`). The key is `vm
 | `cloud_vm_power` | `vm`: an inventory host id | powers that host's VM off; output `fault_key` |
 | `cloud_vm_power_restore` | `vm` | powers it on again and proves a new boot |
 
+Immediately before invoking the power-off call, the controller records
+`faults/power-dispatch-<node>.json` with `node`, `fault_key` and `at_unix_ns`.
+The action exports `__fault_key` and `__fault_dispatch_unix_ns` for a later
+evidence check. These use the controller's UTC clock and identify the invocation
+window; they do not decide product authority or prove a general failover bound.
+
 ## Which power action
 
 `cloud_vm_power` is an **abrupt stop of the machine**: `az vm stop --skip-shutdown`, a power cut with no guest shutdown. The guest gets no chance to flush, unmount or stop services. The checkers judge an abrupt stop and a clean shutdown the same way, but only the abrupt stop tests the durability promise (an acknowledged write survives a power loss). Do not replace it with a guest shutdown or a deallocate.

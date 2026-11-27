@@ -126,6 +126,9 @@ def validate_guest_exit(status, fault, still_active):
     require(not status.get('error') and status.get('remote_exit') in (255,137)
             and status.get('ended',-1)>=fault['at'], 'guest did not terminate in the power-off window')
     require(not still_active, 'old guest relay still active')
+    require(fault.get('key','').startswith('node-2/') and fault.get('dispatch_unix_ns',0)>0
+            and status.get('ended_unix_ns',0)>=fault['dispatch_unix_ns'],
+            'guest ended before recorded cloud fault dispatch')
 
 
 def process_identity(pid):
@@ -139,6 +142,13 @@ def process_identity(pid):
 def active(root):
     info = json.loads((root/'stream-pid.json').read_text())
     return info if process_identity(info['pid']) == info['start'] else None
+
+
+def require_guest_ended(root):
+    require((root/'stream-ended.json').exists() and (root/'fault-dispatch.json').exists(),
+            'old guest is not proven ended')
+    validate_guest_exit(json.loads((root/'stream-ended.json').read_text()),
+                        json.loads((root/'fault-dispatch.json').read_text()),bool(active(root)))
 
 
 def copy_ledger(cfg, host):
@@ -169,7 +179,10 @@ def main():
     init = sub.add_parser('init'); init.add_argument('--tag', required=True);init.add_argument('--rf',choices=('2','3'),required=True)
     init.add_argument('--user',required=True);init.add_argument('--key',required=True);init.add_argument('--node',nargs=4,action='append',required=True)
     init.add_argument('--data-port',required=True);init.add_argument('--nvme-port',required=True);init.add_argument('--writes',type=int,required=True)
-    for cmd in ('before','stream-start','stream-ended','_stream','verify','no-ack','after-rejoin','cleanup'):sub.add_parser(cmd)
+    for cmd in ('before','stream-start','_stream','verify','no-ack','after-rejoin','cleanup'):sub.add_parser(cmd)
+    ended=sub.add_parser('stream-ended')
+    ended.add_argument('--fault-dispatch-unix-ns',type=int,required=True)
+    ended.add_argument('--fault-key',required=True)
     a = p.parse_args(); root = a.config.parent
     if a.command == 'init':
         require(not root.exists(), 'guest controller directory is not fresh')
@@ -194,7 +207,7 @@ def main():
         status={'started':time.monotonic()}
         try: status['remote_exit']=relay(cfg,'node-2','during-loss',0,True)
         except Exception as error: status['error']=str(error)
-        status['ended']=time.monotonic();publish(root/'stream-ended.json',status)
+        status['ended']=time.monotonic();status['ended_unix_ns']=time.time_ns();publish(root/'stream-ended.json',status)
     elif a.command == 'stream-start':
         require(not (root/'stream-pid.json').exists(),'stream already started')
         with (root/'stream-controller.log').open('wb') as log:
@@ -208,6 +221,8 @@ def main():
         publish(root/'fault-ready.json',dict(at=time.monotonic()))
     elif a.command == 'stream-ended':
         fault=json.loads((root/'fault-ready.json').read_text());end=time.monotonic()+60
+        fault.update(dispatch_unix_ns=a.fault_dispatch_unix_ns,key=a.fault_key)
+        publish(root/'fault-dispatch.json',fault)
         while not (root/'stream-ended.json').exists():
             require(time.monotonic()<end,'guest SSH did not end after host power-off');time.sleep(.2)
         status=json.loads((root/'stream-ended.json').read_text())
@@ -223,7 +238,7 @@ def main():
                 while active(root) and time.monotonic()<end:time.sleep(.1)
         require(not (root/'stream-pid.json').exists() or not active(root),'guest relay still active')
     else:
-        require((root/'stream-ended.json').exists() and not active(root),'old guest is not proven ended')
+        require_guest_ended(root)
         text=os.environ['PROMOTION'];host=selected_host(cfg,text)
         if a.command=='verify':verify(cfg,host,text)
         elif a.command=='after-rejoin':

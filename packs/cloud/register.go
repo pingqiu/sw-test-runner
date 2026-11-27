@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -93,12 +94,25 @@ func vmPowerOff(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	if err != nil {
 		return nil, err
 	}
+	var dispatch int64
+	off := p.PowerOff
+	p.PowerOff = func(ctx context.Context) error {
+		dispatch = time.Now().UnixNano()
+		raw, err := json.Marshal(map[string]any{"node": p.Node, "fault_key": p.Key(), "at_unix_ns": dispatch})
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(actx.Bundle.Dir, "faults", "power-dispatch-"+p.Node+".json"), raw, 0o600); err != nil {
+			return err
+		}
+		return off(ctx)
+	}
 	err = actx.Safety.ApplyWitnessedPowerFault(ctx, p.Key(), p)
 	werr := writeReceipts(actx)
 	if err != nil {
 		return nil, errors.Join(err, werr)
 	}
-	return map[string]string{"fault_key": p.Key()}, werr
+	return map[string]string{"fault_key": p.Key(), "__fault_key": p.Key(), "__fault_dispatch_unix_ns": strconv.FormatInt(dispatch, 10)}, werr
 }
 
 func vmPowerRestore(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
