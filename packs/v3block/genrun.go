@@ -38,6 +38,12 @@ func (m *blockModel) Rerun(action string, params map[string]string, n int, since
 	return blockActions.Rerun(action, params, n, since, out)
 }
 
+func (m *blockModel) Placeable(action string) bool { return blockActions.Placeable(action) }
+
+func (m *blockModel) Place(action string, params map[string]string, before, after map[string]any) (string, string, bool) {
+	return blockActions.Place(action, params, before, after)
+}
+
 var _ randomrun.Rerunner = (*blockModel)(nil)
 
 // driven is the handler a SCRIPTED step runs (register.go): an action with a
@@ -56,14 +62,14 @@ func driven(name string) tr.ActionHandlerFunc {
 	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 		act.Action = name
 		o := GenOp{Action: name, Volume: opParam(act, actx, "volume"), Params: act.Params}
-		out, _, err := randomrun.Attempts(ctx, actx, h, act, m, o.Volume, func() error {
+		out, _, err := randomrun.Attempts(ctx, actx, h, act, m, o.Volume, func() (map[string]any, error) {
 			for _, s := range m.ObserveSubjects(o) {
 				obs := m.Observe(s)
 				if _, err := observe(ctx, actx, tr.Action{Action: obs.Action, Node: act.Node, Params: obs.Params}); err != nil {
-					return err
+					return nil, err
 				}
 			}
-			return nil
+			return randomrun.LastObservation(actx.History, o.Volume)
 		})
 		return out, err
 	}

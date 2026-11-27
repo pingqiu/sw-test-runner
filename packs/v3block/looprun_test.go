@@ -70,10 +70,11 @@ func TestLoopRunSoakOverTheBlockHandlers(t *testing.T) {
 		}
 	}
 	// 4 volumes x 40 iterations: a write of 4 lbas (4 calls) and a read; a
-	// snapshot at 10, 20, 30, 40; a delete at 40 of the one taken at 10. The
-	// sweep: one read per volume, then an observation of each.
+	// snapshot at 10, 20, 30, 40, each observed first (the "before" the
+	// driver places an unknown snapshot by); a delete at 40 of the one taken
+	// at 10. The sweep: one read per volume, then an observation of each.
 	want := map[string]int{"v3_op_create": 4, "v3_op_attach": 4, "v3_op_write": 4 * 40 * 4, "v3_op_read": 4*40 + 4,
-		"v3_op_snapshot": 16, "v3_op_snapshot_delete": 4, "v3_op_observe": 4, "v3_op_stop": 4}
+		"v3_op_snapshot": 16, "v3_op_snapshot_delete": 4, "v3_op_observe": 4 + 16, "v3_op_stop": 4}
 	if fmt.Sprint(calls) != fmt.Sprint(want) {
 		t.Fatalf("calls %v\nwant  %v", calls, want)
 	}

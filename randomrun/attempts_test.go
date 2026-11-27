@@ -23,6 +23,11 @@ func (rerunDriver) RequestArg(action string) string {
 	return ""
 }
 
+func (rerunDriver) Placeable(string) bool { return false }
+func (rerunDriver) Place(string, map[string]string, map[string]any, map[string]any) (string, string, bool) {
+	return PlacedNotPlaced, "", false
+}
+
 func (rerunDriver) Rerun(action string, _ map[string]string, n int, _ time.Duration, out map[string]string) (bool, time.Duration, string) {
 	if action != "delete" || out["value"] != tr.OutcomeRefused {
 		return false, 0, ""

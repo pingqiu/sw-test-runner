@@ -12,8 +12,11 @@ package randomrun
 // The last attempt's outcome is the call's.
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -27,22 +30,43 @@ const VerbRerunGuard = "rerun_guard"
 
 // Attempts runs one call act of handler h on subject: one attempt, or, when
 // rr declares a rerun of act.Action (RequestArg not ""), attempt 1 and,
-// while rr.Rerun says so, attempt n+1 after its pause, each with
-// AttemptParam set. observe records the subject's observation; it runs
-// right after a refused attempt that is re-issued and again right before
-// the next attempt (none: nothing is observed).
-// When the guard ends the attempts, a VerbRerunGuard record says so. It returns the last
-// attempt's output and the number of attempts made (0 for an action with no
-// declared rerun). A step that sets AttemptParam itself is a runner error:
-// only the driver numbers attempts. A context ended during a pause returns
-// the last attempt's output, as an attempt that was not made.
-func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFunc, act tr.Action, rr Rerunner, subject string, observe func() error) (map[string]string, int, error) {
+// while rr says so, attempt n+1 after its pause, each with AttemptParam
+// set. observe records an observation of the subject and returns its
+// record's result (nil observe: nothing is observed, and an unknown is never
+// re-issued). The observations:
+//   - a refused attempt that is re-issued: right after it, and again right
+//     before the next attempt, after the pause (a baseline pair);
+//   - an action whose unknown can be placed (rr.Placeable): one before the
+//     first attempt, and one right after each unknown with a page-named
+//     answer (Rerun's why "place"), which places that attempt (rr.Place):
+//     did_not re-issues it after the pause, with that observation as the next
+//     attempt's "before"; took_effect, third or not_placed (or names not
+//     recorded) ends the attempts, the attempt's outcome staying unknown in
+//     the history for the checkers to place by the same observation. The
+//     output then carries "placement" (the outcome) and "placement_why".
+//
+// When the guard ends the attempts, a VerbRerunGuard record says so. It
+// returns the last attempt's output and the number of attempts made (0 for
+// an action with no declared rerun). A step that sets AttemptParam itself is
+// a runner error: only the driver numbers attempts. A context ended during a
+// pause returns the last attempt's output, as an attempt that was not made.
+func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFunc, act tr.Action, rr Rerunner, subject string, observe func() (map[string]any, error)) (map[string]string, int, error) {
 	if _, set := act.Params[AttemptParam]; set {
 		return nil, 0, fmt.Errorf("%s: %s is the driver's to set, not a step's", act.Action, AttemptParam)
 	}
 	if rr == nil || rr.RequestArg(act.Action) == "" {
 		out, err := h(ctx, actx, act)
 		return out, 0, err
+	}
+	// before is the latest observation of the subject the driver made: the
+	// "before" a placement of the next attempt reads.
+	var before map[string]any
+	if observe != nil && rr.Placeable(act.Action) {
+		b, err := observe()
+		if err != nil {
+			return nil, 0, err
+		}
+		before = b
 	}
 	start := time.Now()
 	for n := 1; ; n++ {
@@ -59,6 +83,32 @@ func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFun
 		}
 		elapsed := time.Since(start)
 		again, pause, why := rr.Rerun(act.Action, act.Params, n, elapsed, out)
+		if why == "place" {
+			// An unknown with a page-named answer: never re-issued without
+			// first observing and placing it.
+			if observe == nil || before == nil {
+				actx.Log("  %s attempt %d: unknown, and no observation to place it: not re-issued", act.Action, n)
+				return out, n, nil
+			}
+			after, err := observe()
+			if err != nil {
+				return nil, n, err
+			}
+			placed, pwhy, ok := rr.Place(act.Action, act.Params, before, after)
+			out = withPlacement(out, placed, pwhy)
+			if !ok || placed != PlacedDidNot {
+				actx.Log("  %s attempt %d: unknown, placed %s (%s): not re-issued", act.Action, n, placed, pwhy)
+				return out, n, nil
+			}
+			actx.Log("  %s attempt %d: unknown, placed %s (%s): re-issued", act.Action, n, placed, pwhy)
+			before = after
+			select {
+			case <-ctx.Done():
+				return out, n, nil
+			case <-time.After(pause):
+			}
+			continue
+		}
 		if !again {
 			if why == "guard" {
 				actx.Log("  %s: the wall-clock guard ended the reruns after attempt %d", act.Action, n)
@@ -69,13 +119,13 @@ func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFun
 			}
 			return out, n, nil
 		}
-		// Only a refused attempt is re-issued (Rerun). Observe right after
-		// it (its "after") and again right before the next attempt, after
-		// the pause (the next one's "before"): the two are a baseline pair,
-		// so work the product does in the background during the pause shows
-		// as a baseline difference, blamed on neither attempt.
+		// A refused attempt is re-issued (Rerun). Observe right after it (its
+		// "after") and again right before the next attempt, after the pause
+		// (the next one's "before"): the two are a baseline pair, so work the
+		// product does in the background during the pause shows as a
+		// baseline difference, blamed on neither attempt.
 		if observe != nil {
-			if err := observe(); err != nil {
+			if _, err := observe(); err != nil {
 				return nil, n, err
 			}
 		}
@@ -85,9 +135,55 @@ func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFun
 		case <-time.After(pause):
 		}
 		if observe != nil {
-			if err := observe(); err != nil {
+			b, err := observe()
+			if err != nil {
 				return nil, n, err
+			}
+			before = b
+		}
+	}
+}
+
+// The placement outcomes Rerunner.Place answers (one enumeration with the
+// product's placement table).
+const (
+	PlacedTookEffect = "took_effect"
+	PlacedDidNot     = "did_not"
+	PlacedThird      = "third"
+	PlacedNotPlaced  = "not_placed"
+)
+
+// withPlacement is out with the placement of its attempt.
+func withPlacement(out map[string]string, placed, why string) map[string]string {
+	o := make(map[string]string, len(out)+2)
+	for k, v := range out {
+		o[k] = v
+	}
+	o["placement"], o["placement_why"] = placed, why
+	return o
+}
+
+// LastObservation is the result of the last observation of subject in the
+// history (an observe record with verb VerbObserve on it): what the driver
+// just observed, read back as the model reads observations (the record, not
+// the handler's answer). nil when there is none.
+func LastObservation(h *tr.History, subject string) (map[string]any, error) {
+	f, err := os.Open(h.Path())
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var last map[string]any
+	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 1<<20), 64<<20)
+	for s.Scan() {
+		var r tr.HistoryRecord
+		if json.Unmarshal(s.Bytes(), &r) == nil && r.Kind == tr.HistoryObserve && r.Verb == VerbObserve && r.Volume == subject {
+			last = r.Result
+			if last == nil {
+				last = map[string]any{}
 			}
 		}
 	}
+	return last, s.Err()
 }

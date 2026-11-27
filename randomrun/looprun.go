@@ -419,7 +419,12 @@ func readLoopScript(name, path string, valid func(string) bool, rr Rerunner) (*l
 				}
 				continue
 			}
-			cur = nil
+			if r.Verb != VerbObserve {
+				// An observation of a subject inside a step (the driver's,
+				// around a rerun's attempts) is part of the step; any other
+				// observe record ends it.
+				cur = nil
+			}
 			switch r.Verb {
 			case "loop_header", "fault_schedule":
 				return nil, bad("a second %s", r.Verb)

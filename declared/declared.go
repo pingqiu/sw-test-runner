@@ -939,6 +939,9 @@ type Executor struct {
 	Subject func(actx *tr.ActionContext, name string) (Subject, error)
 	// Lookup is the product's outcome table.
 	Lookup LookupFunc
+	// Placements are the product's placement rows by verb (ParsePlacements):
+	// how an unknown of the verb is placed, for a rerun (Rerun, Place).
+	Placements map[string]*Placement
 	// Pause, when set, replaces a retry's declared pause (tests).
 	Pause func(declared time.Duration) time.Duration
 	// Deadline, when set, replaces a variant's declared runner deadline
@@ -1469,23 +1472,27 @@ func (x *Executor) RequestArg(name string) string {
 // Rerun is action name's declared rerun, read by the DRIVER, which
 // re-issues the action: whether attempt n+1 follows attempt n, which
 // answered out (the handler's value, detail and transport) since the
-// first attempt began, and after what pause. ONLY after an attempt that
-// answered refused, with an answer the operator page names
-// (Retry.matches): never after an unknown, even one whose detail matches
-// (an unknown may have changed the subject, and the next attempt would
-// have no "before"), never after a refused_effect, an ok or a transport
-// failure. A step that declares expect=refused only when its
-// expected_refusal param is true. The COUNT is the bound: at most
-// max_attempts attempts. within_param (seconds) is only a guard, a wall
-// clock past which no attempt follows (why "guard"). It reads nothing but
-// the declaration and the step's params, and writes nothing.
+// first attempt began, and after what pause. An attempt that answered
+// refused, with an answer the operator page names (Retry.matches), is
+// re-issued (again). An UNKNOWN is never re-issued as it stands: one with a
+// page-named answer, of a verb with a placement row (Placements), answers
+// why "place": the driver observes the subject, places the attempt
+// (Place), and re-issues only when it did not take effect (did_not), with
+// that observation as the next attempt's "before". Any other unknown, a
+// refused_effect, an ok or a transport failure ends the attempts. A step
+// that declares expect=refused only when its expected_refusal param is
+// true. The COUNT is the bound: at most max_attempts attempts. within_param
+// (seconds) is only a guard, a wall clock past which no attempt follows
+// (why "guard"). It reads nothing but the declaration and the step's
+// params, and writes nothing.
 func (x *Executor) Rerun(name string, params map[string]string, n int, since time.Duration, out map[string]string) (bool, time.Duration, string) {
 	a := x.action(name)
 	if a == nil || a.Retry == nil {
 		return false, 0, ""
 	}
 	r := a.Retry
-	if out["transport"] != "" || out["value"] != tr.OutcomeRefused || !r.matches(out["detail"]) {
+	place := out["value"] == tr.OutcomeUnknown && x.Placements[a.Verb] != nil
+	if out["transport"] != "" || (out["value"] != tr.OutcomeRefused && !place) || !r.matches(out["detail"]) {
 		return false, 0, ""
 	}
 	if params["expect"] == tr.OutcomeRefused {
@@ -1503,7 +1510,40 @@ func (x *Executor) Rerun(name string, params map[string]string, n int, since tim
 	if x.Pause != nil {
 		pause = x.Pause(pause)
 	}
+	if place {
+		return false, pause, "place"
+	}
 	return true, pause, ""
+}
+
+// Placeable says whether an unknown of action name can be placed by an
+// observation: its verb has a placement row (the driver then observes the
+// subject before the first attempt, the "before" a placement needs).
+func (x *Executor) Placeable(name string) bool {
+	a := x.action(name)
+	return a != nil && a.Retry != nil && x.Placements[a.Verb] != nil
+}
+
+// Place places an unknown attempt of action name (with params) from the
+// results of the observation before it and the one after it, by its verb's
+// placement row: the outcome (PlacementOutcomes) and why; ok false when the
+// row cannot place it (no row, the request's name not a param, the names not
+// recorded by both observations).
+func (x *Executor) Place(name string, params map[string]string, before, after map[string]any) (string, string, bool) {
+	a := x.action(name)
+	if a == nil || x.Placements[a.Verb] == nil {
+		return PlacedNotPlaced, "no placement row", false
+	}
+	p := x.Placements[a.Verb]
+	t := a.Record.Args[p.Arg].Template
+	if !strings.HasPrefix(t, "{{") || !strings.HasSuffix(t, "}}") || strings.Count(t, "{{") != 1 {
+		return PlacedNotPlaced, fmt.Sprintf("record arg %s is not one param (%q)", p.Arg, t), false
+	}
+	v, ok := params[strings.TrimSpace(t[2:len(t)-2])]
+	if !ok || v == "" {
+		return PlacedNotPlaced, fmt.Sprintf("record arg %s: no param %s", p.Arg, t), false
+	}
+	return p.Place(v, before, after)
 }
 
 // action is the declared action name, nil when there is none.

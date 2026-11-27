@@ -39,7 +39,7 @@ func (toyDriver) OutageRestart() Op {
 // The contract's names are pinned: a product's handlers write them.
 func TestHandlerVerbContractIsPinned(t *testing.T) {
 	for _, c := range [][2]string{{VerbKill, "kill"}, {VerbRestart, "restart"}, {VerbHealthy, "healthy"},
-		{LookSingle, "single"}, {HealthyKey, "healthy"}, {HealthyTrue, "true"}} {
+		{LookSingle, "single"}, {HealthyKey, "healthy"}, {HealthyTrue, "true"}, {VerbObserve, "observe"}} {
 		if c[0] != c[1] {
 			t.Errorf("contract name %q, pinned %q", c[0], c[1])
 		}

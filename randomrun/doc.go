@@ -17,12 +17,15 @@ package randomrun
 //     LookSingle: one look, no wait, one record per look. It also answers
 //     DownKey: the processes it found down, separated by spaces ("" for
 //     none); the run takes one before every kill.
-//   - An observation (Driver.Observe) answers no outcome; every other
-//     handler answers {"value": "ok" | "refused" | "unknown"}.
+//   - An observation (Driver.Observe) answers no outcome and records one
+//     observe with verb VerbObserve on its subject (the driver reads it back
+//     to place a rerun's unknown, LastObservation); every other handler
+//     answers {"value": "ok" | "refused" | "unknown"}.
 const (
 	VerbKill    = FaultKill
 	VerbRestart = FaultRestart
 	VerbHealthy = "healthy"
+	VerbObserve = "observe"
 	LookSingle  = "single"
 	// HealthyKey is the healthy handler's answer key; HealthyTrue its value
 	// at a healthy point.

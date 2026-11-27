@@ -50,6 +50,10 @@ func TestReadScriptCountsTheLastAttempt(t *testing.T) {
 type reqDriver struct{ toyDriver }
 
 func (reqDriver) RequestArg(action string) string { return "req_id" }
+func (reqDriver) Placeable(string) bool           { return false }
+func (reqDriver) Place(string, map[string]string, map[string]any, map[string]any) (string, string, bool) {
+	return PlacedNotPlaced, "", false
+}
 func (reqDriver) Rerun(string, map[string]string, int, time.Duration, map[string]string) (bool, time.Duration, string) {
 	return false, 0, ""
 }

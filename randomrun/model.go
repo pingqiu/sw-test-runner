@@ -98,6 +98,15 @@ type Rerunner interface {
 	// it does not, why says what ended the attempts ("" for an answer that is
 	// not rerun).
 	Rerun(action string, params map[string]string, n int, since time.Duration, out map[string]string) (again bool, pause time.Duration, why string)
+	// Placeable says whether an unknown of action can be placed by an
+	// observation (the product's placement row for its verb): the driver
+	// then observes the subject before the first attempt.
+	Placeable(action string) bool
+	// Place places an unknown attempt of action from the results of the
+	// observation before it and the one after it: one of PlacedTookEffect,
+	// PlacedDidNot, PlacedThird, PlacedNotPlaced, and why; ok false when it
+	// cannot be placed (the names not recorded by both).
+	Place(action string, params map[string]string, before, after map[string]any) (outcome, why string, ok bool)
 }
 
 // Model is the product's side of proposing: its state, preconditions and

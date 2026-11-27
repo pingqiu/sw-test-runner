@@ -40,6 +40,7 @@ complete  write g2 ok null null
 invoke  write g2  null null
 complete  write g2 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":9,"params":{"name":"g1-s1","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_restore","opno":10,"params":{"snapshot":"g1-s1","target_volume":"g4","volume":"g1"}}
@@ -163,6 +164,7 @@ complete  write g1 ok null null
 invoke  write g1  null null
 complete  write g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":42,"params":{"name":"g1-s2","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g3  null {"action":"v3_op_attach","opno":43,"params":{"host":"0","volume":"g3"}}
@@ -174,6 +176,7 @@ complete  snapshot_delete g1 ok null null
 observe gen gen_step g4  null {"action":"v3_op_observe","forced":"lease","opno":45,"params":{"volume":"g4"}}
 observe  observe g4  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":46,"params":{"name":"g1-s3","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g3  null {"action":"v3_op_write","opno":47,"params":{"lbas":"2 5","round":"g47","volume":"g3"}}
@@ -375,6 +378,7 @@ complete  restore g1 refused null null
 observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_step g7  null {"action":"v3_op_snapshot","opno":92,"params":{"name":"g7-s1","volume":"g7"}}
+observe  observe g7  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g7  null null
 complete  snapshot g7 ok null null
 observe gen gen_step g1  null {"action":"v3_op_read","opno":93,"params":{"lbas":"0 3 7","volume":"g1"}}
@@ -428,6 +432,7 @@ observe gen gen_step g5  null {"action":"v3_op_write","opno":103,"params":{"lbas
 invoke  write g5  null null
 complete  write g5 ok null null
 observe gen gen_step g7  null {"action":"v3_op_snapshot","opno":104,"params":{"name":"g7-s2","volume":"g7"}}
+observe  observe g7  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g7  null null
 complete  snapshot g7 ok null null
 observe gen gen_step g6  null {"action":"v3_op_read","opno":105,"params":{"lbas":"5","volume":"g6"}}
@@ -477,6 +482,7 @@ observe gen gen_step g1  null {"action":"v3_op_write","opno":116,"params":{"lbas
 invoke  write g1  null null
 complete  write g1 ok null null
 observe gen gen_step g5  null {"action":"v3_op_snapshot","opno":117,"params":{"name":"g5-s1","volume":"g5"}}
+observe  observe g5  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g5  null null
 complete  snapshot g5 ok null null
 observe gen gen_step g6  null {"action":"v3_op_observe","forced":"lease","opno":118,"params":{"volume":"g6"}}
@@ -587,6 +593,7 @@ observe gen gen_step g5  null {"action":"v3_op_read","opno":142,"params":{"lbas"
 invoke  read g5  null null
 complete  read g5 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":143,"params":{"name":"g1-s4","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g5  null {"action":"v3_op_write","opno":144,"params":{"lbas":"4 1 7","round":"g144","volume":"g5"}}
@@ -603,6 +610,7 @@ observe gen gen_step g5  null {"action":"v3_op_write","opno":146,"params":{"lbas
 invoke  write g5  null null
 complete  write g5 ok null null
 observe gen gen_step g5  null {"action":"v3_op_snapshot","opno":147,"params":{"name":"g5-s2","volume":"g5"}}
+observe  observe g5  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g5  null null
 complete  snapshot g5 ok null null
 observe gen gen_step g5  null {"action":"v3_op_write","opno":148,"params":{"lbas":"1 4","round":"g148","volume":"g5"}}
@@ -935,6 +943,7 @@ observe gen gen_step g1  null {"action":"v3_op_write","opno":221,"params":{"lbas
 invoke  write g1  null null
 complete  write g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":222,"params":{"name":"g1-s5","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g9  null {"action":"v3_op_read","opno":223,"params":{"lbas":"3 5","volume":"g9"}}
@@ -955,15 +964,18 @@ observe gen gen_step g9  null {"action":"v3_op_read","opno":226,"params":{"lbas"
 invoke  read g9  null null
 complete  read g9 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":227,"params":{"name":"g1-s6","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_snapshot","opno":228,"params":{"name":"g1-s7","volume":"g1"}}
+observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g1  null null
 complete  snapshot g1 ok null null
 observe gen gen_step g9  null {"action":"v3_op_read","opno":229,"params":{"lbas":"0 1 6 7","volume":"g9"}}
 invoke  read g9  null null
 complete  read g9 ok null null
 observe gen gen_step g5  null {"action":"v3_op_snapshot","opno":230,"params":{"name":"g5-s3","volume":"g5"}}
+observe  observe g5  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g5  null null
 complete  snapshot g5 ok null null
 observe gen gen_step g5  null {"action":"v3_op_write","opno":231,"params":{"lbas":"3 6 4","round":"g231","volume":"g5"}}
@@ -1142,6 +1154,7 @@ complete  write g9 ok null null
 invoke  write g9  null null
 complete  write g9 ok null null
 observe gen gen_step g10  null {"action":"v3_op_snapshot","opno":269,"params":{"name":"g10-s1","volume":"g10"}}
+observe  observe g10  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g10  null null
 complete  snapshot g10 ok null null
 observe gen gen_step g10  null {"action":"v3_op_write","opno":270,"params":{"lbas":"2 5 0 7","round":"g270","volume":"g10"}}
@@ -1173,6 +1186,7 @@ invoke  snapshot_delete g1  null null
 complete  snapshot_delete g1 refused null null
 observe  observe g1  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_step g9  null {"action":"v3_op_snapshot","opno":275,"params":{"name":"g9-s1","volume":"g9"}}
+observe  observe g9  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g9  null null
 complete  snapshot g9 ok null null
 observe gen gen_step g9  null {"action":"v3_op_write","opno":276,"params":{"lbas":"2 3 4","round":"g276","volume":"g9"}}
@@ -1212,6 +1226,7 @@ observe gen gen_step g9  null {"action":"v3_op_write","opno":283,"params":{"lbas
 invoke  write g9  null null
 complete  write g9 ok null null
 observe gen gen_step g9  null {"action":"v3_op_snapshot","opno":284,"params":{"name":"g9-s2","volume":"g9"}}
+observe  observe g9  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g9  null null
 complete  snapshot g9 ok null null
 observe gen gen_step g10  null {"action":"v3_op_read","opno":285,"params":{"lbas":"0 1 3","volume":"g10"}}
@@ -1311,6 +1326,7 @@ observe gen gen_step g13  null {"action":"v3_op_read","opno":310,"params":{"lbas
 invoke  read g13  null null
 complete  read g13 ok null null
 observe gen gen_step g13  null {"action":"v3_op_snapshot","opno":311,"params":{"name":"g13-s1","volume":"g13"}}
+observe  observe g13  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g13  null null
 complete  snapshot g13 ok null null
 observe gen gen_step g13  null {"action":"v3_op_write","opno":312,"params":{"lbas":"6 7 5","round":"g312","volume":"g13"}}
@@ -1324,6 +1340,7 @@ observe gen gen_step g13  null {"action":"v3_op_read","opno":313,"params":{"lbas
 invoke  read g13  null null
 complete  read g13 ok null null
 observe gen gen_step g13  null {"action":"v3_op_snapshot","opno":314,"params":{"name":"g13-s2","volume":"g13"}}
+observe  observe g13  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g13  null null
 complete  snapshot g13 ok null null
 observe gen gen_step g13  null {"action":"v3_op_write","opno":315,"params":{"lbas":"4","round":"g315","volume":"g13"}}
@@ -1549,6 +1566,7 @@ complete  write g17 ok null null
 invoke  write g17  null null
 complete  write g17 ok null null
 observe gen gen_step g17  null {"action":"v3_op_snapshot","opno":368,"params":{"name":"g17-s1","volume":"g17"}}
+observe  observe g17  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  snapshot g17  null null
 complete  snapshot g17 ok null null
 observe gen gen_step g15  null {"action":"v3_op_delete","forced":"tail","opno":369,"params":{"volume":"g15"}}

@@ -11,8 +11,11 @@ the example.
 
 A rerun is never folded: each attempt is its own invoke and complete, its
 args carrying the request and "attempt": n, and a request's outcome is its
-LAST attempt's (superseded()). C0, C6 and C7 judge a request by its last
-attempt. C5 judges EVERY refused attempt under its limit, like any refusal:
+LAST attempt's (superseded()). C0 and C7 judge a request by its last
+attempt. C6 places EVERY unknown attempt, a replaced one too: the driver
+re-issues an unknown only after observing the subject and placing the
+attempt (it did not take effect), and that observation, right after the
+attempt, places it here. C5 judges EVERY refused attempt under its limit, like any refusal:
 the driver observes the subject after each refused attempt it re-issues, so
 that observation is the "after" of attempt n and the "before" of attempt
 n+1, and a refused attempt that changed the observed state fails C5 even
@@ -1389,11 +1392,13 @@ def c6(recs):
     f, notes, unruled, resolved = [], [], [], 0
     ops_ = operations(recs)
     healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
-    # An unknown resolves per request, by its last attempt: an earlier attempt
-    # a later one replaced is not an unknown of its own.
+    # Every unknown attempt is placed, an earlier one a later attempt of its
+    # request replaced too: the driver re-issues an unknown only after it
+    # observed the subject and placed the attempt (did not take effect), so
+    # that observation, right after it, places it here by the same rule.
     earlier = superseded(recs)
     unknowns = [(inv, comp) for inv, comp in ops_ if inv['verb'] not in RUNNER_VERBS and inv['verb'] != 'read'
-                and inv['seq'] not in earlier and (comp is None or comp['outcome'] == 'unknown')]
+                and (comp is None or comp['outcome'] == 'unknown')]
     if not unknowns and not healthy:
         return {'verdict': 'FAIL', 'findings': ['no unknown outcome and no healthy point in the history: C6 not exercised']}
     # Latency, only against a stated bound and never under a fault.
@@ -1435,6 +1440,9 @@ def c6(recs):
     # None stays unknown.
     for inv, comp in unknowns:
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+        replaced = inv['seq'] in earlier
+        if replaced:
+            name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
         settled_ok = False
         if inv['verb'] in PRODUCT.NEEDS_SETTLED:
             # An unknown lifecycle operation is resolved by the settled record;
@@ -1455,9 +1463,9 @@ def c6(recs):
             unruled.append(name)
             continue
         done = inv['seq'] if comp is None else comp['seq']
-        due = next((p for p in points if p > done), None)
+        due = None if replaced else next((p for p in points if p > done), None)   # a replaced attempt: the observation right after it
         after = done if due is None else due
-        at = 'the end' if due is None else 'healthy point seq %d' % due
+        at = ('its re-issue' if replaced else 'the end') if due is None else 'healthy point seq %d' % due
         if inv['verb'] == 'write':
             how, why = _place_write(recs, inv, done, after)
         else:

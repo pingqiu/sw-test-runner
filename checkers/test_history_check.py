@@ -2022,13 +2022,17 @@ class Attempts(unittest.TestCase):
         self.assertTrue(any(x.startswith('limit ordinary delete: the rerun guard ended v3_op_delete on v1 at attempt 3 after 3813500 ms')
                             for x in v['C5']['findings']), v['C5'])
 
-    def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
-        # An unknown first attempt rerun to a refused second: C6 has no
-        # unknown to place (the request was answered), C0 no unknown.
+    def test_an_unknown_re_issued_without_an_observation_is_not_placed(self):
+        # An unknown first attempt rerun to a refused second, with no
+        # observation of the volume between them (the shape before the driver
+        # placed an unknown before re-issuing it): C0 judges the request by
+        # its last attempt (no unknown), and C6 places every unknown attempt,
+        # this one included: none places it, a FAIL.
         recs = history(*(self.attempts('v1', ['unknown', 'refused'])))
         v = hc.check(dump(recs))
         self.assertFalse(any('outcome unknown' in x for x in v['C0']['findings']), v['C0'])
-        self.assertIn('C6 not exercised', v['C6']['findings'][0])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(v['C6']['findings'][0].startswith('unknown not resolved: seq 1 delete v1 (attempt 1, replaced by a later attempt) (due at its re-issue)'), v['C6'])
 
 if __name__ == '__main__':
     unittest.main()
