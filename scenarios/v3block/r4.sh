@@ -84,7 +84,17 @@ write_one() {
 }
 
 ledger_line() { # LEDGER KIND OP ROUND OFFSET SHA
-  printf '%s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$bs" "$6" >> "$1"
+  local record receipt digest
+  printf -v record '%s %s %s %s %s %s' "$2" "$3" "$4" "$5" "$bs" "$6"
+  printf '%s\n' "$record" >> "$1"
+  if [[ "${R4_LEDGER_RELAY:-0}" == 1 ]]; then
+    # The observer off-host fsyncs each intent before I/O, and each ACK before
+    # confirming it. No receipt means no next write and no reported guest ACK.
+    printf 'R4_LEDGER %s\n' "$record"
+    IFS= read -r receipt || die "off-host ledger receipt missing"
+    digest=$(printf '%s\n' "$record" | sha256sum | cut -d' ' -f1)
+    [[ "$receipt" == "R4_STORED $digest" ]] || die "off-host ledger receipt mismatch"
+  fi
 }
 
 blocks_of() { # DEV -> number of 4 KiB blocks

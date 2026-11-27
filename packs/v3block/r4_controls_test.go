@@ -213,88 +213,44 @@ func TestR4FailedPreflightPreventsHostWork(t *testing.T) {
 	}
 }
 
-// Run the real stop command with an inert systemctl, then feed its result
-// through the real scenario engine. No device, unit, network or drain wait.
-func TestR4WriterStopBlocksReconnectAndReadback(t *testing.T) {
-	const script = "../../scenarios/v3block/r4.sh"
-	body := mustRead(t, script)
-	for _, mode := range []string{"success", "stop-failure", "still-active"} {
+// The lost host takes its guest with it. The observer must prove that the
+// old relay ended before creating a new guest and reading the ACK ledger.
+func TestR4GuestExitBlocksReconnectAndReadback(t *testing.T) {
+	for _, mode := range []string{"success", "guest-still-active", "guest-ended-before-fault"} {
 		t.Run(mode, func(t *testing.T) {
-			check := func(script string) bool {
-				dir := t.TempDir()
-				stopped := filepath.Join(dir, "stopped")
-				ctl := r4File(t, filepath.Join(dir, "systemctl"), `#!/bin/sh
-case "$1" in
-is-active)
-  if [ -e "$R4_TEST_STOPPED" ]; then echo inactive; exit 3; fi
-  echo active; exit 0 ;;
-stop)
-  [ "$R4_TEST_MODE" = still-active ] || touch "$R4_TEST_STOPPED"
-  [ "$R4_TEST_MODE" != stop-failure ] || exit 124
-  exit 0 ;;
-*) exit 99 ;;
-esac
-`)
-				env := []string{"R4_SYSTEMCTL=" + ctl, "R4_TEST_STOPPED=" + stopped, "R4_TEST_MODE=" + mode}
-				s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
-				if err != nil {
-					t.Fatal(err)
-				}
-				stopCalls, reconnect, readback := 0, 0, 0
-				fault := false
-				h := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
-					cmd := a.Params["cmd"]
-					if a.Action == "cloud_vm_power" {
-						fault = true
-					}
-					if strings.Contains(cmd, "r4.sh writer-stop $T") {
-						stopCalls++
-						out, err := r4ScriptEnv(t, script, env, "writer-stop", "test")
-						if err != nil {
-							return nil, fmt.Errorf("writer-stop refused: %w: %s", err, out)
-						}
-					}
-					if fault && strings.Contains(cmd, "r4.sh connect ") {
-						reconnect++
-					}
-					if fault && strings.Contains(cmd, "auto-p2.py verify ") {
-						readback++
-					}
-					if strings.Contains(cmd, "auto-p2.py wait ") {
-						return map[string]string{"value": "test-promotion-token"}, nil
-					}
-					return nil, nil
-				}
-				reg := tr.NewRegistry()
-				for _, name := range []string{"exec", "upload_path", "collect_path", "cloud_vm_power", "cloud_vm_power_restore"} {
-					reg.RegisterFunc(name, tr.TierCore, h)
-				}
-				result := tr.NewEngine(reg, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
-				if mode == "success" {
-					return result.Status == tr.StatusPass && stopCalls == 1 && reconnect == 1 && readback == 1
-				}
-				return result.Status == tr.StatusFail && stopCalls == 1 && reconnect == 0 && readback == 0 && strings.Contains(result.Error, "writer-stop refused")
+			s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !check(script) {
-				t.Fatal("writer stop did not gate the scenario's reconnect/readback")
+			ended, reconnected, readback := 0, 0, 0
+			h := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+				cmd := a.Params["cmd"]
+				if strings.HasSuffix(cmd, " stream-ended") {
+					ended++
+					if mode != "success" {
+						return nil, fmt.Errorf("old guest not ended: %s", mode)
+					}
+				}
+				if strings.HasSuffix(cmd, " verify") && strings.Contains(cmd, "guest-io.py") {
+					reconnected++
+					readback++
+				}
+				if strings.Contains(cmd, "auto-p2.py wait ") {
+					return map[string]string{"value": "test-promotion-token"}, nil
+				}
+				return nil, nil
 			}
-			if mode != "success" {
-				guard := ` || die "writer stop is unknown; retained"`
-				if mode == "still-active" {
-					guard = `  ! unit_active "$u" || die "writer is still alive; no reconnect or verify"`
+			r := tr.NewRegistry()
+			for _, n := range []string{"exec", "upload_path", "collect_path", "cloud_vm_power", "cloud_vm_power_restore"} {
+				r.RegisterFunc(n, tr.TierCore, h)
+			}
+			result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
+			if mode == "success" {
+				if result.Status != tr.StatusPass || ended != 1 || reconnected != 1 || readback != 1 {
+					t.Fatalf("wrong guest transition %s %d/%d/%d %s", result.Status, ended, reconnected, readback, result.Error)
 				}
-				if strings.Count(body, guard) != 1 {
-					t.Fatal("decisive guard changed; update the mutation control")
-				}
-				replacement := ""
-				if mode == "stop-failure" {
-					// Disable the refusal without letting errexit supply it instead.
-					replacement = " || true"
-				}
-				mutant := r4File(t, filepath.Join(t.TempDir(), "r4-mutant.sh"), strings.Replace(body, guard, replacement, 1))
-				if check(mutant) {
-					t.Fatal("control failed to catch removal of the decisive stop refusal")
-				}
+			} else if result.Status != tr.StatusFail || ended != 1 || reconnected != 0 || readback != 0 {
+				t.Fatalf("new guest preceded old guest termination: %s %s", result.Status, result.Error)
 			}
 		})
 	}
@@ -462,25 +418,25 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 						}
 					}
 				}
-				if strings.Contains(cmd, "r4.sh unit $T writer") {
+				if strings.Contains(cmd, "guest-io.py") && strings.HasSuffix(cmd, " stream-start") {
 					writer = true
 				}
 				if a.Action == "cloud_vm_power" && !writer {
 					return nil, fmt.Errorf("power-off precedes continuous writer")
 				}
-				if strings.Contains(cmd, "r4.sh writer-stop $T") {
+				if strings.Contains(cmd, "guest-io.py") && strings.HasSuffix(cmd, " stream-ended") {
 					writerStopped = true
 				}
 				if strings.Contains(cmd, "/bin/blockvolume ") {
 					starts++
-					if !strings.Contains(cmd, "--allow-external-nvme-bind") {
-						return nil, fmt.Errorf("missing NVMe permission")
+					if strings.Contains(cmd, "--allow-external-nvme-bind") || !strings.Contains(cmd, "--nvme-listen 127.0.0.1:") {
+						return nil, fmt.Errorf("standalone target must stay loopback-only")
 					}
 				}
 				if strings.Contains(cmd, "systemd-run") {
 					return nil, fmt.Errorf("transient unit")
 				}
-				if strings.Contains(cmd, "r4.sh connect ") {
+				if strings.Contains(cmd, "guest-io.py") && (strings.HasSuffix(cmd, " before") || strings.HasSuffix(cmd, " verify")) {
 					connects++
 					if connects > 1 && !writerStopped {
 						return nil, fmt.Errorf("reconnect before stopping the fault-boundary writer")
@@ -498,7 +454,7 @@ func TestR4RendersBothModesWithoutNestedTemplates(t *testing.T) {
 				if strings.Contains(cmd, "r4.sh start test-run-rf"+rf+" volume") && a.Node == "node-2" {
 					rejoin = true
 				}
-				if strings.Contains(cmd, "verify \"$DEV\" $W/ledger before during-loss after-rejoin") {
+				if strings.Contains(cmd, "guest-io.py") && strings.HasSuffix(cmd, " after-rejoin") {
 					post = true
 				}
 				if strings.Contains(cmd, "auto-p2.py wait ") {

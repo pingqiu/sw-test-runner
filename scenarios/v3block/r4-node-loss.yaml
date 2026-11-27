@@ -1,83 +1,26 @@
-# R4 node loss, standalone (systemd), 3 cloud VMs, mutual TLS.
-#
-# Fenced automatic failover, end to end: a primary whose host loses power
-# is replaced only after a fencing round; no acknowledged write is lost; the old primary,
-# powered on again, is fenced and rejoins as a replica.
-#
-# Pass line (stated before the run), each asserted below with a failing
-# control (packs/v3block/r4_scenario_test.go), for rf=3 and then rf=2:
-#   P1  the primary's VM (node-2) loses power abruptly (cloud_vm_power:
-#       az vm stop --skip-shutdown; the node no longer answers).
-#   P2  automatic mode: the master's persisted line carries promotion evidence
-#       BasisFenced and FencedEpoch=e+1, a configured survivor serves at e+1,
-#       zero operator calls and all ACKs read back. No automatic operator fallback.
-#       Explicit operator mode retains held for an undecidable-round case.
-#   P3  in operator mode, failover (sw-block ops failover --expect-current
-#       --confirm-old-node-off) moves the line through the fencing round:
-#       the target is primary at epoch e+1 (r4.sh wait-role primary).
-#   P4  a writer runs through the power-off; intent precedes each write and
-#       ack follows success. An acked offset with later unacked attempts may
-#       hold its acked content or any of those attempts, and nothing else.
-#       Every other acknowledged offset reads back exactly from the new primary:
-#       0 mismatches (r4.sh verify); the red control drops one acked write
-#       and the check must FAIL (r4.sh drop-control).
-#   P4b rf=2 only: between the failover and the rejoin no write is
-#       acknowledged (r4.sh no-ack); an ack there is a finding, and a device
-#       or tool failure fails the step (it is not a refusal).
-#   P5  the old VM powered on (cloud_vm_power_restore proves a new boot); its
-#       blockvolume unit, started again, is fenced: it reports replica_ready
-#       at e+1 behind the new primary, never primary (r4.sh wait-role replica).
-#       Before P6, the selected primary must also list r1 healthy at e+1 on
-#       /status/peers. Supporting admission alone is not catch-up completion.
-#   P6  after the rejoin a new round of writes is all acknowledged, and every
-#       acked write, old and new, reads back (verify ... after-rejoin).
-# Every write round must be acknowledged in full (r4.sh write fails short).
-# The during-loss streaming round is the exception: I/O errors and unacked
-# attempts are expected around the fault; it must have acknowledged a write
-# before the fault, stay running through it, and stop before reconnecting.
-# The authority receipt, serving status and full ACK readback are all required;
-# status readiness alone is not fencing evidence. The observed successor may
-# be r2 or r3; subsequent connections follow its persisted endpoint.
-# The device is found again by its NQN after every connect (r4.sh connect /
-# dev): exactly one namespace with a live path to the expected target.
-# The checkers C1-C3 do not judge this scenario in v1: it records no typed
-# operations; its verdict is these assertions.
-#
-# Hosts: the cloud run's inventory node-1..node-3, one VM each. node-1 runs
-# blockmaster and the client (kernel NVMe/TCP, native multipath); replicas:
-#   rf=3: r1 node-2 (the primary to lose), r2 node-1, r3 node-3
-#   rf=2: r1 node-2 (the primary to lose), r2 node-3
-# The cloud run passes each host's management and private (data) address as
-# -env values (n1_ip .. n3_ip, n1_data .. n3_data) with ssh_user and ssh_key.
-# Pass n1_host_key .. n3_host_key from the cloud context's per-node host_keys.
-#
-# Everything a run owns is named by its tag, <run_id>-rf<rf>: the work dir
-# /var/lib/r4/<tag>, the units r4-<tag>-master and r4-<tag>-volume, the NQN,
-# the controller's /tmp/r4-<tag>. A host that already holds any of them, or a
-# blockmaster mapping, is refused (r4.sh install). The always phase stops the
-# status and journals on every host before stopping units, then archives them.
-# It removes the units and proves them gone (r4.sh cleanup). Host work remains
-# until the controller destroys the VMs, including if archive collection fails.
-#
-# The units are the run's own (r4.sh unit), not the installed deploy/systemd
-# units: root, flags inline, no sandboxing, written to /etc/systemd/system and
-# synced, and NOT enabled, so the rebooted node-2 starts its blockvolume only
-# when the rejoin says so. They keep the example units' restart policy
-# (Restart=on-failure, RestartPreventExitStatus=78: a final refusal is not
-# retried).
-#
-# Build provenance: the binaries are built on the controller from
-# `git archive product_head`, r4.sh is taken from runner_head, the scenario
-# file must equal its runner_head copy, and SHA256SUMS (checked on every host)
-# plus provenance.txt are collected into the bundle.
-#
-# Env values never nest {{ }}: the engine resolves an action's params once,
-# so every command names {{ run_id }}-rf{{ rf }} itself.
-#
-#   swblock run --allow-mutating -env rf=3 -env product_src=<checkout> \
-#     -env runner_src=$PWD -env product_head=<final RC sha> -env runner_head=<sha> \
-#     -env n1_ip=.. -env n2_ip=.. -env n3_ip=.. -env n1_data=.. -env n2_data=.. -env n3_data=.. \
-#     -env ssh_user=.. -env ssh_key=.. scenarios/v3block/r4-node-loss.yaml
+# R4 documented standalone: NVMe guest on its holder's host, loopback only.
+# node-2 starts r1 and the guest; abrupt VM power loss takes both down.
+# The controller synchronously fsyncs the intent/ACK ledger over pinned SSH,
+# outside that VM. No next write or observed ACK precedes its durable receipt.
+# P1: one host power-off, including its guest; the off-host ledger survives.
+# P2: automatic persisted BasisFenced/e+1 proof and successor-serving status,
+#     zero operator calls, followed by EVERY observed ACK read back.
+# P3: operator mode remains explicit, never an automatic fallback.
+# P4: a new guest on the selected successor connects over 127.0.0.1, verifies
+#     every ACK (allowing only the recorded later-unacked overwrite), and
+#     the in-scenario dropped-write control must catch a missing ACKed write.
+# P4b: RF2 cannot ACK while r1 is off; a new guest there must observe refusal.
+# P5: r1 powers on, never serves as primary, rejoins and reaches Healthy in
+#     the selected primary's peer view. The old guest is not restarted.
+# P6: the new guest writes again, exports its ACKs off-host, verifies all old
+#     and new ACKs. A mismatch or a missing required round fails the row.
+# Replicas: RF3 r1=node-2/r2=node-1/r3=node-3; RF2 r1=node-2/r2=node-3.
+# blockmaster is on node-1, never on the lost primary. Product and runner
+# sources, binaries, per-node SSH pins, mutual TLS and unit ownership are
+# checked as before. The controller is an observer, not a cross-host guest.
+# Own roots/units/NQN are run-ID scoped; always collect journals and off-host
+# ledger before teardown. Cloud controller destroys VMs after any row failure.
+# No external NVMe bind, VIP, multipath to another holder or implicit migration.
 
 name: v3block-r4-node-loss
 timeout: 60m
@@ -138,7 +81,7 @@ phases:
           assert os.environ['RF'] in ('2','3'), 'rf must be 2 or 3'
           assert os.environ['MODE'] in ('automatic','operator'), 'invalid failover_mode'
           files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
-          for flag in ('allow-external-nvme-bind','master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
+          for flag in ('master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
               assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
           for flag in ('failback-runtime-rpc','tls-cert','role-file','audit-log','launcher-replication-ack','lifecycle-product-loop-interval'):
               assert '"'+flag+'"' in files['cmd/blockmaster/main.go'], 'removed master flag '+flag
@@ -146,7 +89,7 @@ phases:
               assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
           assert 'RestartPreventExitStatus=78' in files['deploy/systemd/sw-blockvolume.service']
           from pathlib import Path
-          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh','scripts/r4/auto-p2.py'):
+          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh','scripts/r4/auto-p2.py','scripts/r4/guest-io.py'):
               assert Path(rs,p).read_text()==show(rs,rhead,p), 'runner working copy differs from pin: '+p
           print('PREFLIGHT PASS product='+head+' runner='+rhead+' rf='+os.environ['RF'])
           PY
@@ -177,6 +120,7 @@ phases:
           for b in blockmaster blockvolume sw-block; do (cd "$L/src" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$L/pkg/bin/$b" ./cmd/$b); done
           git -C "$RS" show "$RHEAD:scenarios/v3block/r4.sh" > "$L/pkg/r4.sh"
           git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py" > "$L/pkg/auto-p2.py"
+          git -C "$RS" show "$RHEAD:scripts/r4/guest-io.py" > "$L/pkg/guest-io.py"
           # Development certificates from the product's script (files only):
           # blockmaster's carries DNS:blockmaster, so every node maps that
           # name to node-1's private address and dials blockmaster by name.
@@ -184,7 +128,7 @@ phases:
           (cd "$L/pkg" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
           tar -C "$L/pkg" -czf "$L/r4-pkg.tgz" .
           { echo "product_head=$HEAD"; echo "runner_head=$RHEAD"; go version
-            grep -E ' \./(bin/|r4\.sh|auto-p2\.py)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
+            grep -E ' \./(bin/|r4\.sh|auto-p2\.py|guest-io\.py)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
           cat "$L/provenance.txt"
       - {action: upload_path, node: node-1, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
       - {action: upload_path, node: node-2, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
@@ -193,8 +137,20 @@ phases:
       - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
       - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
       - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
-      # The client: nvme-cli, nvme_tcp and native multipath, before any I/O.
+      # Initial and replacement guests use the holder's local kernel target.
       - {action: exec, node: node-1, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - {action: exec, node: node-2, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - {action: exec, node: node-3, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - action: exec
+        node: controller
+        cmd: >-
+          L=/tmp/r4-{{ run_id }}-rf{{ rf }};
+          python3 $L/pkg/guest-io.py --config $L/guest/config.json init
+          --tag {{ run_id }}-rf{{ rf }} --rf {{ rf }} --user '{{ ssh_user }}' --key '{{ ssh_key }}'
+          --node node-1 '{{ n1_ip }}' '{{ n1_data }}' '{{ n1_host_key }}'
+          --node node-2 '{{ n2_ip }}' '{{ n2_data }}' '{{ n2_host_key }}'
+          --node node-3 '{{ n3_ip }}' '{{ n3_data }}' '{{ n3_host_key }}'
+          --data-port {{ data_port }} --nvme-port {{ nvme_port }} --writes {{ writes }}
 
   - name: start
     actions:
@@ -223,7 +179,7 @@ phases:
           --server-id s2 --volume-id v1 --replica-id r1
           --data-addr {{ n2_data }}:{{ data_port }} --ctrl-addr {{ n2_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
           --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
-          --nvme-listen {{ n2_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
           --master-tls-cert $W/tls/node-s2.crt --master-tls-key $W/tls/node-s2.key --master-ca $W/tls/ca.crt &&
           sudo bash $W/r4.sh start $T volume
       - action: exec
@@ -235,7 +191,7 @@ phases:
           --server-id s3 --volume-id v1 --replica-id $R
           --data-addr {{ n3_data }}:{{ data_port }} --ctrl-addr {{ n3_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
           --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
-          --nvme-listen {{ n3_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
           --master-tls-cert $W/tls/node-s3.crt --master-tls-key $W/tls/node-s3.key --master-ca $W/tls/ca.crt &&
           sudo bash $W/r4.sh start $T volume
       - action: exec
@@ -247,7 +203,7 @@ phases:
           --server-id s1 --volume-id v1 --replica-id r2
           --data-addr {{ n1_data }}:{{ data_port }} --ctrl-addr {{ n1_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
           --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
-          --nvme-listen {{ n1_data }}:{{ nvme_port }} --allow-external-nvme-bind --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
           --master-tls-cert $W/tls/node-s1.crt --master-tls-key $W/tls/node-s1.key --master-ca $W/tls/ca.crt &&
           sudo bash $W/r4.sh start $T volume
       # r1 primary at epoch 1 (creation complete: its first ready answer).
@@ -255,34 +211,16 @@ phases:
 
   - name: write-before-loss
     actions:
-      - action: exec
-        node: node-1
-        timeout: 3m
-        cmd: >-
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} {{ nvme_port }} 30) &&
-          sudo bash $W/r4.sh write "$DEV" $W/ledger before {{ writes }}
+      - {action: exec, node: controller, timeout: 5m, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json before"}
 
   - name: writer-through-loss
     actions:
-      - action: exec
-        node: node-1
-        timeout: 1m
-        cmd: >-
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
-          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n2_data }} 10) &&
-          sudo bash $W/r4.sh unit $T writer -- /bin/bash $W/r4.sh stream "$DEV" $W/ledger during-loss 0 &&
-          sudo bash $W/r4.sh start $T writer && sudo bash $W/r4.sh writer-ready $T 30
+      - {action: exec, node: controller, timeout: 2m, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json stream-start"}
 
   - name: lose-the-primary
     actions:
-      - action: cloud_vm_power                                   # P1
-        node: node-1
-        vm: node-2                  # the VM to power off
-      - action: exec
-        node: node-1
-        timeout: 5m # drain old I/O with documented ctrl-loss-tmo=180, fast fail off
-        cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
+      - {action: cloud_vm_power, node: node-1, vm: node-2}
+      - {action: exec, node: controller, timeout: 90s, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json stream-ended"}
 
   - name: operator-call-count
     actions:
@@ -336,21 +274,16 @@ phases:
         timeout: 3m
         env.PROMOTION: "{{ promotion }}"
         cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2); sudo python3 $W/auto-p2.py status \"$PROMOTION\" $R http://127.0.0.1:{{ status_port }}/status?volume=v1 $W/successor-status.json"
-      - action: exec                                             # P4 + its red control
-        node: node-1
-        timeout: 5m
+      - action: exec # New guest on the selected successor: P2 readback + P4 control
+        node: controller
+        timeout: 6m
         env.PROMOTION: "{{ promotion }}"
-        cmd: |
-          bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$(python3 $W/auto-p2.py field "$PROMOTION" host); DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T "$DATA" {{ nvme_port }} 30) && sudo python3 $W/auto-p2.py verify "$PROMOTION" $W/r4.sh "$DEV" $W/ledger | sudo tee $W/verify-after-failover.txt && sudo bash $W/r4.sh drop-control "$DEV" $W/ledger
-          R4STEP
-      - action: exec                                             # P4b (rf=2)
-        node: node-1
+        cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json verify"
+      - action: exec # P4b, RF2 only, executed on its successor's host
+        node: controller
         timeout: 2m
-        cmd: |
-          bash -e -o pipefail <<'R4STEP'
-          [ {{ rf }} = 2 ] || exit 0; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T {{ n3_data }} 10) && sudo bash $W/r4.sh no-ack "$DEV" $W/ledger 30 | sudo tee $W/no-ack.txt
-          R4STEP
+        env.PROMOTION: "{{ promotion }}"
+        cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json no-ack"
 
   - name: rejoin
     actions:
@@ -371,18 +304,17 @@ phases:
         timeout: 5m
         env.PROMOTION: "{{ promotion }}"
         cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2); sudo python3 $W/auto-p2.py peers \"$PROMOTION\" $R http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 $W/rejoin-peers.json"
-      - action: exec                                             # P6
-        node: node-1
-        timeout: 5m
+      - action: exec # P6: new guest writes, exports ACKs off-host, verifies all
+        node: controller
+        timeout: 6m
         env.PROMOTION: "{{ promotion }}"
-        cmd: |
-          bash -e -o pipefail <<'R4STEP'
-          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; DATA=$(python3 $W/auto-p2.py field "$PROMOTION" host); DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T "$DATA" 10) && sudo bash $W/r4.sh write "$DEV" $W/ledger after-rejoin {{ writes }} && sudo bash $W/r4.sh verify "$DEV" $W/ledger before during-loss after-rejoin | sudo tee $W/verify-after-rejoin.txt
-          R4STEP
+        cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; python3 $L/pkg/guest-io.py --config $L/guest/config.json after-rejoin"
 
   - name: collect
     always: true
     actions:
+      - {action: exec, node: controller, cmd: 'L=/tmp/r4-{{ run_id }}-rf{{ rf }}; [ ! -f "$L/guest/config.json" ] || python3 "$L/pkg/guest-io.py" --config "$L/guest/config.json" cleanup'}
+      - {action: collect_path, node: controller, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/guest", name: "off-host-guest-ledger"}
       # Capture and archive journals BEFORE stopping/removing units, on every exit.
       # Retain host work if collection fails; the cloud controller owns VM teardown.
       - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S evidence $T"}
@@ -393,6 +325,6 @@ phases:
       - {action: collect_path, node: node-3, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-3-evidence"}
       - {action: collect_path, node: controller, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/provenance.txt"}
       - {action: exec, node: node-1, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
-      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
-      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-2, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-3, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
       - {action: exec, node: controller, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; rm -rf \"${L:?}\""}
