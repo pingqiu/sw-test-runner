@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -22,9 +23,12 @@ func TestSnapshotHeadConflictRatio(t *testing.T) {
 		line    string
 		k, n    int
 	}{
-		"one conflict in three": {[]eqAnswer{{}, conflict, {}}, "head_conflict per snapshot attempted: 1/3", 1, 3},
-		"none in two":           {[]eqAnswer{{}, {}}, "head_conflict per snapshot attempted: 0/2", 0, 2},
-		"no snapshot":           {nil, "head_conflict per snapshot attempted: 0/0 (no snapshot attempted)", 0, 0},
+		// The conflict is rerun (the page's retry): its rerun is an attempt
+		// too, so three snapshots make four attempts and the conflict stays
+		// counted.
+		"one conflict in three snapshots, rerun": {[]eqAnswer{{}, conflict, {}, {}}, "head_conflict per snapshot attempted: 1/4", 1, 4},
+		"none in two":                            {[]eqAnswer{{}, {}}, "head_conflict per snapshot attempted: 0/2", 0, 2},
+		"no snapshot":                            {nil, "head_conflict per snapshot attempted: 0/0 (no snapshot attempted)", 0, 0},
 	} {
 		node := &eqNode{rules: []eqRule{{"ops chunk snapshot", c.answers}}, n: make([]int, 1)}
 		if c.answers == nil {
@@ -34,7 +38,7 @@ func TestSnapshotHeadConflictRatio(t *testing.T) {
 		var logs []string
 		actx.Log = func(f string, a ...interface{}) { logs = append(logs, fmt.Sprintf(f, a...)) }
 		actx.Bundle = &tr.RunBundle{Dir: t.TempDir()}
-		for i := range c.answers {
+		for i := 0; i < snapshots(c.answers); i++ {
 			if _, err := blockActions.Handler("v3_op_snapshot")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "name": fmt.Sprintf("s%d", i)}}); err != nil {
 				t.Fatal(err)
 			}
@@ -65,4 +69,16 @@ func TestSnapshotHeadConflictRatio(t *testing.T) {
 			t.Errorf("%s: answer-counts.json %s %v", name, b, err)
 		}
 	}
+}
+
+// snapshots is how many snapshot steps a case runs: one per answer, but a
+// head_conflict and its rerun are one step.
+func snapshots(answers []eqAnswer) int {
+	n := 0
+	for _, a := range answers {
+		if !strings.Contains(a.out, "head_conflict") {
+			n++
+		}
+	}
+	return n
 }

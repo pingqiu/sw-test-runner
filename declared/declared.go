@@ -357,14 +357,46 @@ type Decode struct {
 // step that declares expect=refused is one attempt, unless ExpectedRefusal
 // names a bool param it sets true.
 type Retry struct {
-	WhileCode            string                `json:"while_code"`
-	WhileMessageContains string                `json:"while_message_contains"`
-	MaxAttempts          int                   `json:"max_attempts"`
-	EverySeconds         int                   `json:"every_seconds"`
-	WithinParam          string                `json:"within_param,omitempty"`
-	RequestArg           string                `json:"request_arg"`
-	PageCite             string                `json:"page_cite"`
-	ExpectedRefusal      *ExpectedRefusalRetry `json:"expected_refusal,omitempty"`
+	WhileCode            string `json:"while_code,omitempty"`
+	WhileMessageContains string `json:"while_message_contains,omitempty"`
+	// Answers lists the page's answers when there are several, each a code
+	// and (optional, when the page names the code alone) a message phrase.
+	Answers         []RerunAnswer         `json:"answers,omitempty"`
+	MaxAttempts     int                   `json:"max_attempts"`
+	EverySeconds    int                   `json:"every_seconds"`
+	WithinParam     string                `json:"within_param,omitempty"`
+	RequestArg      string                `json:"request_arg"`
+	PageCite        string                `json:"page_cite"`
+	ExpectedRefusal *ExpectedRefusalRetry `json:"expected_refusal,omitempty"`
+	Note            string                `json:"note,omitempty"`
+}
+
+// RerunAnswer is one answer a page tells the operator to run the command
+// again for: its error code, and the phrase its message contains when the
+// page names one.
+type RerunAnswer struct {
+	Code            string `json:"code"`
+	MessageContains string `json:"message_contains,omitempty"`
+}
+
+// answers is the retry's rerun answers: WhileCode's, then Answers.
+func (r *Retry) answers() []RerunAnswer {
+	var out []RerunAnswer
+	if r.WhileCode != "" {
+		out = append(out, RerunAnswer{r.WhileCode, r.WhileMessageContains})
+	}
+	return append(out, r.Answers...)
+}
+
+// matches says whether an answer's detail ("code: message") is one the page
+// names.
+func (r *Retry) matches(detail string) bool {
+	for _, a := range r.answers() {
+		if strings.HasPrefix(detail, a.Code+":") && strings.Contains(detail, a.MessageContains) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExpectedRefusalRetry names the bool param that lets a step declaring
@@ -737,8 +769,16 @@ func (a *Action) check(keys, run map[string]bool) error {
 		if !pageCite.MatchString(r.PageCite) {
 			return fmt.Errorf("a rerun needs the operator page line that tells the operator to run the command again (page_cite docs/<page>.md:<line>), not %q: without one there is no rerun", r.PageCite)
 		}
-		if r.WhileCode == "" || r.WhileMessageContains == "" || r.MaxAttempts < 2 || r.EverySeconds <= 0 {
-			return errors.New("retry needs while_code, while_message_contains (the page's answer), max_attempts of 2 or more and every_seconds")
+		if len(r.answers()) == 0 || r.MaxAttempts < 2 || r.EverySeconds <= 0 {
+			return errors.New("retry needs the page's answers (while_code, or answers), max_attempts of 2 or more and every_seconds")
+		}
+		if r.WhileCode == "" && r.WhileMessageContains != "" {
+			return errors.New("retry: while_message_contains without while_code")
+		}
+		for _, an := range r.answers() {
+			if an.Code == "" {
+				return errors.New("retry: an answer without its code")
+			}
 		}
 		if r.WithinParam != "" && !ints[r.WithinParam] {
 			return errors.New("retry.within_param must be an int param")
@@ -1276,7 +1316,7 @@ func (x *Executor) attempts(s *scope, actx *tr.ActionContext, a *Action, v *Vari
 		actx.Log("  %s(%s) attempt %d: %s", a.Action, vol, n, out)
 		outcome = out
 		d, _ := res["detail"].(string)
-		again := !transport && out != tr.OutcomeOK && strings.HasPrefix(d, r.WhileCode+":") && strings.Contains(d, r.WhileMessageContains)
+		again := !transport && out != tr.OutcomeOK && r.matches(d)
 		if expect == tr.OutcomeRefused {
 			er := r.ExpectedRefusal
 			again = again && er != nil && s.vals[er.Param] == "true"

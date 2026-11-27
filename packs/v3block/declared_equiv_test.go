@@ -269,7 +269,10 @@ func TestDeclaredSnapshotEquivalent(t *testing.T) {
 		{name: "on the second host", params: p, vols: moved, rules: on(eqAnswer{})},
 	}
 	cases = append(cases, commonErrorCases(p, on(eqAnswer{}))...)
-	checkEquivalent(t, "v3_op_snapshot", v3OpSnapshotFrozen, cases)
+	// The deliberate change since the frozen handler: the snapshot is a
+	// retried action (docs/operator-guide.md:220-225), so its invocation
+	// names its request and its attempt, and its log line the attempt.
+	checkEquivalentAs(t, "v3_op_snapshot", v3OpSnapshotFrozen, cases, asSnapshotAttempt)
 }
 
 func TestDeclaredRestoreEquivalent(t *testing.T) {
@@ -335,6 +338,7 @@ func TestEquivalenceRedControl(t *testing.T) {
 			t.Error("a changed recorded arg was not caught")
 		}
 	}
+	asSnapshotAttempt(c, &frozen) // the snapshot's one deliberate change
 	if got := runEq(t, blockActions.Handler("v3_op_snapshot"), c, true); !reflect.DeepEqual(frozen, got) {
 		t.Errorf("green twin differs: %+v vs %+v", frozen, got)
 	}
@@ -391,6 +395,22 @@ func TestDeclaredSnapshotDeleteEquivalent(t *testing.T) {
 // asOneAttempt is the deliberate change from the frozen delete's single
 // call to the declared delete's one attempt: its invoke carries attempt 1,
 // its complete no attempts list, its log line names the attempt.
+// asSnapshotAttempt is asOneAttempt for the snapshot, whose record also
+// names its request (<volume>-<name>, as its --request-id).
+func asSnapshotAttempt(c eqCase, r *eqRun) {
+	for i := range r.records {
+		if r.records[i].Kind == tr.HistoryInvoke {
+			r.records[i].Args["request"] = r.records[i].Volume + "-" + fmt.Sprint(r.records[i].Args["name"])
+		}
+	}
+	asOneAttempt(c, r)
+	for i, l := range r.logs {
+		if strings.HasPrefix(l, "  v3_op_snapshot(") {
+			r.logs[i] = strings.Replace(l, "): ", ") attempt 1: ", 1)
+		}
+	}
+}
+
 func asOneAttempt(_ eqCase, r *eqRun) {
 	for i := range r.records {
 		switch r.records[i].Kind {
@@ -676,5 +696,44 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "maybe"}), rules: []eqRule{{"volume-delete", []eqAnswer{deps}}}}, true)
 	if r.err == nil || len(r.calls) != 0 {
 		t.Fatalf("retry_horizon=maybe: %v, %d calls", r.err, len(r.calls))
+	}
+}
+
+// The snapshot reruns ONLY the answers the operator page names
+// (docs/operator-guide.md:220-225): head_conflict, then an internal "is not
+// in HEAD after its commit"; at most three attempts, each its own operation
+// with the request and the attempt; every attempt is counted.
+func TestDeclaredSnapshotReruns(t *testing.T) {
+	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
+	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
+	conflict := chunkErr("head_conflict", "storage: capture CAS not applied: storage: chunk HEAD precondition failed")
+	notInHead := chunkErr("internal", `durable: snapshot "s1" of v1 is not in HEAD after its commit`)
+	for name, c := range map[string]struct {
+		answers  []eqAnswer
+		outcomes []string
+	}{
+		"a conflict, then ok":                   {[]eqAnswer{conflict, {}}, []string{"unknown", "ok"}},
+		"a conflict, the known defect, then ok": {[]eqAnswer{conflict, notInHead, {}}, []string{"unknown", "unknown", "ok"}},
+		"conflicts to the bound":                {[]eqAnswer{conflict}, []string{"unknown", "unknown", "unknown"}},
+		"another internal is not rerun":         {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
+		"a layout refusal is not rerun":         {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
+	} {
+		r := runEq(t, blockActions.Handler("v3_op_snapshot"), eqCase{params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", c.answers}}}, true)
+		var got []string
+		n := 0
+		for _, rec := range r.records {
+			switch rec.Kind {
+			case tr.HistoryInvoke:
+				n++
+				if rec.Args["request"] != "v1-s1" || rec.Args["attempt"] != float64(n) {
+					t.Fatalf("%s: attempt %d args %v", name, n, rec.Args)
+				}
+			case tr.HistoryComplete:
+				got = append(got, rec.Outcome)
+			}
+		}
+		if r.err != nil || strings.Join(got, " ") != strings.Join(c.outcomes, " ") || r.ret["value"] != c.outcomes[len(c.outcomes)-1] {
+			t.Fatalf("%s: %v %v, outcomes %v", name, r.err, r.ret, got)
+		}
 	}
 }

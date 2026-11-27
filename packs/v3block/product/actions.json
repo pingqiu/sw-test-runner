@@ -1,6 +1,6 @@
 {
   "product": "block",
-  "read_at": "seaweed-block d69447eff3c2a1bcc58ee925a7c01f2169579b00",
+  "read_at": "seaweed-block 032eb1971cfddd6622ddeb46d20e17854d12c205",
   "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (name, nqn, layout_id, status_addr: the current host's status address, holder_alive: the recorded holder runs), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The exceptions are the actions that stay Go handlers, each with its reason.",
   "config": {
     "keys": [
@@ -56,13 +56,17 @@
         {"name": "volume", "kind": "subject", "vars": true},
         {"name": "name", "vars": true, "required": true}
       ],
-      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}"}},
+      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}", "request": "{{volume.name}}-{{name}}"}},
       "variants": [{
         "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "snapshot", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--name", "{{name}}", "--request-id", "{{volume.name}}-{{name}}"],
         "runner_deadline_seconds": 90,
         "cite": "cmd/sw-block/chunk.go:81-82 (dispatch), :207-208, :216-219 (--volume, --status-addr, --name, --request-id), :226 (--timeout 60s)",
         "decode": {"kind": "error_body", "path": "ops chunk snapshot"}
-      }]
+      }],
+      "retry": {"answers": [{"code": "head_conflict"}, {"code": "internal", "message_contains": "is not in HEAD after its commit"}],
+        "max_attempts": 3, "every_seconds": 1, "request_arg": "request",
+        "page_cite": "docs/operator-guide.md:220-225 (a snapshot can answer head_conflict: retry it with the same name; if that retry answers internal ... is not in HEAD after its commit, retry once more; the name exists only after a request for it succeeds)",
+        "note": "each attempt is its own operation (request, attempt), counted in answer_counts: the head_conflict ratio counts every attempt, a rerun never hides a conflict"}
     },
     {
       "action": "v3_op_snapshot_delete", "verb": "snapshot_delete", "op": "SnapshotRemoval.DeleteSnap", "runs_on": "step_node",
@@ -638,7 +642,7 @@
       "select_var": "guest_connect_variant",
       "default": {"name": "documented", "evidence": true, "deployment": "standalone",
         "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2},
-        "cite": "docs/standalone-deployment.md:463-464 (the documented connect: sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n \"$NQN\" --ctrl-loss-tmo=180 --reconnect-delay=2), docs/operator-guide.md:252-265 (Host connect settings: --ctrl-loss-tmo 180, --reconnect-delay 2, --fast_io_fail_tmo left off)",
+        "cite": "docs/standalone-deployment.md:463-464 (the documented connect: sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n \"$NQN\" --ctrl-loss-tmo=180 --reconnect-delay=2), docs/operator-guide.md:259-272 (Host connect settings: --ctrl-loss-tmo 180, --reconnect-delay 2, --fast_io_fail_tmo left off)",
         "why": "test what ships: the connect the standalone deployment's own documented procedure performs. A test (the page comparison) keeps these options equal to the page's command at the pin"},
       "variants": [
         {"name": "csi_plain", "options": {}, "evidence": false,

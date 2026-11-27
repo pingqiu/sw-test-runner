@@ -1,6 +1,6 @@
 {
   "product": "block",
-  "read_at": "seaweed-block d69447eff3c2a1bcc58ee925a7c01f2169579b00",
+  "read_at": "seaweed-block 032eb1971cfddd6622ddeb46d20e17854d12c205",
   "about": "The outcome of one failed operator-surface call (exit not 0), per runner action and the product path it calls. A row matches when its code equals the answer's code and its action and path equal the call's or are \"*\". A matching unknown row decides unknown. Otherwise a matching refused row decides refused when it has no message_contains or the answer's message contains that text exactly. Every other failed answer, with or without a row, is unknown, for a read of the state to decide. A refused_effect row is a refusal with a documented effect: the product refused, and a PAGE line (effect.cite, docs/<page>.md:<line>) states what the refused call changed anyway (effect.part, effect.to); its completion carries that effect. An effect stated only in code never makes a row refused_effect: the row stays unknown and is listed in page_gaps with the code line, the page read and why it does not state the effect. Refused means nothing changed, so a refused row needs a citation that the product states that. Unknown rows record a code kept unknown on purpose, with the reason. Codes of ops chunk are its JSON error codes; codes of ops workspace are exit codes; codes of v3ctl are the master's gRPC code names, and v3ctl (packs/v3block/v3ctl/main.go, built inside the product checkout) keeps a compiled copy of its rows that a test keeps equal to them. Every match on product text (an effect's *_contains, a row's message_contains) is listed in phrases with its source line and the product test that pins it, or null; each is a product gap until the product treats it as an interface. An effect that relies on a phrase no product test pins is refused at load, unless the row is marked pending_pin: it then decodes unknown, keeps its effect, and is listed in product_gaps; setting the phrase's pinned_by makes it count with no other edit. A pin is direct (the test runs the matched command) or indirect (through another call); an indirect pin counts only when the phrase comes from code both paths share (shared_source).",
   "rows": [
     {"action": "*", "path": "*", "code": "detach_aborted", "outcome": "refused",
@@ -23,8 +23,8 @@
      "cite": "core/frontend/durable/provider_layout_snapshot.go:63-73",
      "why": "a refusal from the layout after the cut began: the name rides on a cut that commits first, unnamed, and advances HEAD"},
     {"action": "snapshot", "path": "ops chunk snapshot", "code": "head_conflict", "outcome": "unknown",
-     "cite": "core/host/volume/chunk_control.go:334-335; core/storage/chunk_layer.go:1001-1008, 1122-1142, 1575-1580; core/frontend/chunkstore/layout_remote.go:157-178, 294-389, 425-432, 717; core/frontend/durable/provider_layout_snapshot.go:64-69",
-     "why": "the cut writes before its commit loses: with changed data it begins its session on HEAD (a conditional HEAD update) and uploads the chunks and the session's root, then the commit finds HEAD moved past its base; it discards what it staged, aborts the session (another HEAD write) and the snapshot withdraws its name. HEAD's generation and the file listing change. The answer is marked retryable, which is not a page instruction to rerun"},
+     "cite": "core/host/volume/chunk_control.go:334-335; core/storage/chunk_layer.go:1001-1008, 1122-1142, 1575-1580; core/frontend/chunkstore/layout_remote.go:157-178, 294-389, 425-432, 720; core/frontend/durable/provider_layout_snapshot.go:64-69",
+     "why": "the cut writes before its commit loses: with changed data it begins its session on HEAD (a conditional HEAD update) and uploads the chunks and the session's root, then the commit finds HEAD moved past its base; it discards what it staged, aborts the session (another HEAD write) and the snapshot withdraws its name. HEAD's generation and the file listing change. The operator page tells the operator to retry it with the same name (docs/operator-guide.md:220-225): the declared snapshot reruns it, each attempt its own operation"},
     {"action": "snapshot", "path": "ops chunk snapshot", "code": "snapshot_limit", "outcome": "refused",
      "cite": "docs/operator-guide.md:209-211; core/frontend/durable/provider_layout_snapshot.go:30-33, 58-62; core/host/volume/chunk_control.go:305-306; core/frontend/chunkstore/control_types.go:45",
      "why": "a volume at layout.MaxSnapshots refuses a new name before the cut opens a session, under the volume's snapshot lock (the only path that adds a name), so the refusal writes nothing: no snapshot, no cut, HEAD as it was (the page; TestChunkSnapshotPastTheLimitIsRefusedWithHEADUnchanged)"},
@@ -114,6 +114,11 @@
     {"action": "resolve", "path": "v3ctl resolve", "code": "AlreadyExists", "outcome": "refused", "cite": "core/host/master/services.go:221-240", "why": "GetVolume writes nothing, so no answer it gives changed state"}
   ],
   "phrases": [
+    {"phrase": "is not in HEAD after its commit", "source": "core/frontend/durable/provider_layout_snapshot.go:82",
+     "pinned_by": "core/frontend/durable/provider_layout_busy_operator_known_defect_test.go:153-154", "pin": "indirect",
+     "through": "SnapshotVolume, the provider call the holder's snapshot route answers with (not a test of ops chunk snapshot)",
+     "shared_source": "core/frontend/durable/provider_layout_snapshot.go:82",
+     "note": "the declared snapshot's second rerun answer (docs/operator-guide.md:220-225: internal ... is not in HEAD after its commit, retry once more); the product's known defect, planned to be fixed in 1.0.1"},
     {"phrase": "volume is being deleted", "source": "core/host/master/workspace_service.go:33",
      "pinned_by": "cmd/sw-block/chunk_volume_delete_reserved_test.go:73-75", "pin": "direct",
      "note": "the product's test runs ops workspace show after a delete refused by dependents and requires exit 1 with this text (TestOpsChunkVolumeDeleteRefusedByDependentsLeavesTheVolumeReserved); the master's message is \"workspace: volume is being deleted\""},
@@ -132,13 +137,9 @@
   "page_gaps": [
     {"action": "snapshot", "path": "ops chunk snapshot", "codes": ["head_conflict"], "kind": "effect",
      "effect": {"part": "head", "to": {"gen_advanced": true}},
-     "code_cite": "core/storage/chunk_layer.go:1001-1008, 1122-1142; core/frontend/chunkstore/layout_remote.go:157-178, 717",
-     "page_read": "docs/operator-guide.md:209-216; docs/standalone-deployment.md:748-752; docs/volume-lifecycle.md:224, :505, :528",
-     "why": "no page states head_conflict, its retryability, or what a lost cut leaves behind (HEAD's generation moved by its session's begin and abort, its uploaded objects left for a cleaning)"},
-    {"action": "snapshot", "path": "ops chunk snapshot", "codes": ["head_conflict"], "kind": "rerun",
-     "code_cite": "core/host/volume/chunk_control.go:334-335 (marked retryable)",
-     "page_read": "docs/operator-guide.md:209-216; docs/volume-lifecycle.md:528",
-     "why": "no page tells the operator to run the snapshot again for head_conflict: no rerun; each answer stands (counted per run: answer_counts)"},
+     "code_cite": "core/storage/chunk_layer.go:1001-1008, 1122-1142; core/frontend/chunkstore/layout_remote.go:157-178, 720",
+     "page_read": "docs/operator-guide.md:209-216, :220-225; docs/standalone-deployment.md:748-752; docs/volume-lifecycle.md:224, :505, :528",
+     "why": "the page (docs/operator-guide.md:220-225) states head_conflict, its retry, that the volume's data is committed either way and that the name exists only after a request for it succeeds; it does not state what HEAD and the file listing show right after this answer (HEAD's generation moved by the session's begin and abort, the uploaded objects left for a cleaning), so the row stays unknown"},
     {"action": "delete", "path": "ops chunk volume-delete", "codes": ["not_admitted"], "kind": "rerun",
      "code_cite": "core/frontend/chunkstore/layout/delete.go:173-177 (the reservation, then RunMarkDeleting's no-live-lease check)",
      "page_read": "docs/volume-lifecycle.md:489-492, :526",
