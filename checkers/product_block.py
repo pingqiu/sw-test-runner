@@ -372,21 +372,6 @@ def process_of(inv):
     return str((inv.get('args') or {}).get('process', ''))
 
 
-def line_epoch(rec):
-    """The epoch a record shows for its volume's line, or None: an
-    observation's HEAD epoch, or the epoch an attach answered ok with. LIN
-    closes an unknown write's window when its volume's epoch has advanced
-    past the one last shown before the write's invoke."""
-    res = rec.get('result') or {}
-    e = None
-    if rec.get('kind') == 'observe':
-        head = res.get('head')
-        e = head.get('epoch') if isinstance(head, dict) else None
-    elif rec.get('kind') == 'complete' and rec.get('verb') == 'attach' and rec.get('outcome') == 'ok':
-        e = res.get('epoch')
-    return e if isinstance(e, int) and not isinstance(e, bool) else None
-
-
 def holder_identity(healthy_obs):
     """{volume: (pid, start)} of each volume's holder process, from a healthy
     record's result.holders; empty when the record names none. A volume

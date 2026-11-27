@@ -174,7 +174,7 @@ code is 0 only when every checker passes.
   LIN linearizability per block (M3): each block a register, every operation
       taking effect at one point inside its interval (mono_ns), concurrent
       writers allowed. An unknown write may take effect from its invoke until
-      its holder is known dead or its volume's epoch advanced, or never; a
+      its holder is known dead or its line's epoch advanced, or never; a
       kill reaching the volume falls the register back to what DUR's rule
       allows. Cut per block where nothing is in flight; a piece over 2,000
       operations or 60 s is NOT JUDGED, never PASS. FAIL when no order of a
@@ -1223,18 +1223,16 @@ def _lin_blocks(recs):
     its volume's flushes and restores and the kills reaching it; the count of
     unknown writes whose window an epoch advance closes; the kills."""
     _, _, images = replay(recs)
-    line_epoch = getattr(PRODUCT, 'line_epoch', None)
+    # The master's line per volume, read as C4 reads it (master_lines): one
+    # source, so LIN and C4 never disagree on when the line advanced.
     epochs = {}   # volume -> [(seq, mono, epoch)]
-    if line_epoch is not None:
-        for r in recs:
-            if r['kind'] in ('observe', 'complete') and r.get('volume'):
-                e = line_epoch(r)
-                if e is not None:
-                    epochs.setdefault(r['volume'], []).append((r['seq'], r['mono_ns'], e))
+    for r in recs:
+        for vol, (_, e) in sorted(PRODUCT.master_lines(r).items()):
+            epochs.setdefault(vol, []).append((r['seq'], r['mono_ns'], e))
 
     def close_of(vol, inv):
-        # The first record after the invoke showing the volume's epoch above
-        # the one last shown before it; no epoch shown before: never.
+        # The first record after the invoke showing the line's epoch above
+        # the one last shown before it; no line shown before: never.
         before = None
         for seq, mono, e in epochs.get(vol, ()):
             if seq < inv['seq']:
@@ -1376,9 +1374,10 @@ def lin(recs):
     inside it. A write whose outcome is unknown (or that never completed)
     may take effect at any point after its invoke UNTIL its holder is known
     dead (a kill invoked after it reaching its volume, holder_kills) or its
-    volume's epoch advanced (the product's line_epoch: the first record
-    after the invoke showing an epoch above the last one shown before it),
-    or never. A refused write and a read not answered ok are not in the
+    line's epoch advanced (the master's line, master_lines as C4 reads
+    it: the first record after the invoke showing the volume's line at an
+    epoch above the last one shown before it), or never. A refused write
+    and a read not answered ok are not in the
     model.
     Durability is part of the register: its state is (value, durable set,
     writes since the durable point); an acknowledged write with its fsync
