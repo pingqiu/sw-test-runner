@@ -189,6 +189,8 @@ type Action struct {
 	// Coded hands one case of the action to a Go handler the description
 	// lists as an exception.
 	Coded *Coded `json:"coded,omitempty"`
+	// Kind "sequence" (sequence.go).
+	Sequence *Sequence `json:"sequence,omitempty"`
 }
 
 // Param is one parameter of the step. Kind "subject" loads the subject it
@@ -421,6 +423,9 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[a.Action] = true
 	}
+	if err := f.checkSequences(keys, run); err != nil {
+		return nil, err
+	}
 	if len(f.Actions) > 0 {
 		for _, n := range names(f.RunnerIODir) {
 			if !strings.HasPrefix(n, "config.") || !keys[strings.TrimPrefix(n, "config.")] {
@@ -479,7 +484,7 @@ func (a *Action) check(keys, run map[string]bool) error {
 	if a.RunsOn != "step_node" {
 		return fmt.Errorf("runs_on %q (want step_node)", a.RunsOn)
 	}
-	stepKind := a.Kind == "device" || a.Kind == "process"
+	stepKind := a.Kind == "device" || a.Kind == "process" || a.Kind == "sequence"
 	if a.Kind != "" && a.Kind != "observe" && !stepKind {
 		return fmt.Errorf("kind %q", a.Kind)
 	}
@@ -487,7 +492,7 @@ func (a *Action) check(keys, run map[string]bool) error {
 		return errors.New("no variant")
 	}
 	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil ||
-		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
+		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil || a.Sequence != nil) {
 		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and coded belong to the step kinds")
 	}
 	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
@@ -595,6 +600,17 @@ func (a *Action) check(keys, run map[string]bool) error {
 			if !plain[c.Param] || c.Handler == "" || strings.TrimSpace(c.Why) == "" {
 				return errors.New("coded: a param of the action, a handler and why")
 			}
+		}
+		if a.Kind == "sequence" {
+			if len(a.OnInvokeSet) != 0 || a.Coded != nil {
+				return errors.New("a sequence has no on_invoke_set and no coded case")
+			}
+			for _, v := range a.Record.Args {
+				if err := base(v.Template); err != nil {
+					return err
+				}
+			}
+			return nil // its steps are checked once every action is read (steps_of)
 		}
 		if a.Kind == "process" {
 			for k, t := range a.OnInvokeSet {
@@ -1107,7 +1123,7 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Volume: vol})
 		return x.observe(s, actx, a, vol)
 	}
-	if a.Kind == "device" || a.Kind == "process" {
+	if a.Kind == "device" || a.Kind == "process" || a.Kind == "sequence" {
 		if err := x.runValues(s, actx, act); err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -1115,6 +1131,9 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		if a.Kind == "process" {
 			s.procName = a.Process.Name
 			return x.processStep(s, actx, act, a, expect)
+		}
+		if a.Kind == "sequence" {
+			return x.sequence(s, actx, act, a, expect)
 		}
 		return x.device(s, actx, act, a, expect)
 	}

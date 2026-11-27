@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,6 +156,43 @@ func NVMeConnect(ctx context.Context, node Runner, host, port, nqn, extra string
 		return "nvme connect: " + FirstLine(stderr)
 	}
 	return ""
+}
+
+// NVMeDisconnectCount deletes every kernel controller of subsystem nqn
+// through sysfs (what `nvme disconnect -n` does) and says how many it
+// deleted (-1 when that is not known). It certifies the disconnect only from
+// a successful scan that then finds no controller of nqn: a failed delete,
+// or a scan that cannot read sysfs, is a reason, not "disconnected".
+func NVMeDisconnectCount(ctx context.Context, node Runner, nqn string) (int, string) {
+	cmd := fmt.Sprintf(`n=0; for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo 1 > "$d/delete_controller" || exit 4; n=$((n+1)); done; echo "deleted $n"`, ShellQuote(nqn))
+	stdout, stderr, code, err := Call(ctx, node.RunRoot, cmd)
+	if err != nil || code != 0 {
+		return -1, fmt.Sprintf("nvme disconnect: exit %d: %s", code, FirstLine(stderr))
+	}
+	n := -1
+	if f := strings.Fields(stdout); len(f) == 2 && f[0] == "deleted" {
+		n, _ = strconv.Atoi(f[1])
+	}
+	return n, NVMeConfirmGone(ctx, node, nqn)
+}
+
+// NVMeConfirmGone waits until a scan finds no controller of nqn.
+func NVMeConfirmGone(ctx context.Context, node Runner, nqn string) string {
+	end := time.Now().Add(5 * time.Second)
+	for {
+		state, _, why := NVMeScan(ctx, node, nqn)
+		switch {
+		case state == NVMeAbsent:
+			return ""
+		case state == NVMeUnreadable:
+			return "nvme disconnect: cannot confirm: " + why
+		case time.Now().After(end):
+			return "nvme disconnect: a controller of " + nqn + " remains"
+		}
+		if !Pause(ctx, 250*time.Millisecond) {
+			return "nvme disconnect: a controller of " + nqn + " remains at the runner deadline"
+		}
+	}
 }
 
 // Pause waits d, or less when ctx ends; false when ctx has ended.

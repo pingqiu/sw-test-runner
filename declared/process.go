@@ -764,7 +764,7 @@ func (x *Executor) values(s *scope, res map[string]any, vals map[string]Value) e
 		}
 		switch v.Type {
 		case "int":
-			n, err := strconv.ParseUint(t, 10, 64)
+			n, err := strconv.ParseInt(t, 10, 64)
 			if err != nil {
 				return fmt.Errorf("result %s %q is not an int", k, t)
 			}
