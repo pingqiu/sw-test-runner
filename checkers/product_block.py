@@ -14,6 +14,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
   NOTED                         of those, the verbs whose placement C6 names in a note
+  effect_mismatches(part, to, before, after)   a refused_effect's effect.to, checked
   place_by_status(inv, obs, base)   C6's per-verb placement rules
   after_delete_findings(vol, obs)   C7: the tombstone shape after an ok delete
   recreate_finding(vol, comp)       C7: a create of a deleted name must be refused
@@ -190,6 +191,55 @@ def show_part(state, part):
     if part in ('dirs', 'files'):
         return '%d entries' % len(v)
     return repr(v)[:120]
+
+
+# --- refused_effect ----------------------------------------------------------
+
+def effect_mismatches(part, to, before, after):
+    """How the observation `after` misses a refused_effect's effect.to for
+    `part` ([] when it matches). C5 has already checked that `part`, and only
+    it, changed between `before` and `after`. `to` is an object of
+    conditions on the part as the observation records it:
+      a dict part (head, workspace): each key a field and its exact value,
+        and "exit_nonzero": true for an integer exit other than 0 (the
+        workspace query refused: cmd/sw-block/workspace.go:18 at 14dff69);
+      a list part (snapshots, dirs, files): "added" and "removed", the
+        exact entries gained and lost against `before`.
+    A key this reader does not know is a mismatch, never ignored."""
+    if not isinstance(to, dict) or not to:
+        return ['effect.to %r is not an object of conditions' % (to,)]
+    b = (before.get('result') or {}).get(part)
+    a = (after.get('result') or {}).get(part)
+    out = []
+    if part in ('dirs', 'files', 'snapshots'):
+        if not isinstance(a, list) or not isinstance(b, list):
+            return ['%s not a list in both observations' % part]
+        gained, lost = sorted(set(a) - set(b)), sorted(set(b) - set(a))
+        for key, val in to.items():
+            if key == 'added':
+                if gained != sorted(val):
+                    out.append('%s gained %s, effect %s' % (part, gained, sorted(val)))
+            elif key == 'removed':
+                if lost != sorted(val):
+                    out.append('%s lost %s, effect %s' % (part, lost, sorted(val)))
+            else:
+                out.append('%s: condition %r unknown for a list part' % (part, key))
+        if 'added' not in to and gained:
+            out.append('%s gained %s, effect none' % (part, gained))
+        if 'removed' not in to and lost:
+            out.append('%s lost %s, effect none' % (part, lost))
+        return out
+    if not isinstance(a, dict):
+        return ['%s is %r, not a record of fields' % (part, a)]
+    for key, val in to.items():
+        if key == 'exit_nonzero':
+            ex = a.get('exit')
+            nonzero = isinstance(ex, int) and not isinstance(ex, bool) and ex != 0
+            if nonzero != bool(val):
+                out.append('%s.exit is %r, effect exit_nonzero %r' % (part, ex, val))
+        elif a.get(key) != val:
+            out.append('%s.%s is %r, effect %r' % (part, key, a.get(key), val))
+    return out
 
 
 # --- C6 placement ----------------------------------------------------------

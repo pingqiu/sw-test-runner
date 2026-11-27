@@ -849,6 +849,77 @@ class C5(unittest.TestCase):
                          'result': {'head': {'gen': 4}, 'files': FILES}})
         self.assertEqual(hc.check(dump(renumber(recs)))['C5']['verdict'], 'UNKNOWN')
 
+    # refused_effect: judged strictly
+    EFFECT = {'part': 'workspace', 'to': {'exit_nonzero': True},
+              'cite': 'docs/operator-guide.md:193-196; cmd/sw-block/workspace.go:18'}
+    REFUSED_WS = dict(WS, workspace={'exit': 1, 'text': ['']})   # the workspace query refused (a host run's seq 1042)
+
+    def effect_history(self, after_gen=4, after=None, effect=EFFECT, expect=True):
+        """A clean pair around a delete answered refused_effect with `effect`."""
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG if expect else {}, 'refused'),
+                                 ('obs', 'v1', after_gen, FILES, self.REFUSED_WS if after is None else after))))
+        comp = recs[-3]
+        self.assertEqual(comp['kind'], 'complete')
+        comp['outcome'] = 'refused_effect'
+        comp['result'] = {'detail': 'snapshot_has_dependents: layout: a snapshot has dependents'}
+        if effect is not None:
+            comp['result']['effect'] = effect
+        return recs
+
+    def test_a_refused_effect_that_changed_exactly_its_part_passes(self):
+        v = hc.check(dump(self.effect_history()))
+        self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
+        self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged'])
+        # C0 takes it as a known outcome, with no note
+        self.assertEqual((v['C0']['verdict'], v['C0']['findings']), ('PASS', []))
+        # C6 has nothing to resolve: it is not an unknown
+        self.assertIn('not exercised', v['C6']['findings'][0])
+
+    def test_red_refused_effect_its_part_and_another_part_changed(self):
+        v = hc.check(dump(self.effect_history(after_gen=5)))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('seq 4 delete v1 (ordinary delete) refused_effect but its head changed', v['findings'][0])
+        self.assertEqual(len([x for x in v['findings'] if 'refused_effect but' in x]), 1, 'the named part itself is no finding')
+
+    def test_red_refused_effect_its_part_changed_to_another_value(self):
+        # the workspace text changed, but the query still answered exit 0
+        text = ['volume: v1', 'replica: r1', 'epoch: 1', 'lease state: deleting', 'holder: r1@1', 'recorded ACK: none', 'host: unknown']
+        v = hc.check(dump(self.effect_history(after=dict(WS, workspace={'exit': 0, 'text': text}))))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('refused_effect but its workspace changed to another value: workspace.exit is 0, effect exit_nonzero True', v['findings'][0])
+        # a field value: exit 1 named, exit 3 answered
+        v = hc.check(dump(self.effect_history(after=dict(WS, workspace={'exit': 3, 'text': ['']}),
+                                              effect=dict(self.EFFECT, to={'exit': 1}))))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('workspace.exit is 3, effect 1', v['findings'][0])
+
+    def test_red_refused_effect_its_part_unchanged(self):
+        v = hc.check(dump(self.effect_history(after=WS)))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('refused_effect but its workspace did not change', v['findings'][0])
+
+    def test_red_refused_effect_without_its_effect_is_unreadable(self):
+        # The runner copies the effect from the outcome map; a record without
+        # it breaks the writer's own rule: nothing is judged, by any checker.
+        for bad in (None, {'part': 'workspace', 'to': {'exit_nonzero': True}}, {'to': {}, 'cite': 'x'}):
+            v = hc.check(dump(self.effect_history(effect=bad)))
+            for name, r in v.items():
+                self.assertEqual(r['verdict'], 'UNKNOWN', (bad, name, r))
+            self.assertIn('refused_effect without result.effect', v['C5']['findings'][0])
+
+    def test_refused_effect_is_a_refusal_for_the_declaration_rule(self):
+        v = hc.check(dump(self.effect_history(expect=False)))['C0']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('refusal not expected: delete v1 seq 4', v['findings'][0])
+
+    def test_effect_mismatches_reads_list_parts_and_refuses_unknown_conditions(self):
+        b = {'result': {'files': ['HEAD', 'VOLUME', 'root/a']}}
+        a = {'result': {'files': ['HEAD', 'VOLUME', 'root/a', 'root/b']}}
+        self.assertEqual(hc.PRODUCT.effect_mismatches('files', {'added': ['root/b']}, b, a), [])
+        self.assertTrue(hc.PRODUCT.effect_mismatches('files', {'removed': ['root/a']}, b, a))
+        self.assertTrue(hc.PRODUCT.effect_mismatches('workspace', {'exit_zero': True}, b, {'result': {'workspace': {'exit': 1}}}))
+        self.assertTrue(hc.PRODUCT.effect_mismatches('workspace', {}, b, a))
+
     def test_no_refusal_fails_not_exercised(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
         self.assertEqual(v['verdict'], 'FAIL', v)
