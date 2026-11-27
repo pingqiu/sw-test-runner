@@ -14,7 +14,9 @@ package randomrun
 //     answers {"value": "ok", "healthy": "true"} at a healthy point,
 //     {"value": "ok", "healthy": "false"} otherwise. Only "true" resolves.
 //   - A single look (Driver.Look) is that record with result.look ==
-//     LookSingle: one look, no wait, one record per look.
+//     LookSingle: one look, no wait, one record per look. It also answers
+//     DownKey: the processes it found down, separated by spaces ("" for
+//     none); the run takes one before every kill.
 //   - An observation (Driver.Observe) answers no outcome; every other
 //     handler answers {"value": "ok" | "refused" | "unknown"}.
 const (
@@ -26,4 +28,6 @@ const (
 	// at a healthy point.
 	HealthyKey  = "healthy"
 	HealthyTrue = "true"
+	// DownKey is a single look's answer key for the processes found down.
+	DownKey = "down"
 )

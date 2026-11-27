@@ -334,6 +334,11 @@ func parseOps(res map[string]any, key string) ([]Op, error) {
 // through here, so a replayed history has the same shape):
 //   - after operation k completes (and is learnt), every event with
 //     after_op k runs through the Driver's fault operation;
+//   - before each kill, one single look (Driver.Look): "one down at a time"
+//     is checked against what is observed, not only against what this run
+//     killed. When the look shows anything down the kill is skipped, and so
+//     is its restart. An observe record "fault_kill" {after_op, process,
+//     down, skipped} records the decision; a replay follows the recorded one;
 //   - after each restart, the Driver's healthy operation records a `healthy`
 //     observation; at a healthy point (it answers healthy=true) every
 //     operation whose outcome was unknown since the last healthy point is
@@ -357,6 +362,47 @@ type faultRun struct {
 	gen     *Generator   // nil in a replay
 	wait    string       // the healthy operation's wait ("" for its default: look once)
 	outages map[int][]Op // a replay's recorded outage writes, by after_op
+	// kills are a replay's recorded kill decisions, in order (nil: decide
+	// from the look); skip is the process whose kill was skipped, so its
+	// restart is skipped too.
+	kills []KillDecision
+	skip  string
+}
+
+// KillDecision is one recorded "fault_kill" record: whether the kill of
+// process after operation after_op ran.
+type KillDecision struct {
+	AfterOp int
+	Process string
+	Skipped bool
+}
+
+// killDecision takes the single look before a kill and decides: a kill only
+// while the look shows nothing down. It records the decision.
+func (f *faultRun) killDecision(ctx context.Context, actx *tr.ActionContext, e FaultEvent) (bool, error) {
+	o := f.r.Driver.Look()
+	h, ok := f.r.Handlers[o.Action]
+	if !ok {
+		return false, fmt.Errorf("no handler for %s", o.Action)
+	}
+	out, err := h(ctx, actx, tr.Action{Action: o.Action, Node: f.r.Node, Params: o.Params})
+	if err != nil {
+		return false, fmt.Errorf("look before kill %s after operation %d: %w", e.Process, e.AfterOp, err)
+	}
+	down := strings.Fields(out[DownKey])
+	skipped := len(down) > 0
+	if f.kills != nil {
+		if len(f.kills) == 0 || f.kills[0].AfterOp != e.AfterOp || f.kills[0].Process != e.Process {
+			return false, fmt.Errorf("kill %s after operation %d: no recorded fault_kill for it", e.Process, e.AfterOp)
+		}
+		skipped, f.kills = f.kills[0].Skipped, f.kills[1:]
+	}
+	if down == nil {
+		down = []string{}
+	}
+	err = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_kill",
+		Result: map[string]any{"after_op": e.AfterOp, "process": e.Process, "down": down, "skipped": skipped}})
+	return skipped, err
 }
 
 // newFaultRun takes the header's fault_healthy_wait (absent: "").
@@ -400,6 +446,20 @@ func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
 	if e.Action == FaultMasterOutage {
 		return f.outage(ctx, actx, e)
+	}
+	if e.Action == FaultKill && e.AfterOp > 0 { // a scheduled kill (finish restarts with after_op 0)
+		skipped, err := f.killDecision(ctx, actx, e)
+		if err != nil {
+			return err
+		}
+		if skipped {
+			f.skip = e.Process
+			return nil
+		}
+	}
+	if e.Action == FaultRestart && f.skip != "" && f.skip == e.Process {
+		f.skip = ""
+		return nil
 	}
 	if _, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e)); err != nil {
 		return fmt.Errorf("%s %s after operation %d: %w", e.Action, e.Process, e.AfterOp, err)

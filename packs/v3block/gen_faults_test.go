@@ -60,6 +60,9 @@ type faultFake struct {
 	inOutage      bool
 	outageUnknown bool
 	ready         []string // ready_seconds of each restart
+	// alsoDown is a process a look finds down that this run never killed
+	// (a holder fenced on its own): looks report it.
+	alsoDown string
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -105,8 +108,8 @@ func (f *faultFake) install(t *testing.T) {
 			f.inOutage = f.inOutage || f.down == "blockmaster"
 			f.log = append(f.log, "look")
 			_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{
-				"healthy": false, "down": []string{f.down}, "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
-			return map[string]string{"value": tr.OutcomeOK, "healthy": "false"}, nil
+				"healthy": f.down == "" && f.alsoDown == "", "down": strings.Fields(f.down + " " + f.alsoDown), "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
+			return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(f.down == "" && f.alsoDown == ""), "down": strings.TrimSpace(f.down + " " + f.alsoDown)}, nil
 		}
 		f.healthyCall++
 		ok := f.down == "" && f.healthyCall > f.unhealthy
@@ -755,4 +758,76 @@ func TestNoOrdinaryKillOfTheMaster(t *testing.T) {
 	if _, err := NewGenerator(GenConfig{Seed: 1, Ops: 50, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}}); err != nil {
 		t.Fatalf("green: %v", err)
 	}
+}
+
+// F6: "one down at a time" is checked against what is observed. A single
+// look before each kill; when it shows anything down, the kill and its
+// restart are skipped and the decision is recorded; a replay follows the
+// recorded decisions.
+func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
+	kills := func(log []string) int {
+		n := 0
+		for _, l := range log {
+			n += btoi(strings.HasPrefix(l, FaultKill+" ") || strings.HasPrefix(l, FaultRestart+" "))
+		}
+		return n
+	}
+	// Green: nothing else down, every scheduled kill runs, each after a look.
+	f := &faultFake{}
+	f.install(t)
+	actx, a := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	recs := records(t, a)
+	decided, ran := 0, kills(f.log)
+	for i, r := range recs {
+		if r.Verb != "fault_kill" {
+			continue
+		}
+		decided++
+		if recs[i-1].Verb != "healthy" || recs[i-1].Result["look"] != "single" || r.Result["skipped"] != false ||
+			recs[i+1].Kind != tr.HistoryInvoke || recs[i+1].Verb != FaultKill {
+			t.Fatalf("kill decision at %d: look %+v, decision %+v, then %+v", i, recs[i-1], r.Result, recs[i+1])
+		}
+	}
+	if decided == 0 || ran != 2*decided {
+		t.Fatalf("%d decisions, %d kills and restarts ran", decided, ran)
+	}
+	// The replay follows the recorded decisions, whatever its own looks show.
+	f.alsoDown = "blockvolume:7"
+	f.log = nil
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" || kills(f.log) != ran {
+		t.Fatalf("replay of the kills: %v %v, log %v", out, err, f.log)
+	} // Red: a holder the run never killed is down: no kill and no restart runs.
+	f2 := &faultFake{alsoDown: "blockvolume:7"}
+	f2.install(t)
+	actx2, b := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx2, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx2.History.Close()
+	if n := kills(f2.log); n != 0 {
+		t.Fatalf("%d kills and restarts ran while a look showed blockvolume:7 down: %v", n, f2.log)
+	}
+	skips := 0
+	for _, r := range records(t, b) {
+		if r.Verb == "fault_kill" {
+			d, _ := r.Result["down"].([]any)
+			if r.Result["skipped"] != true || len(d) != 1 || d[0] != "blockvolume:7" {
+				t.Fatalf("decision %+v", r.Result)
+			}
+			skips++
+		}
+	}
+	if skips != decided {
+		t.Fatalf("%d skips, %d scheduled kills", skips, decided)
+	}
+	f2.alsoDown = ""
+	f2.log = nil
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" || kills(f2.log) != 0 {
+		t.Fatalf("replay of the skips: %v %v, log %v", out, err, f2.log)
+	}
+
 }
