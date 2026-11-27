@@ -11,9 +11,12 @@ the example.
 
 A rerun is never folded: each attempt is its own invoke and complete, its
 args carrying the request and "attempt": n, and a request's outcome is its
-LAST attempt's (superseded()). C0, C5, C6 and C7 judge a request by its last
-attempt; an earlier refused attempt counts under no C5 limit (it is still
-judged by the whole-state rule when a clean observation pair allows).
+LAST attempt's (superseded()). C0, C6 and C7 judge a request by its last
+attempt. C5 judges EVERY refused attempt under its limit, like any refusal:
+the driver observes the subject after each refused attempt it re-issues, so
+that observation is the "after" of attempt n and the "before" of attempt
+n+1, and a refused attempt that changed the observed state fails C5 even
+when the request's last attempt is ok.
 
 Each checker returns PASS, FAIL or UNKNOWN with its findings, and "judged":
 the number of items it actually judged (C0 operations with a known outcome,
@@ -70,6 +73,8 @@ code is 0 only when every checker passes.
       with refusals but no such pair.
       Each refusal belongs to a LIMIT: the generator's gen_step names the
       limit a negative operation probes; other refusals are "ordinary <verb>".
+      Every refused attempt of a rerun request is a refusal of its limit
+      (a refusal a later attempt replaced is still judged and counted).
       The findings report judged / refusals per limit. FAIL if a judged
       refusal shows a different state; UNKNOWN if a limit that occurred has
       no judged refusal; PASS only if every limit that occurred was judged at
@@ -799,18 +804,19 @@ def c5(recs):
     could move HEAD between the two observations, and the observations could
     no longer be laid to the refusal alone."""
     ops_ = operations(recs)
-    # A request's refusal is its LAST attempt's: an earlier attempt (a rerun
-    # through, say, the lease horizon) is no refusal of the request's limit.
+    # Every refused attempt is judged under its limit: an earlier attempt (a
+    # rerun through, say, the lease horizon) is a refusal like any other,
+    # between the driver's observation before it and after it. Only the
+    # "negative not refused" rule reads a request's LAST attempt.
     earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
-    if not [1 for inv, _ in refusals if inv['seq'] not in earlier]:
-        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']
-                + (['%d refused attempt(s) a later attempt of the same request replaced: no refusal of any limit' % len(refusals)] if refusals else [])}
+    if not refusals:
+        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
-    per = {}   # limit -> [refusals, judged], last attempts only
-    attempts_judged = 0   # earlier attempts judged by the whole-state rule, under no limit
+    per = {}   # limit -> [refusals, judged], every refused attempt
+    attempts_judged = 0   # of those, attempts a later attempt of the same request replaced
     for inv, comp in ops_:
         if inv['seq'] in earlier:
             continue   # the request's answer is its last attempt's
@@ -822,11 +828,11 @@ def c5(recs):
     for inv, comp in refusals:
         vol = inv.get('volume')
         last = inv['seq'] not in earlier
-        lim = limit[inv['seq']] if last else '%s, attempt %s replaced by a later attempt (counted under no limit)' % (
-            limit[inv['seq']], (inv.get('args') or {}).get('attempt'))
-        if last:
-            per.setdefault(lim, [0, 0])[0] += 1
+        lim = limit[inv['seq']]
+        per.setdefault(lim, [0, 0])[0] += 1
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], vol or '(no volume)')
+        if not last:
+            name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
         if not vol:
             notes.append('not judged: %s: an operation on no volume' % name)
             continue
@@ -882,9 +888,8 @@ def c5(recs):
                 notes.append('not judged: %s: observation seq %d cannot show its effect: %s' % (name, after['seq'], '; '.join(cannot)))
                 continue
         gaps.update(missing)
-        if last:
-            per[lim][1] += 1
-        else:
+        per[lim][1] += 1
+        if not last:
             attempts_judged += 1
         f += found
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
@@ -892,9 +897,9 @@ def c5(recs):
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
     replaced = sum(1 for inv, _ in refusals if inv['seq'] in earlier)
     if replaced:
-        notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged by the whole-state rule), counted under no limit'
+        notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged), each counted under its limit'
                      % (replaced, attempts_judged))
-    judged = sum(j for _, j in per.values()) + attempts_judged   # judged: refusals judged (last attempts, and earlier ones a pair allowed)
+    judged = sum(j for _, j in per.values())   # judged: refused attempts judged
     checked, bf = baseline(recs)
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}

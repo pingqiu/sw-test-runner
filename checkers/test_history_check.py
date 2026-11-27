@@ -1845,16 +1845,22 @@ HORIZON = 'not_admitted: layout: delete reservation: workspace: deletion refused
 class Attempts(unittest.TestCase):
     """A rerun is never folded: each attempt is its own invoke and complete,
     its args carrying the request and "attempt": n, and the request's
-    outcome is its last attempt's."""
+    outcome is its last attempt's. The driver observes the volume after each
+    refused attempt it re-issues, so C5 judges every refused attempt."""
 
-    def attempts(self, vol, outcomes, expect=False, effect=None):
-        """Steps of one delete request answered `outcomes` in turn."""
+    def attempts(self, vol, outcomes, expect=False, between=None):
+        """Steps of one delete request answered `outcomes` in turn; between,
+        when given, is the observation step the driver records after each
+        refused attempt it re-issues (every refused attempt but the last), or
+        a function of the attempt number giving it."""
         out = []
         for n, o in enumerate(outcomes, 1):
             args = {'request': 'delete-' + vol, 'layout_id': '0' * 32, 'attempt': n}
             if expect:
                 args['expect'] = 'refused'
             out.append(('delete', vol, args, o))
+            if between is not None and n < len(outcomes) and o in ('refused', 'refused_effect'):
+                out.append(between(n) if callable(between) else between)
         return out
 
     def finish(self, recs, details):
@@ -1864,13 +1870,15 @@ class Attempts(unittest.TestCase):
                 r['result'] = details(r)
         return recs
 
-    def case_ordinary(self):
-        # v1: an ordinary delete refused twice by the lease horizon, then ok;
-        # then its tombstone and a refused re-create. v2: a judged negative so
-        # C5 has a limit to judge.
+    def case_ordinary(self, between=('obs', 'v1', 4, FILES, WS)):
+        # v1: an ordinary delete refused twice by the lease horizon, then ok,
+        # the driver's observation after each refused attempt (between; None
+        # for the shape before the driver observed); then its tombstone and
+        # a refused re-create. v2: a judged negative so C5 has a limit to
+        # judge.
         tomb = dict(WS, files=['HEAD', 'VOLUME'])
         steps = (BASE + (('obs', 'v1', 4, FILES, WS),)
-                 + tuple(self.attempts('v1', ['refused', 'refused', 'ok']))
+                 + tuple(self.attempts('v1', ['refused', 'refused', 'ok'], between=between))
                  + (('obs', 'v1', 5, ['HEAD', 'VOLUME'], tomb),
                     ('create', 'v1', NEG, 'refused'), ('obs', 'v1', 5, ['HEAD', 'VOLUME'], tomb),
                     ('obs', 'v2', 4, FILES, WS), ('write', 'v2', NEG, 'refused'), ('obs', 'v2', 4, FILES, WS)))
@@ -1892,29 +1900,56 @@ class Attempts(unittest.TestCase):
         firsts = [r['seq'] for r in rs if r['kind'] == 'invoke' and r['args']['attempt'] == 1]
         self.assertEqual(hc.superseded(rs), set(firsts))
 
-    def test_an_ordinary_delete_refused_twice_by_the_horizon_then_ok_counts_no_refusal(self):
+    def test_an_ordinary_delete_refused_twice_by_the_horizon_then_ok_judges_both_refusals(self):
         v = hc.check(dump(self.case_ordinary()))
         self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
+        self.assertIn('limit ordinary delete: 2 of 2 refusal(s) judged', v['C5']['findings'])
         self.assertIn('limit ordinary write: 1 of 1 refusal(s) judged', v['C5']['findings'])
         self.assertIn('limit ordinary create: 1 of 1 refusal(s) judged', v['C5']['findings'])
-        self.assertFalse(any(x.startswith('limit ordinary delete') for x in v['C5']['findings']), v['C5'])
-        self.assertTrue(any('refused attempts a later attempt of the same request replaced: 2' in x for x in v['C5']['findings']), v['C5'])
-        self.assertEqual(v['C5']['judged'], 2)
+        self.assertIn('refused attempts a later attempt of the same request replaced: 2 (2 judged), each counted under its limit', v['C5']['findings'])
+        self.assertEqual(v['C5']['judged'], 4)
         # C0: the request answered ok; its refused attempts are no refusal not expected
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
         # C7 sees its ok, the last attempt
         self.assertEqual((v['C7']['verdict'], v['C7']['judged']), ('PASS', 1), v['C7'])
 
-    def test_red_a_mutant_counting_every_attempt_makes_it_unknown(self):
-        with mock.patch.object(hc, 'superseded', lambda recs: set()):
-            v = hc.check(dump(self.case_ordinary()))
+    def test_red_a_refused_attempt_that_changed_the_state_fails_c5_though_the_request_ends_ok(self):
+        # The seeded defect: the first refused attempt moved HEAD (gen 4 ->
+        # 5, seen by the driver's observation after it); the request's last
+        # attempt is ok. End to end through the checker's command line.
+        import tempfile
+        recs = self.case_ordinary(between=('obs', 'v1', 5, FILES, WS))
+        with tempfile.TemporaryDirectory() as d:
+            hist, out = Path(d) / 'h.jsonl', Path(d) / 'v.json'
+            hist.write_text('\n'.join(dump(recs)) + '\n', encoding='utf-8')
+            with mock.patch('sys.stdout'):
+                code = hc.main([str(hist), '--json', str(out)])
+            v = json.loads(out.read_text(encoding='utf-8'))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(v['C5']['verdict'], 'FAIL', v['C5'])
+        first = [r for r in recs if r['kind'] == 'invoke' and r['verb'] == 'delete'][0]
+        self.assertTrue(v['C5']['findings'][0].startswith(
+            'seq %d delete v1 (attempt 1, replaced by a later attempt) (ordinary delete) refused but its head changed' % first['seq']), v['C5'])
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])   # the request itself answered ok
+
+    def test_attempts_without_the_drivers_observation_leave_their_limit_unjudged(self):
+        # The shape before the driver observed between attempts: two refusals
+        # of "ordinary delete" with no observation after them. They are
+        # refusals of that limit now, and none is judged: UNKNOWN, not PASS.
+        v = hc.check(dump(self.case_ordinary(between=None)))
         self.assertEqual(v['C5']['verdict'], 'UNKNOWN', v['C5'])
         self.assertEqual(v['C5']['findings'][0], 'limit(s) with no judged refusal: ordinary delete', v['C5'])
-        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])   # and C0 takes the horizon for a refusal not expected
+        self.assertIn('limit ordinary delete: 0 of 2 refusal(s) judged', v['C5']['findings'])
 
-    def test_the_delete_source_negative_with_three_horizon_attempts_then_refused_effect_counts_1_of_1(self):
+    def test_red_a_mutant_without_superseded_fails_c0(self):
+        with mock.patch.object(hc, 'superseded', lambda recs: set()):
+            v = hc.check(dump(self.case_ordinary()))
+        self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])   # C5 judges every attempt either way
+        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])   # C0 takes the horizon for a refusal not expected
+
+    def test_the_delete_source_negative_with_three_horizon_attempts_then_refused_effect_judges_4_of_4(self):
         lim = 'delete a source whose snapshot has a restore target'
-        steps = BASE + (('obs', 'v1', 4, FILES, WS),) + tuple(self.attempts('v1', ['refused'] * 3 + ['refused'], expect=True)) \
+        steps = BASE + (('obs', 'v1', 4, FILES, WS),) + tuple(self.attempts('v1', ['refused'] * 3 + ['refused'], expect=True, between=('obs', 'v1', 4, FILES, WS))) \
             + (('obs', 'v1', 4, FILES, C5.REFUSED_WS),)
         recs = history(*steps)
         last = [r for r in recs if r['kind'] == 'complete' and r['verb'] == 'delete'][-1]
@@ -1928,8 +1963,8 @@ class Attempts(unittest.TestCase):
                          'result': {'action': 'v3_op_delete', 'negative': lim, 'params': {'expect': 'refused', 'volume': 'v1'}}})
         v = hc.check(dump(renumber(recs)))
         self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
-        self.assertIn('limit %s: 1 of 1 refusal(s) judged' % lim, v['C5']['findings'])
-        self.assertTrue(any('replaced: 3' in x for x in v['C5']['findings']), v['C5'])
+        self.assertIn('limit %s: 4 of 4 refusal(s) judged' % lim, v['C5']['findings'])
+        self.assertTrue(any('replaced: 3 (3 judged)' in x for x in v['C5']['findings']), v['C5'])
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
 
     def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
