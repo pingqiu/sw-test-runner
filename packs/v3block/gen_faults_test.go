@@ -121,7 +121,7 @@ func faultAct(ops, rate string) tr.Action {
 	a := genAct(ops)
 	a.Params["pool"] = strings.Join(pool(100), " ") // not exhausted before the budget
 	a.Params["faults"] = rate
-	a.Params["fault_processes"] = "blockmaster blockvolume:0"
+	a.Params["fault_processes"] = "blockvolume:0 blockvolume:1"
 	return a
 }
 
@@ -197,7 +197,7 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 	if recs[0].Result["generator"] != GenVersionFaults || recs[1].Verb != "fault_schedule" {
 		t.Fatalf("header %+v, then %+v", recs[0], recs[1])
 	}
-	want, _ := NewFaultSchedule(5, 300, []string{"blockmaster", "blockvolume:0"}, 0.05, DefaultRestartWithin)
+	want, _ := NewFaultSchedule(5, 300, []string{"blockvolume:0", "blockvolume:1"}, 0.05, DefaultRestartWithin)
 	if !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.Record())) || len(want.Events) < 4 {
 		t.Fatalf("fault_schedule %v, want %v", recs[1].Result, want.Record())
 	}
@@ -256,7 +256,7 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 	}
 	cov := lastVerb(t, p, "gen_coverage").Result
 	fc, _ := cov["fault_cells"].(map[string]any)
-	for _, c := range []string{"kill|blockmaster", "restart|blockmaster", "kill|blockvolume:0", "restart|blockvolume:0", "while_down|v3_op_write"} {
+	for _, c := range []string{"kill|blockvolume:1", "restart|blockvolume:1", "kill|blockvolume:0", "restart|blockvolume:0", "while_down|v3_op_write"} {
 		if fc[c] == nil {
 			t.Errorf("fault cell %s missing: %v", c, fc)
 		}
@@ -427,13 +427,19 @@ func TestGenReplayRefusesABadFaultScheduleBeforeAnyCall(t *testing.T) {
 		},
 		"kill never restarted": func(h *tr.History) {
 			obs(h, "gen_header", "", hdr)
-			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster")}})
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockvolume:1")}})
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},
 		"two down": func(h *tr.History) {
 			obs(h, "gen_header", "", hdr)
-			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster"), ev(2, FaultKill, "blockvolume:0"), ev(3, FaultRestart, "blockvolume:0"), ev(4, FaultRestart, "blockmaster")}})
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockvolume:1"), ev(2, FaultKill, "blockvolume:0"), ev(3, FaultRestart, "blockvolume:0"), ev(4, FaultRestart, "blockvolume:1")}})
+			obs(h, "gen_step", "g1", step)
+			opRec(h, "create", "g1", tr.OutcomeOK)
+		},
+		"an ordinary kill of the master": func(h *tr.History) {
+			obs(h, "gen_header", "", hdr)
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster"), ev(2, FaultRestart, "blockmaster")}})
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},
@@ -466,7 +472,7 @@ func TestGenReplayRefusesABadFaultScheduleBeforeAnyCall(t *testing.T) {
 
 func TestGeneratorLearnsAnUnknownWriteInAFaultRun(t *testing.T) {
 	cfg := GenConfig{Seed: 1, Ops: 400, Pool: pool(1), Blocks: 4, Negative: 0.01,
-		Faults: 0.1, FaultProcesses: []string{"blockmaster"},
+		Faults: 0.1, FaultProcesses: []string{"blockvolume:0"},
 		Weights: map[string]int{"v3_op_create": 1, "v3_op_attach": 1, "v3_op_write": 1, "v3_op_stop": 50, "v3_op_move": 50}}
 	g, err := NewGenerator(cfg)
 	if err != nil {
@@ -724,5 +730,29 @@ func TestOutageFactsComeFromChecksJSON(t *testing.T) {
 	}
 	if f, ok := readOutageFacts([]byte(`{"master_outage": {"max_seconds": 7, "cite": "x"}, "fault_targets": [{"name": "blockmaster", "role": "master"}]}`)); !ok || f.maxSeconds != 7 {
 		t.Errorf("%+v %v", f, ok)
+	}
+}
+
+// The master is never killed by an ordinary kill: a run configured to is
+// refused before anything runs (the short outage is its own event).
+func TestNoOrdinaryKillOfTheMaster(t *testing.T) {
+	_, err := NewGenerator(GenConfig{Seed: 1, Ops: 50, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster", "blockvolume:0"}})
+	if err == nil {
+		t.Fatal("an ordinary kill of the master was scheduled")
+	}
+	f := &faultFake{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	a := faultAct("50", "0.1")
+	a.Params["fault_processes"] = "blockmaster"
+	if _, err := v3GenRun(context.Background(), actx, a); err == nil {
+		t.Fatal("v3_gen_run accepted fault_processes blockmaster")
+	}
+	_ = actx.History.Close()
+	if n := len(records(t, p)); n != 1 || len(f.log) != 0 {
+		t.Fatalf("%d records, log %v before the refusal", n, f.log)
+	}
+	if _, err := NewGenerator(GenConfig{Seed: 1, Ops: 50, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}}); err != nil {
+		t.Fatalf("green: %v", err)
 	}
 }

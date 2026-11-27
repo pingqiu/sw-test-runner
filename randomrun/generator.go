@@ -119,8 +119,13 @@ func (g *Generator) Header() map[string]any {
 func (g *Generator) Faulty() bool { return g.cfg.Faults != 0 || g.cfg.MasterOutage != 0 }
 
 // schedule derives a config's fault schedule: kills and restarts, then the
-// master outages.
+// master outages. An ordinary kill never names the product's master: a
+// restart counted in operations comes long after the holders' serve window,
+// and they fence by design; a short master outage is its own event.
 func schedule(cfg Config, m Model) (FaultSchedule, error) {
+	if master, _, ok := m.MasterOutage(); ok && slices.Contains(cfg.FaultProcesses, master) {
+		return FaultSchedule{}, fmt.Errorf("fault schedule: %s is never killed by an ordinary kill (a short master outage is its own event, fault_master_outage)", master)
+	}
 	s, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess)
 	if err != nil || cfg.MasterOutage == 0 {
 		return s, err

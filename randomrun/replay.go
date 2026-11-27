@@ -201,9 +201,13 @@ func replaySchedule(header, res map[string]any, d Driver) ([]FaultEvent, error) 
 	if err := CheckFaultSchedule(events, int(ops), int(within), d.ValidProcess); err != nil {
 		return nil, fmt.Errorf("fault_schedule: %w", err)
 	}
+	master, _, ok := d.MasterOutage()
 	for _, e := range events {
-		if master, _, ok := d.MasterOutage(); e.Action == FaultMasterOutage && (!ok || e.Process != master) {
+		if e.Action == FaultMasterOutage && (!ok || e.Process != master) {
 			return nil, fmt.Errorf("fault_schedule: a master outage of %s, the product's master is %q", e.Process, master)
+		}
+		if e.Action != FaultMasterOutage && ok && e.Process == master {
+			return nil, fmt.Errorf("fault_schedule: an ordinary %s of the master %s", e.Action, master)
 		}
 	}
 	return events, nil

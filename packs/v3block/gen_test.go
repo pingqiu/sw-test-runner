@@ -823,7 +823,7 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	}
 
 	// An unknown write in a fault run may have persisted: no release negative.
-	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster"}})
+	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
 	drive(gf, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
 	gf.Learn(op("v3_op_write", "g2", "lbas", "4", "round", "r3"), "unknown")
 	if has(gf.negatives(), "v3_op_release", "g1", limReleaseLive) {

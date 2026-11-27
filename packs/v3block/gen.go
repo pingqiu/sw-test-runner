@@ -40,8 +40,9 @@ const GenVersion = "m1-gen/3"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
-// history replays as before. m2-gen/2: as m1-gen/3.
-const GenVersionFaults = "m2-gen/2"
+// history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
+// kill of the master.
+const GenVersionFaults = "m2-gen/3"
 
 //go:embed product/operations.json
 var operationsJSON []byte
