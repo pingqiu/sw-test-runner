@@ -648,7 +648,9 @@ def state_diff(a, b):
     one = sorted(set(sa) ^ set(sb))
     if one:
         return None, 'records %s in one observation only' % ', '.join(one)
-    return [p for p in STATE_PARTS if p in sa and sa[p] != sb[p]], [p for p in STATE_PARTS if p not in sa]
+    # `a` is the earlier observation: the product reader decides whether the
+    # later value is the same state (it may allow a step that time alone makes).
+    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p])], [p for p in STATE_PARTS if p not in sa]
 
 
 def show_part(state, part):

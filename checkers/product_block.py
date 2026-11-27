@@ -9,6 +9,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
 
   bind(checks)                  receives checks.json once, at load
   observed_state(obs, parts)    an observation's comparable parts
+  same_part(part, before, after)    whether a later value shows the same state
   show_part(state, part)        one part, short, for a finding
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
@@ -34,13 +35,16 @@ NEEDS_BASELINE = ('snapshot',)
 NOTED = ('snapshot',)   # the note names which rule (names or roots) judged it
 
 _master = None
+_lease_steps = frozenset()   # (earlier, later) lease states time alone may step through
 
 
 def bind(checks):
     """Take the product facts this module reads from checks.json."""
-    global _master
+    global _master, _lease_steps
     masters = [t['name'] for t in checks.get('fault_targets', []) if t.get('role') == 'master']
     _master = masters[0] if masters else None
+    steps = (checks.get('observation') or {}).get('lease_time_steps') or {}
+    _lease_steps = frozenset(tuple(s) for s in steps.get('steps', []))
 
 
 # --- observation -----------------------------------------------------------
@@ -147,6 +151,33 @@ def observed_state(obs, parts):
             continue
         (state if got[0] == 'ok' else bad)[part] = got[1]
     return state, bad
+
+
+LEASE_STATE = 'lease state'
+
+
+def same_part(part, before, after):
+    """Whether the later value of a part shows the same state as the earlier
+    one. Equal values are; so is a workspace answer whose only difference is
+    a lease state step time alone makes (checks.json lease_time_steps: the
+    lease state is the host validity at query time), every other kept fact
+    equal. Direction matters: `before` is the earlier observation."""
+    if before == after:
+        return True
+    if part != 'workspace' or not _lease_steps:
+        return False
+    (bx, bf), (ax, af) = before, after
+    if bx != 0 or ax != 0 or len(bf) != len(af):
+        return False
+    stepped = False
+    for (bk, bv), (ak, av) in zip(bf, af):
+        if (bk, bv) == (ak, av):
+            continue
+        if bk == ak == LEASE_STATE and (bv, av) in _lease_steps and not stepped:
+            stepped = True
+            continue
+        return False
+    return stepped
 
 
 def show_part(state, part):

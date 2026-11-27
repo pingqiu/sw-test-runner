@@ -716,6 +716,18 @@ class C5(unittest.TestCase):
         self.assertEqual(v['verdict'], 'UNKNOWN', v)
         self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
 
+    def test_a_lease_running_out_by_time_is_no_baseline_change(self):
+        # From a host run: revoking -> expired on a stopped volume, nothing in between.
+        lease = lambda state, n: {'workspace': {'exit': 0, 'text': ws_text(state=state, validity=n)}, 'dirs': WS['dirs'], 'snapshots': []}
+        steps = lambda a, b: (('obs', 'v0', 1, FILES, lease(a, 5)), ('obs', 'v0', 1, FILES, lease(b, 0)),
+                              ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
+        v = self.c5(*steps('revoking', 'expired'), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        # red control: the reverse is a change
+        v = self.c5(*steps('expired', 'revoking'), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
+
     def test_a_garbled_workspace_text_leaves_the_refusal_not_judged(self):
         bad = dict(WS, workspace={'exit': 0, 'text': ['lease state granted']})
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, bad))

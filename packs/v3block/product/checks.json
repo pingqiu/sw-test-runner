@@ -28,6 +28,8 @@
  "observation": {
   "compared": ["head", "snapshots", "workspace", "dirs", "files"],
   "required": ["head", "workspace"],
+  "lease_time_steps": {"steps": [["revoking", "expired"]], "cite": "docs/volume-lifecycle.md:35",
+   "why": "the workspace lease state is the host validity at query time: a revoking lease runs out to expired by time alone, with no operation. Two observations differing only by such a step (every other workspace fact equal) show the same state; the reverse, and any step from or to granted, stay changes"},
   "required_note": "C5 requires these parts in both observations of a judged refusal: a pair lacking one leaves the refusal not judged (no PASS on what was not seen).",
   "ignored": [
    {"field": "head: VolumeID, ClaimID, Activity, Current, Position",

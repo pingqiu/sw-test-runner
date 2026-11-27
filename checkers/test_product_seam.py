@@ -14,6 +14,7 @@ import sys
 import tokenize
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import history_check as hc
 
@@ -204,6 +205,44 @@ class Workspace(unittest.TestCase):
     def test_a_failed_show_is_compared_as_recorded(self):
         self.assertEqual(self.part([''], 1), ((1, ('',)), None))
         self.assertNotEqual(self.part([''], 1)[0], self.part([''], 3)[0])
+
+    def lease(self, state, **swap):
+        lines = [('lease state: %s' % state) if x.startswith('lease state: ') else x for x in REAL_WS]
+        for old, new in swap.items():
+            lines = [x.replace(old, new) for x in lines]
+        return hc.observed_state(ws_obs(lines))
+
+    def same(self, a, b):
+        diff, _ = hc.state_diff(a, b)
+        self.assertIsNotNone(diff)
+        return diff == []
+
+    def test_revoking_to_expired_by_time_compares_equal(self):
+        # From a host run: a stopped volume's lease ran out, validity reaching 0.
+        expired = self.lease('expired', **{'host validity_ns at query: 14849887534': 'host validity_ns at query: 0'})
+        self.assertTrue(self.same(self.lease('revoking'), expired))
+
+    def test_red_other_lease_steps_compare_unequal(self):
+        for a, b in (('expired', 'revoking'), ('granted', 'revoking'), ('revoking', 'granted'),
+                     ('granted', 'expired'), ('expired', 'granted')):
+            self.assertFalse(self.same(self.lease(a), self.lease(b)), (a, b))
+
+    def test_red_revoking_to_expired_with_another_change_compares_unequal(self):
+        before = self.lease('revoking')
+        for swap in ({'epoch: 1': 'epoch: 2'}, {'holder: r1@1': 'holder: r2@1'}, {'replica: r1': 'replica: r2'},
+                     {'recorded ACK: none': 'recorded ACK: r1@1 HEAD generation 4'}):
+            self.assertFalse(self.same(before, self.lease('expired', **swap)), swap)
+        moved = hc.observed_state(ws_obs([x.replace('granted', 'expired') for x in REAL_WS] + ['binding: host=b data=d ctrl=c retired=false']))
+        self.assertFalse(self.same(before, moved))
+
+    def test_the_allowed_steps_are_the_data(self):
+        checks = json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
+        row = checks['observation']['lease_time_steps']
+        self.assertEqual(row['steps'], [['revoking', 'expired']])
+        self.assertEqual(row['cite'], 'docs/volume-lifecycle.md:35')
+        # with no step in the data, the same pair is a change
+        with mock.patch.object(hc.PRODUCT, '_lease_steps', frozenset()):
+            self.assertFalse(self.same(self.lease('revoking'), self.lease('expired')))
 
     def test_the_dropped_fields_are_listed_as_ignored(self):
         checks = json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
