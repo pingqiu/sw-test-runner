@@ -23,8 +23,19 @@ package declared
 //     certified only by a scan that then finds the subsystem absent within
 //     ConfirmWithinSeconds.
 //
+// A resolver may also declare a fourth command:
+//
+//   - readback: one look at named values of the subsystem's unit (its
+//     controller, say) after a connect, a template over {{subsystem}} and
+//     {{files}} (the names, space separated, one word). A line matching
+//     UnitLine (one group) names a unit, counted; a line matching ValueLine
+//     (two groups) gives a name's value, NotShown when the unit has none.
+//     Other lines are ignored. A failing command is Unreadable; a count of
+//     units other than one is NotOne ({{count}}), the values read kept.
+//     TextValues gives the integer some value texts stand for.
+//
 // Every failure text is the resolver's ({{exit}}, {{stderr_first_line}},
-// {{line}}, {{why}}, {{count.<kind>}}, {{subsystem}}, {{options}}).
+// {{line}}, {{why}}, {{count.<kind>}}, {{count}}, {{subsystem}}, {{options}}).
 
 import (
 	"context"
@@ -50,6 +61,19 @@ type Resolver struct {
 	Scan       ResolverScan       `json:"scan"`
 	Connect    ResolverConnect    `json:"connect"`
 	Disconnect ResolverDisconnect `json:"disconnect"`
+	Readback   *ResolverReadback  `json:"readback,omitempty"`
+}
+
+// ResolverReadback is a resolver's read of a unit's named values.
+type ResolverReadback struct {
+	Command    []Word         `json:"command"`
+	AsRoot     bool           `json:"as_root,omitempty"`
+	UnitLine   string         `json:"unit_line"`
+	ValueLine  string         `json:"value_line"`
+	NotShown   string         `json:"not_shown"`
+	TextValues map[string]int `json:"text_values,omitempty"`
+	Unreadable string         `json:"unreadable"`
+	NotOne     string         `json:"not_one"`
 }
 
 // ResolverScan is a resolver's look at a subsystem.
@@ -145,6 +169,13 @@ func (r *Resolver) check() error {
 	if d.CountPattern != "" {
 		if re, err := regexp.Compile(d.CountPattern); err != nil || re.NumSubexp() != 1 {
 			return errors.New("disconnect: count_pattern has one group")
+		}
+	}
+	if rb := r.Readback; rb != nil {
+		u, eu := regexp.Compile(rb.UnitLine)
+		v, ev := regexp.Compile(rb.ValueLine)
+		if len(rb.Command) == 0 || eu != nil || ev != nil || u.NumSubexp() != 1 || v.NumSubexp() != 2 || rb.NotShown == "" || rb.Unreadable == "" || rb.NotOne == "" {
+			return errors.New("readback: command, unit_line (one group), value_line (two groups), not_shown and its texts")
 		}
 	}
 	return nil
@@ -351,6 +382,67 @@ func (x *Executor) DeviceDisconnect(ctx context.Context, node Runner, name, subs
 			return n, msg
 		}
 	}
+}
+
+// DeviceReadback reads the values of files of the subsystem's one unit by
+// the resolver name: the unit (the last one named), the values shown by
+// file, and why not one unit, or why unreadable.
+func (x *Executor) DeviceReadback(ctx context.Context, node Runner, name, subsystem string, files []string) (string, map[string]string, string) {
+	r, err := x.resolver(name)
+	if err != nil {
+		return "", nil, err.Error()
+	}
+	rb := r.Readback
+	if rb == nil {
+		return "", nil, fmt.Errorf("device resolver %q declares no readback", name).Error()
+	}
+	s := resolverScope(ctx, node, map[string]string{"subsystem": subsystem, "files": strings.Join(files, " ")})
+	cmd, err := s.command(rb.Command)
+	if err != nil {
+		return "", nil, err.Error()
+	}
+	run := node.Run
+	if rb.AsRoot {
+		run = node.RunRoot
+	}
+	stdout, stderr, code, err := Call(ctx, run, cmd)
+	if err != nil || code != 0 {
+		s.vals["exit"], s.vals["stderr_first_line"] = strconv.Itoa(code), FirstLine(stderr)
+		msg, _ := s.expand(rb.Unreadable)
+		return "", map[string]string{}, msg
+	}
+	unitRe, valueRe := regexp.MustCompile(rb.UnitLine), regexp.MustCompile(rb.ValueLine)
+	unit, units, byFile := "", 0, map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if m := unitRe.FindStringSubmatch(l); m != nil {
+			unit, units = m[1], units+1
+		} else if m := valueRe.FindStringSubmatch(l); m != nil && m[2] != rb.NotShown {
+			byFile[m[1]] = m[2]
+		}
+	}
+	if units != 1 {
+		s.vals["count"] = strconv.Itoa(units)
+		msg, _ := s.expand(rb.NotOne)
+		return unit, byFile, msg
+	}
+	return unit, byFile, ""
+}
+
+// checkReadbacks refuses a device_readback step whose resolver declares no
+// readback.
+func (f *File) checkReadbacks() error {
+	for _, a := range f.Actions {
+		if p := a.Process; p != nil {
+			for _, ps := range [][]Probe{p.Before, p.Owned, p.After} {
+				for _, pr := range ps {
+					if r := f.DeviceResolvers[pr.Resolver]; pr.Kind == "device_readback" && r != nil && r.Readback == nil {
+						return fmt.Errorf("actions: %s: step %s: device resolver %q declares no readback", a.Action, pr.Name, pr.Resolver)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // resolverRefs lists every device resolver an action names.

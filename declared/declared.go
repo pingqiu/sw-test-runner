@@ -565,6 +565,9 @@ func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 			return nil, fmt.Errorf("actions: device resolver %q is named and not declared", n)
 		}
 	}
+	if err := f.checkReadbacks(); err != nil {
+		return nil, err
+	}
 	if len(f.Actions) > 0 {
 		for _, n := range names(f.RunnerIODir) {
 			if !strings.HasPrefix(n, "config.") || !keys[strings.TrimPrefix(n, "config.")] {

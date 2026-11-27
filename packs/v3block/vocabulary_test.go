@@ -40,7 +40,7 @@ var freeMaps = map[string]bool{"derived": true, "lines": true, "fields": true, "
 	"absent": true, "one": true, "map": true, "exits": true, "ok_length": true, "result": true, "result_ok": true,
 	"result_failure": true, "result_not_run": true, "result_answered": true, "result_launched": true, "result_ready": true,
 	"result_unanswered": true, "aliases": true, "device_resolvers": true, "failure_body": true, "on_unreadable": true,
-	"on_failure": true, "on_not_run": true, "object": true, "files": true, "record_fields": true}
+	"on_failure": true, "on_not_run": true, "object": true, "files": true, "record_fields": true, "text_values": true}
 
 // typesOnly are maps of names (to types, or to maps of names) with no
 // vocabulary below them.
@@ -131,7 +131,7 @@ var vocabulary = map[string][]string{
 	".actions[].sequence.steps[].result_failure.*":        typed,
 	".actions[].sequence.steps[].result_not_run.*":        typed,
 	".actions[].sequence.steps[].result_answered.*":       typed,
-	".device_resolvers.*":                                 {"cite", "scan", "connect", "disconnect"},
+	".device_resolvers.*":                                 {"cite", "scan", "connect", "disconnect", "readback"},
 	".device_resolvers.*.scan": {"command", "as_root", "end", "lines", "absent", "one", "device_line", "device",
 		"unreadable", "bad_line", "incomplete", "no_device", "no_device_by_deadline", "every_ms"},
 	".device_resolvers.*.scan.command[]":    word,
@@ -141,6 +141,9 @@ var vocabulary = map[string][]string{
 	".device_resolvers.*.disconnect": {"command", "as_root", "count_pattern", "failure", "confirm_within_seconds",
 		"confirm_every_ms", "not_confirmed", "remains", "remains_by_deadline"},
 	".device_resolvers.*.disconnect.command[]": word,
+	".device_resolvers.*.readback": {"command", "as_root", "unit_line", "value_line", "not_shown", "text_values",
+		"unreadable", "not_one"},
+	".device_resolvers.*.readback.command[]": word,
 }
 
 var probe = []string{"name", "kind", "when", "command", "as_root", "decode", "failure", "on_ok_set", "addresses", "schema",

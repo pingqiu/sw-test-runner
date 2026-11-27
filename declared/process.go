@@ -100,11 +100,11 @@ type Ready struct {
 //     a scan finds no controller of the subsystem.
 //   - "device": the one namespace of Subsystem within WithinSeconds,
 //     {{device}} and the result field Into.
-//   - "nvme_readback": the controller's effective connect values read back
-//     from the kernel (Files: option -> sysfs file) into Into, compared with
-//     Expect (the connect's options); a mismatch ends the step, and with
-//     FailRun fails the run (readback.go). RecordVerb names the run's one
-//     record of its first read-back, with RecordFields.
+//   - "device_readback": the effective connect values of Subsystem read
+//     back by Resolver (Files: option -> the resolver's file name) into
+//     Into, compared with Expect (the connect's options); a mismatch ends
+//     the step, and with FailRun fails the run (readback.go). RecordVerb
+//     names the run's one record of its first read-back, with RecordFields.
 type Probe struct {
 	Name          string                     `json:"name"`
 	Kind          string                     `json:"kind"`
@@ -487,13 +487,13 @@ func (pr *Probe) check(defined func(string) error, subjects map[string]bool, rea
 			return errors.New("device: a resolver, subsystem, into and within_seconds, not a ready probe")
 		}
 		return defined(pr.Subsystem)
-	case "nvme_readback":
-		if ready || pr.Subsystem == "" || pr.Into == "" || len(pr.Files) == 0 {
-			return errors.New("nvme_readback: subsystem, into and files, not a ready probe")
+	case "device_readback":
+		if ready || pr.Resolver == "" || pr.Subsystem == "" || pr.Into == "" || len(pr.Files) == 0 {
+			return errors.New("device_readback: a resolver, subsystem, into and files, not a ready probe")
 		}
 		for o, f := range pr.Files {
 			if o == "" || f == "" || strings.ContainsAny(f, "/ ") {
-				return fmt.Errorf("nvme_readback: file %q of %q is not a sysfs file name", f, o)
+				return fmt.Errorf("device_readback: file %q of %q is not a file name", f, o)
 			}
 		}
 		for _, t := range append([]string{pr.Subsystem, pr.Expect}, mapValues(pr.RecordFields)...) {
@@ -941,7 +941,7 @@ func (x *Executor) probe(s *scope, ctx context.Context, pr *Probe, res map[strin
 			return tr.OutcomeUnknown, why, false
 		}
 		return "", "", true
-	case "nvme_readback":
+	case "device_readback":
 		return x.readback(s, ctx, pr, res)
 	case "device":
 		nqn, err := s.expand(pr.Subsystem)

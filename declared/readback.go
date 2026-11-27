@@ -1,8 +1,9 @@
 package declared
 
-// The "nvme_readback" probe: after a connect, the controller's EFFECTIVE
-// values read back from the kernel (/sys/class/nvme/<ctrl>/<file>, the
-// probe's Files: option -> sysfs file), recorded in the result field Into,
+// The "device_readback" probe: after a connect, the unit's EFFECTIVE
+// values read back by the step's device resolver (its readback, resolver.go;
+// the probe's Files: option -> the resolver's file name), recorded in the
+// result field Into,
 // and compared with the options the connect was given (Expect, a template
 // of ",key=value..." as the connect's options). A declared option the
 // kernel does not hold, or cannot show, ends the step unknown; with FailRun
@@ -68,33 +69,15 @@ func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[st
 	for _, o := range opts {
 		files = append(files, pr.Files[o])
 	}
-	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo "ctrl $(basename "$d")"; for f in %s; do if [ -e "$d/$f" ]; then echo "$f $(cat "$d/$f")"; else echo "$f -"; fi; done; done; echo end`,
-		ShellQuote(nqn), strings.Join(files, " "))
-	stdout, stderr, code, rerr := s.node.Run(ctx, cmd)
+	var textValues map[string]int
+	if r, err := x.resolver(pr.Resolver); err == nil && r.Readback != nil {
+		textValues = r.Readback.TextValues
+	}
+	ctrl, byFile, why := x.DeviceReadback(ctx, s.node, pr.Resolver, nqn, files)
 	eff := map[string]string{}
-	why := ""
-	ctrl := ""
-	if rerr != nil || code != 0 {
-		why = fmt.Sprintf("readback exit %d: %s", code, FirstLine(stderr))
-	} else {
-		byFile := map[string]string{}
-		ctrls := 0
-		for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
-			f := strings.Fields(l)
-			switch {
-			case len(f) == 2 && f[0] == "ctrl":
-				ctrl, ctrls = f[1], ctrls+1
-			case len(f) == 2:
-				byFile[f[0]] = f[1]
-			}
-		}
-		for _, o := range opts {
-			if v, ok := byFile[pr.Files[o]]; ok && v != "-" {
-				eff[o] = v
-			}
-		}
-		if ctrls != 1 {
-			why = fmt.Sprintf("%d controllers of %s", ctrls, nqn)
+	for _, o := range opts {
+		if v, ok := byFile[pr.Files[o]]; ok {
+			eff[o] = v
 		}
 	}
 	read := map[string]any{"ctrl": ctrl, "values": eff}
@@ -108,8 +91,8 @@ func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[st
 	for _, o := range sortedKeysInt(declared) {
 		got, shown := eff[o]
 		n, err := strconv.Atoi(got)
-		if got == "off" {
-			n, err = -1, nil
+		if t, ok := textValues[got]; ok {
+			n, err = t, nil
 		}
 		if !shown || err != nil || n != declared[o] {
 			bad = append(bad, fmt.Sprintf("%s declared %d, the kernel shows %q", o, declared[o], got))

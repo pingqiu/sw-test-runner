@@ -20,7 +20,7 @@
   "runner_io_dir": "{{config.root}}/.runner-io",
   "device_resolvers": {
     "nvme_namespace": {
-      "cite": "core/csi/linux_util.go:318 (the product's connect: nvme connect -t -a -s -n), :554 (a subsystem's NQN in sysfs); run by declared/resolver.go:168-350",
+      "cite": "core/csi/linux_util.go:318 (the product's connect: nvme connect -t -a -s -n), :554 (a subsystem's NQN in sysfs); run by declared/resolver.go:199-429",
       "scan": {
         "command": [
           {
@@ -105,6 +105,29 @@
         "not_confirmed": "nvme disconnect: cannot confirm: {{why}}",
         "remains": "nvme disconnect: a controller of {{subsystem}} remains",
         "remains_by_deadline": "nvme disconnect: a controller of {{subsystem}} remains at the runner deadline"
+      },
+      "readback": {
+        "command": [
+          {
+            "raw": "for d in /sys/class/nvme/nvme*; do [ -e \"$d\" ] || continue; q=$(cat \"$d/subsysnqn\") || exit 3; [ \"$q\" ="
+          },
+          "{{subsystem}}",
+          {
+            "raw": "] || continue; echo \"ctrl $(basename \"$d\")\"; for f in $(echo"
+          },
+          "{{files}}",
+          {
+            "raw": "); do if [ -e \"$d/$f\" ]; then echo \"$f $(cat \"$d/$f\")\"; else echo \"$f -\"; fi; done; done; echo end"
+          }
+        ],
+        "unit_line": "^ctrl (\\S+)$",
+        "value_line": "^(\\S+) (\\S+)$",
+        "not_shown": "-",
+        "text_values": {
+          "off": -1
+        },
+        "unreadable": "readback exit {{exit}}: {{stderr_first_line}}",
+        "not_one": "{{count}} controllers of {{subsystem}}"
       }
     }
   },
@@ -296,12 +319,12 @@
           {"name": "connect", "kind": "device_connect", "resolver": "nvme_namespace", "address": "{{volume.nvme_addr}}", "subsystem": "{{volume.nqn}}", "options": "{{run.guest_connect_options}}",
            "cite": "the run's guest connect (guest.connect: the documented connect by default, docs/standalone-deployment.md:463-464), as the product's connect does it (core/csi/linux_util.go:318: nvme connect -t -a -s -n), through the kernel's fabrics interface"},
           {"name": "device", "kind": "device", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 20, "into": "device",
-           "cite": "declared/resolver.go:168-267 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
-          {"name": "readback", "kind": "nvme_readback", "subsystem": "{{volume.nqn}}", "expect": "{{run.guest_connect_options}}",
+           "cite": "declared/resolver.go:199-298 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+          {"name": "readback", "kind": "device_readback", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "expect": "{{run.guest_connect_options}}",
            "files": {"ctrl_loss_tmo": "ctrl_loss_tmo", "reconnect_delay": "reconnect_delay", "fast_io_fail_tmo": "fast_io_fail_tmo", "keep_alive_tmo": "kato"},
            "into": "guest_connect_effective", "fail_run": true, "record_verb": "guest_connect",
            "record_fields": {"name": "{{run.guest_connect_name}}", "label": "{{run.guest_connect}}", "evidence": "{{run.guest_connect_evidence}}"},
-           "cite": "declared/readback.go:49-141 (the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
+           "cite": "declared/readback.go:50-125 and the resolver's readback (declared/resolver.go:387-429: the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
         ]
       },
       "on_outcome_set": {"ok": {"volume.intent": "held"}, "unknown": {"volume.intent": "unsettled"}},
@@ -363,14 +386,14 @@
         "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
         "after": [
           {"name": "connect", "kind": "device_connect", "resolver": "nvme_namespace", "address": "{{process.nvme_addr}}", "subsystem": "{{process.nqn}}", "options": "{{run.guest_connect_options}}", "unless_present": true,
-           "cite": "declared/resolver.go:168-236 (the scan: no controller of the subsystem left), :271-304 (the connect); the run's guest connect (guest.connect), as the product's connect does it (core/csi/linux_util.go:318)"},
+           "cite": "declared/resolver.go:199-267 (the scan: no controller of the subsystem left), :302-335 (the connect); the run's guest connect (guest.connect), as the product's connect does it (core/csi/linux_util.go:318)"},
           {"name": "device", "kind": "device", "resolver": "nvme_namespace", "subsystem": "{{process.nqn}}", "within_seconds": 20, "into": "device",
-           "cite": "declared/resolver.go:168-267 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
-          {"name": "readback", "kind": "nvme_readback", "subsystem": "{{process.nqn}}", "expect": "{{run.guest_connect_options}}",
+           "cite": "declared/resolver.go:199-298 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+          {"name": "readback", "kind": "device_readback", "resolver": "nvme_namespace", "subsystem": "{{process.nqn}}", "expect": "{{run.guest_connect_options}}",
            "files": {"ctrl_loss_tmo": "ctrl_loss_tmo", "reconnect_delay": "reconnect_delay", "fast_io_fail_tmo": "fast_io_fail_tmo", "keep_alive_tmo": "kato"},
            "into": "guest_connect_effective", "fail_run": true, "record_verb": "guest_connect",
            "record_fields": {"name": "{{run.guest_connect_name}}", "label": "{{run.guest_connect}}", "evidence": "{{run.guest_connect_evidence}}"},
-           "cite": "declared/readback.go:49-141 (the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
+           "cite": "declared/readback.go:50-125 and the resolver's readback (declared/resolver.go:387-429: the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
         ]
       },
       "note": "a restart, by the schedule or the unit, is not a lifecycle operation: it leaves the volume's intended state as it is"
@@ -388,7 +411,7 @@
         "steps": [
           {"name": "disconnect", "kind": "device_disconnect", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}",
            "observe": {"verb": "disconnect", "subsystem": "nqn", "removed": "controllers"}, "failure": "{{why}}",
-           "cite": "declared/resolver.go:308-350 (delete through sysfs, certified by a scan); cmd/sw-block/workspace.go:46-48 (the planned hand-over order)"},
+           "cite": "declared/resolver.go:339-381 (delete through sysfs, certified by a scan); cmd/sw-block/workspace.go:46-48 (the planned hand-over order)"},
           {"name": "detach", "kind": "command",
            "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "detach", "--plain", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--timeout", "120s"],
            "judge": {"kind": "error_body", "action": "detach", "path": "ops chunk detach"},
@@ -483,7 +506,7 @@
       },
       "on_invoke_set": {"volume.written": "{{item}}"},
       "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}, "sha256": "{{input.sha256}}", "round": "{{round}}", "flush": {"template": "{{derived.flush_arg}}", "type": "bool", "optional": true}}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:168-267 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:199-298 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["dd", "if={{input.path}}", "of={{device}}", "bs=4096", "seek={{item}}", "count=1", "oflag=direct", "conv={{derived.conv}}", "status=none"], "as_root": true,
         "runner_deadline_seconds": 120,
@@ -501,7 +524,7 @@
       "runner_deadline_seconds": 150,
       "each": "lbas",
       "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:168-267 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:199-298 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["bash", "-c", "set -o pipefail; dd if={{device}} bs=4096 skip={{item}} count=1 iflag=direct status=none | sha256sum | cut -c1-64"], "as_root": true,
         "runner_deadline_seconds": 120,
@@ -519,7 +542,7 @@
       ],
       "runner_deadline_seconds": 150,
       "record": {"volume": "{{volume.name}}", "args": {}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:168-267 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:199-298 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["python3", "-I", "-c", {"script": "packs/v3block/scripts/device_fsync.py"}, "{{device}}"], "as_root": true,
         "runner_deadline_seconds": 120,
