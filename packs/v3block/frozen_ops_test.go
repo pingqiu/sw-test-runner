@@ -8,8 +8,11 @@ package v3block
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
@@ -106,4 +109,98 @@ func v3OpReleaseFrozen(ctx context.Context, actx *tr.ActionContext, act tr.Actio
 		}
 		return fromChunk(chunkRelease, stdout, code, nil)
 	})
+}
+
+// v3OpSnapshotDeleteFrozen deletes a named snapshot (SnapshotRemoval.DeleteSnap):
+// through the holder while it serves (the product cleans right after such a
+// delete), store direct with `sw-block ops chunk snapshot-delete` when no
+// holder runs (cleaned at the next periodic pass, the product's guide says).
+// Param: name.
+func v3OpSnapshotDeleteFrozen(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	node, e, v, err := opBegin(actx, act, "v3_op_snapshot_delete")
+	if err != nil {
+		return nil, err
+	}
+	name := requireParam(act, actx, "name")
+	if name == "" {
+		return nil, errors.New("v3_op_snapshot_delete: name is required")
+	}
+	via := "store"
+	if alive(ctx, node, v.PID, v.PIDStart) {
+		via = "holder"
+	}
+	return record(actx, e, "snapshot_delete", v.Name, map[string]any{"name": name, "via": via}, func() (string, map[string]any) {
+		if via == "holder" {
+			body, _ := json.Marshal(map[string]string{"volumeID": v.Name, "name": name})
+			out, _, code, err := node.Run(ctx, fmt.Sprintf("curl -s -m 60 -X POST -H 'Content-Type: application/json' --data %s -w '\\n%%{http_code}' %s",
+				shellQuote(string(body)), shellQuote("http://"+v.Hosts[v.Cur].Status+"/chunk/snapshot/delete")))
+			if err != nil || code != 0 {
+				return fail(fmt.Sprintf("holder not answering (curl exit %d)", code))
+			}
+			i := strings.LastIndex(strings.TrimRight(out, "\n"), "\n")
+			status := 1
+			if strings.TrimSpace(out[i+1:]) == "200" {
+				status = 0
+			}
+			return fromChunk(chunkSnapDelHolder, out[:max(i, 0)], status, nil)
+		}
+		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
+			shellQuote(v.Name), shellQuote(name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
+		if err != nil {
+			return fail(err.Error())
+		}
+		return fromChunk(chunkSnapDelStore, stdout, code, nil)
+	})
+}
+
+// v3OpDeleteFrozen deletes the volume through the master's delete authority
+// (MoveAdmission.DelMark, `ops chunk volume-delete`). After a stop the master
+// admits the delete only once the holder's lease horizon plus the clock-skew
+// margin has passed, and answers not_admitted until then; the CLI's own
+// procedure is to rerun with the SAME request id once the cause is cleared.
+// So one operation reruns it while the answer is not_admitted, within
+// admit_seconds (default 120), and records every attempt. Its outcome is the
+// last answer's. A step that declares expect=refused (a negative: the
+// refusal is what it probes) is one call, never rerun: rerunning would wait
+// out the refusal it tests.
+func v3OpDeleteFrozen(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	node, e, v, err := opBegin(actx, act, "v3_op_delete")
+	if err != nil {
+		return nil, err
+	}
+	bound := time.Duration(actions.ParseInt(optionalParam(act, "admit_seconds"), 120)) * time.Second
+	req := "delete-" + v.Name
+	return record(actx, e, "delete", v.Name, map[string]any{"layout_id": v.LayoutID, "request": req}, func() (string, map[string]any) {
+		return e.deleteVolumeFrozen(ctx, node, v, req, bound)
+	})
+}
+
+// deleteRetryEveryFrozen is the pause between two attempts of one delete.
+var deleteRetryEveryFrozen = 3 * time.Second
+
+// deleteVolumeFrozen runs `ops chunk volume-delete` once, and again while the
+// answer is not_admitted within bound, unless the step declares
+// expect=refused. Its outcome is the last answer's; every attempt is listed.
+func (e opEnv) deleteVolumeFrozen(ctx context.Context, node runner, v *opVolume, req string, bound time.Duration) (string, map[string]any) {
+	end := time.Now().Add(bound)
+	var attempts []string
+	for {
+		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
+			shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote(req)))
+		if err != nil {
+			return tr.OutcomeUnknown, map[string]any{"detail": err.Error(), "attempts": attempts}
+		}
+		r, res := fromChunk(chunkVolumeDelete, stdout, code, nil)
+		d, _ := res["detail"].(string)
+		attempts = append(attempts, fmt.Sprintf("%s %s", r, firstLine(d)))
+		res["attempts"] = attempts
+		if r == tr.OutcomeOK || e.expect == tr.OutcomeRefused || !strings.HasPrefix(d, "not_admitted:") || time.Now().After(end) {
+			return r, res
+		}
+		select {
+		case <-ctx.Done():
+			return r, res
+		case <-time.After(deleteRetryEveryFrozen):
+		}
+	}
 }

@@ -24,7 +24,7 @@
       "variants": [{
         "command": ["{{config.bin_dir}}/v3ctl", "create", "--master", "{{config.master}}", "--volume", "{{volume.name}}", "--size", "{{size_bytes}}"],
         "timeout_seconds": 90,
-        "cite": "the runner's client of the master's CreateVolume (core/host/master/services.go:57): packs/v3block/v3ctl/main.go:120-124 (flags), :139-147 (the call), :165-180 (the answer and its exit: ok 0, refused 1, unknown 3); its --timeout is 60s (:124)",
+        "cite": "the runner's client of the master's CreateVolume (core/host/master/services.go:57): packs/v3block/v3ctl/main.go:120-124 (flags), :139-152 (the call), :166-181 (the answer and its exit: ok 0, refused 1, unknown 3); its --timeout is 60s (:124)",
         "decode": {
           "kind": "self_reported",
           "fields": {"outcome": "string", "volume": "string", "layout_id": "string", "store_ready": "bool", "call_ns": "int", "error": "string"},
@@ -54,6 +54,31 @@
       }]
     },
     {
+      "action": "v3_op_snapshot_delete", "verb": "snapshot_delete", "op": "SnapshotRemoval.DeleteSnap", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "name", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}", "via": "{{variant}}"}},
+      "variants": [
+        {
+          "name": "holder", "when": {"field": "volume.holder_alive", "equals": "true"},
+          "command": ["curl", "-s", "-m", "60", "-X", "POST", "-H", "Content-Type: application/json", "--data", {"json": {"volumeID": "{{volume.name}}", "name": "{{name}}"}}, "-w", "\\n%{http_code}", "http://{{volume.status_addr}}/chunk/snapshot/delete"],
+          "timeout_seconds": 90,
+          "cite": "core/host/volume/chunk_control.go:241 (route), :529-549 (POST, body volumeID and name, 200 on success, the error body otherwise)",
+          "decode": {"kind": "error_body", "path": "POST /chunk/snapshot/delete", "answer": "http_status_last_line", "transport_failure": "holder not answering (curl exit {{exit}})"}
+        },
+        {
+          "name": "store",
+          "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "snapshot-delete", "--volume", "{{volume.name}}", "--name", "{{name}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}"],
+          "timeout_seconds": 60,
+          "cite": "cmd/sw-block/chunk.go:87-88 (dispatch); cmd/sw-block/chunk_b.go:187-192 (--volume through bindVolume :87-89, --name), :117-122 (--chunk-filer, --chunk-path, --master; --timeout 30s from :188)",
+          "decode": {"kind": "error_body", "path": "ops chunk snapshot-delete"}
+        }
+      ],
+      "note": "through the holder while the recorded holder runs (the product cleans right after such a delete), store direct otherwise"
+    },
+    {
       "action": "v3_op_restore", "verb": "restore", "op": "RestoreTarget.CreateHead", "runs_on": "step_node",
       "params": [
         {"name": "volume", "kind": "subject", "vars": true},
@@ -81,11 +106,25 @@
         "cite": "cmd/sw-block/chunk.go:93-94 (dispatch); cmd/sw-block/chunk_b.go:305-309 (--source, --target through bindVolume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master)",
         "decode": {"kind": "error_body", "path": "ops chunk release"}
       }]
+    },
+    {
+      "action": "v3_op_delete", "verb": "delete", "op": "MoveAdmission.DelMark", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "admit_seconds", "kind": "int", "default": "120"}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"layout_id": "{{volume.layout_id}}", "request": "delete-{{volume.name}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "volume-delete", "--volume", "{{volume.name}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}", "--request-id", "delete-{{volume.name}}"],
+        "timeout_seconds": 90,
+        "cite": "cmd/sw-block/chunk.go:99-100 (dispatch); cmd/sw-block/chunk_volume_delete.go:19-32 (--volume, --request-id; rerun with the same id once the cause is cleared; --timeout 1m), cmd/sw-block/chunk_b.go:117-122 (--chunk-filer, --chunk-path, --master)",
+        "decode": {"kind": "error_body", "path": "ops chunk volume-delete"}
+      }],
+      "retry": {"while_code": "not_admitted", "within_param": "admit_seconds", "every_seconds": 3, "attempts": "attempts"},
+      "note": "after a stop the master admits the delete only once the holder's lease horizon has passed, answering not_admitted until then; the CLI's procedure is to rerun with the same request id. A step that declares expect=refused is one call."
     }
   ],
   "exceptions": [
-    {"action": "v3_op_snapshot_delete", "why": "pending: declared in the next change"},
-    {"action": "v3_op_delete", "why": "pending: declared in the next change"},
     {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup"},
     {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba"},
     {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each"},

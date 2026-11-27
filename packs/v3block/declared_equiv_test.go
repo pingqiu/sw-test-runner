@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/declared"
@@ -317,5 +318,89 @@ func TestEquivalenceRedControl(t *testing.T) {
 	}
 	if got := runEq(t, blockActions.Handler("v3_op_snapshot"), c); !reflect.DeepEqual(frozen, got) {
 		t.Errorf("green twin differs: %+v vs %+v", frozen, got)
+	}
+}
+
+func TestDeclaredSnapshotDeleteEquivalent(t *testing.T) {
+	p := map[string]string{"volume": "v1", "name": "s1"}
+	held := func(cur int, start string) []*opVolume {
+		vs := eqVolumes()
+		vs[0].PID, vs[0].PIDStart, vs[0].Cur = "4242", start, cur
+		return vs
+	}
+	proc := func(out string, code int) eqRule { return eqRule{"/proc/4242", []eqAnswer{{out: out, code: code}}} }
+	holder := func(a eqAnswer) []eqRule {
+		return []eqRule{proc("start 999\n", 0), {"curl", []eqAnswer{a}}, {"snapshot-delete", []eqAnswer{{}}}}
+	}
+	store := func(p eqRule, a eqAnswer) []eqRule {
+		return []eqRule{p, {"curl", []eqAnswer{{out: "\n200"}}}, {"snapshot-delete", []eqAnswer{a}}}
+	}
+	refusedBody := `{"code":"layout_refused","message":"has dependents","retryable":false}`
+	cases := []eqCase{
+		{name: "holder ok", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: `{"volumeID":"v1","name":"s1","state":"deleted"}` + "\n200"})},
+		{name: "holder refused", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: refusedBody + "\n409"})},
+		{name: "holder other code", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: `{"code":"internal","message":"x"}` + "\n500"})},
+		{name: "holder status only", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: "200"})},
+		{name: "holder status then newline", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: refusedBody + "\n409\n"})},
+		{name: "holder no body", params: p, vols: held(0, "999"), rules: holder(eqAnswer{out: "\n502"})},
+		{name: "holder not answering", params: p, vols: held(0, "999"), rules: holder(eqAnswer{code: 7})},
+		{name: "holder not run", params: p, vols: held(0, "999"), rules: holder(eqAnswer{code: -1, err: broken})},
+		{name: "holder on the second host", params: p, vols: held(1, "999"), rules: holder(eqAnswer{out: "{}\n200"})},
+		{name: "a name to quote, holder", params: map[string]string{"volume": "v1", "name": `a'b "c"`}, vols: held(0, "999"), rules: holder(eqAnswer{out: "{}\n200"})},
+		{name: "pid reused: store", params: p, vols: held(0, "999"), rules: store(proc("start 1000", 0), eqAnswer{})},
+		{name: "holder gone: store", params: p, vols: held(0, "999"), rules: store(proc("absent", 0), eqAnswer{})},
+		{name: "holder unreadable: store", params: p, vols: held(0, "999"), rules: store(proc("", 3), chunkErr("snapshot_has_dependents", "x"))},
+		{name: "no identity: store", params: p, vols: held(0, ""), rules: store(proc("start 999", 0), eqAnswer{})},
+		{name: "store refused", params: p, rules: store(proc("absent", 0), chunkErr("conflict", "lost"))},
+		{name: "store volume deleting", params: p, rules: store(proc("absent", 0), chunkErr("volume_deleting", "x"))},
+		{name: "store other code", params: p, rules: store(proc("absent", 0), chunkErr("internal", "x"))},
+		{name: "store no body", params: p, rules: store(proc("absent", 0), eqAnswer{code: 1})},
+		{name: "store not run", params: p, rules: store(proc("absent", 0), eqAnswer{err: broken})},
+		{name: "name from vars", params: map[string]string{"volume": "v1"}, vars: map[string]string{"name": "s2"}, rules: store(proc("absent", 0), eqAnswer{})},
+		{name: "no name", params: map[string]string{"volume": "v1"}, vols: held(0, "999"), rules: holder(eqAnswer{})},
+	}
+	cases = append(cases, commonErrorCases(p, store(proc("absent", 0), eqAnswer{}))...)
+	checkEquivalent(t, "v3_op_snapshot_delete", v3OpSnapshotDeleteFrozen, cases)
+	// The cases reach both variants.
+	for i, via := range map[int]string{0: "holder", 10: "store"} {
+		if r := runEq(t, blockActions.Handler("v3_op_snapshot_delete"), cases[i]); len(r.records) < 1 || r.records[0].Args["via"] != via {
+			t.Errorf("%s: records %v, want via %s", cases[i].name, r.records, via)
+		}
+	}
+}
+
+func TestDeclaredDeleteEquivalent(t *testing.T) {
+	defer func(d time.Duration, p func(time.Duration) time.Duration) {
+		deleteRetryEveryFrozen, blockActions.Pause = d, p
+	}(deleteRetryEveryFrozen, blockActions.Pause)
+	deleteRetryEveryFrozen = time.Millisecond
+	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
+
+	live := chunkErr("not_admitted", "layout: delete reservation: workspace: deletion refused before persistence: live until T")
+	horizon := chunkErr("not_admitted", "layout: a holder is acting on the volume: live until T")
+	deleted := eqAnswer{out: `{"volume":"v1","state":"deleted"}`}
+	on := func(as ...eqAnswer) []eqRule { return []eqRule{{"volume-delete", as}} }
+	p := map[string]string{"volume": "v1"}
+	neg := map[string]string{"volume": "v1", "expect": "refused"}
+	cases := []eqCase{
+		{name: "ok", params: p, rules: on(deleted)},
+		{name: "refused then ok", params: p, rules: on(live, deleted)},
+		{name: "not admitted twice then ok", params: p, rules: on(horizon, live, horizon, deleted)},
+		{name: "not admitted then a kept-unknown code", params: p, rules: on(horizon, chunkErr("conflict", "lost"))},
+		{name: "not admitted then no body", params: p, rules: on(horizon, eqAnswer{out: "x", code: 1})},
+		{name: "not run at once", params: p, rules: on(eqAnswer{err: broken})},
+		{name: "not run after a not admitted", params: p, rules: on(horizon, eqAnswer{err: broken})},
+		{name: "negative refused is one call", params: neg, rules: on(live, deleted)},
+		{name: "negative unknown is one call", params: neg, rules: on(horizon, deleted)},
+		{name: "negative ok", params: neg, rules: on(deleted)},
+		{name: "admit seconds not a number", params: map[string]string{"volume": "v1", "admit_seconds": "soon"}, rules: on(horizon, deleted)},
+		{name: "admit seconds given", params: map[string]string{"volume": "v1", "admit_seconds": "30"}, rules: on(horizon, deleted)},
+		{name: "a volume without a layout id", params: map[string]string{"volume": "tgt"}, rules: on(deleted)},
+	}
+	cases = append(cases, commonErrorCases(p, on(deleted))...)
+	checkEquivalent(t, "v3_op_delete", v3OpDeleteFrozen, cases)
+	// The retry is exercised: three reruns, then ok.
+	if r := runEq(t, blockActions.Handler("v3_op_delete"), cases[2]); len(r.calls) != 4 || r.ret["value"] != tr.OutcomeOK {
+		t.Errorf("%s: %d calls, %v", cases[2].name, len(r.calls), r.ret)
 	}
 }

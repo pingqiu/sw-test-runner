@@ -132,10 +132,12 @@ func TestChunkOutcomePerOperation(t *testing.T) {
 }
 
 // A negative delete (expect=refused) is one call; any other delete reruns
-// while the answer is not_admitted.
+// while the answer is not_admitted. It runs the frozen copy of the Go
+// handler; the declared delete is held equal to it by
+// TestDeclaredDeleteEquivalent.
 func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
-	defer func(d time.Duration) { deleteRetryEvery = d }(deleteRetryEvery)
-	deleteRetryEvery = time.Millisecond
+	defer func(d time.Duration) { deleteRetryEveryFrozen = d }(deleteRetryEveryFrozen)
+	deleteRetryEveryFrozen = time.Millisecond
 	live := `{"code":"not_admitted","message":"layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: workspace: deletion refused before persistence: workspace delete: live until T","retryable":false}`
 	horizon := `{"code":"not_admitted","message":"layout: a holder is acting on the volume: workspace delete: live until T","retryable":false}`
 	deleted := `{"volume":"v1","state":"deleted"}`
@@ -153,26 +155,26 @@ func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
 	neg := e
 	neg.expect = tr.OutcomeRefused
 	f := (&fakeNode{}).on("volume-delete", fakeAnswer{out: live, code: 1}, ok(deleted))
-	if out, res := neg.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeRefused || count(f) != 1 {
+	if out, res := neg.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeRefused || count(f) != 1 {
 		t.Fatalf("negative delete: %s after %d calls %v; want refused after 1", out, count(f), res)
 	}
 	// A negative whose answer is the post-reservation not_admitted is still
 	// one call, and unknown.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: horizon, code: 1}, ok(deleted))
-	if out, _ := neg.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeUnknown || count(f) != 1 {
+	if out, _ := neg.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeUnknown || count(f) != 1 {
 		t.Fatalf("negative delete after the reservation: %s after %d calls; want unknown after 1", out, count(f))
 	}
 
 	// Red control: an ordinary delete still reruns through not_admitted,
 	// whichever of the two it is, and ends with the last answer.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: live, code: 1}, fakeAnswer{out: horizon, code: 1}, ok(deleted))
-	out, res := e.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute)
+	out, res := e.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute)
 	if out != tr.OutcomeOK || count(f) != 3 || len(res["attempts"].([]string)) != 3 {
 		t.Fatalf("ordinary delete: %s after %d calls %v; want ok after 3", out, count(f), res)
 	}
 	// And stops at the bound with the last answer.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: horizon, code: 1})
-	if out, _ := e.deleteVolume(context.Background(), f, v, "delete-v1", 20*time.Millisecond); out != tr.OutcomeUnknown || count(f) < 2 {
+	if out, _ := e.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", 20*time.Millisecond); out != tr.OutcomeUnknown || count(f) < 2 {
 		t.Fatalf("ordinary delete at its bound: %s after %d calls; want unknown after at least 2", out, count(f))
 	}
 }
