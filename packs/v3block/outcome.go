@@ -97,6 +97,19 @@ type outcomeTable struct {
 	About    string       `json:"about"`
 	Rows     []outcomeRow `json:"rows"`
 	PageGaps []pageGap    `json:"page_gaps,omitempty"`
+	Phrases  []phrase     `json:"phrases,omitempty"`
+}
+
+// phrase is a match on PRODUCT TEXT the table relies on (an effect's
+// *_contains, a row's message_contains): its source line and the product
+// test that pins it, or null. Every phrase is a product gap until the
+// product treats it as an interface; an effect may rely only on a pinned
+// one.
+type phrase struct {
+	Phrase   string  `json:"phrase"`
+	Source   string  `json:"source"`
+	PinnedBy *string `json:"pinned_by"`
+	Note     string  `json:"note,omitempty"`
 }
 
 // pageLine is a citation of a product page line: docs/<page>.md:<line>.
@@ -155,6 +168,46 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 		for j, u := range t.Rows {
 			if i != j && u.Outcome != r.Outcome && u.Code == r.Code && overlap(r.Action, u.Action) && overlap(r.Path, u.Path) {
 				return t, fmt.Errorf("outcomes rows %d and %d: %s %q %s is both %s and %s", i, j, r.Action, r.Path, r.Code, r.Outcome, u.Outcome)
+			}
+		}
+	}
+	phrases := map[string]phrase{}
+	for i, ph := range t.Phrases {
+		at := fmt.Sprintf("outcomes phrase %d (%q)", i, ph.Phrase)
+		switch {
+		case ph.Phrase == "" || !strings.Contains(ph.Source, ".go:"):
+			return t, fmt.Errorf("%s: the phrase and its source line are required", at)
+		case ph.PinnedBy != nil && !strings.Contains(*ph.PinnedBy, "_test.go:"):
+			return t, fmt.Errorf("%s: pinned_by %q is not a product test line (or null)", at, *ph.PinnedBy)
+		}
+		if _, dup := phrases[ph.Phrase]; dup {
+			return t, fmt.Errorf("%s: listed twice", at)
+		}
+		phrases[ph.Phrase] = ph
+	}
+	for i, r := range t.Rows {
+		at := fmt.Sprintf("outcomes row %d (%s %q %s)", i, r.Action, r.Path, r.Code)
+		if r.MessageContains != "" {
+			if _, ok := phrases[r.MessageContains]; !ok {
+				return t, fmt.Errorf("%s: message_contains %q is product text not listed in phrases", at, r.MessageContains)
+			}
+		}
+		if r.Effect == nil {
+			continue
+		}
+		for k, v := range r.Effect.To {
+			text, isText := v.(string)
+			if !strings.HasSuffix(k, "_contains") {
+				continue
+			}
+			ph, ok := phrases[text]
+			switch {
+			case !isText || text == "":
+				return t, fmt.Errorf("%s: effect %s is not a phrase", at, k)
+			case !ok:
+				return t, fmt.Errorf("%s: effect %s %q is product text not listed in phrases", at, k, text)
+			case ph.PinnedBy == nil:
+				return t, fmt.Errorf("%s: effect %s %q relies on a phrase no product test pins (pinned_by null): the row stays unknown", at, k, text)
 			}
 		}
 	}

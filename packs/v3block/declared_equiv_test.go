@@ -527,7 +527,7 @@ func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 		t.Fatalf("%v %+v", r.ret, r.records)
 	}
 	to, _ := asRead["to"].(map[string]any)
-	if to["exit"] != float64(1) || to["stderr_contains"] != "workspace show: workspace show: workspace: volume is being deleted" {
+	if to["exit"] != float64(1) || to["stderr_contains"] != "workspace: volume is being deleted" {
 		t.Fatalf("effect %v", asRead)
 	}
 }

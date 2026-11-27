@@ -8,7 +8,9 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 )
 
-const effectHeader = `{"product": "block", "read_at": "x", "about": "a", "rows": [`
+const effectHeader = `{"product": "block", "read_at": "x", "about": "a", "phrases": [
+  {"phrase": "pinned text", "source": "a.go:1", "pinned_by": "a_test.go:9"},
+  {"phrase": "loose text", "source": "a.go:2", "pinned_by": null}], "rows": [`
 
 const effectRow = `{"action": "delete", "path": "ops chunk volume-delete", "code": "reserved_here", "outcome": "refused_effect",
   "cite": "x.go:1", "why": "w", "effect": {"part": "workspace", "to": {"exit_nonzero": true}, "cite": "docs/operator-guide.md:193-196"}}`
@@ -82,6 +84,51 @@ func TestPageGaps(t *testing.T) {
 	} {
 		if _, err := loadOutcomes([]byte(b)); err == nil {
 			t.Errorf("%s: loaded", name)
+		}
+	}
+}
+
+// Product text: an effect may match only a listed phrase that a product test
+// pins; a row's message_contains must be listed (pinned or not).
+func TestEffectPhrasesArePinned(t *testing.T) {
+	row := func(to string) string {
+		return `{"action": "delete", "path": "ops chunk volume-delete", "code": "reserved_here", "outcome": "refused_effect",
+		  "cite": "x.go:1", "effect": {"part": "workspace", "to": {"exit": 1, ` + to + `}, "cite": "docs/operator-guide.md:193-196"}}`
+	}
+	if _, err := loadOutcomes([]byte(effectHeader + row(`"stderr_contains": "pinned text"`) + `]}`)); err != nil {
+		t.Fatalf("green twin: %v", err)
+	}
+	for name, b := range map[string]string{
+		"an unpinned phrase":        effectHeader + row(`"stderr_contains": "loose text"`) + `]}`,
+		"an unlisted phrase":        effectHeader + row(`"text_contains": "other text"`) + `]}`,
+		"a phrase that is no text":  effectHeader + row(`"stderr_contains": 7`) + `]}`,
+		"an unlisted message":       effectHeader + `{"action": "a", "path": "p", "code": "c", "outcome": "refused", "cite": "x.go:1", "message_contains": "other"}]}`,
+		"a pin that is no test":     strings.Replace(effectHeader, `"a_test.go:9"`, `"docs/x.md:1"`, 1) + `]}`,
+		"a phrase without a source": strings.Replace(effectHeader, `"source": "a.go:2"`, `"source": ""`, 1) + `]}`,
+	} {
+		if _, err := loadOutcomes([]byte(b)); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
+	}
+	// A listed message_contains loads whether pinned or not.
+	if _, err := loadOutcomes([]byte(effectHeader + `{"action": "a", "path": "p", "code": "c", "outcome": "refused", "cite": "x.go:1", "message_contains": "loose text"}]}`)); err != nil {
+		t.Fatalf("listed message: %v", err)
+	}
+	// The embedded table: every effect phrase is pinned.
+	for _, r := range outcomes.Rows {
+		if r.Effect == nil {
+			continue
+		}
+		for k, v := range r.Effect.To {
+			if strings.HasSuffix(k, "_contains") {
+				found := false
+				for _, ph := range outcomes.Phrases {
+					found = found || (ph.Phrase == v && ph.PinnedBy != nil)
+				}
+				if !found {
+					t.Errorf("%s %s: %v is not a pinned phrase", r.Action, r.Code, v)
+				}
+			}
 		}
 	}
 }
