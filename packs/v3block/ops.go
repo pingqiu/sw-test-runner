@@ -24,6 +24,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 // opIDs: verb -> the Module.Action recorded as op.
@@ -52,6 +53,12 @@ type opEnv struct {
 	// Per step, never per verb: any other refusal still fails the run.
 	expect   string
 	lockDirs bool
+	// The action's runner deadline (actions.json), the device I/O runner
+	// deadline and where detached commands keep their files (guest
+	// configuration); the guest's NVMe connect options.
+	deadline, deviceDeadline time.Duration
+	ioDir                    string
+	connect                  guestConnect
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -142,10 +149,19 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 	if actx.History == nil {
 		return nil, opEnv{}, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
 	}
-	node, err := opNode(actx, act.Node)
+	inner, err := opNode(actx, act.Node)
 	if err != nil {
 		return nil, opEnv{}, fmt.Errorf("%s: %w", name, err)
 	}
+	deadline, err := runnerDeadline(name, act.Params)
+	if err != nil {
+		return nil, opEnv{}, err
+	}
+	conn, err := selectConnect(opParam(act, actx, guest.Connect.SelectVar))
+	if err != nil {
+		return nil, opEnv{}, fmt.Errorf("%s: %w", name, err)
+	}
+	node := boundedNode{inner: inner, bound: deadline}
 	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
 		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
 		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
@@ -164,11 +180,18 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
 		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
 	}
+	e.deadline, e.deviceDeadline, e.ioDir, e.connect = deadline, deviceDeadline(), e.root+"/.runner-io", conn
 	return node, e, nil
 }
 
-// record runs one operation between its invoke and complete records.
-func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func() (string, map[string]any)) (map[string]string, error) {
+// recordBounded runs one operation between its invoke and complete
+// records, under the action's runner deadline (e.deadline): do gets a
+// context that ends at it. An operation that has not answered ok by then is
+// completed unknown, "timeout after <n>s", its last detail kept as
+// detail_at_deadline; any process abandoned on the way is in its result.
+// The runner never waits past the deadline on the product: every command
+// goes through the bounded node, and every wait loop ends with the context.
+func recordBounded(ctx context.Context, actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func(context.Context) (string, map[string]any)) (map[string]string, error) {
 	if e.expect != "" {
 		if args == nil {
 			args = map[string]any{}
@@ -179,13 +202,56 @@ func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	outcome, result := do()
+	octx, cancel := context.WithTimeout(ctx, e.deadline)
+	outcome, result := do(octx)
+	timedOut := octx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+	cancel()
+	if timedOut && outcome != tr.OutcomeOK {
+		if result == nil {
+			result = map[string]any{}
+		}
+		if d, ok := result["detail"]; ok {
+			result["detail_at_deadline"] = d
+		}
+		result["detail"] = fmt.Sprintf("timeout after %ds", int(e.deadline/time.Second))
+		outcome = tr.OutcomeUnknown
+	}
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
 	}
 	actx.Log("  v3_op_%s(%s): %s", verb, vol, outcome)
 	return map[string]string{"value": outcome}, nil
 }
+
+// pause waits d, or less when ctx ends; false when ctx has ended.
+func pause(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return ctx.Err() == nil
+	}
+}
+
+// runDevice runs one I/O command on the volume's kernel block device,
+// detached, under the device I/O runner deadline: a child stuck in
+// uninterruptible sleep on a dead device never holds the runner. At the
+// deadline the answer is unknown ("timeout after <n>s") and whatever
+// survived the kill is named under "abandoned". A non-nil result is the
+// operation's (unknown) result.
+func (e opEnv) runDevice(ctx context.Context, node runner, cmd string) (string, string, int, map[string]any) {
+	stdout, stderr, code, err := declared.RunDetached(ctx, node, true, e.ioDir, cmd, e.deviceDeadline, devicePoll)
+	if t, ok := declared.AsDetached(err); ok {
+		return "", "", -1, declared.TimeoutResult(t)
+	}
+	if err != nil {
+		return "", "", -1, map[string]any{"detail": err.Error()}
+	}
+	return stdout, stderr, code, nil
+}
+
+// devicePoll is how often a detached device command is polled.
+var devicePoll = 200 * time.Millisecond
 
 func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
@@ -321,7 +387,7 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	h := v.Hosts[v.Cur]
 	defer saveVolume(actx, v)
-	return record(actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch}, func() (string, map[string]any) {
+	return recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
 		if v.LayoutID == "" {
 			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
 			if err != nil {
@@ -381,7 +447,7 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 		return fail("start: " + firstLine(stderr))
 	}
 	start, state := procStart(ctx, node, pid)
-	res := map[string]any{"pid": pid, "pid_start": start, "log": logPath, "layout_id": v.LayoutID}
+	res := map[string]any{"pid": pid, "pid_start": start, "log": logPath, "layout_id": v.LayoutID, "guest_connect": e.connect.Label}
 	if state != procRunning {
 		res["detail"] = "blockvolume exited at once, or its identity could not be read"
 		return tr.OutcomeUnknown, res
@@ -422,7 +488,7 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 					}
 					host, port, _ := strings.Cut(h.NVMe, ":")
 					if connect {
-						if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
+						if why := nvmeConnect(ctx, node, host, port, v.NQN, e.connect.Options); why != "" {
 							res["detail"] = why
 							return tr.OutcomeUnknown, res
 						}
@@ -441,7 +507,10 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 			res["detail"] = fmt.Sprintf("not serving above epoch %d from its own listeners within %s", v.Epoch, bound)
 			return tr.OutcomeUnknown, res
 		}
-		time.Sleep(250 * time.Millisecond)
+		if !pause(ctx, 250*time.Millisecond) {
+			res["detail"] = fmt.Sprintf("not serving above epoch %d from its own listeners by the runner deadline", v.Epoch)
+			return tr.OutcomeUnknown, res
+		}
 	}
 }
 
@@ -523,13 +592,16 @@ func writeArgs(lba uint64, sha, round string, flush bool) map[string]any {
 
 // writeBlock writes the generated block blk at lba of v's device: ok on dd's
 // exit 0, unknown otherwise.
-func writeBlock(ctx context.Context, node runner, v *opVolume, blk string, lba uint64, flush bool) (string, map[string]any) {
+func (e opEnv) writeBlock(ctx context.Context, node runner, v *opVolume, blk string, lba uint64, flush bool) (string, map[string]any) {
 	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
 	if why != "" {
 		return fail(why)
 	}
-	_, stderr, code, err := node.RunRoot(ctx, writeCmd(blk, dev, lba, flush))
-	if err != nil || code != 0 {
+	_, stderr, code, res := e.runDevice(ctx, node, writeCmd(blk, dev, lba, flush))
+	if res != nil {
+		return tr.OutcomeUnknown, res
+	}
+	if code != 0 {
 		return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
 	}
 	return tr.OutcomeOK, nil
@@ -583,8 +655,8 @@ func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
 		}
 		v.Written[strconv.FormatUint(lba, 10)] = true
-		last, err = record(actx, e, "write", v.Name, writeArgs(lba, want, round, flush), func() (string, map[string]any) {
-			return writeBlock(ctx, node, v, blk, lba, flush)
+		last, err = recordBounded(ctx, actx, e, "write", v.Name, writeArgs(lba, want, round, flush), func(ctx context.Context) (string, map[string]any) {
+			return e.writeBlock(ctx, node, v, blk, lba, flush)
 		})
 		if err != nil {
 			return nil, err
@@ -603,13 +675,17 @@ func flushCmd(dev string) string {
 // flushDevice fsyncs v's device: ok on exit 0, unknown otherwise (a failed
 // or unanswered fsync may or may not have flushed; the product has no
 // refusal for it).
-func flushDevice(ctx context.Context, node runner, v *opVolume) (string, map[string]any) {
+func (e opEnv) flushDevice(ctx context.Context, node runner, v *opVolume) (string, map[string]any) {
 	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
 	if why != "" {
 		return fail(why)
 	}
-	_, stderr, code, err := node.RunRoot(ctx, flushCmd(dev))
-	if err != nil || code != 0 {
+	_, stderr, code, res := e.runDevice(ctx, node, flushCmd(dev))
+	if res != nil {
+		res["device"] = dev
+		return tr.OutcomeUnknown, res
+	}
+	if code != 0 {
 		return fail(fmt.Sprintf("fsync exit %d: %s", code, firstLine(stderr)))
 	}
 	return tr.OutcomeOK, map[string]any{"device": dev}
@@ -623,8 +699,8 @@ func v3OpFlush(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 	if err != nil {
 		return nil, err
 	}
-	return record(actx, e, "flush", v.Name, map[string]any{}, func() (string, map[string]any) {
-		return flushDevice(ctx, node, v)
+	return recordBounded(ctx, actx, e, "flush", v.Name, map[string]any{}, func(ctx context.Context) (string, map[string]any) {
+		return e.flushDevice(ctx, node, v)
 	})
 }
 
@@ -647,14 +723,17 @@ func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	}
 	var last map[string]string
 	for _, lba := range lbas {
-		last, err = record(actx, e, "read", v.Name, map[string]any{"lba": lba}, func() (string, map[string]any) {
+		last, err = recordBounded(ctx, actx, e, "read", v.Name, map[string]any{"lba": lba}, func(ctx context.Context) (string, map[string]any) {
 			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
 			if why != "" {
 				return fail(why)
 			}
-			stdout, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba))))
+			stdout, stderr, code, res := e.runDevice(ctx, node, readCmd(dev, lba))
+			if res != nil {
+				return tr.OutcomeUnknown, res
+			}
 			sum := strings.TrimSpace(stdout)
-			if err != nil || code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
+			if code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
 				return fail(fmt.Sprintf("read exit %d: %s", code, firstLine(stderr)))
 			}
 			return tr.OutcomeOK, map[string]any{"sha256": sum}
@@ -664,6 +743,11 @@ func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		}
 	}
 	return last, nil
+}
+
+// readCmd reads one block of the device and prints its sha256.
+func readCmd(dev string, lba uint64) string {
+	return fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba)))
 }
 
 // handOver runs the planned stop of the holder: disconnect the guest, detach
@@ -698,11 +782,14 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string
 	}
 	v.PID, v.PIDStart = "", ""
 	ack := regexp.MustCompile(fmt.Sprintf(`(?m)^recorded ACK: r1@%d HEAD generation (\d+)\r?$`, v.Epoch))
-	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(500 * time.Millisecond) {
+	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); {
 		out, _, c, e2 := e.workspace(ctx, node, v.Name, "show")
 		if m := ack.FindStringSubmatch(out); e2 == nil && c == 0 && m != nil {
 			res["ack_gen"] = m[1] // recorded, not compared
 			return res, ""
+		}
+		if !pause(ctx, 500*time.Millisecond) {
+			break
 		}
 	}
 	return res, fmt.Sprintf("no recorded ACK of r1@%d", v.Epoch)
@@ -721,7 +808,7 @@ func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, err
 	}
 	defer saveVolume(actx, v)
-	return record(actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func() (string, map[string]any) {
+	return recordBounded(ctx, actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
 		res, why := e.handOver(ctx, node, v, wsStop)
 		if why != "" {
 			res["detail"] = why
@@ -747,7 +834,7 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	dst := v.Hosts[to]
 	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
 	defer saveVolume(actx, v)
-	return record(actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func() (string, map[string]any) {
+	return recordBounded(ctx, actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func(ctx context.Context) (string, map[string]any) {
 		res, why := e.handOver(ctx, node, v, wsMove)
 		if why != "" {
 			res["detail"] = "stop: " + why
@@ -786,6 +873,9 @@ func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	if err != nil {
 		return nil, err
 	}
+	// An observation has no outcome; its runner deadline ends its commands.
+	ctx, cancel := context.WithTimeout(ctx, e.deadline)
+	defer cancel()
 	res := map[string]any{}
 	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
 		shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))

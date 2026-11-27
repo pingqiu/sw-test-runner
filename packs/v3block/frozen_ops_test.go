@@ -204,3 +204,24 @@ func (e opEnv) deleteVolumeFrozen(ctx context.Context, node runner, v *opVolume,
 		}
 	}
 }
+
+// record is the unbounded record() the frozen handlers called.
+func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func() (string, map[string]any)) (map[string]string, error) {
+	if e.expect != "" {
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["expect"] = e.expect
+	}
+	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: e.client, Op: opIDs[verb], Verb: verb, Volume: vol, Args: args})
+	if err != nil {
+		return nil, err
+	}
+	outcome, result := do()
+	if err := actx.History.Complete(seq, outcome, result); err != nil {
+		return nil, err
+	}
+	actx.Log("  v3_op_%s(%s): %s", verb, vol, outcome)
+	return map[string]string{"value": outcome}, nil
+}
+

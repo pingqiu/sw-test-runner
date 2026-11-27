@@ -129,7 +129,7 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 	}
 	// The deadline: kill the session unless it finished meanwhile; what
 	// survives the kill is abandoned.
-	kill := fmt.Sprintf(": runner-io kill %s %s; if [ -e %s ]; then echo done; exit 0; fi; kill -KILL -- -%s 2>/dev/null; sleep 1; for q in $(pgrep -g %s 2>/dev/null); do %s; done; echo killed",
+	kill := fmt.Sprintf(": runner-io kill %s %s; if [ -e %s ]; then echo done; exit 0; fi; env kill -KILL -- -%s 2>/dev/null; sleep 1; for q in $(pgrep -g %s 2>/dev/null); do %s; done; echo killed",
 		q(d), pid, q(d+"/rc"), pid, pid, procStartShell("left", "$q"))
 	o, _, _, kerr := short(kill)
 	if kerr == nil && strings.TrimSpace(o) == "done" {

@@ -127,14 +127,30 @@
   ],
   "exceptions": [
     {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
-    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba", "runner_deadline_seconds": 150},
-    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each", "runner_deadline_seconds": 150},
-    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN", "runner_deadline_seconds": 150},
+    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
+    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
+    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
     {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "runner_deadline_seconds": 300},
     {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "runner_deadline_seconds": 360},
     {"action": "v3_op_observe", "why": "an observation, not an operation: it writes an observe record with no outcome, and reading the answers into comparable values (HEAD and its snapshot names, the authority lines, the filer listings) is code by the platform ruling; its listings also depend on the runner's record (the layout id)", "runner_deadline_seconds": 120},
     {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit", "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20}},
     {"action": "v3_op_restart", "why": "a fault's repair: restarts the killed process with the command line it ran, recorded in the ledger, and waits for readiness as attach does", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
-  ]
+  ],
+  "guest": {
+    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default.",
+    "device_io_runner_deadline_seconds": 120,
+    "device_io_runner_deadline_about": "The RUNNER's own bound on one read, write or flush through the kernel block device, not a product bound. Under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at this deadline and records the abandoned child by pid and start time. It lies above fast_io_fail_tmo of every connect variant.",
+    "connect": {
+      "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
+      "select_var": "guest_connect_variant",
+      "default": {"name": "plain", "evidence": true,
+        "cite": "the product's own connects carry no timeout option: core/csi/linux_util.go:318 (nvme connect -t -a -s -n), docs/standalone-deployment.md:408; only this connect's results count as release evidence"},
+      "variants": [
+        {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
+         "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
+         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."}
+      ]
+    }
+  }
 }

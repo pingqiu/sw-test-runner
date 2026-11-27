@@ -31,7 +31,7 @@ var genHandlers = map[string]tr.ActionHandlerFunc{
 // genRunner executes through the block handlers (read when called, so a
 // test's installed handlers count).
 func genRunner(name, node string, m *blockModel) randomrun.Runner {
-	return randomrun.Runner{Name: name, Node: node, Driver: m, Handlers: genHandlers}
+	return randomrun.Runner{Name: name, Node: node, Driver: m, Handlers: genHandlers, Header: guestHeader}
 }
 
 // genExec runs one proposal through its handler (a write one lba per call);
@@ -67,4 +67,17 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, err
 	}
 	return genRunner("v3_gen_run", act.Node, g.m).Run(ctx, actx, g.Generator, func(k string) string { return opParam(act, actx, k) })
+}
+
+// guestHeader names a declared guest connect variant in the run's header,
+// "guest connect variant: <values>": its results never stand in for the
+// plain connect's. The plain connect (the product's, the only release
+// evidence) adds nothing, so a plain run's header is unchanged; every
+// attach records the connect in effect either way.
+func guestHeader(get func(string) string) (map[string]any, error) {
+	c, err := selectConnect(get(guest.Connect.SelectVar))
+	if err != nil || c.Options == "" {
+		return nil, err
+	}
+	return map[string]any{"guest_connect": c.Label}, nil
 }

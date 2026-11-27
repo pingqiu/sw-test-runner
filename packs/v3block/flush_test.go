@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 const oneDevice = "ctrl nvme3\nns nvme3c3n1\nend\n"
@@ -63,7 +64,7 @@ func TestUnflushedWriteIsRecordedAsSuch(t *testing.T) {
 	v, _, e := testVolume()
 	f := (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("dd if=", ok(""))
 	out, err := record(actx, e, "write", v.Name, writeArgs(3, "abc", "g1", false), func() (string, map[string]any) {
-		return writeBlock(context.Background(), f, v, "/r/.block-v1-3", 3, false)
+		return e.writeBlock(context.Background(), &declared.SimHost{Inner: f}, v, "/r/.block-v1-3", 3, false)
 	})
 	if err != nil || out["value"] != tr.OutcomeOK {
 		t.Fatalf("%v %v", out, err)
@@ -81,9 +82,9 @@ func TestUnflushedWriteIsRecordedAsSuch(t *testing.T) {
 // whose fsync fails, or whose device cannot be established, is unknown, never ok.
 func TestFlushOutcome(t *testing.T) {
 	ctx := context.Background()
-	v, _, _ := testVolume()
+	v, _, e := testVolume()
 	f := (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("os.fsync", ok(""))
-	if out, res := flushDevice(ctx, f, v); out != tr.OutcomeOK || res["device"] != "/dev/nvme3n1" {
+	if out, res := e.flushDevice(ctx, &declared.SimHost{Inner: f}, v); out != tr.OutcomeOK || res["device"] != "/dev/nvme3n1" {
 		t.Fatalf("good flush: %s %v", out, res)
 	}
 	if !f.issued(flushCmd("/dev/nvme3n1")) {
@@ -93,7 +94,7 @@ func TestFlushOutcome(t *testing.T) {
 		"fsync fails": (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("os.fsync", fakeAnswer{errOut: "OSError: [Errno 5] Input/output error", code: 1}),
 		"no device":   (&fakeNode{}).on("subsysnqn", fakeAnswer{errOut: "boom", code: 3}),
 	} {
-		if out, res := flushDevice(ctx, n, v); out != tr.OutcomeUnknown || res["detail"] == "" {
+		if out, res := e.flushDevice(ctx, &declared.SimHost{Inner: n}, v); out != tr.OutcomeUnknown || res["detail"] == "" {
 			t.Errorf("%s: %s %v; want unknown", name, out, res)
 		}
 	}
