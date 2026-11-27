@@ -107,7 +107,12 @@ const oneNS = "ctrl nvme3\nns nvme3c3n1\nend\n"
 
 func deviceSetup(t *testing.T, n Runner, sub *subject) (*Executor, *tr.ActionContext, string) {
 	t.Helper()
-	f, err := Parse([]byte(deviceDesc))
+	return deviceSetupDesc(t, deviceDesc, n, sub)
+}
+
+func deviceSetupDesc(t *testing.T, desc string, n Runner, sub *subject) (*Executor, *tr.ActionContext, string) {
+	t.Helper()
+	f, err := Parse([]byte(desc))
 	if err != nil {
 		t.Fatal(err)
 	}

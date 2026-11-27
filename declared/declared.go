@@ -181,6 +181,14 @@ type Action struct {
 	// OnInvokeSet updates a subject's field just before each invoke:
 	// "<subject param>.<field>" -> template.
 	OnInvokeSet map[string]string `json:"on_invoke_set,omitempty"`
+	// Kind "process" (process.go).
+	Process *ProcessStep `json:"process,omitempty"`
+	// OnOutcomeSet updates subjects' fields after the operation completed
+	// with that outcome: outcome -> "<subject param>.<field>" -> template.
+	OnOutcomeSet map[string]map[string]string `json:"on_outcome_set,omitempty"`
+	// Coded hands one case of the action to a Go handler the description
+	// lists as an exception.
+	Coded *Coded `json:"coded,omitempty"`
 }
 
 // Param is one parameter of the step. Kind "subject" loads the subject it
@@ -441,6 +449,17 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[x.Action] = true
 	}
+	for _, a := range f.Actions {
+		if c := a.Coded; c != nil {
+			found := false
+			for _, x := range f.Exceptions {
+				found = found || x.Action == c.Handler
+			}
+			if !found {
+				return nil, fmt.Errorf("actions: %s: coded handler %s is not an exception", a.Action, c.Handler)
+			}
+		}
+	}
 	for _, x := range f.RunnerSetup {
 		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
 			return nil, fmt.Errorf("actions: runner setup %q needs its action and why", x.Action)
@@ -460,15 +479,24 @@ func (a *Action) check(keys, run map[string]bool) error {
 	if a.RunsOn != "step_node" {
 		return fmt.Errorf("runs_on %q (want step_node)", a.RunsOn)
 	}
-	stepKind := a.Kind == "device"
+	stepKind := a.Kind == "device" || a.Kind == "process"
 	if a.Kind != "" && a.Kind != "observe" && !stepKind {
 		return fmt.Errorf("kind %q", a.Kind)
 	}
 	if len(a.Variants) == 0 && a.Kind == "" {
 		return errors.New("no variant")
 	}
-	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil || len(a.OnInvokeSet) != 0) {
-		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io and on_invoke_set belong to the step kinds")
+	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil ||
+		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
+		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and coded belong to the step kinds")
+	}
+	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
+		return errors.New("process, on_outcome_set and coded belong to process actions")
+	}
+	for o := range a.OnOutcomeSet {
+		if o != tr.OutcomeOK && o != tr.OutcomeUnknown {
+			return fmt.Errorf("on_outcome_set %q: only ok and unknown change state (a refusal changes nothing)", o)
+		}
 	}
 	plain, subjects, ints, lists := map[string]bool{"variant": true}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for k := range keys {
@@ -485,6 +513,11 @@ func (a *Action) check(keys, run map[string]bool) error {
 	for _, p := range a.Params {
 		switch p.Kind {
 		case "subject":
+			subjects[p.Name] = true
+		case "process":
+			if a.Kind != "process" {
+				return fmt.Errorf("param %s: a process param belongs to a process action", p.Name)
+			}
 			subjects[p.Name] = true
 		case "bool":
 			if p.Default != "" && p.Default != "true" && p.Default != "false" {
@@ -547,6 +580,37 @@ func (a *Action) check(keys, run map[string]bool) error {
 	if stepKind {
 		if err := checkDerived(a.Derived, base); err != nil {
 			return err
+		}
+		for o, sets := range a.OnOutcomeSet {
+			for k, t := range sets {
+				if i := strings.IndexByte(k, '.'); i <= 0 || !subjects[k[:i]] {
+					return fmt.Errorf("on_outcome_set %s %q: not <subject>.<field>", o, k)
+				}
+				if err := base(t); err != nil {
+					return err
+				}
+			}
+		}
+		if c := a.Coded; c != nil {
+			if !plain[c.Param] || c.Handler == "" || strings.TrimSpace(c.Why) == "" {
+				return errors.New("coded: a param of the action, a handler and why")
+			}
+		}
+		if a.Kind == "process" {
+			for k, t := range a.OnInvokeSet {
+				if i := strings.IndexByte(k, '.'); i <= 0 || !subjects[k[:i]] {
+					return fmt.Errorf("on_invoke_set %q: not <subject>.<field>", k)
+				}
+				if err := base(t); err != nil {
+					return err
+				}
+			}
+			for _, v := range a.Record.Args {
+				if err := base(v.Template); err != nil {
+					return err
+				}
+			}
+			return a.checkProcess(defined, subjects, ints)
 		}
 		return a.checkDevice(defined, subjects, lists)
 	}
@@ -703,6 +767,11 @@ type Executor struct {
 	Values func(actx *tr.ActionContext, act tr.Action) (map[string]string, error)
 	// OpDeadline, when set, replaces a step kind's runner deadline (tests).
 	OpDeadline func(declared time.Duration) time.Duration
+	// Process resolves a process param: the process's record as a subject,
+	// or why the runner knows no such process (the operation is refused).
+	Process func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node Runner, name string) (Subject, string)
+	// Coded is the product's Go handler an action's Coded names.
+	Coded func(name string) (tr.ActionHandlerFunc, bool)
 }
 
 // Handlers returns one handler per declared action, by its name.
@@ -735,6 +804,9 @@ type scope struct {
 	subjects map[string]Subject
 	derived  map[string]Derived
 	params   map[string]string // the step's own params
+	// unresolved: process params the product could not resolve, and why.
+	unresolved map[string]string
+	procName   string
 }
 
 func (s *scope) get(n string) (string, error) {
@@ -893,6 +965,17 @@ func andList(ns []string) string {
 
 func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Action, a *Action) (map[string]string, error) {
 	name := a.Action
+	if c := a.Coded; c != nil && act.Params[c.Param] == c.Equals {
+		var h tr.ActionHandlerFunc
+		ok := false
+		if x.Coded != nil {
+			h, ok = x.Coded(c.Handler)
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: the product has no handler %s", name, c.Handler)
+		}
+		return h(ctx, actx, act)
+	}
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
 	}
@@ -946,6 +1029,23 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 				n = def
 			}
 			s.vals[p.Name] = strconv.Itoa(n)
+		case "process":
+			v := paramValue(act, actx, p)
+			s.vals[p.Name] = v
+			if x.Process == nil {
+				return nil, fmt.Errorf("%s: the product resolves no process", name)
+			}
+			pctx, cancel := context.WithTimeout(ctx, x.opDeadline(s, a))
+			sub, why := x.Process(pctx, actx, act, node, v)
+			cancel()
+			if why != "" {
+				if s.unresolved == nil {
+					s.unresolved = map[string]string{}
+				}
+				s.unresolved[p.Name] = why
+				continue
+			}
+			s.subjects[p.Name] = sub
 		case "enum":
 			v := paramValue(act, actx, p)
 			if v == "" {
@@ -1007,11 +1107,15 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Volume: vol})
 		return x.observe(s, actx, a, vol)
 	}
-	if a.Kind == "device" {
+	if a.Kind == "device" || a.Kind == "process" {
 		if err := x.runValues(s, actx, act); err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		s.derived = a.Derived
+		if a.Kind == "process" {
+			s.procName = a.Process.Name
+			return x.processStep(s, actx, act, a, expect)
+		}
 		return x.device(s, actx, act, a, expect)
 	}
 	var v *Variant
