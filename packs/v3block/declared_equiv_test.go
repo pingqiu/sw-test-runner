@@ -497,3 +497,37 @@ func toAny(ss []string) []any {
 	}
 	return out
 }
+
+// The delete of a source whose snapshot has a restore target is refused
+// with a documented effect. The deliberate change since the frozen handler:
+// its completion also carries the effect, exactly as outcomes.json states
+// it. Everything else is the frozen handler's.
+func TestDeclaredDeleteRefusedEffect(t *testing.T) {
+	_, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", "")
+	if eff == nil {
+		t.Fatal("the row has no effect")
+	}
+	want := eff.record()
+	b, _ := json.Marshal(want)
+	var asRead map[string]any
+	_ = json.Unmarshal(b, &asRead)
+	cases := []eqCase{
+		{name: "dependents after the reservation", params: map[string]string{"volume": "v1"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
+		{name: "a negative", params: map[string]string{"volume": "v1", "expect": "refused"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
+	}
+	checkEquivalentAs(t, "v3_op_delete", v3OpDeleteFrozen, cases, func(c eqCase, r *eqRun) {
+		for i := range r.records {
+			if r.records[i].Kind == tr.HistoryComplete {
+				r.records[i].Result["effect"] = asRead
+			}
+		}
+	})
+	r := runEq(t, blockActions.Handler("v3_op_delete"), cases[0], true)
+	if r.ret["value"] != tr.OutcomeRefusedEffect || r.records[1].Outcome != tr.OutcomeRefusedEffect {
+		t.Fatalf("%v %+v", r.ret, r.records)
+	}
+	to, _ := asRead["to"].(map[string]any)
+	if to["exit"] != float64(1) || to["stderr_contains"] != "workspace show: workspace show: workspace: volume is being deleted" {
+		t.Fatalf("effect %v", asRead)
+	}
+}
