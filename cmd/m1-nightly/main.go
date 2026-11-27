@@ -65,11 +65,12 @@ func argv(swblock, scenario, results string, nightly uint64, r randomrun.NightRu
 	return append(a, scenario)
 }
 
-// findCoverage returns the first gen-coverage.json under dir, or "".
-func findCoverage(dir string) string {
+// findFile returns the first file called name under dir, or "": the run's
+// gen-coverage.json and its artifacts/checks.json.
+func findFile(dir, name string) string {
 	found := ""
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && d.Name() == "gen-coverage.json" && found == "" {
+		if err == nil && !d.IsDir() && d.Name() == name && found == "" {
 			found = p
 			return fs.SkipAll
 		}
@@ -139,7 +140,8 @@ func main() {
 				r.Error = err.Error()
 			}
 			r.Bundle = dir
-			r.Coverage = findCoverage(dir)
+			r.Coverage = findFile(dir, "gen-coverage.json")
+			r.Checks = findFile(dir, "checks.json")
 		}(&runs[i])
 	}
 	wg.Wait()

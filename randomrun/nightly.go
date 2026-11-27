@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 )
 
 // splitmix64 is a fixed, well-mixed function: run i's seed is
@@ -46,8 +48,15 @@ type NightRun struct {
 	Exit     int    `json:"exit"`
 	Bundle   string `json:"bundle"`
 	Coverage string `json:"coverage"` // the run's gen-coverage.json, if found
+	Checks   string `json:"checks"`   // the run's checks.json (artifacts/), if found
 	Verdict  string `json:"verdict"`  // PASS only on exit 0 with a coverage file
 	Error    string `json:"error,omitempty"`
+	// Filled by Judge: a fault run (its coverage has fault cells), and the n
+	// of its C6 finding "unknowns resolved: <n>" (0 when absent; ChecksNote
+	// says why).
+	Faults           bool   `json:"faults"`
+	UnknownsResolved int    `json:"unknowns_resolved"`
+	ChecksNote       string `json:"checks_note,omitempty"`
 }
 
 // NightReport is the night's verdict and the union coverage.
@@ -57,21 +66,58 @@ type NightReport struct {
 	UnionCells        map[string]int `json:"union_cells"`
 	UnionNeverReached []string       `json:"union_cells_never_reached"`
 	Verdict           string         `json:"verdict"`
+	Findings          []string       `json:"findings,omitempty"` // night-level reasons for FAIL
+}
+
+// resolvedPrefix is the C6 finding that counts the unknowns resolved by
+// observation at a healthy point.
+const resolvedPrefix = "unknowns resolved: "
+
+// unknownsResolved reads n from a checks.json's C6 finding
+// "unknowns resolved: <n>".
+func unknownsResolved(path string) (int, string) {
+	if path == "" {
+		return 0, "no checks.json in the bundle"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err.Error()
+	}
+	var checks map[string]struct {
+		Findings []string `json:"findings"`
+	}
+	if err := json.Unmarshal(b, &checks); err != nil {
+		return 0, "checks.json does not parse"
+	}
+	for _, f := range checks["C6"].Findings {
+		if s, ok := strings.CutPrefix(f, resolvedPrefix); ok {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 0 {
+				return 0, fmt.Sprintf("C6 finding %q", f)
+			}
+			return n, ""
+		}
+	}
+	return 0, "C6 has no finding \"" + resolvedPrefix + "<n>\""
 }
 
 // Judge fills each run's verdict and the night's: a run PASSes only with
 // exit 0 and a readable coverage file; the night PASSes only if every run
 // does. Union coverage sums the runs' cells; a cell is never reached in the
-// union only if no run reached it.
+// union only if no run reached it. A night with fault runs also needs one run
+// whose C6 resolved at least one unknown ("unknowns resolved: <n>", n > 0):
+// otherwise the faults exercised nothing C6 can judge, and the night FAILs.
 func Judge(nightly uint64, runs []NightRun) NightReport {
 	rep := NightReport{NightlySeed: nightly, UnionCells: map[string]int{}, Verdict: "PASS"}
 	never := map[string]int{} // cell -> number of runs that never reached it
 	for _, r := range runs {
 		r.Verdict = "FAIL"
 		var cov struct {
-			Cells map[string]int `json:"cells"`
-			Never []string       `json:"cells_never_reached"`
+			Cells  map[string]int `json:"cells"`
+			Never  []string       `json:"cells_never_reached"`
+			Faults map[string]int `json:"fault_cells"`
 		}
+		r.UnknownsResolved, r.ChecksNote = unknownsResolved(r.Checks)
 		b, err := os.ReadFile(r.Coverage)
 		switch {
 		case r.Coverage == "":
@@ -87,6 +133,7 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 			for _, c := range cov.Never {
 				never[c]++
 			}
+			r.Faults = cov.Faults != nil
 			if r.Exit == 0 {
 				r.Verdict = "PASS"
 			} else if r.Error == "" {
@@ -106,6 +153,19 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 		}
 	}
 	slices.Sort(rep.UnionNeverReached)
+	faults, resolved := 0, 0
+	for _, r := range rep.Runs {
+		if r.Faults {
+			faults++
+		}
+		if r.UnknownsResolved > 0 {
+			resolved++
+		}
+	}
+	if faults > 0 && resolved == 0 {
+		rep.Verdict = "FAIL"
+		rep.Findings = append(rep.Findings, fmt.Sprintf("%d fault runs, and no run's C6 resolved an unknown (%s<n> with n > 0)", faults, resolvedPrefix))
+	}
 	if len(runs) == 0 {
 		rep.Verdict = "FAIL"
 	}

@@ -63,3 +63,51 @@ func TestNightPassesOnlyIfEveryRunPasses(t *testing.T) {
 		}
 	}
 }
+
+func writeJSON(t *testing.T, name string, v any) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	b, _ := json.Marshal(v)
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func checksFile(t *testing.T, c6 ...string) string {
+	return writeJSON(t, "checks.json", map[string]any{"C0": map[string]any{"findings": []string{}, "verdict": "PASS"},
+		"C6": map[string]any{"findings": c6, "verdict": "PASS"}})
+}
+
+// A night with fault runs needs one run whose C6 resolved an unknown.
+func TestNightWithFaultRunsNeedsAnUnknownResolved(t *testing.T) {
+	plain := coverageFile(t, map[string]int{"write|up": 5}, nil)
+	fault := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5}, "fault_cells": map[string]int{"kill|p0": 1}})
+	none, two := checksFile(t, "unknowns resolved: 0"), checksFile(t, "unknown v1 seq 9 resolved", "unknowns resolved: 2")
+
+	rep := Judge(7, []NightRun{{Exit: 0, Coverage: fault, Checks: none}, {Index: 1, Exit: 0, Coverage: fault, Checks: two}})
+	if rep.Verdict != "PASS" || !rep.Runs[0].Faults || rep.Runs[0].UnknownsResolved != 0 || rep.Runs[1].UnknownsResolved != 2 {
+		t.Fatalf("one fault run resolved two: %+v", rep)
+	}
+	// Red controls: fault runs, and no run resolved anything.
+	for name, runs := range map[string][]NightRun{
+		"every fault run resolved 0":    {{Exit: 0, Coverage: fault, Checks: none}, {Exit: 0, Coverage: plain, Checks: none}},
+		"no checks.json":                {{Exit: 0, Coverage: fault}},
+		"C6 without the count":          {{Exit: 0, Coverage: fault, Checks: checksFile(t, "unknown v1 seq 9 resolved")}},
+		"a count that is not a number":  {{Exit: 0, Coverage: fault, Checks: checksFile(t, "unknowns resolved: two")}},
+		"a checks.json that is no JSON": {{Exit: 0, Coverage: fault, Checks: writeJSON(t, "checks.json", "x")}},
+	} {
+		r := Judge(7, runs)
+		if r.Verdict != "FAIL" || len(r.Findings) != 1 {
+			t.Errorf("%s: night %s %v", name, r.Verdict, r.Findings)
+		}
+	}
+	// A night without fault runs does not need one.
+	if r := Judge(7, []NightRun{{Exit: 0, Coverage: plain, Checks: none}}); r.Verdict != "PASS" || r.Runs[0].Faults {
+		t.Fatalf("a night without faults: %+v", r)
+	}
+	// The count is read whatever the run's kind; a plain run's count also satisfies a night with fault runs.
+	if r := Judge(7, []NightRun{{Exit: 0, Coverage: fault, Checks: none}, {Exit: 0, Coverage: plain, Checks: two}}); r.Verdict != "PASS" {
+		t.Fatalf("%+v", r)
+	}
+}
