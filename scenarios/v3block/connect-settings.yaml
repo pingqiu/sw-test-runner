@@ -162,11 +162,14 @@ phases:
         cmd: |
           set -eu
           q="{{ nqn_prefix }}c1"; dev=""
-          for c in /sys/class/nvme/nvme*; do [ "$(cat $c/subsysnqn 2>/dev/null)" = "$q" ] || continue; for n in $c/nvme*n*; do [ -e "$n" ] && dev=/dev/$(basename $n); done; done
-          [ -n "$dev" ] || { echo "no device for $q" >&2; exit 2; }
+          # The namespace's block device only (nvmeXnY), never a per-path node
+          # (nvmeXcYnZ has no /dev entry: writing there would create a file).
+          for c in /sys/class/nvme/nvme*; do [ "$(cat $c/subsysnqn 2>/dev/null)" = "$q" ] || continue
+            for n in $c/nvme*; do b=$(basename $n); case "$b" in nvme[0-9]*n[0-9]*) case "$b" in *c[0-9]*) continue ;; esac; [ -b "/dev/$b" ] && dev=/dev/$b ;; esac; done; done
+          [ -n "$dev" ] && [ -b "$dev" ] || { echo "no block device for $q" >&2; exit 2; }
           f="{{ work }}/positive"; rm -f "$f".*
           export dev f
-          setsid sh -c 's=$(date +%s.%N); head -c 4096 /dev/urandom | dd of=$dev bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none 2>"$f.err"; e=$?; echo "$s $(date +%s.%N) $e" > "$f.done"' </dev/null >/dev/null 2>&1 &
+          setsid sh -c '[ -b "$dev" ] || exit 2; s=$(date +%s.%N); head -c 4096 /dev/urandom | dd of=$dev bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none 2>"$f.err"; e=$?; echo "$s $(date +%s.%N) $e" > "$f.done"' </dev/null >/dev/null 2>&1 &
           echo "started on $dev"
       - action: sleep
         node: host
@@ -195,11 +198,14 @@ phases:
         cmd: |
           set -eu
           q="{{ nqn_prefix }}c1"; dev=""
-          for c in /sys/class/nvme/nvme*; do [ "$(cat $c/subsysnqn 2>/dev/null)" = "$q" ] || continue; for n in $c/nvme*n*; do [ -e "$n" ] && dev=/dev/$(basename $n); done; done
-          [ -n "$dev" ] || { echo "no device for $q" >&2; exit 2; }
+          # The namespace's block device only (nvmeXnY), never a per-path node
+          # (nvmeXcYnZ has no /dev entry: writing there would create a file).
+          for c in /sys/class/nvme/nvme*; do [ "$(cat $c/subsysnqn 2>/dev/null)" = "$q" ] || continue
+            for n in $c/nvme*; do b=$(basename $n); case "$b" in nvme[0-9]*n[0-9]*) case "$b" in *c[0-9]*) continue ;; esac; [ -b "/dev/$b" ] && dev=/dev/$b ;; esac; done; done
+          [ -n "$dev" ] && [ -b "$dev" ] || { echo "no block device for $q" >&2; exit 2; }
           f="{{ work }}/negative"; rm -f "$f".*
           export dev f
-          setsid sh -c 's=$(date +%s.%N); head -c 4096 /dev/urandom | dd of=$dev bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none 2>"$f.err"; e=$?; echo "$s $(date +%s.%N) $e" > "$f.done"' </dev/null >/dev/null 2>&1 &
+          setsid sh -c '[ -b "$dev" ] || exit 2; s=$(date +%s.%N); head -c 4096 /dev/urandom | dd of=$dev bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none 2>"$f.err"; e=$?; echo "$s $(date +%s.%N) $e" > "$f.done"' </dev/null >/dev/null 2>&1 &
           echo "started on $dev"
       - action: exec
         node: host
