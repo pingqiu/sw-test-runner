@@ -47,14 +47,16 @@ import (
 // lbas read first, a pair window before a source or target leaves, the
 // lease horizon learnt from observations, and a coverage tail before the
 // sweep; a negative is observed on every volume it names.
-const GenVersion = "m1-gen/5"
+//
+// m1-gen/6: the source-delete negative carries retry_horizon.
+const GenVersion = "m1-gen/6"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
-// m2-gen/4: as m1-gen/5.
-const GenVersionFaults = "m2-gen/4"
+// m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6.
+const GenVersionFaults = "m2-gen/5"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -444,8 +446,13 @@ func (m *blockModel) Negatives() []GenOp {
 		case stStopped:
 			// Within the lease horizon the horizon refuses first, not this
 			// limit: probed only once an observation shows the lease expired.
+			// retry_horizon: the declared delete retries while the answer is
+			// the lease-horizon refusal before persistence (a plain refusal,
+			// nothing changed) and returns the first other answer, the one
+			// judged against this limit. Never on "delete while attached",
+			// whose expected refusal is the horizon itself.
 			if len(v.targets) > 0 && v.leaseLapsed {
-				add(op("v3_op_delete", n), limDeleteSource)
+				add(op("v3_op_delete", n, "retry_horizon", "true"), limDeleteSource)
 			}
 		}
 		// Snapshots with a live restore target: their delete is refused, through

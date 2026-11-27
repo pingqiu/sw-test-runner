@@ -1380,3 +1380,33 @@ func TestModelLearnsARefusedEffect(t *testing.T) {
 		t.Errorf("an unmodelled refused_effect left the volume %q", g.vols["g2"].state)
 	}
 }
+
+// retry_horizon rides on the source-delete negative only: the declared
+// delete retries past the lease horizon so the limit is what answers.
+// "Delete while attached" expects the horizon's refusal and never has it.
+func TestRetryHorizonOnlyOnTheSourceDeleteNegative(t *testing.T) {
+	src, attached := 0, 0
+	for seed := uint64(1); seed <= 10; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 1500, Pool: pool(40), Blocks: 8, Negative: 0.4})
+		for _, o := range ops {
+			has := o.Params["retry_horizon"] == "true"
+			switch {
+			case o.Negative == limDeleteSource:
+				src++
+				if !has {
+					t.Fatalf("seed %d op %d: source delete without retry_horizon: %v", seed, o.No, o.Params)
+				}
+			case o.Negative == limDeleteAttached:
+				attached++
+				fallthrough
+			default:
+				if _, ok := o.Params["retry_horizon"]; ok {
+					t.Fatalf("seed %d op %d: retry_horizon on %s (%q)", seed, o.No, o.Action, o.Negative)
+				}
+			}
+		}
+	}
+	if src == 0 || attached == 0 {
+		t.Fatalf("%d source deletes, %d attached deletes", src, attached)
+	}
+}
