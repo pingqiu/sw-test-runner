@@ -53,8 +53,9 @@ import (
 // holder the runner killed is offered nothing until it serves again.
 // m1-gen/8 (host runs 6): every restore pair gets its window: the target's
 // first attach is forced, neither side leaves before the window, a lost
-// side is noted in coverage.
-const GenVersion = "m1-gen/8"
+// side is noted in coverage. m1-gen/9: a volume out of the run is observed
+// at the end, and read if it still serves.
+const GenVersion = "m1-gen/9"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
@@ -62,8 +63,8 @@ const GenVersion = "m1-gen/8"
 // kill of the master; it also learns as m1-gen/4.
 // m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6. m2-gen/6: a master outage
 // with nothing serving is skipped. m2-gen/7: as m1-gen/7. m2-gen/8: as
-// m1-gen/8.
-const GenVersionFaults = "m2-gen/8"
+// m1-gen/8. m2-gen/9: as m1-gen/9.
+const GenVersionFaults = "m2-gen/9"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -216,6 +217,9 @@ type genVol struct {
 	// every leaseObserveEvery drawn operations until it lapses).
 	leaseLapsed bool
 	leaseObsAt  int
+	// obsServing: its latest observation shows it still serving (a granted
+	// lease, HEAD neither detached nor deleted).
+	obsServing bool
 }
 
 // leaseObserveEvery is how many drawn operations apart a stopped volume
@@ -248,6 +252,12 @@ type tailState struct {
 	observe  []string // volumes to observe next
 	deleted  []string // volumes the tail deleted
 	stoppedC string   // the stopped candidate observed for its lease
+	// The volumes out of the run (unknown) with acknowledged content: each
+	// observed, and read when that observation shows it still serving.
+	outInit  bool
+	outVols  []string
+	outCheck string
+	outReads []GenOp
 }
 
 var _ randomrun.Model = (*blockModel)(nil)
@@ -949,7 +959,9 @@ func (m *blockModel) Sweep() []GenOp {
 				out = append(out, op("v3_op_read", n, "lbas", strings.Join(f, " ")))
 			}
 			out = append(out, m.Observe(n))
-		case stCreated, stStopped, stMoved, stReserved, stDeleted, stUnsettled:
+		case stCreated, stStopped, stMoved, stReserved, stDeleted, stUnsettled, stUnknown:
+			// A volume out of the run is observed too (always safe): it lets
+			// C6 place its unknown.
 			out = append(out, m.Observe(n))
 		}
 	}
@@ -973,11 +985,17 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 		if v := m.vols[r.Volume]; v != nil {
 			ws, _ := r.Result["workspace"].(map[string]any)
 			text, _ := ws["text"].([]any)
-			lapsed := false
+			lapsed, granted := false, false
 			for _, l := range text {
 				lapsed = lapsed || l == "lease state: expired"
+				granted = granted || l == "lease state: granted"
 			}
 			v.leaseLapsed = lapsed
+			// Still serving, as far as an observation tells: a granted lease,
+			// and a HEAD neither detached nor deleted.
+			head, _ := r.Result["head"].(map[string]any)
+			hs, _ := head["state"].(string)
+			v.obsServing = granted && hs != "detached" && hs != "deleted"
 		}
 	case "settled":
 		vol, _ := r.Result["volume"].(string)
@@ -1047,6 +1065,39 @@ func (m *blockModel) Tail() (GenOp, bool) {
 	// First the owed operations, with every pending pair window queued now
 	// (the budget is spent: no drawn operation will start the delay's end).
 	m.settlePairs(true)
+	// Out of the run: each volume taken out (unknown, a third state, or never
+	// settled) with acknowledged
+	// content is observed; if that observation shows it still serving, its
+	// content is read (read only, never written), so C1 is not left with
+	// unread blocks.
+	if !t.outInit {
+		t.outInit = true
+		for _, n := range m.order {
+			if v := m.vols[n]; (v.state == stUnknown || v.state == stUnsettled) && len(v.lbas) > 0 {
+				t.outVols = append(t.outVols, n)
+			}
+		}
+	}
+	if t.outCheck != "" {
+		v := m.vols[t.outCheck]
+		t.outCheck = ""
+		if v.obsServing {
+			t.outReads = m.readsOf(v, sortedLBAs(v.lbas), "tail")
+		}
+	}
+	if len(t.outReads) > 0 {
+		o := t.outReads[0]
+		t.outReads = t.outReads[1:]
+		return o, true
+	}
+	if len(t.outVols) > 0 {
+		n := t.outVols[0]
+		t.outVols, t.outCheck = t.outVols[1:], n
+		m.vols[n].obsServing = false
+		o := m.Observe(n)
+		o.Forced = "tail"
+		return o, true
+	}
 	for i := 0; i < len(m.due); i++ {
 		switch m.dueState(m.due[i]) {
 		case "go":
