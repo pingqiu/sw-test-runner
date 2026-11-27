@@ -29,7 +29,7 @@
       "action": "v3_op_create", "verb": "create", "op": "VolumeCreate.MarkReady", "runs_on": "step_node",
       "params": [
         {"name": "volume", "kind": "subject", "vars": true},
-        {"name": "size_bytes", "kind": "int", "default": "16777216"}
+        {"name": "size_bytes", "kind": "int", "default": "16777216", "vars": true}
       ],
       "record": {"volume": "{{volume.name}}", "args": {"size_bytes": {"template": "{{size_bytes}}", "type": "int"}}},
       "variants": [{
