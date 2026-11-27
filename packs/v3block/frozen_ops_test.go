@@ -224,4 +224,3 @@ func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]a
 	actx.Log("  v3_op_%s(%s): %s", verb, vol, outcome)
 	return map[string]string{"value": outcome}, nil
 }
-

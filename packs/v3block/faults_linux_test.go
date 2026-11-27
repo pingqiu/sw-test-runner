@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The generated kill, run by a real shell against controlled /proc contents.
@@ -46,5 +47,38 @@ func TestKillCmdSignalsOnlyTheRecordedIdentity(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (x) S 7\n"), 0o644)
 	if out, code := run(pid, "555"); code != 3 {
 		t.Errorf("short stat: %q exit %d", out, code)
+	}
+}
+
+// The unit wrapper, run by a real shell: it prints the HOLDER's pid (the
+// child running argv, not the wrapper), and writes the holder's own exit
+// status to the exit file once it exits; the holder's output goes to its log.
+func TestHolderLaunchCmdKeepsTheHoldersIdentityAndWritesItsStatus(t *testing.T) {
+	for _, status := range []string{"75", "0", "78"} {
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "a-v1.1.log")
+		argv := []string{"sh", "-c", "echo exiting status=99; sleep 0.5; exit " + status, "holder-" + status}
+		out, err := exec.Command("sh", "-c", holderLaunchCmd(argv, logPath)).Output()
+		if err != nil {
+			t.Fatalf("launch: %v", err)
+		}
+		pid := strings.TrimSpace(string(out))
+		cmd, err := os.ReadFile(filepath.Join("/proc", pid, "cmdline"))
+		if err != nil || !strings.Contains(string(cmd), "holder-"+status) || strings.Contains(string(cmd), "wait") {
+			t.Fatalf("pid %s is not the holder: %q %v", pid, cmd, err)
+		}
+		var got string
+		for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+			if b, err := os.ReadFile(logPath + ".exit"); err == nil {
+				got = string(b)
+				break
+			}
+		}
+		if f := strings.Fields(got); len(f) != 2 || f[0] != status {
+			t.Errorf("exit file %q, want status %s and a time", got, status)
+		}
+		if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "status=99") {
+			t.Errorf("the holder's output is not in its log: %q", b)
+		}
 	}
 }
