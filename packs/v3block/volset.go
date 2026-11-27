@@ -1077,14 +1077,15 @@ func (s *vsSet) headGen(ctx context.Context, node setRunner, vol string) (uint64
 	return body.Head.Gen, ""
 }
 
-// wsOutcome maps `sw-block ops workspace` exit codes: 0 ok; 1, 2, 5 refused;
-// 3 and 4 (and anything else) unknown.
+// setWsOutcome maps `sw-block ops workspace` exit codes inside v3VsMove, its
+// only caller: 0 ok, anything else unknown. The CLI's 1, 2 and 5 say that
+// one command did nothing (cmd/sw-block/workspace.go:17-22 at the commit
+// pinned in outcome.go), but v3VsMove's revoke and move --clean both come
+// after its detach --plain sealed HEAD, so the move as a whole changed
+// state (see wsRefusals in outcome.go).
 func setWsOutcome(code int) string {
-	switch code {
-	case 0:
+	if code == 0 {
 		return "ok"
-	case 1, 2, 5:
-		return "refused"
 	}
 	return "unknown"
 }

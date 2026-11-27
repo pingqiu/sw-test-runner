@@ -550,6 +550,12 @@ func TestGeneratorLearnsAnUnknownWriteInAFaultRun(t *testing.T) {
 			if o.Action == want {
 				return o
 			}
+			if o.Action == "v3_op_stop" || o.Action == "v3_op_move" {
+				// Refused changes nothing: the one volume stays serving (a
+				// stopped volume never serves again).
+				g.Learn(o, "refused")
+				continue
+			}
 			g.Learn(o, "ok")
 		}
 	}
@@ -568,6 +574,10 @@ func TestGeneratorLearnsAnUnknownWriteInAFaultRun(t *testing.T) {
 		}
 		if o.Negative == "" && o.Action != "v3_op_write" && o.Action != "v3_op_read" {
 			t.Fatalf("unexpected %s", o.Action)
+		}
+		if o.Negative != "" {
+			g.Learn(o, "refused") // a negative answered ok takes the volume out
+			continue
 		}
 		g.Learn(o, "ok")
 	}

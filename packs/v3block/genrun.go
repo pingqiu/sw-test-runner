@@ -41,6 +41,7 @@ var genHandlers = map[string]tr.ActionHandlerFunc{
 	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete, "v3_op_observe": v3OpObserve,
 	"v3_op_kill": v3OpKill, "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	"v3_op_flush": v3OpFlush,
+	"v3_op_release": v3OpRelease,
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.

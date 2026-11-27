@@ -43,12 +43,12 @@ env:
   # The name pool. The product (a standalone deployment) has no online create
   # and never reuses a deleted name, so the cluster spec declares every name
   # the run may use, up front. 300 operations against a product answering ok
-  # to every ordinary operation use at most 21 names (mean 14) over seeds
-  # 1..200 (TestM1DefaultPoolLastsTheDefaultRun); 32 leaves room for names an
+  # to every ordinary operation use at most 24 names (mean 16.9) over seeds
+  # 1..200 (TestM1DefaultPoolLastsTheDefaultRun); 48 leaves room for names an
   # unknown outcome takes out of the run. An exhausted pool is a normal end.
-  # Each name costs 10 holder ports (v3_op_spec), so 32 names fit a 1000-port
+  # Each name costs 10 holder ports (v3_op_spec), so 48 names fit a 1000-port
   # block per run.
-  gen_pool: "v01 v02 v03 v04 v05 v06 v07 v08 v09 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31 v32"
+  gen_pool: "v01 v02 v03 v04 v05 v06 v07 v08 v09 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31 v32 v33 v34 v35 v36 v37 v38 v39 v40 v41 v42 v43 v44 v45 v46 v47 v48"
   chunk_path: "/m1"
   lock_dirs_test_only: "true"
   # Every typed operation reads these as vars (work, master_port and

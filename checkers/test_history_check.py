@@ -716,6 +716,28 @@ class C5(unittest.TestCase):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))
         self.assertEqual(v['verdict'], 'UNKNOWN', v)
 
+    def test_a_stop_refused_with_detach_aborted_must_leave_the_volume_serving(self):
+        # detach_aborted: "nothing was published and serving resumed here".
+        # The observation after it must show what the one before showed: HEAD
+        # unsealed and the workspace still serving.
+        def run(after_ws=WS, after_state=''):
+            recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('stop', 'v1', {}, 'refused'), ('obs', 'v1', 4, FILES, after_ws))))
+            recs[-3]['result'] = {'detail': 'detach: detach_aborted: nothing was published and serving resumed here'}
+            recs[-2]['result']['head']['state'] = after_state
+            return hc.check(dump(recs))['C5']
+        v = run()
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
+        # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
+        for name, ws, state, part in (
+                ('revoked', dict(WS, workspace={'exit': 0, 'text': 'v1 revoking epoch 1'}), '', 'workspace'),
+                ('no live lease', dict(WS, workspace={'exit': 0, 'text': 'v1 no live lease (recorded ACK r1@1)'}), '', 'workspace'),
+                ('workspace show failing', dict(WS, workspace={'exit': 3, 'text': 'v1 serving epoch 1'}), '', 'workspace'),
+                ('HEAD sealed', WS, 'detached', 'head')):
+            v = run(ws, state)
+            self.assertEqual(v['verdict'], 'FAIL', (name, v))
+            self.assertIn('seq 4 stop v1 (ordinary stop) refused but its %s changed' % part, v['findings'][0], name)
+
     def test_an_ok_operation_between_before_and_the_refusal_voids_before(self):
         # The ok write moved the generation from 4 to 5: comparing against the
         # stale observation would blame the refusal for it.
