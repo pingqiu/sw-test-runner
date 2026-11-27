@@ -100,7 +100,7 @@ func TestR4EveryConnectBoundsControllerLoss(t *testing.T) {
 	env := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"), "R4_ARGV_LOG=" + log, "R4_SYS=" + sys, "R4_DEVDIR=" + devices}
 	for _, port := range []string{"4420", "4421"} {
 		out, err := r4Env(t, env, "connect", "our-nqn", "10.2.3.4", port, "0")
-		if err != nil || !strings.Contains(out, "--fast_io_fail_tmo=5 --ctrl-loss-tmo=60") {
+		if err != nil || !strings.Contains(out, "--ctrl-loss-tmo=180 --reconnect-delay=2") {
 			t.Fatalf("connect/settings receipt: %v %s", err, out)
 		}
 	}
@@ -110,10 +110,13 @@ func TestR4EveryConnectBoundsControllerLoss(t *testing.T) {
 			continue
 		}
 		connects++
-		for _, flag := range []string{"--fast_io_fail_tmo=5", "--ctrl-loss-tmo=60"} {
+		for _, flag := range []string{"--ctrl-loss-tmo=180", "--reconnect-delay=2"} {
 			if !strings.Contains(" "+line+" ", " "+flag+" ") {
 				t.Fatalf("connect missing %s: %s", flag, line)
 			}
+		}
+		if strings.Contains(line, "fast_io_fail") || strings.Contains(line, "fast-io-fail") {
+			t.Fatalf("fast I/O failure must remain off as documented: %s", line)
 		}
 	}
 	if connects != 2 {

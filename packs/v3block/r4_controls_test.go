@@ -140,6 +140,13 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	if !strings.Contains(body, "RestartPreventExitStatus=78") || strings.Contains(body, "[Install]") {
 		t.Fatal(body)
 	}
+	if out, err := r4Env(t, env, "unit", "test", "writer", "--", "/bin/true"); err != nil {
+		t.Fatalf("writer unit: %v %s", err, out)
+	}
+	writerBody := mustRead(t, filepath.Join(units, "r4-test-writer.service"))
+	if !strings.Contains(writerBody, "TimeoutStopSec=210s") || !strings.Contains(writerBody, "Restart=no") {
+		t.Fatal("writer must drain documented controller lifetime without restart: " + writerBody)
+	}
 	if out, err := r4Env(t, env, "start", "test", "volume"); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}

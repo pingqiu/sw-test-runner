@@ -163,7 +163,9 @@ cmd_writer_stop() {
   local tag="$1" u
   check_tag "$tag"; u=$(unit_of "$tag" writer)
   unit_active "$u" || die "writer was not running through power-off"
-  timeout 45 "$systemctl_bin" stop "$u" || die "writer stop is unknown; retained"
+  # fast_io_fail_tmo is off: allow the documented 180s controller lifetime
+  # to drain the old pending write. This is not the failover-duration sample.
+  timeout 240 "$systemctl_bin" stop "$u" || die "writer stop is unknown; retained"
   ! unit_active "$u" || die "writer is still alive; no reconnect or verify"
   echo "writer stopped after power-off"
 }
@@ -373,7 +375,9 @@ cmd_dev() {
 cmd_connect() {
   local nqn="$1" addr="$2" port="$3" secs="$4"
   timeout 30 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
-  local args=(connect -t tcp -a "$addr" -s "$port" -n "$nqn" --fast_io_fail_tmo=5 --ctrl-loss-tmo=60)
+  # Product operator-guide: Host connect settings. Fast I/O failure stays off
+  # by omitting its option, exactly as in the documented command.
+  local args=(connect -t tcp -a "$addr" -s "$port" -n "$nqn" --ctrl-loss-tmo=180 --reconnect-delay=2)
   # The action transcript records these fault-window settings in the bundle.
   { printf 'nvme'; printf ' %q' "${args[@]}"; printf '\n'; } >&2
   timeout 60 nvme "${args[@]}" >&2 || die "connect: nvme connect $addr:$port $nqn failed"
@@ -470,7 +474,7 @@ RestartSec=5s
 EOF
   sync
   if [[ "$role" == writer ]]; then
-    printf '\n# Writer is never restarted or allowed to outlive its fault window.\nRestart=no\nRuntimeMaxSec=600\n' >> "$f"
+    printf '\n# Writer is never restarted or allowed to outlive its fault window.\nRestart=no\nRuntimeMaxSec=600\nTimeoutStopSec=210s\n' >> "$f"
     sync
   fi
   "$systemctl_bin" daemon-reload

@@ -29,6 +29,17 @@ must list that old r1 as `State=healthy, Epoch=2`. Its own supporting admission
 is not completion of catch-up. No guest writes are sent between those gates.
 The existing 240-second catch-up budget decides failure, never eligibility.
 
+Host connects follow the product operator guide's Host connect settings:
+`--ctrl-loss-tmo=180 --reconnect-delay=2`, with fast I/O failure left off by
+omitting that option. Record the exact argv. A pending old-controller write
+may consequently take longer to finish; the writer unit has a 210s stop
+budget and its stop action 240s (scenario action 5m). An unknown stop still
+fails and prevents reconnect/readback. Do not infer that increasing these
+fixture stop budgets changes product failover latency or guarantees a drain.
+Measure fault-to-successor-serving independently of writer stop and record
+the raw observations and sampling overhead before replacing the guide's
+derived estimate. No measured value is supplied by this change.
+
 The original local rehearsal failed against the former manual-only contract;
 it is not relabeled as a pass. The whole sequence must pass again on the selected
 RC with primary process SIGKILL before requesting a paid run. Process restart is
