@@ -82,3 +82,49 @@ func snapshots(answers []eqAnswer) int {
 	}
 	return n
 }
+
+// The GO-bar ratio counts ATTEMPTS: every attempt that answers head_conflict
+// counts, a rerun included. One conflict, then its rerun (attempt 2 of the
+// same request) ok, then two plain snapshots: 1/4. The attempts are issued
+// as a driver issues them (the attempt param), so the count does not rest on
+// when the driver re-issues.
+func TestSnapshotHeadConflictRatioCountsEveryAttempt(t *testing.T) {
+	conflict := chunkErr("head_conflict", "storage: capture CAS not applied: storage: chunk HEAD precondition failed")
+	node := &eqNode{rules: []eqRule{{"ops chunk snapshot", []eqAnswer{conflict, {}, {}, {}}}}, n: make([]int, 1)}
+	actx, p := deadlineCtx(t, &declared.SimHost{Inner: node})
+	var logs []string
+	actx.Log = func(f string, a ...interface{}) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	actx.Bundle = &tr.RunBundle{Dir: t.TempDir()}
+	h := blockActions.Handler("v3_op_snapshot")
+	for _, c := range []struct{ name, attempt string }{{"s0", "1"}, {"s0", "2"}, {"s1", "1"}, {"s2", "1"}} {
+		if _, err := h(context.Background(), actx, tr.Action{Action: "v3_op_snapshot", Params: map[string]string{"volume": "v1", "name": c.name, "attempt": c.attempt}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := v3HistoryEnd(context.Background(), actx, tr.Action{}); err != nil {
+		t.Fatal(err)
+	}
+	line := "head_conflict per snapshot attempted: 1/4"
+	found := false
+	for _, l := range logs {
+		found = found || l == line
+	}
+	if !found {
+		t.Errorf("no line %q in %q", line, logs)
+	}
+	want := map[string]any{"conflicts": float64(1), "attempts": float64(4)}
+	var rec map[string]any
+	for _, r := range historyRecords(t, p) {
+		if r.Verb == "answer_counts" {
+			rec = r.Result
+		}
+	}
+	if fmt.Sprint(rec["snapshot_head_conflict"]) != fmt.Sprint(want) {
+		t.Errorf("answer_counts %v", rec)
+	}
+	b, err := os.ReadFile(filepath.Join(actx.Bundle.Dir, "answer-counts.json"))
+	var file map[string]any
+	if err != nil || json.Unmarshal(b, &file) != nil || fmt.Sprint(file["snapshot_head_conflict"]) != fmt.Sprint(want) {
+		t.Errorf("answer-counts.json %s %v", b, err)
+	}
+}
