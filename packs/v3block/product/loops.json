@@ -19,6 +19,57 @@
       "teardown": [
         {"action": "v3_op_stop", "params": {"volume": "{subject}"}}
       ]
-    }
+    },
+    "writes": {
+      "comment": "Create and attach every volume of the pool; each iteration, per volume: write 4 random lbas and read them back, with no snapshot, so the only cuts are the product's periodic ones; after the cycle, read back every written lba and observe every volume; last, stop each volume.",
+      "lbas": 4,
+      "setup": [
+       {
+        "action": "v3_op_create",
+        "params": {
+         "volume": "{subject}"
+        }
+       },
+       {
+        "action": "v3_op_attach",
+        "params": {
+         "volume": "{subject}"
+        }
+       }
+      ],
+      "cycle": [
+       {
+        "action": "v3_op_write",
+        "params": {
+         "volume": "{subject}",
+         "lbas": "{lbas}",
+         "round": "i{iteration}"
+        },
+        "writes_lbas": true
+       },
+       {
+        "action": "v3_op_read",
+        "params": {
+         "volume": "{subject}",
+         "lbas": "{lbas}"
+        }
+       }
+      ],
+      "sweep": {
+       "action": "v3_op_read",
+       "params": {
+        "volume": "{subject}",
+        "lbas": "{written}"
+       }
+      },
+      "teardown": [
+       {
+        "action": "v3_op_stop",
+        "params": {
+         "volume": "{subject}"
+        }
+       }
+      ]
+     }
   }
 }
