@@ -127,10 +127,8 @@ def smoke(root, seconds=10):
     env = dict(os.environ, CGO_ENABLED='0', GOTOOLCHAIN='local')
     for binary in ('blockmaster', 'blockvolume'):
         subprocess.run(['go', 'build', '-trimpath', '-buildvcs=false', '-o', str(binaries/binary), './cmd/'+binary], cwd=src, env=env, check=True)
-    # External-NVMe opt-in rejects loopback. Preserve that exact flag and use
-    # an existing controller interface only for its temporary NVMe listener.
-    bind = subprocess.check_output(['hostname', '-I'], text=True).split()[0]
-    require(not bind.startswith('127.') and ':' not in bind, 'controller IPv4 interface required')
+    # Standalone guests and every NVMe target are same-host loopback only.
+    bind = '127.0.0.1'
     receipts = dict(pins=pins, seconds=seconds, binary_sha256={b: hashlib.sha256((binaries/b).read_bytes()).hexdigest() for b in ('blockmaster','blockvolume')}, rounds=[])
     for rf in ('3', '2'):
         base = out/('rf'+rf)

@@ -127,8 +127,10 @@ class AutoP2(unittest.TestCase):
         self.assertIn('failover_mode: "automatic"', source)
         self.assertIn('git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py"', source)
         self.assertIn("[ '{{ failover_mode }}' = operator ] || exit 0\n", source)
-        self.assertIn('auto-p2.py verify "$PROMOTION"', source)
-        self.assertIn('auto-p2.py field "$PROMOTION" host', source)
+        self.assertIn('guest-io.py --config $L/guest/config.json verify', source)
+        guest = (Path(__file__).resolve().parents[1] / "r4/guest-io.py").read_text()
+        self.assertIn('python3 "$W/auto-p2.py" verify ', guest)
+        self.assertIn('host=selected_host(cfg,text)', guest)
 
     def test_recorded_supporting_admission_is_not_catchup(self):
         # Exact readiness fields from the failed RF2 rejoin status sample:
