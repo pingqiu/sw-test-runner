@@ -9,7 +9,7 @@ package v3block
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -24,6 +24,24 @@ import (
 
 //go:embed product/actions.json
 var actionsJSON []byte
+
+// The scripts the description names by path ({"script": ...}), each with
+// its own tests (scripts/test_*.py).
+//
+//go:embed scripts/*.py
+var scriptFS embed.FS
+
+// declaredScripts is every script file by its repository path.
+func declaredScripts() map[string]string {
+	out := map[string]string{}
+	ents, _ := scriptFS.ReadDir("scripts")
+	for _, e := range ents {
+		if b, err := scriptFS.ReadFile("scripts/" + e.Name()); err == nil {
+			out["packs/v3block/scripts/"+e.Name()] = string(b)
+		}
+	}
+	return out
+}
 
 // opNode finds the node a step names; a test replaces it with a fake.
 var opNode = func(actx *tr.ActionContext, name string) (runner, error) {
@@ -232,7 +250,7 @@ func (s *volumeSubject) Save() { saveVolume(s.actx, s.v) }
 // blockActions is the executor of product/actions.json. A description that
 // does not load stops the pack, as a bad outcome table does.
 var blockActions = func() *declared.Executor {
-	f, err := declared.Parse(actionsJSON)
+	f, err := declared.ParseWith(actionsJSON, declaredScripts())
 	if err != nil {
 		panic(err)
 	}

@@ -371,7 +371,7 @@
       "each": "lbas",
       "input": {
         "kind": "repeat", "text": "{{volume.name}}|{{round}}|{{item}}|", "bytes": 4096, "path": "{{config.root}}/.block-{{volume.name}}-{{item}}",
-        "command": ["mkdir", "-p", "{{config.root}}", {"raw": "&&"}, "python3", "-c", "import sys;t=sys.argv[1].encode();open(sys.argv[2],\"wb\").write((t*(4096//len(t)+1))[:4096])", "{{input.text}}", "{{input.path}}", {"raw": "&&"}, "sha256sum", {"raw": "<"}, "{{input.path}}", {"raw": "| cut -c1-64"}],
+        "command": ["mkdir", "-p", "{{config.root}}", {"raw": "&&"}, "python3", "-c", {"script": "packs/v3block/scripts/block_fill.py"}, "{{input.text}}", "{{input.path}}", {"raw": "&&"}, "sha256sum", {"raw": "<"}, "{{input.path}}", {"raw": "| cut -c1-64"}],
         "cite": "declared/device.go:211-218 (the runner's sha256 of the repeated tag, recorded before the invoke)"
       },
       "on_invoke_set": {"volume.written": "{{item}}"},
@@ -414,7 +414,7 @@
       "record": {"volume": "{{volume.name}}", "args": {}},
       "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
-        "command": ["python3", "-I", "-c", "import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)", "{{device}}"], "as_root": true,
+        "command": ["python3", "-I", "-c", {"script": "packs/v3block/scripts/device_fsync.py"}, "{{device}}"], "as_root": true,
         "runner_deadline_seconds": 120,
         "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); fsync(2) of the block device",
         "failure": "fsync exit {{exit}}: {{stderr_first_line}}",
@@ -568,7 +568,7 @@
             "python3",
             "-I",
             "-c",
-            "import json,sys,urllib.request,urllib.parse,urllib.error\nd,pre=sys.argv[1],sys.argv[2]; out=[]; last=\"\"\nwhile True:\n    q=urllib.parse.urlencode({\"limit\":1000,\"lastFileName\":last,\"namePattern\":pre+\"*\"})\n    try:\n        r=json.load(urllib.request.urlopen(urllib.request.Request(d+\"/?\"+q,headers={\"Accept\":\"application/json\"}),timeout=10))\n    except urllib.error.HTTPError as e:\n        if e.code==404 and not last: break\n        raise\n    es=r.get(\"Entries\") or []\n    out+=[e[\"FullPath\"].rsplit(\"/\",1)[1] for e in es]\n    if not r.get(\"ShouldDisplayLoadMore\") or not es: break\n    last=es[-1][\"FullPath\"].rsplit(\"/\",1)[1]\nprint(json.dumps(sorted(n for n in out if n.startswith(pre))))",
+            {"script": "packs/v3block/scripts/filer_dirs.py"},
             "http://{{derived.filer_http}}{{derived.chunk_path}}",
             "{{volume.name}}-"
           ],
@@ -591,7 +591,7 @@
             "python3",
             "-I",
             "-c",
-            "import json,sys,urllib.request,urllib.parse,urllib.error\nroot=sys.argv[1]; out=[]\ndef ls(d,rel):\n    last=\"\"\n    while True:\n        q=urllib.parse.urlencode({\"limit\":1000,\"lastFileName\":last})\n        try:\n            r=json.load(urllib.request.urlopen(urllib.request.Request(d+\"/?\"+q,headers={\"Accept\":\"application/json\"}),timeout=10))\n        except urllib.error.HTTPError as e:\n            if e.code==404 and not last: return\n            raise\n        es=r.get(\"Entries\") or []\n        for e in es:\n            name=e[\"FullPath\"].rsplit(\"/\",1)[1]\n            if e.get(\"Mode\",0)&0o20000000000: ls(d+\"/\"+urllib.parse.quote(name),rel+name+\"/\")\n            else: out.append(rel+name)\n        if not r.get(\"ShouldDisplayLoadMore\") or not es: return\n        last=es[-1][\"FullPath\"].rsplit(\"/\",1)[1]\nls(root,\"\")\nprint(json.dumps(sorted(out)))",
+            {"script": "packs/v3block/scripts/filer_files.py"},
             "http://{{derived.filer_http}}{{derived.chunk_path}}/{{volume.name}}-{{derived.layout8}}"
           ],
           "runner_deadline_seconds": 120,

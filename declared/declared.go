@@ -66,6 +66,7 @@ type File struct {
 	// kinds ({{run.<name>}}), each with why; the executor's Values supplies
 	// them, and a step it cannot supply them for does not run.
 	RunValues []RunValue `json:"run_values,omitempty"`
+	scripts   map[string]string
 	// Guest is the product's guest configuration, read by the product's
 	// own code; the executor does not interpret it.
 	Guest json.RawMessage `json:"guest,omitempty"`
@@ -254,13 +255,17 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 // of templates written as one JSON word; every such word is shell quoted.
 // {"raw": "&&"} is shell text written as it is (an operator or a
 // redirection; it takes no template). {"when": cond, "words": [...]} is a
-// group of words used only when the condition holds.
+// group of words used only when the condition holds. {"script": path} is
+// one word: the text of a script file the product supplies (ParseWith),
+// without its final newline, shell quoted (a program given to an
+// interpreter's -c, kept out of the description as a file with its own tests).
 type Word struct {
-	Text  string
-	JSON  map[string]string
-	Raw   string
-	When  *Cond
-	Words []Word
+	Text   string
+	JSON   map[string]string
+	Raw    string
+	When   *Cond
+	Words  []Word
+	Script string
 }
 
 func (w *Word) UnmarshalJSON(b []byte) error {
@@ -268,13 +273,21 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 		return json.Unmarshal(b, &w.Text)
 	}
 	var o struct {
-		JSON  map[string]string `json:"json"`
-		Raw   string            `json:"raw"`
-		When  *Cond             `json:"when"`
-		Words []Word            `json:"words"`
+		JSON   map[string]string `json:"json"`
+		Raw    string            `json:"raw"`
+		When   *Cond             `json:"when"`
+		Words  []Word            `json:"words"`
+		Script string            `json:"script"`
 	}
 	if err := strict(b, &o); err != nil {
 		return err
+	}
+	if o.Script != "" {
+		if o.JSON != nil || o.Raw != "" || o.When != nil || o.Words != nil {
+			return errors.New("a script word names its script only")
+		}
+		w.Script = o.Script
+		return nil
 	}
 	switch {
 	case len(o.JSON) > 0 && o.Raw == "" && o.When == nil && o.Words == nil:
@@ -284,7 +297,7 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 	case o.When != nil && len(o.Words) > 0 && o.JSON == nil && o.Raw == "":
 		w.When, w.Words = o.When, o.Words
 	default:
-		return errors.New("a command word is a string, {\"json\": {...}}, {\"raw\": text} or {\"when\": cond, \"words\": [...]}")
+		return errors.New("a command word is a string, {\"json\": {...}}, {\"raw\": text}, {\"script\": path} or {\"when\": cond, \"words\": [...]}")
 	}
 	return nil
 }
@@ -368,6 +381,36 @@ type ExpectedRefusalRetry struct {
 	Why                  string `json:"why,omitempty"`
 }
 
+// scriptRefs lists the paths every {"script": path} word of a description
+// names, in order of first appearance.
+func scriptRefs(b []byte) []string {
+	var d any
+	if json.Unmarshal(b, &d) != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	var walk func(any)
+	walk = func(o any) {
+		switch o := o.(type) {
+		case map[string]any:
+			if p, ok := o["script"].(string); ok && len(o) == 1 && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+			for _, v := range o {
+				walk(v)
+			}
+		case []any:
+			for _, v := range o {
+				walk(v)
+			}
+		}
+	}
+	walk(d)
+	return out
+}
+
 func strict(b []byte, v any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
@@ -390,8 +433,25 @@ func names(t string) []string {
 // node, at least one variant, and each variant a command, a cite, a timeout
 // and a known decoding; every template names only what is defined where it
 // is used; no action is both declared and an exception.
-func Parse(b []byte) (*File, error) {
+func Parse(b []byte) (*File, error) { return ParseWith(b, nil) }
+
+// ParseWith is Parse for a description whose script words name files of
+// scripts (repository path -> text). A script that is not supplied, or
+// whose text is not a file's (a carriage return, or no final newline),
+// refuses the description.
+func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 	var f File
+	f.scripts = map[string]string{}
+	for _, p := range scriptRefs(b) {
+		text, ok := scripts[p]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("actions: script %s is not supplied", p)
+		case strings.Contains(text, "\r") || !strings.HasSuffix(text, "\n"):
+			return nil, fmt.Errorf("actions: script %s: LF line ends and a final newline", p)
+		}
+		f.scripts[p] = strings.TrimSuffix(text, "\n")
+	}
 	if err := strict(b, &f); err != nil {
 		return nil, fmt.Errorf("actions: %w", err)
 	}
@@ -820,6 +880,8 @@ type scope struct {
 	subjects map[string]Subject
 	derived  map[string]Derived
 	params   map[string]string // the step's own params
+	// scripts: the description's script files, by path.
+	scripts map[string]string
 	// unresolved: process params the product could not resolve, and why.
 	unresolved map[string]string
 	procName   string
@@ -878,6 +940,12 @@ func (s *scope) words(words []Word) ([]string, error) {
 	var out []string
 	for _, w := range words {
 		switch {
+		case w.Script != "":
+			text, ok := s.scripts[w.Script]
+			if !ok {
+				return nil, fmt.Errorf("script %s is not supplied", w.Script)
+			}
+			out = append(out, ShellQuote(text))
 		case w.Raw != "":
 			out = append(out, w.Raw)
 		case w.When != nil:
@@ -920,7 +988,7 @@ func (s *scope) argv(words []Word) ([]string, error) {
 	var out []string
 	for _, w := range words {
 		switch {
-		case w.Raw != "" || w.JSON != nil:
+		case w.Raw != "" || w.JSON != nil || w.Script != "":
 			return nil, errors.New("an argv word is a template or a group")
 		case w.When != nil:
 			hold, err := s.holds(w.When)
@@ -999,7 +1067,7 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}, params: act.Params}
+	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}, params: act.Params, scripts: x.File.scripts}
 	expect := act.Params["expect"]
 	if expect != "" && expect != tr.OutcomeRefused {
 		return nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, expect, tr.OutcomeRefused)
