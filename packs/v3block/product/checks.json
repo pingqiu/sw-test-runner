@@ -15,14 +15,6 @@
    "what": "the holder's start wait ends this long after the re-grant or after its start, whichever is later"}
  ],
  "recovery_note": "A holder is healthy again by max(kill completion + regrant, restart completion) + start_wait. The pages state no restart bound for the master: its restart is not judged.",
- "documented_unknowns": [
-  {"limit": "delete a source whose snapshot has a restore target", "action": "delete", "code": "snapshot_has_dependents",
-   "allowed_after": {"head": "unchanged", "snapshots": "unchanged", "dirs": "unchanged", "files": "unchanged",
-                     "workspace": {"exit": 1, "cite": "cmd/sw-block/workspace.go:18 (exit 1: the master refused; nothing moved)"}},
-   "cite": "docs/operator-guide.md:193-196; core/frontend/chunkstore/layout/delete.go:173-176",
-   "what": "the delete reservation commits at blockmaster first, then marking HEAD deleting refuses for the snapshot's dependent: the volume can never serve again and its name is reserved, HEAD and the store are untouched, and the workspace query is refused (run 4 seq 1042)"}
- ],
- "documented_unknowns_note": "An unknown outcome the pages document for one negative: C0 notes it instead of failing, C6 resolves it by the volume's next observation matching allowed_after against the clean observation before the operation. A part 'unchanged' must equal that observation's; a part given as fields must answer those fields. Any other unknown stays a FAIL.",
  "master_outage": {"max_seconds": 10, "cite": "docs/standalone-deployment.md:670",
    "what": "volumes already serving keep serving through a master restart this short: each holder renews every 10 s or less and may serve until 20 s after its last renewal, so a master that answers again within 10 s interrupts nothing. A longer outage is not judged by MO (it is fail-closed, with its own recovery bound)."},
  "holder_unit": {"file": "deploy/systemd/sw-blockvolume.service",
