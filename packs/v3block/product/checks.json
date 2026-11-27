@@ -16,13 +16,17 @@
  ],
  "recovery_note": "A holder is healthy again by max(kill completion + regrant, restart completion) + start_wait. The pages state no restart bound for the master: its restart is not judged.",
  "fault_targets": [
-  {"name": "blockmaster", "role": "master", "unit": "process",
-   "what": "the master; a kill of it reaches no holder, so no volume's data path"},
-  {"name": "blockvolume:<i>", "role": "holder", "unit": "process", "prefix": "blockvolume",
-   "what": "the holder of volume i (from 0); a process whose name starts with the prefix is a holder"}
+  {"name": "blockmaster", "role": "master", "unit": "process", "cite": "cmd/blockmaster/main.go:1-2",
+   "what": "the block master daemon; a kill of it reaches no holder, so no volume's data path"},
+  {"name": "blockvolume:<i>", "role": "holder", "unit": "process", "prefix": "blockvolume", "cite": "cmd/blockvolume/main.go:1-3",
+   "what": "the block volume daemon holding volume i (from 0); a process whose name starts with the prefix is a holder"}
  ],
+ "block_bytes": {"bytes": 4096, "cite": "cmd/blockvolume/main.go:239",
+   "what": "the block size in bytes on first create (the daemon's --durable-blocksize default; the runner also passes 4096); the checkers' ZERO is the sha256 of one block of zeros"},
  "observation": {
   "compared": ["head", "snapshots", "workspace", "dirs", "files"],
+  "required": ["head", "workspace"],
+  "required_note": "C5 requires these parts in both observations of a judged refusal: a pair lacking one leaves the refusal not judged (no PASS on what was not seen).",
   "ignored": [
    {"field": "head: VolumeID, ClaimID, Activity, Current, Position",
     "why": "not recorded by the observation: it keeps HEAD's generation, epoch, holder and state, the volume's identity, ownership and life state"},

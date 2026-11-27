@@ -43,9 +43,10 @@ code is 0 only when every checker passes.
       snapshot names (result.snapshots), the control plane's workspace answer (exit and text), the volume's
       directories (result.dirs, so a name that never existed is observed as
       having none) and its file listing (result.files). A part recorded in
-      neither observation is not compared and is named in a note; a part
-      recorded in one only, an unreadable HEAD, or a listing error leaves the
-      refusal not judged.
+      neither observation is not compared and is named in a note, except a
+      required part (REQUIRED_PARTS: HEAD and the workspace answer), whose
+      absence leaves the refusal not judged; a part recorded in one only, an
+      unreadable HEAD, or a listing error leaves the refusal not judged.
       BASELINE: two consecutive observations of a volume with no operation
       touching it invoked between them must show the same state; the product
       works in the background (checkpoint publishing, cleaning), and a
@@ -57,8 +58,9 @@ code is 0 only when every checker passes.
       refusal shows a different state; UNKNOWN if a limit that occurred has
       no judged refusal; PASS only if every limit that occurred was judged at
       least once and none changed anything; FAIL (not exercised) if there was
-      no refusal at all, like the other checkers. A negative operation that
-      was not refused is listed in a note (it is not C5's to judge)
+      no refusal at all, like the other checkers. A negative operation
+      answered ok is a FAIL ("negative not refused"); one answered unknown is
+      listed in a note (unknown is not ok)
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
@@ -109,8 +111,11 @@ code is 0 only when every checker passes.
       volume or block changed in between), on a run whose last healthy
       record is not healthy, and on a kill with no healthy point after it.
       A read changes nothing and needs no placing; an unknown of another
-      verb has no rule and makes the verdict UNKNOWN. FAIL (not exercised)
-      if the history holds neither an unknown nor a healthy record.
+      verb has no rule and makes the verdict UNKNOWN. Every judged verdict
+      carries the finding "unknowns resolved: <n>" (a run with healthy
+      points and n = 0 PASSes; the night requires n > 0 in some run). FAIL
+      (not exercised) if the history holds neither an unknown nor a healthy
+      record.
 
 A fault is an operation of module Runner (verbs fault_apply and fault_restore,
 args fault_key, resource, vm_id), never a record kind of its own. A fault is
@@ -132,7 +137,7 @@ import json
 import os
 import sys
 
-ZERO = hashlib.sha256(bytes(4096)).hexdigest()
+ZERO = None       # sha256 of one block of zeros, the product's block_bytes: set by load_product
 KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
 OUTCOMES = {'ok', 'refused', 'unknown'}
 
@@ -146,6 +151,7 @@ PRODUCT = None     # the product's reader module
 BOUNDS = {}        # C6 latency bounds: verb -> (seconds, cite); filled in place by load_product
 RECOVERY = {}      # C6 recovery terms: term -> (seconds, cite); filled in place by load_product
 STATE_PARTS = ()   # the observation parts compared, in checks.json's order
+REQUIRED_PARTS = ()   # of those, the parts C5 requires in both observations of a judged refusal
 MASTER = None      # the fault target whose role is master
 HOLDER_PREFIX = None   # a process whose name starts with this is a holder
 PLACED_BY_OBSERVATION = ('write',)   # extended by the product's PLACED_BY_STATUS
@@ -168,14 +174,18 @@ def _load_module(name, product_dir):
 def load_product(product_dir):
     """Read checks.json from `product_dir` and load its reader module. The
     tables BOUNDS and RECOVERY are filled in place (a test may patch them)."""
-    global CHECKS, PRODUCT, STATE_PARTS, MASTER, HOLDER_PREFIX, PLACED_BY_OBSERVATION
+    global CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS, MASTER, HOLDER_PREFIX, PLACED_BY_OBSERVATION, ZERO
     with open(os.path.join(product_dir, 'checks.json'), encoding='utf-8') as fh:
         checks = json.load(fh)
     mod = _load_module(checks['reader']['module'], product_dir)
     mod.bind(checks)
     parts = tuple(checks['observation']['compared'])
     mod.observed_state({'result': {}}, parts)   # a part the reader cannot read fails here, not mid-run
-    CHECKS, PRODUCT, STATE_PARTS = checks, mod, parts
+    required = tuple(checks['observation'].get('required', ()))
+    if set(required) - set(parts):
+        raise ValueError('required parts %s are not compared parts' % ', '.join(sorted(set(required) - set(parts))))
+    CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS = checks, mod, parts, required
+    ZERO = hashlib.sha256(bytes(checks['block_bytes']['bytes'])).hexdigest()
     BOUNDS.clear()
     BOUNDS.update({r['verb']: (r['seconds'], r['cite']) for r in checks.get('bounds', [])})
     RECOVERY.clear()
@@ -679,7 +689,10 @@ def c5(recs):
     per = {}   # limit -> [refusals, judged]
     for inv, comp in ops_:
         if comp is not None and comp['outcome'] != 'refused' and (inv.get('args') or {}).get('expect') == 'refused':
-            notes.append('negative not refused: seq %d %s %s (%s) answered %s' % (inv['seq'], inv['verb'], inv.get('volume'), limit[inv['seq']], comp['outcome']))
+            # ok is a FAIL: the limit let the operation through; unknown is not
+            # ok and stays a note.
+            (f if comp['outcome'] == 'ok' else notes).append('negative not refused: seq %d %s %s (%s) answered %s'
+                                                            % (inv['seq'], inv['verb'], inv.get('volume'), limit[inv['seq']], comp['outcome']))
     for inv, comp in refusals:
         vol = inv.get('volume')
         lim = limit[inv['seq']]
@@ -711,6 +724,10 @@ def c5(recs):
         diff, missing = state_diff(b, a)
         if diff is None:
             notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
+            continue
+        lacking = [p for p in REQUIRED_PARTS if p in missing]
+        if lacking:
+            notes.append('not judged: %s: observations seq %d, %d record no %s (required)' % (name, before['seq'], after['seq'], ', '.join(lacking)))
             continue
         gaps.update(missing)
         per[lim][1] += 1
@@ -1079,7 +1096,7 @@ def recovery_findings(recs, ops_, healthy):
 @unknown_on_overlap
 def c6(recs):
     """Bounds and "none stays unknown" (see the module docstring)."""
-    f, notes, unruled = [], [], []
+    f, notes, unruled, resolved = [], [], [], 0
     ops_ = operations(recs)
     healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
     unknowns = [(inv, comp) for inv, comp in ops_ if inv['verb'] not in RUNNER_VERBS and inv['verb'] != 'read'
@@ -1146,13 +1163,18 @@ def c6(recs):
             f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
         elif how == 'third':
             f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
-        elif inv['verb'] in PRODUCT.NOTED:
-            notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
+        else:
+            resolved += 1
+            if inv['verb'] in PRODUCT.NOTED:
+                notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
+    # Always reported, in this exact form, so a night can require n > 0 in
+    # at least one run; a single run with n = 0 and its healthy points PASSes.
+    count = 'unknowns resolved: %d' % resolved
     if f:
-        return {'verdict': 'FAIL', 'findings': f + notes}
+        return {'verdict': 'FAIL', 'findings': f + notes + [count]}
     if unruled:
-        return {'verdict': 'UNKNOWN', 'findings': ['no resolution rule for an unknown: %s' % ', '.join(unruled)] + notes}
-    return {'verdict': 'PASS', 'findings': notes}
+        return {'verdict': 'UNKNOWN', 'findings': ['no resolution rule for an unknown: %s' % ', '.join(unruled)] + notes + [count]}
+    return {'verdict': 'PASS', 'findings': notes + [count]}
 
 
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur}

@@ -4,6 +4,7 @@ history_check.py names no product word outside comments and docstrings; the
 product's facts come from its description directory (checks.json) and its
 reader module. Each guard ships with a red control.
 """
+import hashlib
 import io
 import json
 import os
@@ -98,6 +99,26 @@ class Data(unittest.TestCase):
     def test_red_a_number_without_a_cite_is_caught(self):
         self.assertEqual(numbers_without_cite({'recovery': [{'term': 'x', 'seconds': 5}]}), ['$.recovery[0]'])
         self.assertEqual(numbers_without_cite({'bounds': [{'verb': 'write', 'seconds': 1.5, 'cite': ''}]}), ['$.bounds[0]'])
+
+    def test_every_fault_target_has_a_cite(self):
+        self.assertTrue(self.checks['fault_targets'])
+        for row in self.checks['fault_targets']:
+            self.assertTrue(row.get('cite'), row)
+
+    def test_red_a_fault_target_without_a_cite_is_caught(self):
+        self.checks['fault_targets'][0].pop('cite')
+        with self.assertRaises(AssertionError):
+            self.test_every_fault_target_has_a_cite()
+
+    def test_zero_is_one_block_of_zeros(self):
+        n = self.checks['block_bytes']['bytes']
+        self.assertTrue(self.checks['block_bytes']['cite'])
+        self.assertEqual(hc.ZERO, hashlib.sha256(bytes(n)).hexdigest())
+        self.assertEqual(hc.ZERO, hashlib.sha256(b'\0' * 4096).hexdigest(), 'block: 4096 bytes')
+
+    def test_required_parts_are_compared_parts(self):
+        self.assertEqual(hc.REQUIRED_PARTS, tuple(self.checks['observation']['required']))
+        self.assertLessEqual(set(hc.REQUIRED_PARTS), set(hc.STATE_PARTS))
 
     def test_every_ignored_field_says_why(self):
         for row in self.checks['observation']['ignored']:
