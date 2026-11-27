@@ -148,7 +148,7 @@
       "record": {"volume": "{{volume.name}}", "args": {"server": "{{volume.server}}", "min_epoch": {"template": "{{volume.epoch}}", "type": "int"}, "guest_connect": "{{run.guest_connect}}"}},
       "process": {
         "op": "start", "subject": "volume", "name": "blockvolume",
-        "cite": "the holder is cmd/blockvolume with the command line the product's own real-process tests run; host 0 is the volume's first host, 1 its move target (v3_op_spec)",
+        "cite": "cmd/blockvolume/main.go:186-198, :201, :214-215, :223-224, :229-231, :237 (the holder's flags as the command line uses them); launched by declared/process.go:234-245 (the wrapper that keeps its pid and writes its exit status)",
         "before": [
           {"name": "layout", "kind": "command", "when": {"field": "volume.layout_id", "equals": ""},
            "command": ["{{config.bin_dir}}/v3ctl", "resolve", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
@@ -157,9 +157,9 @@
            "on_ok_set": {"volume.layout_id": "{{answer.layout_id}}"},
            "cite": "packs/v3block/v3ctl/main.go:12 (resolve --master --volume), :153-160 (the answer; the exits as create's): the layout id from the master when the runner does not know it"},
           {"name": "endpoints", "kind": "ports_free", "addresses": ["{{volume.data_addr}}", "{{volume.ctrl_addr}}", "{{volume.status_addr}}", "{{volume.nvme_addr}}"],
-           "cite": "readiness is credited only to the launched process: a listener already on one of the host's endpoints (another run's, or a leftover) refuses the start, nothing launched"},
+           "cite": "declared/process.go:251-280 (the listener read): readiness is credited only to the launched process, so a listener already on one of the host's endpoints refuses the start"},
           {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{volume.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{volume.server}}.locks"]}],
-           "failure": "mkdir", "cite": "the holder's durable root (and the test-only lock directory)"}
+           "failure": "mkdir", "cite": "cmd/blockvolume/main.go:223 (--durable-root)"}
         ],
         "argv": ["{{config.bin_dir}}/blockvolume",
           {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["--volume-lock-dir-test-only", "{{config.root}}/{{volume.server}}.locks"]},
@@ -185,9 +185,9 @@
              "holds": [{"path": "VolumeID", "equals": "{{volume.name}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
                {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "above": "{{volume.epoch}}"}],
              "capture": {"epoch": "Epoch"},
-             "cite": "blockvolume's /status: it serves the volume as primary, healthy, its frontend ready, at an epoch above the one the runner recorded"},
+             "cite": "core/host/volume/status_server.go:113, 119 (volumeID, epoch), :193-196 (FrontendPrimaryReady), :204-205 (AuthorityRole), :174 (primary), :376 (the /status route)"},
             {"name": "listeners", "kind": "listeners_held", "addresses": ["{{volume.status_addr}}", "{{volume.nvme_addr}}"],
-             "cite": "the status and NVMe listeners are held by the launched process, not by another service"}
+             "cite": "declared/process.go:251-280 (the listener read): the status and NVMe listeners are held by the launched pid; cmd/blockvolume/main.go:201, :214 (--status-addr, --nvme-listen)"}
           ],
           "not_ready": "not serving above epoch {{volume.epoch}} from its own listeners within {{ready.within}}",
           "not_ready_by_deadline": "not serving above epoch {{volume.epoch}} from its own listeners by the runner deadline"
@@ -198,7 +198,7 @@
           {"name": "connect", "kind": "nvme_connect", "address": "{{volume.nvme_addr}}", "subsystem": "{{volume.nqn}}", "options": "{{run.guest_connect_options}}",
            "cite": "core/csi/linux_util.go:318 (the product's connect: nvme connect -t -a -s -n), through the kernel's fabrics interface"},
           {"name": "device", "kind": "device", "subsystem": "{{volume.nqn}}", "within_seconds": 20, "into": "device",
-           "cite": "the guest's one namespace of the volume's subsystem"}
+           "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"}
         ]
       },
       "on_outcome_set": {"ok": {"volume.intent": "held"}, "unknown": {"volume.intent": "unsettled"}},
@@ -228,12 +228,12 @@
       "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}}},
       "process": {
         "op": "restart", "subject": "process", "name": "blockvolume",
-        "cite": "a holder the runner killed, relaunched with the command line it ran (read from /proc before the kill): same ports, same data directory",
+        "cite": "declared/process.go:211-227 (the command line read from /proc before the kill), :234-245 (relaunched under the same wrapper)",
         "before": [
           {"name": "endpoints", "kind": "ports_free", "addresses": ["{{process.data_addr}}", "{{process.ctrl_addr}}", "{{process.status_addr}}", "{{process.nvme_addr}}"],
-           "cite": "readiness is credited only to the relaunched process: a listener already on an endpoint refuses the start, nothing launched"},
+           "cite": "declared/process.go:251-280 (the listener read): a listener already on one of the host's endpoints refuses the start"},
           {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{process.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{process.server}}.locks"]}],
-           "failure": "mkdir", "cite": "the holder's durable root (and the test-only lock directory)"}
+           "failure": "mkdir", "cite": "cmd/blockvolume/main.go:223 (--durable-root)"}
         ],
         "log": "{{config.root}}/{{process.server}}.{{now_ns}}.log",
         "result_launched": {"layout_id": "{{process.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
@@ -251,9 +251,9 @@
              "holds": [{"path": "VolumeID", "equals": "{{process.volume}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
                {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "at_least": "{{process.epoch}}"}],
              "capture": {"epoch": "Epoch"},
-             "cite": "blockvolume's /status: serving again at the recorded epoch or above (a restart keeps its epoch)"},
+             "cite": "core/host/volume/status_server.go:113, 119 (volumeID, epoch), :193-196 (FrontendPrimaryReady), :204-205 (AuthorityRole), :174 (primary), :376 (the /status route)"},
             {"name": "listeners", "kind": "listeners_held", "addresses": ["{{process.status_addr}}", "{{process.nvme_addr}}"],
-             "cite": "the status and NVMe listeners are held by the relaunched process"}
+             "cite": "declared/process.go:251-280 (the listener read): the status and NVMe listeners are held by the relaunched pid"}
           ],
           "not_ready": "not serving above epoch {{process.epoch}} from its own listeners within {{ready.within}}",
           "not_ready_by_deadline": "not serving above epoch {{process.epoch}} from its own listeners by the runner deadline"
@@ -262,9 +262,9 @@
         "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
         "after": [
           {"name": "connect", "kind": "nvme_connect", "address": "{{process.nvme_addr}}", "subsystem": "{{process.nqn}}", "options": "{{run.guest_connect_options}}", "unless_present": true,
-           "cite": "the kernel reconnects the controller a killed holder left behind by itself; it is connected only when none of the volume's NQN is left"},
+           "cite": "declared/device.go:89-115 (the scan: no controller of the subsystem left), :147-159 (the fabrics connect); the product's connect is core/csi/linux_util.go:318"},
           {"name": "device", "kind": "device", "subsystem": "{{process.nqn}}", "within_seconds": 20, "into": "device",
-           "cite": "the guest's one namespace of the volume's subsystem"}
+           "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"}
         ]
       },
       "note": "a restart, by the schedule or the unit, is not a lifecycle operation: it leaves the volume's intended state as it is"
@@ -281,7 +281,7 @@
         "result": {"epoch": {"template": "{{volume.epoch}}", "type": "int"}},
         "steps": [
           {"name": "disconnect", "kind": "nvme_disconnect", "subsystem": "{{volume.nqn}}", "failure": "{{why}}",
-           "cite": "the guest lets go of the device first (nvme disconnect -n, through sysfs); recorded, so the checkers close an unknown write's window on it"},
+           "cite": "declared/device.go:166-197 (delete through sysfs, certified by a scan); cmd/sw-block/workspace.go:46-48 (the planned hand-over order)"},
           {"name": "detach", "kind": "command",
            "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "detach", "--plain", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--timeout", "120s"],
            "judge": {"kind": "error_body", "action": "detach", "path": "ops chunk detach"},
@@ -297,24 +297,24 @@
              "capture": {"gen": "headGen"}
            },
            "result": {"sealed_gen": {"template": "{{step.detach.gen}}", "type": "int"}},
-           "cite": "the holder seals HEAD (ops chunk detach --plain): the JSON answer on stdout and exactly 'sealed HEAD generation: G' on stderr name the same generation, for this volume at this epoch; G feeds the revoke"},
+           "cite": "cmd/sw-block/chunk.go:83 (dispatch), :268 (--plain); cmd/sw-block/chunk_plain.go:29-35 (the JSON answer and 'sealed HEAD generation: G' on stderr)"},
           {"name": "revoke", "kind": "command",
            "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "revoke", "--replica", "r1", "--epoch", "{{volume.epoch}}", "--sealed-gen", "{{step.detach.gen}}", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
            "judge": {"kind": "exit_code", "path": "ops workspace revoke"},
            "failure": "revoke: {{output_first_line}}",
            "result_failure": {"revoke_exit": {"template": "{{exit}}", "type": "int"}}, "result_not_run": {"revoke_exit": {"template": "{{exit}}", "type": "int"}},
-           "cite": "ops workspace revoke with the sealed generation the detach answered (product/outcomes.json: the stop's and the move's revoke rows)"},
+           "cite": "cmd/sw-block/workspace.go:30, :91 (revoke), cmd/sw-block/workspace_revoke.go:28 (--sealed-gen from detach --plain); packs/v3block/product/outcomes.json:69-84 (the stop's and the move's revoke rows)"},
           {"name": "exit", "kind": "wait_gone", "pid": "{{volume.pid}}", "start": "{{volume.pid_start}}", "within_seconds": 40,
            "failure": "the holder did not exit by itself after the revoke: {{why}}",
            "on_ok_set": {"volume.pid": "", "volume.pid_start": ""},
-           "cite": "after the revoke the holder exits by itself; its exit is certified by its recorded identity, never by a name"},
+           "cite": "declared/process.go:174-205 (gone by its recorded pid and start time); cmd/sw-block/workspace.go:46-48 (the holder exits after the revoke)"},
           {"name": "ack", "kind": "poll",
            "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "show", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
            "pattern": "(?m)^recorded ACK: r1@{{volume.epoch}} HEAD generation (\\d+)\\r?$", "every_ms": 500, "within_seconds": 30,
            "capture": {"gen": "1"},
            "result": {"ack_gen": "{{step.ack.gen}}"},
            "failure": "no recorded ACK of r1@{{volume.epoch}}",
-           "cite": "ops workspace show: the master's recorded ACK of (replica, epoch), its generation recorded, not compared"}
+           "cite": "cmd/sw-block/workspace.go:87 (show), cmd/sw-block/workspace_show.go:64-67 ('recorded ACK: R@E HEAD generation G')"}
         ]
       },
       "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
@@ -349,7 +349,7 @@
            },
            "result": {"new_epoch": "{{step.move.new_epoch}}", "head_gen": "{{step.move.head_gen}}", "remote_lsn": "{{step.move.remote_lsn}}"},
            "on_ok_set": {"volume.cur": "{{volume.next_cur}}"},
-           "cite": "ops workspace move --clean to the volume's other host: its answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes; never refused, the hand-over already sealed and revoked (product/outcomes.json, the move's rows)"}
+           "cite": "cmd/sw-block/workspace.go:89 (move), cmd/sw-block/workspace_clean.go:31, :40 (--clean), :57 (the answer line); packs/v3block/product/outcomes.json:87-93 (the move's rows)"}
         ]
       },
       "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
@@ -372,15 +372,15 @@
       "input": {
         "kind": "repeat", "text": "{{volume.name}}|{{round}}|{{item}}|", "bytes": 4096, "path": "{{config.root}}/.block-{{volume.name}}-{{item}}",
         "command": ["mkdir", "-p", "{{config.root}}", {"raw": "&&"}, "python3", "-c", "import sys;t=sys.argv[1].encode();open(sys.argv[2],\"wb\").write((t*(4096//len(t)+1))[:4096])", "{{input.text}}", "{{input.path}}", {"raw": "&&"}, "sha256sum", {"raw": "<"}, "{{input.path}}", {"raw": "| cut -c1-64"}],
-        "cite": "the block's content is a tag naming the volume, the round and the lba, repeated to one 4096-byte block, so a block from another volume, round or offset cannot match; its sha256 is recorded before the invoke"
+        "cite": "declared/device.go:211-218 (the runner's sha256 of the repeated tag, recorded before the invoke)"
       },
       "on_invoke_set": {"volume.written": "{{item}}"},
       "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}, "sha256": "{{input.sha256}}", "round": "{{round}}", "flush": {"template": "{{derived.flush_arg}}", "type": "bool", "optional": true}}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["dd", "if={{input.path}}", "of={{device}}", "bs=4096", "seek={{item}}", "count=1", "oflag=direct", "conv={{derived.conv}}", "status=none"], "as_root": true,
         "runner_deadline_seconds": 120,
-        "cite": "dd(1): oflag=direct writes through the device, conv=fsync makes the kernel send the device a cache flush before dd exits, so exit 0 is acknowledged and flushed; without it exit 0 is acknowledged only",
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); oflag=direct and conv=fsync,notrunc are dd(1)'s",
         "failure": "dd exit {{exit}}: {{stderr_first_line}}"
       },
       "note": "one operation per lba (lbas: a list, or written: every lba a write was attempted on); ok on dd's exit 0, unknown otherwise. flush=false issues the write without the fsync and records flush: false, so it is durable only after a later acknowledged flush. The I/O runner deadline lies above fast_io_fail_tmo of every guest connect variant and below the kernel's default ctrl_loss_tmo (600 s), under which I/O to a dead controller stays blocked"
@@ -394,11 +394,11 @@
       "runner_deadline_seconds": 150,
       "each": "lbas",
       "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["bash", "-c", "set -o pipefail; dd if={{device}} bs=4096 skip={{item}} count=1 iflag=direct status=none | sha256sum | cut -c1-64"], "as_root": true,
         "runner_deadline_seconds": 120,
-        "cite": "dd(1) iflag=direct reads one block through the device; the sha256 of what it read is the result, compared with nothing here",
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); iflag=direct is dd(1)'s",
         "ok_stdout": "^[0-9a-f]{64}$",
         "failure": "read exit {{exit}}: {{stderr_first_line}}",
         "result": {"sha256": "{{io.stdout}}"}
@@ -412,11 +412,11 @@
       ],
       "runner_deadline_seconds": 150,
       "record": {"volume": "{{volume.name}}", "args": {}},
-      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/device.go:89-141 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
       "io": {
         "command": ["python3", "-I", "-c", "import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)", "{{device}}"], "as_root": true,
         "runner_deadline_seconds": 120,
-        "cite": "fsync(2) of a block device: the kernel sends the device a cache flush and returns only once it is acknowledged; exit 0 only after fsync returns",
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); fsync(2) of the block device",
         "failure": "fsync exit {{exit}}: {{stderr_first_line}}",
         "result": {"device": "{{device}}"},
         "result_unanswered": {"device": "{{device}}"}
