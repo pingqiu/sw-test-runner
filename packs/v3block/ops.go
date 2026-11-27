@@ -343,78 +343,18 @@ func dirOf(p string) string {
 	return "/"
 }
 
-// blockvolume's command line for v on host h, as the product's own
-// real-process tests run it, with the layout id from the master.
-func (e opEnv) volumeArgs(v *opVolume, h vsHost, blocks uint64) []string {
-	args := []string{"--master", e.master, "--server-id", h.Server, "--volume-id", v.Name, "--replica-id", "r1",
-		"--layout-id", v.LayoutID, "--data-addr", h.Data, "--ctrl-addr", h.Ctrl, "--status-addr", h.Status,
-		"--durable-root", e.root + "/" + h.Server, "--durable-impl", "walstore-chunk",
-		"--durable-blocks", strconv.FormatUint(blocks, 10), "--durable-blocksize", "4096",
-		"--chunk-filer", e.filer, "--chunk-path", e.chunkPath, "--chunk-control-endpoint", "--workspace-lease",
-		"--nvme-listen", h.NVMe, "--nvme-subsysnqn", v.NQN, "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
-	if e.lockDirs {
-		args = append([]string{"--volume-lock-dir-test-only", e.root + "/" + h.Server + ".locks"}, args...)
-	}
-	return args
-}
+func portOf(addr string) string { return declared.PortOf(addr) }
 
-// v3OpAttach starts the holder on the volume's host (param host: 0 first, 1
-// the move target; default the current one), waits until it serves above the
-// recorded epoch, and connects the kernel NVMe/TCP host (HolderInterface.Start).
-// The layout id comes from the master when the runner does not know it.
-// Params: blocks (default 4096), ready_seconds (60).
-func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_attach")
-	if err != nil {
-		return nil, err
-	}
-	if h := optionalParam(act, "host"); h != "" {
-		i, perr := strconv.Atoi(h)
-		if perr != nil || i < 0 || i >= len(v.Hosts) {
-			return nil, fmt.Errorf("v3_op_attach: host %q", h)
-		}
-		v.Cur = i
-	}
-	blocks := uint64(actions.ParseInt(optionalParam(act, "blocks"), 4096))
-	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
-	h := v.Hosts[v.Cur]
-	defer saveVolume(actx, v)
-	// The answer sets the volume's intended state (faults.go lifecycle).
-	return lifecycle(v, intentHeld)(recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
-		if v.LayoutID == "" {
-			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
-			if err != nil {
-				return fail(err.Error())
-			}
-			a, r := parseV3ctl(stdout, code, v.Name)
-			if r != tr.OutcomeOK {
-				return r, map[string]any{"detail": "resolve: " + a.Error}
-			}
-			v.LayoutID = a.LayoutID
-		}
-		return e.startHolder(ctx, node, v, h, blocks, bound)
-	}))
-}
-
-func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
-
-// startHolder starts blockvolume for v on host h and credits readiness only
-// to that process:
-//   - every endpoint of h must be free before the launch (a listener already
-//     there, another run's or a leftover, refuses the start: nothing launched);
-//   - the child is identified by its pid and start time and recorded as owned;
-//   - it is ready only while that child runs, its status serves above the
-//     recorded epoch, AND the status and NVMe listeners are held by it;
-//   - only then is the kernel host connected, to this run's NQN.
-func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
-	return e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
-}
-
-// launchHolder is startHolder with the command line given. A restart
-// (faults.go: the command line of a killed holder, as it ran) is ready at the
-// recorded epoch or above, and connects the kernel host only when no
-// controller of the volume's NQN is left: the kernel reconnects the one a
-// killed holder left behind by itself.
+// launchHolder starts blockvolume for v on host h with the command line
+// given and credits readiness only to that process, as the declared
+// v3_op_attach and v3_op_restart do: the unit's relaunch of a holder that
+// exited by itself (faults.go supervise, part of the v3_op_healthy
+// exception). Every endpoint of h must be free before the launch; the child
+// is identified by its pid and start time and recorded as owned; it is ready
+// only while that child runs, its status serves above the recorded epoch (a
+// restart: at it or above), AND the status and NVMe listeners are held by
+// it; a restart connects the kernel host only when no controller of the
+// volume's NQN is left.
 func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsHost, argv []string, bound time.Duration, restart bool) (string, map[string]any) {
 	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
 	held, err := listenerPIDs(ctx, node, ports)

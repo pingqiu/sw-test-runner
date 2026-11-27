@@ -577,7 +577,7 @@ func TestFaultActionsRegisteredAndNeedAHistory(t *testing.T) {
 		}
 	}
 	actx := &tr.ActionContext{Vars: map[string]string{}, Log: func(string, ...interface{}) {}}
-	for _, h := range []tr.ActionHandlerFunc{v3OpKill, v3OpRestart, v3OpHealthy} {
+	for _, h := range []tr.ActionHandlerFunc{blockActions.Handler("v3_op_kill"), blockActions.Handler("v3_op_restart"), v3OpHealthy} {
 		if _, err := h(context.Background(), actx, tr.Action{Params: map[string]string{"process": "blockmaster"}}); err == nil || !strings.Contains(err.Error(), "no history") {
 			t.Errorf("ran without a history: %v", err)
 		}
@@ -972,9 +972,19 @@ func TestIntentIsSetByTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for verb, target := range map[string]string{"attach": "intentHeld", "stop": "intentNotHeld", "move": "intentNotHeld"} {
+	for verb, target := range map[string]string{"stop": "intentNotHeld", "move": "intentNotHeld"} {
 		if !strings.Contains(string(src), "lifecycle(v, "+target+")(recordBounded(ctx, actx, e, \""+verb+"\",") {
 			t.Errorf("v3_op_%s does not set the intended state from its answer", verb)
+		}
+	}
+	// The declared attach: ok holds, unknown unsettles, a refusal nothing.
+	for _, a := range blockActions.File.Actions {
+		if a.Action != "v3_op_attach" {
+			continue
+		}
+		set := a.OnOutcomeSet
+		if len(set) != 2 || set[tr.OutcomeOK]["volume.intent"] != intentHeld || set[tr.OutcomeUnknown]["volume.intent"] != intentUnsettled {
+			t.Errorf("v3_op_attach does not set the intended state from its answer: %v", set)
 		}
 	}
 }

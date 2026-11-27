@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,12 +31,21 @@ type devCase struct {
 	unkillable bool
 }
 
-// squeeze drops consecutive repeats.
+// squeeze drops consecutive repeats of one command, and of one poll round
+// (a run of up to 8 commands repeated at once): how many rounds a poll takes
+// within its bound is the clock's.
 func squeeze(calls []string) []string {
-	var out []string
-	for _, c := range calls {
-		if len(out) == 0 || out[len(out)-1] != c {
-			out = append(out, c)
+	out := append([]string(nil), calls...)
+	for changed := true; changed; {
+		changed = false
+		for k := 1; k <= 8 && !changed; k++ {
+			for i := 0; i+2*k <= len(out); i++ {
+				if slices.Equal(out[i:i+k], out[i+k:i+2*k]) {
+					out = append(out[:i+k], out[i+2*k:]...)
+					changed = true
+					break
+				}
+			}
 		}
 	}
 	return out

@@ -9,7 +9,11 @@
       {"name": "filer", "required": true},
       {"name": "chunk_path", "required": true},
       {"name": "root", "required": true},
-      {"name": "client", "default": "c1"}
+      {"name": "client", "default": "c1"},
+      {"name": "own_script"},
+      {"name": "work"},
+      {"name": "owner"},
+      {"name": "lock_dirs_test_only"}
     ],
     "client": "client"
   },
@@ -130,6 +134,140 @@
         "expected_refusal": {"param": "retry_horizon", "while_message_contains": "workspace: deletion refused before persistence",
           "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes; the phrase is the delete sentinel (outcomes.json phrases)"}},
       "note": "after a stop the master admits the delete only once the holder's lease horizon has passed, answering not_admitted until then; the CLI's procedure is to rerun with the same request id. A step that declares expect=refused is one call, unless it sets retry_horizon: it then reruns through the lease-horizon refusal before persistence."
+    },
+    {
+      "action": "v3_op_attach", "verb": "attach", "op": "HolderInterface.Start", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "host"},
+        {"name": "blocks", "kind": "int", "default": "4096"},
+        {"name": "ready_seconds", "kind": "int", "default": "60"}
+      ],
+      "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
+      "on_invoke_set": {"volume.cur": "{{host}}"},
+      "record": {"volume": "{{volume.name}}", "args": {"server": "{{volume.server}}", "min_epoch": {"template": "{{volume.epoch}}", "type": "int"}, "guest_connect": "{{run.guest_connect}}"}},
+      "process": {
+        "op": "start", "subject": "volume", "name": "blockvolume",
+        "cite": "the holder is cmd/blockvolume with the command line the product's own real-process tests run; host 0 is the volume's first host, 1 its move target (v3_op_spec)",
+        "before": [
+          {"name": "layout", "kind": "command", "when": {"field": "volume.layout_id", "equals": ""},
+           "command": ["{{config.bin_dir}}/v3ctl", "resolve", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "decode": {"kind": "self_reported", "fields": {"outcome": "string", "volume": "string", "layout_id": "string", "store_ready": "bool", "call_ns": "int", "error": "string"},
+             "outcome_field": "outcome", "exits": {"ok": 0, "refused": 1, "unknown": 3}, "match": {"volume": "{{volume.name}}"}, "ok_length": {"layout_id": 32}, "detail": "resolve: {{answer.error}}"},
+           "on_ok_set": {"volume.layout_id": "{{answer.layout_id}}"},
+           "cite": "packs/v3block/v3ctl/main.go:12 (resolve --master --volume), :153-160 (the answer; the exits as create's): the layout id from the master when the runner does not know it"},
+          {"name": "endpoints", "kind": "ports_free", "addresses": ["{{volume.data_addr}}", "{{volume.ctrl_addr}}", "{{volume.status_addr}}", "{{volume.nvme_addr}}"],
+           "cite": "readiness is credited only to the launched process: a listener already on one of the host's endpoints (another run's, or a leftover) refuses the start, nothing launched"},
+          {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{volume.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{volume.server}}.locks"]}],
+           "failure": "mkdir", "cite": "the holder's durable root (and the test-only lock directory)"}
+        ],
+        "argv": ["{{config.bin_dir}}/blockvolume",
+          {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["--volume-lock-dir-test-only", "{{config.root}}/{{volume.server}}.locks"]},
+          "--master", "{{config.master}}", "--server-id", "{{volume.server}}", "--volume-id", "{{volume.name}}", "--replica-id", "r1",
+          "--layout-id", "{{volume.layout_id}}", "--data-addr", "{{volume.data_addr}}", "--ctrl-addr", "{{volume.ctrl_addr}}", "--status-addr", "{{volume.status_addr}}",
+          "--durable-root", "{{config.root}}/{{volume.server}}", "--durable-impl", "walstore-chunk",
+          "--durable-blocks", "{{blocks}}", "--durable-blocksize", "4096",
+          "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}", "--chunk-control-endpoint", "--workspace-lease",
+          "--nvme-listen", "{{volume.nvme_addr}}", "--nvme-subsysnqn", "{{volume.nqn}}", "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"],
+        "log": "{{config.root}}/{{volume.server}}.{{now_ns}}.log",
+        "result_launched": {"layout_id": "{{volume.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
+        "owned": [
+          {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
+           "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{volume.server}}", "{{launched.pid}}"],
+           "failure": "recording ownership: {{stderr_first_line}}",
+           "cite": "scenarios/v3block/m0-own.sh:94 (record): the run's ledger, so the teardown stops the process by its identity"}
+        ],
+        "ready": {
+          "within_param": "ready_seconds", "every_ms": 250,
+          "probes": [
+            {"name": "status", "kind": "json", "command": ["curl", "-s", "-m", "2", "http://{{volume.status_addr}}/status?volume={{volume.name}}"],
+             "schema": {"VolumeID": "string", "Epoch": "uint", "Healthy": "bool", "AuthorityRole": "string", "FrontendPrimaryReady": "bool"},
+             "holds": [{"path": "VolumeID", "equals": "{{volume.name}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
+               {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "above": "{{volume.epoch}}"}],
+             "capture": {"epoch": "Epoch"},
+             "cite": "blockvolume's /status: it serves the volume as primary, healthy, its frontend ready, at an epoch above the one the runner recorded"},
+            {"name": "listeners", "kind": "listeners_held", "addresses": ["{{volume.status_addr}}", "{{volume.nvme_addr}}"],
+             "cite": "the status and NVMe listeners are held by the launched process, not by another service"}
+          ],
+          "not_ready": "not serving above epoch {{volume.epoch}} from its own listeners within {{ready.within}}",
+          "not_ready_by_deadline": "not serving above epoch {{volume.epoch}} from its own listeners by the runner deadline"
+        },
+        "on_ready_set": {"volume.epoch": "{{ready.epoch}}"},
+        "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
+        "after": [
+          {"name": "connect", "kind": "nvme_connect", "address": "{{volume.nvme_addr}}", "subsystem": "{{volume.nqn}}", "options": "{{run.guest_connect_options}}",
+           "cite": "core/csi/linux_util.go:318 (the product's connect: nvme connect -t -a -s -n), through the kernel's fabrics interface"},
+          {"name": "device", "kind": "device", "subsystem": "{{volume.nqn}}", "within_seconds": 20, "into": "device",
+           "cite": "the guest's one namespace of the volume's subsystem"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the answer sets the volume's intended state: ok held, unknown unsettled (placed by observation at a healthy look), a refusal nothing"
+    },
+    {
+      "action": "v3_op_kill", "verb": "kill", "op": "Env.Kill", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "process", "kind": "process"},
+        {"name": "kill_seconds", "kind": "int", "default": "20"}
+      ],
+      "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20},
+      "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}, "signal": "KILL", "pid": {"template": "{{process.pid}}", "type": "int", "optional": true}}},
+      "process": {"op": "kill", "subject": "process", "name": "process", "within_param": "kill_seconds",
+        "cite": "the process from the run's records (blockmaster: the ownership ledger, scenarios/v3block/m0-own.sh:72 spawn; blockvolume:<i>: the holder v3_op_attach started for volume i of v3_op_spec), killed by its pid and start time"},
+      "note": "a fault touches every volume: the record's volume is empty and its args name the process and, for a holder, its volume"
+    },
+    {
+      "action": "v3_op_restart", "verb": "restart", "op": "Env.Restart", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "process", "kind": "process"},
+        {"name": "ready_seconds", "kind": "int", "default": "60"}
+      ],
+      "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
+      "coded": {"param": "process", "equals": "blockmaster", "handler": "v3_op_restart_master",
+        "why": "the blockmaster restarts through the ownership script and is ready when a master call answers (see the exception)"},
+      "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}}},
+      "process": {
+        "op": "restart", "subject": "process", "name": "blockvolume",
+        "cite": "a holder the runner killed, relaunched with the command line it ran (read from /proc before the kill): same ports, same data directory",
+        "before": [
+          {"name": "endpoints", "kind": "ports_free", "addresses": ["{{process.data_addr}}", "{{process.ctrl_addr}}", "{{process.status_addr}}", "{{process.nvme_addr}}"],
+           "cite": "readiness is credited only to the relaunched process: a listener already on an endpoint refuses the start, nothing launched"},
+          {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{process.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{process.server}}.locks"]}],
+           "failure": "mkdir", "cite": "the holder's durable root (and the test-only lock directory)"}
+        ],
+        "log": "{{config.root}}/{{process.server}}.{{now_ns}}.log",
+        "result_launched": {"layout_id": "{{process.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
+        "owned": [
+          {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
+           "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{process.server}}", "{{launched.pid}}"],
+           "failure": "recording ownership: {{stderr_first_line}}",
+           "cite": "scenarios/v3block/m0-own.sh:94 (record): a restarted process is in the same ledger, so the teardown stops it like any other"}
+        ],
+        "ready": {
+          "within_param": "ready_seconds", "every_ms": 250,
+          "probes": [
+            {"name": "status", "kind": "json", "command": ["curl", "-s", "-m", "2", "http://{{process.status_addr}}/status?volume={{process.volume}}"],
+             "schema": {"VolumeID": "string", "Epoch": "uint", "Healthy": "bool", "AuthorityRole": "string", "FrontendPrimaryReady": "bool"},
+             "holds": [{"path": "VolumeID", "equals": "{{process.volume}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
+               {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "at_least": "{{process.epoch}}"}],
+             "capture": {"epoch": "Epoch"},
+             "cite": "blockvolume's /status: serving again at the recorded epoch or above (a restart keeps its epoch)"},
+            {"name": "listeners", "kind": "listeners_held", "addresses": ["{{process.status_addr}}", "{{process.nvme_addr}}"],
+             "cite": "the status and NVMe listeners are held by the relaunched process"}
+          ],
+          "not_ready": "not serving above epoch {{process.epoch}} from its own listeners within {{ready.within}}",
+          "not_ready_by_deadline": "not serving above epoch {{process.epoch}} from its own listeners by the runner deadline"
+        },
+        "on_ready_set": {"process.epoch": "{{ready.epoch}}"},
+        "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
+        "after": [
+          {"name": "connect", "kind": "nvme_connect", "address": "{{process.nvme_addr}}", "subsystem": "{{process.nqn}}", "options": "{{run.guest_connect_options}}", "unless_present": true,
+           "cite": "the kernel reconnects the controller a killed holder left behind by itself; it is connected only when none of the volume's NQN is left"},
+          {"name": "device", "kind": "device", "subsystem": "{{process.nqn}}", "within_seconds": 20, "into": "device",
+           "cite": "the guest's one namespace of the volume's subsystem"}
+        ]
+      },
+      "note": "a restart, by the schedule or the unit, is not a lifecycle operation: it leaves the volume's intended state as it is"
     },
     {
       "action": "v3_op_write", "verb": "write", "op": "HolderInterface.Write", "kind": "device", "runs_on": "step_node",
@@ -389,11 +527,9 @@
     {"action": "v3_history_end", "why": "closes the run's history file (its end record) so a later phase judges a whole history; a runner bookkeeping step with no product call"}
   ],
   "exceptions": [
-    {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup", "declarable_with": "a long-lived process step: launch detached, record its identity as owned, and a readiness probe polled until a declared condition holds (status JSON serving above the recorded epoch, listeners held by that pid), then dependent steps (connect, device lookup) run only after it", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
     {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "declarable_with": "a step sequence with data passed between steps (the sealed generation parsed from detach feeds revoke), waits for a process's exit by its recorded identity and a poll for an answer line, and an outcome rule other than the worst step's (any failure after the first change is unknown)", "runner_deadline_seconds": 300},
     {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "declarable_with": "the stop's step sequence (see v3_op_stop), then a command whose answer must match the operation's own args before a subject field (the current host) is updated", "runner_deadline_seconds": 360},
-    {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit", "declarable_with": "process identity from the run's ownership ledger as a subject, a kill command bound to that identity, and a wait for the exit certified by a successful check", "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20}},
-    {"action": "v3_op_restart", "why": "a fault's repair: restarts the killed process with the command line it ran, recorded in the ledger, and waits for readiness as attach does", "declarable_with": "the ledger subject (see v3_op_kill) plus the long-lived process step of v3_op_attach, relaunching the recorded command line", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
+    {"action": "v3_op_restart_master", "why": "the blockmaster's restart (v3_op_restart hands it here): it relaunches through the ownership script's spawn, which records the new identity in the ledger, the identity is read back from the ledger whatever spawn's exit, it is ready when a master call (a resolve of the first volume) answers ok or refused, and after it the unit's supervision relaunches holders that fenced while the master was down", "declarable_with": "a process restart whose launcher is a declared command that records the identity itself (read back from a ledger subject), a readiness probe that is a self-reported answer of ok or refused, and a step after the operation that runs the unit's supervision", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],
   "guest": {

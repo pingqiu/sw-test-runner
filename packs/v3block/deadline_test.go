@@ -100,7 +100,7 @@ func TestExceptionEndsAtItsRunnerDeadline(t *testing.T) {
 		stuck  string
 	}{
 		"stop: the guest disconnect hangs": {v3OpStop, map[string]string{"volume": "v1"}, "delete_controller"},
-		"attach: the listener check hangs": {v3OpAttach, map[string]string{"volume": "v1"}, "ss -Hltnp"},
+		"attach: the listener check hangs": {blockActions.Handler("v3_op_attach"), map[string]string{"volume": "v1"}, "ss -Hltnp"},
 		"flush: the device scan hangs":     {blockActions.Handler("v3_op_flush"), map[string]string{"volume": "v1"}, "subsysnqn"},
 	} {
 		actx, p := deadlineCtx(t, stuckOn{match: c.stuck, inner: &fakeNode{}})
@@ -258,7 +258,7 @@ func TestAttachRecordsTheGuestConnect(t *testing.T) {
 	exceptionDeadlineOverride = 300 * time.Millisecond
 	actx, p := deadlineCtx(t, &fakeNode{})
 	actx.Vars["guest_connect_variant"] = "host_connect_settings"
-	if _, err := v3OpAttach(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
+	if _, err := blockActions.Handler("v3_op_attach")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
 		t.Fatal(err)
 	}
 	_ = actx.History.Close()
@@ -268,7 +268,7 @@ func TestAttachRecordsTheGuestConnect(t *testing.T) {
 	}
 	actx, _ = deadlineCtx(t, &fakeNode{})
 	actx.Vars["guest_connect_variant"] = "ctrl-loss-tmo=1"
-	if _, err := v3OpAttach(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err == nil || actx.History.Open() != 0 {
+	if _, err := blockActions.Handler("v3_op_attach")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err == nil || actx.History.Open() != 0 {
 		t.Fatalf("an unknown option was not refused: %v", err)
 	}
 	_ = actx.History.Close()

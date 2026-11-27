@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -132,89 +131,35 @@ func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration)
 	return declared.NVMeDevice(ctx, node, nqn, bound)
 }
 
-// listenerPIDs maps each port to the pids holding a TCP listener on it, from
-// one `ss -ltnp` read (root sees every process). A failed read is an error,
-// never "nobody listens".
+// listenerPIDs maps each port to the pids holding a TCP listener on it
+// (declared.ListenerPIDs): a failed read is an error, never "nobody
+// listens".
 func listenerPIDs(ctx context.Context, node runner, ports []string) (map[string][]string, error) {
-	stdout, stderr, code, err := node.RunRoot(ctx, "ss -Hltnp")
-	if err != nil || code != 0 {
-		return nil, fmt.Errorf("ss exit %d: %s", code, firstLine(stderr))
-	}
-	out := map[string][]string{}
-	want := map[string]bool{}
-	for _, p := range ports {
-		want[p] = true
-	}
-	pidRe := regexp.MustCompile(`pid=([0-9]+)`)
-	for _, l := range strings.Split(stdout, "\n") {
-		f := strings.Fields(l)
-		if len(f) < 4 {
-			continue
-		}
-		local := f[3]
-		port := local[strings.LastIndex(local, ":")+1:]
-		if !want[port] {
-			continue
-		}
-		pids := pidRe.FindAllStringSubmatch(l, -1)
-		if len(pids) == 0 {
-			out[port] = append(out[port], "?") // held by a process ss could not name
-		}
-		for _, m := range pids {
-			out[port] = append(out[port], m[1])
-		}
-	}
-	return out, nil
+	return declared.ListenerPIDs(ctx, node, ports)
 }
 
 // A process the runner started is identified by its pid AND its start time
-// (field 22 of /proc/PID/stat): a pid alone may be recycled by another
-// process after the first one exits.
+// (declared.ProcStart): a pid alone may be recycled by another process after
+// the first one exits.
 const (
-	procRunning    = "running"    // the pid runs with the recorded start time
-	procGone       = "gone"       // no such pid, or a different process now holds it
-	procUnreadable = "unreadable" // the check failed: nothing may be concluded
+	procRunning    = declared.ProcRunning
+	procGone       = declared.ProcGone
+	procUnreadable = declared.ProcUnreadable
 )
 
-// procStart reads a pid's start time; "" with procGone when the pid does not
-// exist, procUnreadable when the read failed.
+// procStart reads a pid's start time (declared.ProcStart).
 func procStart(ctx context.Context, node runner, pid string) (string, string) {
-	if !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
-		return "", procGone
-	}
-	stdout, _, code, err := node.Run(ctx, procStartCmd("/proc", pid))
-	out := strings.TrimSpace(stdout)
-	switch {
-	case err != nil || code != 0:
-		return "", procUnreadable
-	case out == "absent":
-		return "", procGone
-	case regexp.MustCompile(`^start [0-9]+$`).MatchString(out):
-		return out[6:], procRunning
-	}
-	return "", procUnreadable
+	return declared.ProcStart(ctx, node, pid)
 }
 
-// procStartCmd is the shell that reads a pid's start time: field 22 of
-// PROC/PID/stat. The command name (field 2) may hold spaces and parentheses,
-// so the text is cut after the LAST ')'; the start time is then the 20th
-// remaining field, which the shell must write ${20} ($20 is ${2} then "0").
-// It prints "start N", "absent" for no such pid, or fails (exit 3) when the
-// pid exists but its stat cannot be read.
-func procStartCmd(proc, pid string) string {
-	return fmt.Sprintf(`if [ -e %[1]s/%[2]s ]; then s=$(cat %[1]s/%[2]s/stat) || exit 3; s=${s##*) }; set -- $s; [ -n "${20}" ] || exit 3; echo "start ${20}"; else echo absent; fi`, proc, pid)
-}
+// procStartCmd is the shell that reads a pid's start time
+// (declared.ProcStartCmd).
+func procStartCmd(proc, pid string) string { return declared.ProcStartCmd(proc, pid) }
 
-// procState says whether the process (pid, start) still runs.
+// procState says whether the process (pid, start) still runs
+// (declared.ProcState).
 func procState(ctx context.Context, node runner, pid, start string) string {
-	if start == "" {
-		return procUnreadable // no identity was recorded: nothing may be concluded
-	}
-	got, state := procStart(ctx, node, pid)
-	if state == procRunning && got != start {
-		return procGone // the pid now names another process
-	}
-	return state
+	return declared.ProcState(ctx, node, pid, start)
 }
 
 // alive reports whether the process (pid, start) runs; an unreadable check is
@@ -227,23 +172,7 @@ func alive(ctx context.Context, node runner, pid, start string) bool {
 // only from a successful check that finds it gone: a check that keeps failing
 // is reported, not taken for an exit.
 func waitGone(ctx context.Context, node runner, pid, start string, bound time.Duration) string {
-	end := time.Now().Add(bound)
-	last := ""
-	for {
-		switch last = procState(ctx, node, pid, start); last {
-		case procGone:
-			return ""
-		}
-		if time.Now().After(end) {
-			if last == procUnreadable {
-				return fmt.Sprintf("pid %s: its state could not be read within %s", pid, bound)
-			}
-			return fmt.Sprintf("pid %s still running after %s", pid, bound)
-		}
-		if !pause(ctx, 250*time.Millisecond) {
-			return fmt.Sprintf("pid %s: not gone by the runner deadline", pid)
-		}
-	}
+	return declared.WaitGone(ctx, node, pid, start, bound)
 }
 
 // parseDetach reads the sealed generation of a plain detach: the JSON answer
