@@ -644,7 +644,8 @@ func TestBlockHandlersKeepTheHandlerVerbContract(t *testing.T) {
 	} {
 		actx, p, e := faultSetup(t)
 		out, err := look(actx, e)
-		if err != nil || out["value"] != tr.OutcomeOK || (out[randomrun.HealthyKey] != randomrun.HealthyTrue && out[randomrun.HealthyKey] != "false") || len(out) != 2 {
+		if err != nil || out["value"] != tr.OutcomeOK || (out[randomrun.HealthyKey] != randomrun.HealthyTrue && out[randomrun.HealthyKey] != "false") ||
+			(name == "healthy" && len(out) != 2) || (name == "single look" && (len(out) != 3 || out[randomrun.DownKey] != "")) {
 			t.Fatalf("%s: answer %v %v", name, out, err)
 		}
 		recs := closeRecords(t, actx, p)

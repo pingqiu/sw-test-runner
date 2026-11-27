@@ -15,7 +15,11 @@
 // The interface is what the first product needs and nothing more.
 package randomrun
 
-import "math/rand/v2"
+import (
+	"math/rand/v2"
+
+	tr "github.com/pingqiu/sw-test-runner"
+)
 
 // Op is one proposed operation: the typed action and its params.
 type Op struct {
@@ -96,6 +100,15 @@ type Model interface {
 	// Cells lists, per action, the states in which it can be proposed: the
 	// cells a run reports as never reached.
 	Cells() map[string][]string
+	// Observed hands the model each observe record the run's handlers wrote
+	// (healthy records, the faults' settled records, observations), in
+	// order, after the operation or fault event that wrote it: a model learns
+	// what was observed from the record, not from the invoke.
+	Observed(r tr.HistoryRecord)
+	// KillTarget resolves a scheduled kill at kill time: the process that
+	// holds for the scheduled name now, deterministically from the state;
+	// ok false when none holds (the kill is skipped).
+	KillTarget(scheduled string) (process string, ok bool)
 	// OutageWrites lists the writes of a short master outage after operation
 	// after: one on every serving subject. Learnt like any outcome.
 	OutageWrites(after int) []Op

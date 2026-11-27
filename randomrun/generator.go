@@ -12,11 +12,17 @@ package randomrun
 // and fast ones do not swamp the run.
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // Config sets a run.
@@ -46,6 +52,39 @@ type Generator struct {
 	counts map[string]int // action -> count proposed
 	down   string         // the process a fault holds down now ("" for none)
 	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
+	fed    int64          // the history's bytes already handed to the model (feed)
+}
+
+// feed hands the model every observe record appended to the history since
+// the last feed. The history is synced on every record, so its file is the
+// run's record as it stands.
+func (g *Generator) feed(h *tr.History) error {
+	if h == nil {
+		return nil
+	}
+	f, err := os.Open(h.Path())
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(g.fed, io.SeekStart); err != nil {
+		return err
+	}
+	rd := bufio.NewReader(f)
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err == io.EOF {
+			return nil // a line without its newline is not whole yet
+		}
+		if err != nil {
+			return err
+		}
+		g.fed += int64(len(line))
+		var r tr.HistoryRecord
+		if json.Unmarshal(line, &r) == nil && r.Kind == tr.HistoryObserve {
+			g.m.Observed(r)
+		}
+	}
 }
 
 // New validates the config and starts a run of model m.
@@ -119,8 +158,13 @@ func (g *Generator) Header() map[string]any {
 func (g *Generator) Faulty() bool { return g.cfg.Faults != 0 || g.cfg.MasterOutage != 0 }
 
 // schedule derives a config's fault schedule: kills and restarts, then the
-// master outages.
+// master outages. An ordinary kill never names the product's master: a
+// restart counted in operations comes long after the holders' serve window,
+// and they fence by design; a short master outage is its own event.
 func schedule(cfg Config, m Model) (FaultSchedule, error) {
+	if master, _, ok := m.MasterOutage(); ok && slices.Contains(cfg.FaultProcesses, master) {
+		return FaultSchedule{}, fmt.Errorf("fault schedule: %s is never killed by an ordinary kill (a short master outage is its own event, fault_master_outage)", master)
+	}
 	s, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess)
 	if err != nil || cfg.MasterOutage == 0 {
 		return s, err
@@ -164,9 +208,17 @@ func (g *Generator) Resolved(subject string) { g.m.Resolved(subject) }
 // Learn applies an operation's outcome to the model's state.
 func (g *Generator) Learn(o Op, outcome string) { g.m.Learn(o, outcome) }
 
+// stop ends the proposals for a reason other than the budget or the pool.
+func (g *Generator) stop(why string) {
+	if g.ended == "" {
+		g.ended = why
+	}
+}
+
 // Ended is why the run stopped proposing ("" while it goes on): "ops" when
 // the operation budget is spent, "pool exhausted" when no operation is
-// possible any more (every name used and nothing left to do with them).
+// possible any more (every name used and nothing left to do with them),
+// "unhealthy" when a healthy point stayed false after its full wait.
 func (g *Generator) Ended() string { return g.ended }
 
 // Candidate is one possible next operation with its weight.
