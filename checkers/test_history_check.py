@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import history_check as hc
+import product_block as pb
 
 FIXTURE = Path(__file__).resolve().parent / 'testdata' / 'm0-history.jsonl'
 
@@ -715,6 +716,27 @@ class C5(unittest.TestCase):
                     ('obs', 'v1', 4, FILES, tick(3)), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, tick(4)), base=False)
         self.assertEqual(v['verdict'], 'UNKNOWN', v)
         self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
+
+    def test_workspace_stderr_is_no_baseline_change(self):
+        # The observation keeps the first lines of the show's stderr (why a
+        # show failed). Comparisons ignore it: two observations that differ
+        # only in stderr show the same state, for a successful and a failed
+        # show alike.
+        ok = lambda err: {'workspace': {'exit': 0, 'text': ws_text(), 'stderr': err}, 'dirs': WS['dirs'], 'snapshots': []}
+        v = self.c5(('obs', 'v0', 1, FILES, ok(['warn: a'])), ('obs', 'v0', 1, FILES, ok(['warn: b', 'more'])),
+                    ('obs', 'v1', 4, FILES, ok([''])), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, ok(['other'])), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        failed = lambda err: {'workspace': {'exit': 1, 'text': [''], 'stderr': err}, 'dirs': WS['dirs'], 'snapshots': []}
+        for part_state in (ok, failed):
+            a, b = part_state(['master refused: v1 is being deleted']), part_state(['master did not answer'])
+            sa, _ = pb.observed_state({'result': a}, ['workspace'])
+            sb, _ = pb.observed_state({'result': b}, ['workspace'])
+            self.assertEqual(sa, sb)
+            self.assertTrue(pb.same_part('workspace', sa['workspace'], sb['workspace']))
+        # red control: a different exit status is a different state.
+        sa, _ = pb.observed_state({'result': ok([''])}, ['workspace'])
+        sb, _ = pb.observed_state({'result': failed([''])}, ['workspace'])
+        self.assertNotEqual(sa, sb)
 
     def test_a_lease_running_out_by_time_is_no_baseline_change(self):
         # From a host run: revoking -> expired on a stopped volume, nothing in between.

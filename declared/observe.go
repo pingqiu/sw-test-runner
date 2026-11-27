@@ -13,7 +13,8 @@ package declared
 //     that must hold a value; OnUnreadable, OnFailure (exit not 0) and
 //     OnNotRun (the command could not run) give the fields otherwise.
 //   - "lines": when the command ran, Into is {"exit": code, "text": the
-//     first Lines lines of stdout}.
+//     first Lines lines of stdout}, and with StderrLines also "stderr": the
+//     first StderrLines lines of stderr.
 //   - "json_strings": stdout is a JSON list of strings, into Into; when the
 //     command fails or the answer is not such a list, ErrorInto is Error.
 //
@@ -60,8 +61,11 @@ type Read struct {
 	// decoded leniently.
 	FailureBody map[string]json.RawMessage `json:"failure_body,omitempty"`
 	// lines, json_strings
-	Into      string `json:"into,omitempty"`
-	Lines     int    `json:"lines,omitempty"`
+	Into        string `json:"into,omitempty"`
+	Lines       int    `json:"lines,omitempty"`
+	StderrLines int    `json:"stderr_lines,omitempty"`
+	// StderrWhy says why stderr is kept (documentation).
+	StderrWhy string `json:"stderr_why,omitempty"`
 	ErrorInto string `json:"error_into,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
@@ -344,11 +348,15 @@ func (s *scope) read(res map[string]any, r Read, stdout, stderr string, code int
 		return s.fill(res, r.Fields, data)
 	case "lines":
 		if runErr == nil {
-			lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-			if len(lines) > r.Lines {
-				lines = lines[:r.Lines]
+			first := func(s string, n int) []string {
+				lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+				return lines[:min(n, len(lines))]
 			}
-			res[r.Into] = map[string]any{"exit": code, "text": lines}
+			v := map[string]any{"exit": code, "text": first(stdout, r.Lines)}
+			if r.StderrLines > 0 {
+				v["stderr"] = first(stderr, r.StderrLines)
+			}
+			res[r.Into] = v
 		}
 		return nil
 	case "json_strings":
@@ -469,7 +477,7 @@ func (a *Action) checkObserve(defined func(map[string]bool) func(string) error) 
 				}
 			}
 		case "lines":
-			if r.Into == "" || r.Lines <= 0 {
+			if r.Into == "" || r.Lines <= 0 || r.StderrLines < 0 {
 				return fmt.Errorf("%s: lines needs into and lines", at)
 			}
 		case "json_strings":
