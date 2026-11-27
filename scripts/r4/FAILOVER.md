@@ -29,6 +29,23 @@ must list that old r1 as `State=healthy, Epoch=2`. Its own supporting admission
 is not completion of catch-up. No guest writes are sent between those gates.
 The existing 240-second catch-up budget decides failure, never eligibility.
 
+Host connects follow the product operator guide's
+[Host connect settings at RC e7a7b117](https://github.com/seaweedfs/seaweed-block/blob/e7a7b1179b41ca75ae50bfbc25524416c15b21a1/docs/operator-guide.md#host-connect-settings):
+`--ctrl-loss-tmo=180 --reconnect-delay=2`, with fast I/O failure left off by
+omitting that option. Record the exact argv. A pending old-controller write
+may consequently take longer to finish; the writer unit has a 210s stop
+budget and its stop action 240s (scenario action 5m). An unknown stop still
+fails and prevents reconnect/readback. Do not infer that increasing these
+fixture stop budgets changes product failover latency or guarantees a drain.
+The scenario observes the successor only after writer-stop finishes. Its
+serving-status receipt is therefore a post-drain observation, not an independent
+fault-to-serving sample. This change includes no concurrent readiness sampler.
+A separate local rehearsal driver is being prepared outside this PR; its sampler
+has no reviewed pin here and supplies no timing evidence for this scenario.
+Before replacing the guide's derived estimate, review and pin that sampler and
+retain fault, serving, reconnect and complete ACK-readback observations separately,
+including raw samples and sampling overhead. No measured value is supplied here.
+
 The original local rehearsal failed against the former manual-only contract;
 it is not relabeled as a pass. The whole sequence must pass again on the selected
 RC with primary process SIGKILL before requesting a paid run. Process restart is

@@ -140,6 +140,13 @@ func TestR4OwnedUnitsFreshInstallAndFailedCleanupPreventPurge(t *testing.T) {
 	if !strings.Contains(body, "RestartPreventExitStatus=78") || strings.Contains(body, "[Install]") {
 		t.Fatal(body)
 	}
+	if out, err := r4Env(t, env, "unit", "test", "writer", "--", "/bin/true"); err != nil {
+		t.Fatalf("writer unit: %v %s", err, out)
+	}
+	writerBody := mustRead(t, filepath.Join(units, "r4-test-writer.service"))
+	if !strings.Contains(writerBody, "TimeoutStopSec=210s") || !strings.Contains(writerBody, "Restart=no") {
+		t.Fatal("writer must drain documented controller lifetime without restart: " + writerBody)
+	}
 	if out, err := r4Env(t, env, "start", "test", "volume"); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
@@ -203,6 +210,93 @@ func TestR4FailedPreflightPreventsHostWork(t *testing.T) {
 	result := tr.NewEngine(r, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
 	if result.Status != tr.StatusFail || normal != 1 {
 		t.Fatalf("%s normal=%d %s", result.Status, normal, result.Error)
+	}
+}
+
+// Run the real stop command with an inert systemctl, then feed its result
+// through the real scenario engine. No device, unit, network or drain wait.
+func TestR4WriterStopBlocksReconnectAndReadback(t *testing.T) {
+	const script = "../../scenarios/v3block/r4.sh"
+	body := mustRead(t, script)
+	for _, mode := range []string{"success", "stop-failure", "still-active"} {
+		t.Run(mode, func(t *testing.T) {
+			check := func(script string) bool {
+				dir := t.TempDir()
+				stopped := filepath.Join(dir, "stopped")
+				ctl := r4File(t, filepath.Join(dir, "systemctl"), `#!/bin/sh
+case "$1" in
+is-active)
+  if [ -e "$R4_TEST_STOPPED" ]; then echo inactive; exit 3; fi
+  echo active; exit 0 ;;
+stop)
+  [ "$R4_TEST_MODE" = still-active ] || touch "$R4_TEST_STOPPED"
+  [ "$R4_TEST_MODE" != stop-failure ] || exit 124
+  exit 0 ;;
+*) exit 99 ;;
+esac
+`)
+				env := []string{"R4_SYSTEMCTL=" + ctl, "R4_TEST_STOPPED=" + stopped, "R4_TEST_MODE=" + mode}
+				s, err := tr.ParseFile("../../scenarios/v3block/r4-node-loss.yaml")
+				if err != nil {
+					t.Fatal(err)
+				}
+				stopCalls, reconnect, readback := 0, 0, 0
+				fault := false
+				h := func(_ context.Context, _ *tr.ActionContext, a tr.Action) (map[string]string, error) {
+					cmd := a.Params["cmd"]
+					if a.Action == "cloud_vm_power" {
+						fault = true
+					}
+					if strings.Contains(cmd, "r4.sh writer-stop $T") {
+						stopCalls++
+						out, err := r4ScriptEnv(t, script, env, "writer-stop", "test")
+						if err != nil {
+							return nil, fmt.Errorf("writer-stop refused: %w: %s", err, out)
+						}
+					}
+					if fault && strings.Contains(cmd, "r4.sh connect ") {
+						reconnect++
+					}
+					if fault && strings.Contains(cmd, "auto-p2.py verify ") {
+						readback++
+					}
+					if strings.Contains(cmd, "auto-p2.py wait ") {
+						return map[string]string{"value": "test-promotion-token"}, nil
+					}
+					return nil, nil
+				}
+				reg := tr.NewRegistry()
+				for _, name := range []string{"exec", "upload_path", "collect_path", "cloud_vm_power", "cloud_vm_power_restore"} {
+					reg.RegisterFunc(name, tr.TierCore, h)
+				}
+				result := tr.NewEngine(reg, nil).Run(context.Background(), s, &tr.ActionContext{Scenario: s, Vars: map[string]string{}, Log: func(string, ...interface{}) {}})
+				if mode == "success" {
+					return result.Status == tr.StatusPass && stopCalls == 1 && reconnect == 1 && readback == 1
+				}
+				return result.Status == tr.StatusFail && stopCalls == 1 && reconnect == 0 && readback == 0 && strings.Contains(result.Error, "writer-stop refused")
+			}
+			if !check(script) {
+				t.Fatal("writer stop did not gate the scenario's reconnect/readback")
+			}
+			if mode != "success" {
+				guard := ` || die "writer stop is unknown; retained"`
+				if mode == "still-active" {
+					guard = `  ! unit_active "$u" || die "writer is still alive; no reconnect or verify"`
+				}
+				if strings.Count(body, guard) != 1 {
+					t.Fatal("decisive guard changed; update the mutation control")
+				}
+				replacement := ""
+				if mode == "stop-failure" {
+					// Disable the refusal without letting errexit supply it instead.
+					replacement = " || true"
+				}
+				mutant := r4File(t, filepath.Join(t.TempDir(), "r4-mutant.sh"), strings.Replace(body, guard, replacement, 1))
+				if check(mutant) {
+					t.Fatal("control failed to catch removal of the decisive stop refusal")
+				}
+			}
+		})
 	}
 }
 

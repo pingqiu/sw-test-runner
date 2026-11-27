@@ -281,7 +281,7 @@ phases:
         vm: node-2                  # the VM to power off
       - action: exec
         node: node-1
-        timeout: 1m
+        timeout: 5m # drain old I/O with documented ctrl-loss-tmo=180, fast fail off
         cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
 
   - name: operator-call-count
