@@ -8,6 +8,41 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def completed_imds404_warnings(status):
+    """Return accepted warnings, or an empty list for any unapproved status."""
+    if not isinstance(status, dict) or status.get('status') != 'done' or status.get('errors') != []:
+        return []
+    if not isinstance(status.get('recoverable_errors'), dict):
+        return []
+    warning = re.compile(
+        r"Polling IMDS failed attempt [1-9][0-9]* with exception: UrlError\('404 Client Error: "
+        r"Not Found for url: http://169\.254\.169\.254/metadata/reprovisiondata\?api-version=2019-06-01'\)")
+    warnings = []
+
+    def check(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == 'errors' and item != []:
+                    return False
+                if key == 'recoverable_errors':
+                    if not isinstance(item, dict):
+                        return False
+                    for entries in item.values():
+                        if not isinstance(entries, list):
+                            return False
+                        for entry in entries:
+                            if not isinstance(entry, str) or not warning.fullmatch(entry):
+                                return False
+                            warnings.append(entry)
+                elif not check(item):
+                    return False
+        elif isinstance(value, list):
+            return all(check(item) for item in value)
+        return True
+
+    return list(dict.fromkeys(warnings)) if check(status) else []
+
+
 def main(root):
     if not __debug__:
         raise RuntimeError("R4 launcher refuses Python optimization")
@@ -32,6 +67,7 @@ def main(root):
     out = pathlib.Path(ctx['output'])
     env = dict(os.environ, GOTOOLCHAIN='local', CGO_ENABLED='0')
     args = []
+    bootstrap_summary = {'schema': 'r4.bootstrap-summary/v1', 'nodes': {}}
     users = {h['management']['user'] for h in hosts.values()}
     require(len(users) == 1, "inventory nodes must use the same SSH user")
     user = next(iter(users))
@@ -52,6 +88,27 @@ def main(root):
             r = subprocess.run(ssh+['sudo timeout 240 cloud-init status --wait'], capture_output=True, timeout=255)
             (out/f'cloud-init-{i}.log').write_bytes(r.stdout+r.stderr)
             if r.returncode == 0: break
+            if r.returncode == 2:
+                detail = subprocess.run(ssh+['sudo cloud-init status --long --format json'],
+                                        capture_output=True, timeout=30)
+                (out/f'cloud-init-{i}-long.log').write_bytes(detail.stdout+detail.stderr)
+                (out/f'cloud-init-{i}-long.exit').write_text(str(detail.returncode)+'\n')
+                try:
+                    status = json.loads(detail.stdout)
+                except (ValueError, UnicodeError):
+                    status = None
+                warnings = completed_imds404_warnings(status) if detail.returncode in (0, 2) else []
+                if warnings:
+                    bootstrap_summary['nodes'][h['id']] = {
+                        'message': 'provisioning degraded, accepted: ' + '; '.join(warnings),
+                        'cloud_init_wait_exit': r.returncode,
+                        'long_status_exit': detail.returncode,
+                        'status': status,
+                    }
+                    # Persist before either RF scenario: a later failure must not
+                    # erase that this host was provisioned with accepted warnings.
+                    (out/'SUMMARY.json').write_text(json.dumps(bootstrap_summary, indent=2)+'\n')
+                    break
             if time.monotonic() >= end: raise RuntimeError(f'{h["id"]} cloud-init readiness failed')
             time.sleep(5)
         for k,v in {f'n{i}_ip':m['address'], f'n{i}_data':h['data']['address'], f'n{i}_host_key':pin}.items():

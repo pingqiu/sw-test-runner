@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import importlib.util
 import json
@@ -50,7 +51,7 @@ class R4CloudPack(unittest.TestCase):
                                 h["id"]: "ssh-ed25519 TEST-PIN-" + h["id"] for h in self.hosts})
         self.calls = []
 
-    def run_pack(self, first_scenario_exit=0):
+    def run_pack(self, first_scenario_exit=0, degraded_status=None, long_exit=2):
         (self.root / "inventory.json").write_text(json.dumps(dict(
             target="azure", hosts=self.hosts,
             managed_resource_ids=[h["resource_id"] for h in self.hosts])))
@@ -58,6 +59,10 @@ class R4CloudPack(unittest.TestCase):
 
         def run(argv, **kwargs):
             self.calls.append(argv)
+            if degraded_status is not None and "swtest@192.0.2.3" in argv:
+                if "--format json" in argv[-1]:
+                    return subprocess.CompletedProcess(argv, long_exit, json.dumps(degraded_status).encode(), b"")
+                return subprocess.CompletedProcess(argv, 2, b"status: done\n", b"")
             rc = first_scenario_exit if argv[0] == str(self.root / "swblock") else 0
             return subprocess.CompletedProcess(argv, rc, b"", b"")
 
@@ -66,8 +71,59 @@ class R4CloudPack(unittest.TestCase):
 
         with patch.dict(os.environ, {"SEAWEED_CLOUD_PACK_CONTEXT": str(self.root / "context.json")}), \
                 patch.object(pack.subprocess, "run", side_effect=run), \
-                patch.object(pack.subprocess, "check_output", side_effect=git):
+                patch.object(pack.subprocess, "check_output", side_effect=git), \
+                patch.object(pack.time, "monotonic", side_effect=[0, 0, 0, 301]), \
+                patch.object(pack.time, "sleep"):
             return pack.main(self.root)
+
+    def test_captured_imds404_degraded_done_reaches_both_rounds(self):
+        # Captured from the rejected Azure bootstrap: exit 2, done, no errors.
+        status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        self.assertEqual(self.run_pack(degraded_status=status), 0)
+        scenarios = [argv for argv in self.calls if argv[0] == str(self.root / "swblock")]
+        self.assertEqual(len(scenarios), 2)
+        self.assertIn("rf=3", scenarios[0])
+        self.assertIn("rf=2", scenarios[1])
+
+    def test_accepted_degradation_is_recorded_before_any_scenario_can_fail(self):
+        status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        self.assertEqual(self.run_pack(first_scenario_exit=7, degraded_status=status), 7)
+        summary = json.loads((self.out / "SUMMARY.json").read_text())
+        node = summary["nodes"]["node-3"]
+        self.assertEqual(node["message"], "provisioning degraded, accepted: " +
+                         status["recoverable_errors"]["WARNING"][0])
+        self.assertEqual(node["status"], status)
+        self.assertEqual(node["cloud_init_wait_exit"], 2)
+        self.assertEqual(node["long_status_exit"], 2)
+
+    def test_degraded_status_with_real_or_unrecognized_error_never_starts_scenario(self):
+        captured = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        cases = {}
+        def changed(name, edit):
+            status = copy.deepcopy(captured)
+            edit(status)
+            cases[name] = status
+        changed("fatal error", lambda s: s.update(errors=["package install failed"]))
+        changed("nested fatal error", lambda s: s["modules-final"].update(errors=["script failed"]))
+        changed("not done", lambda s: s.update(status="running"))
+        changed("missing errors", lambda s: s.pop("errors"))
+        changed("unknown recoverable warning", lambda s: s["recoverable_errors"]["WARNING"].append("disk full"))
+        changed("nested unknown warning", lambda s: s["modules-final"]["recoverable_errors"]["WARNING"].append("script failed"))
+        changed("wrong metadata endpoint", lambda s: s["recoverable_errors"]["WARNING"].__setitem__(0,
+                s["recoverable_errors"]["WARNING"][0].replace("reprovisiondata", "instance")))
+        changed("malformed recoverable entries", lambda s: s.update(recoverable_errors={"WARNING": "not a list"}))
+        cases["empty status"] = {}
+        cases["wrong JSON type"] = "status: done"
+        for name, status in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "node-3 cloud-init readiness failed"):
+                self.run_pack(degraded_status=status)
+            self.assertFalse(any(argv[0] == str(self.root / "swblock") for argv in self.calls))
+
+    def test_long_status_transport_failure_never_starts_scenario(self):
+        status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "node-3 cloud-init readiness failed"):
+            self.run_pack(degraded_status=status, long_exit=255)
+        self.assertFalse(any(argv[0] == str(self.root / "swblock") for argv in self.calls))
 
     def test_inventory_user_and_per_node_pins_reach_both_rounds(self):
         self.assertEqual(self.run_pack(), 0)
