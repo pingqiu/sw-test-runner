@@ -2,6 +2,7 @@ package declared
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ func (s *subject) Field(_ context.Context, _ Runner, f string) (string, error) {
 func (s *subject) Set(f, v string) error                                       { s.f[f] = v; return nil }
 func (s *subject) Save()                                                       { s.saved = true }
 
-const head = `{"product": "p", "read_at": "p 1", "config": {"keys": [{"name": "bin", "required": true}, {"name": "client", "default": "c1"}], "client": "client"},`
+const head = `{"product": "p", "read_at": "p 1", "config": {"keys": [{"name": "bin", "required": true}, {"name": "client", "default": "c1"}], "client": "client"}, "runner_io_dir": "/io",`
 
 const desc = head + `
  "actions": [
@@ -50,22 +51,22 @@ const desc = head + `
    "params": [{"name": "volume", "kind": "subject", "vars": true}, {"name": "key", "required": true}, {"name": "n", "kind": "int", "default": "7"}],
    "record": {"volume": "{{volume.name}}", "args": {"key": "{{key}}", "n": {"template": "{{n}}", "type": "int"}}},
    "variants": [
-     {"name": "fast", "when": {"field": "volume.fast", "equals": "yes"}, "command": ["{{config.bin}}/put", "--fast", {"json": {"k": "{{key}}"}}], "timeout_seconds": 5, "cite": "x.go:1",
+     {"name": "fast", "when": {"field": "volume.fast", "equals": "yes"}, "command": ["{{config.bin}}/put", "--fast", {"json": {"k": "{{key}}"}}], "runner_deadline_seconds": 5, "cite": "x.go:1",
       "decode": {"kind": "error_body", "path": "put fast", "answer": "http_status_last_line", "transport_failure": "no answer (exit {{exit}})"}},
-     {"name": "slow", "command": ["{{config.bin}}/put", "--key", "{{key}}", "--n", "{{n}}"], "timeout_seconds": 5, "cite": "x.go:2",
+     {"name": "slow", "command": ["{{config.bin}}/put", "--key", "{{key}}", "--n", "{{n}}"], "runner_deadline_seconds": 5, "cite": "x.go:2",
       "decode": {"kind": "error_body", "path": "put"}}
    ],
    "retry": {"while_code": "busy", "within_param": "n", "every_seconds": 1, "attempts": "attempts"}},
   {"action": "p_make", "verb": "make", "op": "Store.Make", "runs_on": "step_node", "as_root": true,
    "params": [{"name": "volume", "kind": "subject", "vars": true}],
    "record": {"volume": "{{volume.name}}", "args": {}},
-   "variants": [{"command": ["mk", "{{volume.name}}"], "timeout_seconds": 5, "cite": "x.go:3",
+   "variants": [{"command": ["mk", "{{volume.name}}"], "runner_deadline_seconds": 5, "cite": "x.go:3",
      "decode": {"kind": "self_reported", "fields": {"outcome": "string", "volume": "string", "id": "string", "ns": "int", "error": "string"},
        "outcome_field": "outcome", "exits": {"ok": 0, "refused": 1, "unknown": 3}, "match": {"volume": "{{volume.name}}"},
        "ok_length": {"id": 4}, "result": {"ns": "ns"}, "result_ok": {"id": "id"}, "detail": "{{answer.error}} {{stderr}}"}}],
    "on_ok_set": {"volume.id": "{{answer.id}}"}}
  ],
- "exceptions": [{"action": "p_attach", "why": "a process start"}]}`
+ "exceptions": [{"action": "p_attach", "why": "a process start", "runner_deadline_seconds": 30}]}`
 
 func lookup(action, path, code, message string) string {
 	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) {
@@ -86,7 +87,7 @@ func setup(t *testing.T, n *node, sub *subject) (*Executor, *tr.ActionContext) {
 	}
 	t.Cleanup(func() { h.Close() })
 	x := &Executor{File: f, Lookup: lookup, Pause: func(time.Duration) time.Duration { return time.Millisecond },
-		Node:    func(*tr.ActionContext, string) (Runner, error) { return n, nil },
+		Node:    func(*tr.ActionContext, string) (Runner, error) { return &SimHost{Inner: n}, nil },
 		Subject: func(_ *tr.ActionContext, name string) (Subject, error) { sub.f["name"] = name; return sub, nil }}
 	return x, &tr.ActionContext{History: h, Vars: map[string]string{"bin": "{{work}}/b in", "work": "/w"}, Log: func(string, ...interface{}) {}}
 }
@@ -183,20 +184,21 @@ func TestRunnerErrorsRecordNothing(t *testing.T) {
 // Red controls of the description's checks: each seeded defect is refused.
 func TestParseRedControls(t *testing.T) {
 	good := `"actions": [{"action": "a", "verb": "v", "op": "M.A", "runs_on": "step_node", "params": [{"name": "p"}], "record": {"volume": "{{p}}", "args": {}},
-	  "variants": [{"command": ["x", "{{p}}"], "timeout_seconds": 1, "cite": "x.go:1", "decode": {"kind": "error_body", "path": "x"}}]}], "exceptions": []}`
+	  "variants": [{"command": ["x", "{{p}}"], "runner_deadline_seconds": 1, "cite": "x.go:1", "decode": {"kind": "error_body", "path": "x"}}]}], "exceptions": []}`
 	if _, err := Parse([]byte(head + good)); err != nil {
 		t.Fatalf("green twin: %v", err)
 	}
 	for name, bad := range map[string][2]string{
-		"no cite":               {`"cite": "x.go:1"`, `"cite": " "`},
-		"no timeout":            {`"timeout_seconds": 1`, `"timeout_seconds": 0`},
-		"undefined name":        {`"{{p}}"]`, `"{{q}}"]`},
-		"unknown decode":        {`"kind": "error_body"`, `"kind": "grep"`},
-		"no path":               {`"path": "x"`, `"path": ""`},
-		"unknown field":         {`"op": "M.A"`, `"op": "M.A", "shell": "x"`},
-		"declared and excepted": {`"exceptions": []`, `"exceptions": [{"action": "a", "why": "w"}]`},
-		"exception without why": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": ""}]`},
-		"other node":            {`"runs_on": "step_node"`, `"runs_on": "anywhere"`},
+		"no cite":                             {`"cite": "x.go:1"`, `"cite": " "`},
+		"no timeout":                          {`"runner_deadline_seconds": 1`, `"runner_deadline_seconds": 0`},
+		"undefined name":                      {`"{{p}}"]`, `"{{q}}"]`},
+		"unknown decode":                      {`"kind": "error_body"`, `"kind": "grep"`},
+		"no path":                             {`"path": "x"`, `"path": ""`},
+		"unknown field":                       {`"op": "M.A"`, `"op": "M.A", "shell": "x"`},
+		"declared and excepted":               {`"exceptions": []`, `"exceptions": [{"action": "a", "why": "w", "runner_deadline_seconds": 5}]`},
+		"exception without why":               {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "", "runner_deadline_seconds": 5}]`},
+		"exception without a runner deadline": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w"}]`},
+		"other node":                          {`"runs_on": "step_node"`, `"runs_on": "anywhere"`},
 	} {
 		if !strings.Contains(good, bad[0]) {
 			t.Fatalf("%s: seed %q not in the green twin", name, bad[0])
@@ -204,5 +206,77 @@ func TestParseRedControls(t *testing.T) {
 		if _, err := Parse([]byte(head + strings.Replace(good, bad[0], bad[1], 1))); err == nil {
 			t.Errorf("%s: not refused", name)
 		}
+	}
+}
+
+// hung never answers a command.
+type hung struct{ calls int }
+
+func (h *hung) Run(ctx context.Context, cmd string) (string, string, int, error) {
+	h.calls++
+	select {}
+}
+
+func (h *hung) RunRoot(ctx context.Context, cmd string) (string, string, int, error) {
+	return h.Run(ctx, cmd)
+}
+
+// A command that never answers ends at its runner deadline as unknown, the
+// operation is completed in the history, and the next operation runs.
+func TestRunnerDeadlineEndsAHungCommand(t *testing.T) {
+	for _, unkillable := range []bool{false, true} {
+		f, err := Parse([]byte(desc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := tr.OpenHistory(filepath.Join(t.TempDir(), "h.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := &SimHost{Inner: &hung{}, Unkillable: unkillable}
+		x := &Executor{File: f, Lookup: lookup, Poll: 5 * time.Millisecond,
+			Deadline: func(time.Duration) time.Duration { return 100 * time.Millisecond },
+			Node:     func(*tr.ActionContext, string) (Runner, error) { return host, nil },
+			Subject: func(*tr.ActionContext, string) (Subject, error) {
+				return &subject{f: map[string]string{"name": "v1"}}, nil
+			}}
+		actx := &tr.ActionContext{History: h, Vars: map[string]string{"bin": "/b"}, Log: func(string, ...interface{}) {}}
+		start := time.Now()
+		out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k"}})
+		if err != nil || out["value"] != tr.OutcomeUnknown || time.Since(start) > 5*time.Second {
+			t.Fatalf("unkillable=%v: %v %v after %s", unkillable, out, err, time.Since(start))
+		}
+		if h.Open() != 0 {
+			t.Fatalf("the hung operation was not completed")
+		}
+		h.Close()
+		b, _ := os.ReadFile(h.Path())
+		if !strings.Contains(string(b), `"detail":"timeout after 0s"`) || strings.Contains(string(b), `"abandoned"`) != unkillable {
+			t.Fatalf("unkillable=%v: history %s", unkillable, b)
+		}
+		if unkillable && !strings.Contains(string(b), `"abandoned":[{"pid":"40002","start":"777"}]`) {
+			t.Fatalf("the survivor is not named: %s", b)
+		}
+	}
+}
+
+// A node that answers nothing at all, not even the protocol: each call is
+// bounded, so the operation still ends, unknown.
+func TestRunnerDeadlineEndsAHungNode(t *testing.T) {
+	defer func(d time.Duration) { ProtocolCallBound = d }(ProtocolCallBound)
+	ProtocolCallBound = 50 * time.Millisecond
+	f, _ := Parse([]byte(desc))
+	h, _ := tr.OpenHistory(filepath.Join(t.TempDir(), "h.jsonl"))
+	defer h.Close()
+	x := &Executor{File: f, Lookup: lookup, Deadline: func(time.Duration) time.Duration { return 100 * time.Millisecond },
+		Node: func(*tr.ActionContext, string) (Runner, error) { return &hung{}, nil },
+		Subject: func(*tr.ActionContext, string) (Subject, error) {
+			return &subject{f: map[string]string{"name": "v1"}}, nil
+		}}
+	actx := &tr.ActionContext{History: h, Vars: map[string]string{"bin": "/b"}, Log: func(string, ...interface{}) {}}
+	start := time.Now()
+	out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k"}})
+	if err != nil || out["value"] != tr.OutcomeUnknown || time.Since(start) > 2*time.Second || h.Open() != 0 {
+		t.Fatalf("%v %v after %s", out, err, time.Since(start))
 	}
 }

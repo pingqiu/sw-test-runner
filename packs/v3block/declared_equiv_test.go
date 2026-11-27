@@ -88,11 +88,19 @@ func eqBaseVars() map[string]string {
 		"chunk_path": "/chunks", "root": "/w/root"}
 }
 
-func runEq(t *testing.T, h tr.ActionHandlerFunc, c eqCase) eqRun {
+// runEq runs one case; detached says the handler runs its commands
+// detached (a declared action), so the node is a simulated host over the
+// scripted one, which sees exactly the commands a direct run issues.
+func runEq(t *testing.T, h tr.ActionHandlerFunc, c eqCase, detached bool) eqRun {
 	t.Helper()
 	node := &eqNode{rules: c.rules, n: make([]int, len(c.rules))}
 	old := opNode
-	opNode = func(*tr.ActionContext, string) (runner, error) { return node, nil }
+	opNode = func(*tr.ActionContext, string) (runner, error) {
+		if detached {
+			return &declared.SimHost{Inner: node}, nil
+		}
+		return node, nil
+	}
 	defer func() { opNode = old }()
 	vars := eqBaseVars()
 	vols := c.vols
@@ -145,7 +153,7 @@ func checkEquivalent(t *testing.T, action string, frozen tr.ActionHandlerFunc, c
 	t.Helper()
 	h := blockActions.Handler(action)
 	for _, c := range cases {
-		want, got := runEq(t, frozen, c), runEq(t, h, c)
+		want, got := runEq(t, frozen, c, false), runEq(t, h, c, true)
 		if (want.err == nil) != (got.err == nil) {
 			t.Errorf("%s %s: error %v, frozen %v", action, c.name, got.err, want.err)
 			continue
@@ -293,7 +301,7 @@ func TestDeclaredReleaseEquivalent(t *testing.T) {
 // caught.
 func TestEquivalenceRedControl(t *testing.T) {
 	c := eqCase{name: "ok", params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", []eqAnswer{{}}}}}
-	frozen := runEq(t, v3OpSnapshotFrozen, c)
+	frozen := runEq(t, v3OpSnapshotFrozen, c, false)
 	a := blockActions.File.Actions
 	for i := range a {
 		if a[i].Action != "v3_op_snapshot" {
@@ -302,7 +310,7 @@ func TestEquivalenceRedControl(t *testing.T) {
 		w := a[i].Variants[0].Command
 		old := w[len(w)-1].Text
 		w[len(w)-1].Text = old + "x"
-		got := runEq(t, blockActions.Handler("v3_op_snapshot"), c)
+		got := runEq(t, blockActions.Handler("v3_op_snapshot"), c, true)
 		w[len(w)-1].Text = old
 		if reflect.DeepEqual(frozen.calls, got.calls) {
 			t.Error("a changed command word was not caught")
@@ -310,13 +318,13 @@ func TestEquivalenceRedControl(t *testing.T) {
 		args := a[i].Record.Args
 		n := args["name"]
 		args["name"] = declared.Value{Template: "{{name}}-"}
-		got = runEq(t, blockActions.Handler("v3_op_snapshot"), c)
+		got = runEq(t, blockActions.Handler("v3_op_snapshot"), c, true)
 		args["name"] = n
 		if reflect.DeepEqual(frozen.records, got.records) {
 			t.Error("a changed recorded arg was not caught")
 		}
 	}
-	if got := runEq(t, blockActions.Handler("v3_op_snapshot"), c); !reflect.DeepEqual(frozen, got) {
+	if got := runEq(t, blockActions.Handler("v3_op_snapshot"), c, true); !reflect.DeepEqual(frozen, got) {
 		t.Errorf("green twin differs: %+v vs %+v", frozen, got)
 	}
 }
@@ -363,7 +371,7 @@ func TestDeclaredSnapshotDeleteEquivalent(t *testing.T) {
 	checkEquivalent(t, "v3_op_snapshot_delete", v3OpSnapshotDeleteFrozen, cases)
 	// The cases reach both variants.
 	for i, via := range map[int]string{0: "holder", 10: "store"} {
-		if r := runEq(t, blockActions.Handler("v3_op_snapshot_delete"), cases[i]); len(r.records) < 1 || r.records[0].Args["via"] != via {
+		if r := runEq(t, blockActions.Handler("v3_op_snapshot_delete"), cases[i], true); len(r.records) < 1 || r.records[0].Args["via"] != via {
 			t.Errorf("%s: records %v, want via %s", cases[i].name, r.records, via)
 		}
 	}
@@ -400,7 +408,7 @@ func TestDeclaredDeleteEquivalent(t *testing.T) {
 	cases = append(cases, commonErrorCases(p, on(deleted))...)
 	checkEquivalent(t, "v3_op_delete", v3OpDeleteFrozen, cases)
 	// The retry is exercised: three reruns, then ok.
-	if r := runEq(t, blockActions.Handler("v3_op_delete"), cases[2]); len(r.calls) != 4 || r.ret["value"] != tr.OutcomeOK {
+	if r := runEq(t, blockActions.Handler("v3_op_delete"), cases[2], true); len(r.calls) != 4 || r.ret["value"] != tr.OutcomeOK {
 		t.Errorf("%s: %d calls, %v", cases[2].name, len(r.calls), r.ret)
 	}
 }
