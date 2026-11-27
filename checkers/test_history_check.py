@@ -1536,8 +1536,10 @@ class C6(unittest.TestCase):
         self.assertIn('past the deadline 110.000 s = max(re-grant: stop + 65 s = 65.000 s, restart completion 80.000 s)', v['findings'][0])
 
     def test_a_restart_without_an_ok_kill_before_it_is_not_judged(self):
-        v = self.assert_c6('PASS', ('healthy', True), RESTART, ('healthy', True))
+        # not judged, and nothing else judged: not exercised (never a PASS on 0)
+        v = self.assert_c6('FAIL', ('healthy', True), RESTART, ('healthy', True), contains='C6 not exercised')
         self.assertTrue(any('the stop is not known' in x for x in v['findings']), v)
+        self.assertEqual(v['judged'], 0)
 
     def test_red_a_holder_restart_never_healthy_again(self):
         # healthy=true only before the restart; the run then ends unhealthy too
@@ -1546,12 +1548,16 @@ class C6(unittest.TestCase):
     def test_a_master_restart_is_not_judged_for_recovery(self):
         mkill = ('kill', '', {'process': 'blockmaster', 'pid': 7, 'signal': 'KILL'}, 'ok', {})
         mrestart = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
+        # not judged; with nothing else judged the verdict is not exercised, not a failure of the rule
         v = self.healthy_after(300, mkill, mrestart, ('healthy', True))
-        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
+        self.assertFalse(any('recovery bound' in x or 'past the deadline' in x for x in v['findings']), v)
         self.assertTrue(any('recovery not judged: restart seq 3 blockmaster' in x for x in v['findings']), v)
         # a holder restart a master fault overlaps is not judged either
         v = self.healthy_after(300, KILL, mkill, mrestart, RESTART, ('healthy', True))
-        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
         self.assertTrue(any('blockmaster kill seq 3 before its healthy point' in x for x in v['findings']), v)
 
     def test_a_healthy_record_with_an_operation_in_flight_is_no_point(self):
@@ -1730,6 +1736,196 @@ class MO(unittest.TestCase):
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('MO not exercised', v['findings'][0])
 
+
+
+class Judged(unittest.TestCase):
+    """Every checker reports its own count, "judged": the items it actually
+    judged. A PASS with judged 0 is impossible: such a checker says "not
+    exercised" itself. Checked on each checker's raw verdict (not through
+    check(), whose own guard would hide a checker that forgot)."""
+
+    def corpus(self):
+        both = [('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})]
+        return {
+            'm0 fixture': load(),
+            'm0 with a fault': with_fault(load()),
+            'only the end': synth(),
+            'one write': synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {})),
+            'restored': synth(*RESTORED, ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                              ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                              ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S})),
+            'C5 refusal': history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS)))),
+            'C6 unknown resolved': m2(*both),
+            'C6 healthy only': m2(('healthy', True)),
+            'C6 recovery timed': m2(KILL, RESTART, ('healthy', True)),
+            'DUR kill': synth(w(0, A), w(0, B, flush=False), HKILL, rd(0, A)),
+            'DUR no kill': synth(w(0, A, flush=False), rd(0, A)),
+            'MO outage': mo_history(MO.GOOD),
+        }
+
+    def test_no_checker_passes_on_nothing(self):
+        passed = {name: [] for name in hc.CHECKERS}
+        for label, recs in self.corpus().items():
+            rs = hc.read_history(dump(recs))
+            for name, fn in hc.CHECKERS.items():
+                try:
+                    v = fn(rs)
+                except (KeyError, TypeError):
+                    continue
+                if v['verdict'] == 'PASS':
+                    self.assertIn('judged', v, (label, name, v))
+                    self.assertGreater(v['judged'], 0, (label, name, v))
+                    passed[name].append(label)
+        # the test means something only if every checker PASSes somewhere here
+        self.assertEqual([n for n, labels in passed.items() if not labels], [], passed)
+
+    def test_every_verdict_carries_its_count(self):
+        for label, recs in self.corpus().items():
+            for name, v in hc.check(dump(recs)).items():
+                self.assertIsInstance(v.get('judged'), int, (label, name, v))
+        for lines in ([], dump(load())[:-1], ['not json']):
+            for name, v in hc.check(lines).items():
+                self.assertEqual(v['judged'], 0, (name, v))
+
+    def test_the_counts_are_what_each_checker_judged(self):
+        v = hc.check(dump(load()))
+        rs = hc.read_history(dump(load()))
+        ops_ = hc.operations(rs)
+        self.assertEqual(v['C0']['judged'], sum(1 for _, c in ops_ if c is not None and c['outcome'] != 'unknown'))
+        self.assertEqual(v['C1']['judged'], sum(1 for i, c in ops_ if i['verb'] == 'read' and c and c['outcome'] == 'ok'))
+        self.assertEqual(v['C7']['judged'], 2, 'v1 and v2 deleted and observed')
+        self.assertEqual(hc.check(dump(mo_history(MO.GOOD)))['MO']['judged'], 1)
+        c6 = hc.check(dump(m2(('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))))['C6']
+        self.assertEqual(c6['judged'], 2, c6)   # one unknown resolved + the holder's recovery timed
+
+    def test_red_a_c6_with_healthy_points_only_is_not_exercised(self):
+        v = hc.check(dump(m2(('healthy', True))))['C6']
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
+
+    def test_red_check_guards_a_checker_that_passes_on_nothing(self):
+        with mock.patch.dict(hc.CHECKERS, {'ZZ': lambda recs: {'verdict': 'PASS', 'findings': []}}):
+            v = hc.check(dump(load()))['ZZ']
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('PASS with nothing judged: ZZ not exercised', v['findings'][0])
+
+    def test_the_json_output_carries_judged(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            hist, out = Path(d) / 'h.jsonl', Path(d) / 'v.json'
+            hist.write_text('\n'.join(dump(load())) + '\n', encoding='utf-8')
+            with mock.patch('sys.stdout'):
+                hc.main([str(hist), '--json', str(out)])
+            got = json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(set(got), set(hc.CHECKERS))
+        for name, v in got.items():
+            self.assertIsInstance(v['judged'], int, (name, v))
+        self.assertGreater(got['C1']['judged'], 0)
+
+
+HORIZON = 'not_admitted: layout: delete reservation: workspace: deletion refused before persistence: lease horizon'
+
+
+class Attempts(unittest.TestCase):
+    """A rerun is never folded: each attempt is its own invoke and complete,
+    its args carrying the request and "attempt": n, and the request's
+    outcome is its last attempt's."""
+
+    def attempts(self, vol, outcomes, expect=False, effect=None):
+        """Steps of one delete request answered `outcomes` in turn."""
+        out = []
+        for n, o in enumerate(outcomes, 1):
+            args = {'request': 'delete-' + vol, 'layout_id': '0' * 32, 'attempt': n}
+            if expect:
+                args['expect'] = 'refused'
+            out.append(('delete', vol, args, o))
+        return out
+
+    def finish(self, recs, details):
+        """Set each delete completion's result: {seq of its invoke: result}."""
+        for r in recs:
+            if r['kind'] == 'complete' and r['verb'] == 'delete':
+                r['result'] = details(r)
+        return recs
+
+    def case_ordinary(self):
+        # v1: an ordinary delete refused twice by the lease horizon, then ok;
+        # then its tombstone and a refused re-create. v2: a judged negative so
+        # C5 has a limit to judge.
+        tomb = dict(WS, files=['HEAD', 'VOLUME'])
+        steps = (BASE + (('obs', 'v1', 4, FILES, WS),)
+                 + tuple(self.attempts('v1', ['refused', 'refused', 'ok']))
+                 + (('obs', 'v1', 5, ['HEAD', 'VOLUME'], tomb),
+                    ('create', 'v1', NEG, 'refused'), ('obs', 'v1', 5, ['HEAD', 'VOLUME'], tomb),
+                    ('obs', 'v2', 4, FILES, WS), ('write', 'v2', NEG, 'refused'), ('obs', 'v2', 4, FILES, WS)))
+        recs = history(*steps)
+        for r in recs:
+            if r['kind'] == 'observe' and r.get('volume') == 'v1' and r['result'].get('files') == ['HEAD', 'VOLUME']:
+                r['result']['head']['state'] = 'deleted'
+            if r['kind'] == 'complete' and r['verb'] == 'create':
+                r['result'] = {'detail': 'rpc error: code = FailedPrecondition desc = volume v1 %s' % hc.PRODUCT.RESERVED_NAME}
+        return self.finish(recs, lambda r: {'detail': HORIZON} if r['outcome'] == 'refused' else {})
+
+    def test_superseded_groups_attempts_by_request(self):
+        recs = hc.read_history(dump(self.case_ordinary()))
+        inv = [r for r in recs if r['kind'] == 'invoke' and r['verb'] == 'delete']
+        self.assertEqual(hc.superseded(recs), {inv[0]['seq'], inv[1]['seq']})
+        # attempt 1 again starts a new request; an invoke without attempt is a request of one
+        again = history(*(self.attempts('v1', ['refused', 'ok']) + self.attempts('v1', ['refused', 'ok'])))
+        rs = hc.read_history(dump(again))
+        firsts = [r['seq'] for r in rs if r['kind'] == 'invoke' and r['args']['attempt'] == 1]
+        self.assertEqual(hc.superseded(rs), set(firsts))
+
+    def test_an_ordinary_delete_refused_twice_by_the_horizon_then_ok_counts_no_refusal(self):
+        v = hc.check(dump(self.case_ordinary()))
+        self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
+        self.assertIn('limit ordinary write: 1 of 1 refusal(s) judged', v['C5']['findings'])
+        self.assertIn('limit ordinary create: 1 of 1 refusal(s) judged', v['C5']['findings'])
+        self.assertFalse(any(x.startswith('limit ordinary delete') for x in v['C5']['findings']), v['C5'])
+        self.assertTrue(any('refused attempts a later attempt of the same request replaced: 2' in x for x in v['C5']['findings']), v['C5'])
+        self.assertEqual(v['C5']['judged'], 2)
+        # C0: the request answered ok; its refused attempts are no refusal not expected
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
+        # C7 sees its ok, the last attempt
+        self.assertEqual((v['C7']['verdict'], v['C7']['judged']), ('PASS', 1), v['C7'])
+
+    def test_red_a_mutant_counting_every_attempt_makes_it_unknown(self):
+        with mock.patch.object(hc, 'superseded', lambda recs: set()):
+            v = hc.check(dump(self.case_ordinary()))
+        self.assertEqual(v['C5']['verdict'], 'UNKNOWN', v['C5'])
+        self.assertEqual(v['C5']['findings'][0], 'limit(s) with no judged refusal: ordinary delete', v['C5'])
+        self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])   # and C0 takes the horizon for a refusal not expected
+
+    def test_the_delete_source_negative_with_three_horizon_attempts_then_refused_effect_counts_1_of_1(self):
+        lim = 'delete a source whose snapshot has a restore target'
+        steps = BASE + (('obs', 'v1', 4, FILES, WS),) + tuple(self.attempts('v1', ['refused'] * 3 + ['refused'], expect=True)) \
+            + (('obs', 'v1', 4, FILES, C5.REFUSED_WS),)
+        recs = history(*steps)
+        last = [r for r in recs if r['kind'] == 'complete' and r['verb'] == 'delete'][-1]
+        for r in recs:
+            if r['kind'] == 'complete' and r['verb'] == 'delete':
+                r['result'] = {'detail': HORIZON}
+        last['outcome'] = 'refused_effect'
+        last['result'] = {'detail': 'snapshot_has_dependents: layout: a snapshot has dependents', 'effect': C5.EFFECT}
+        at = next(i for i, r in enumerate(recs) if r['kind'] == 'invoke' and r['verb'] == 'delete')
+        recs.insert(at, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'gen_step', 'volume': 'v1', 'mono_ns': recs[at]['mono_ns'],
+                         'result': {'action': 'v3_op_delete', 'negative': lim, 'params': {'expect': 'refused', 'volume': 'v1'}}})
+        v = hc.check(dump(renumber(recs)))
+        self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
+        self.assertIn('limit %s: 1 of 1 refusal(s) judged' % lim, v['C5']['findings'])
+        self.assertTrue(any('replaced: 3' in x for x in v['C5']['findings']), v['C5'])
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
+
+    def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
+        # An unknown first attempt rerun to a refused second: C6 has no
+        # unknown to place (the request was answered), C0 no unknown.
+        recs = history(*(self.attempts('v1', ['unknown', 'refused'])))
+        v = hc.check(dump(recs))
+        self.assertFalse(any('outcome unknown' in x for x in v['C0']['findings']), v['C0'])
+        self.assertIn('C6 not exercised', v['C6']['findings'][0])
 
 if __name__ == '__main__':
     unittest.main()
