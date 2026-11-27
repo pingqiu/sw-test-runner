@@ -612,11 +612,13 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 			e.Process = f.down // the process the kill resolved to
 		}
 	}
-	if _, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e)); err != nil {
+	got, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e))
+	if err != nil {
 		return fmt.Errorf("%s %s after operation %d: %w", e.Action, e.Process, e.AfterOp, err)
 	}
 	if f.gen != nil {
 		f.gen.Fault(e.Action, scheduled) // coverage by the schedule's names
+		f.gen.m.FaultRan(e.Action, e.Process, got)
 	}
 	if e.Action == FaultKill {
 		f.down, f.downScheduled = e.Process, scheduled

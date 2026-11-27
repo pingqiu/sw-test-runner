@@ -71,6 +71,9 @@ type faultFake struct {
 	unsettled []string
 	fenceAll  int
 	pool      []string
+	// refuseRestart: every restart answers refused (a holder that does not
+	// come back).
+	refuseRestart bool
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -108,6 +111,10 @@ func (f *faultFake) install(t *testing.T) {
 				f.ready = append(f.ready, act.Params["ready_seconds"])
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Process." + verb, Verb: verb, Args: map[string]any{"process": p}})
+			if verb == FaultRestart && f.refuseRestart {
+				_ = actx.History.Complete(seq, tr.OutcomeRefused, nil)
+				return map[string]string{"value": tr.OutcomeRefused}, nil
+			}
 			_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
 			return map[string]string{"value": tr.OutcomeOK}, nil
 		}
@@ -1138,5 +1145,100 @@ func TestMasterOutageSkippedWhenNothingServes(t *testing.T) {
 				t.Fatalf("replay outages %d skipped %d ran, recorded %d %d", s2, r2, skipped, ran)
 			}
 		})
+	}
+}
+
+// M2 run 2: after the run killed a volume's holder, nothing but
+// observation is proposed for it (no write, read, snapshot, delete, no
+// negative either) until its restart answers ok and a healthy record shows
+// it serving; a restart answered otherwise keeps it out for good.
+func TestNothingProposedAtAKilledHolder(t *testing.T) {
+	// deadSteps lists steps on a volume between its holder's kill and the
+	// first healthy-true record after its restart answered ok ("out"
+	// forever when the restart did not answer ok), and counts the kills.
+	deadSteps := func(recs []tr.HistoryRecord) (bad []string, kills, back int) {
+		names := pool(100)
+		dead := map[string]string{} // volume -> "killed", "restarted", "out"
+		open := map[uint64]tr.HistoryRecord{}
+		for _, r := range recs {
+			switch {
+			case r.Kind == tr.HistoryInvoke:
+				open[r.Seq] = r
+			case r.Kind == tr.HistoryComplete && (open[r.Of].Verb == FaultKill || open[r.Of].Verb == FaultRestart):
+				inv := open[r.Of]
+				k, err := strconv.Atoi(strings.TrimPrefix(inv.Args["process"].(string), "blockvolume:"))
+				if err != nil {
+					continue
+				}
+				v := names[k]
+				switch {
+				case inv.Verb == FaultKill && r.Outcome == tr.OutcomeOK:
+					dead[v] = "killed"
+					kills++
+				case inv.Verb == FaultRestart && dead[v] == "killed" && r.Outcome == tr.OutcomeOK:
+					dead[v] = "restarted"
+				case inv.Verb == FaultRestart && dead[v] == "killed":
+					dead[v] = "out"
+				}
+			case r.Verb == "healthy" && r.Result["healthy"] == true:
+				for v, s := range dead {
+					if s == "restarted" {
+						delete(dead, v)
+						back++
+					}
+				}
+			case r.Verb == "gen_step" && dead[r.Volume] != "" && r.Result["action"] != "v3_op_observe":
+				bad = append(bad, fmt.Sprintf("%v on %s (%s)", r.Result["action"], r.Volume, dead[r.Volume]))
+			}
+		}
+		return bad, kills, back
+	}
+	run := func(f *faultFake) []tr.HistoryRecord {
+		f.install(t)
+		actx, p := genRunCtx(t)
+		a := faultAct("300", "0.05")
+		a.Params["fault_processes"] = "blockvolume:0 blockvolume:1 blockvolume:2"
+		if _, err := v3GenRun(context.Background(), actx, a); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		return records(t, p)
+	}
+	bad, kills, back := deadSteps(run(&faultFake{}))
+	if len(bad) != 0 || kills == 0 || back == 0 {
+		t.Fatalf("restarts ok: %d kills, %d back, steps at a dead holder %v", kills, back, bad)
+	}
+	bad, kills, back = deadSteps(run(&faultFake{refuseRestart: true}))
+	if len(bad) != 0 || kills == 0 || back != 0 {
+		t.Fatalf("restarts refused: %d kills, %d back, steps at a dead holder %v", kills, back, bad)
+	}
+	// The model itself: killed, restarted, then a healthy record.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(3), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"))
+	g.m.FaultRan(FaultKill, "blockvolume:0", tr.OutcomeOK)
+	if a := offered(g, "g1"); len(a) != 0 {
+		t.Fatalf("offered at a killed holder: %v", a)
+	}
+	if _, ok := g.m.KillTarget("blockvolume:0"); ok {
+		t.Fatal("a killed holder is a kill target")
+	}
+	for _, o := range g.m.Sweep() {
+		if o.Volume == "g1" && o.Action != "v3_op_observe" {
+			t.Fatalf("the sweep %s a killed holder", o.Action)
+		}
+	}
+	g.m.FaultRan(FaultRestart, "blockvolume:0", tr.OutcomeOK)
+	if len(offered(g, "g1")) != 0 {
+		t.Fatal("offered after the restart, before a healthy record")
+	}
+	g.m.Observed(healthyRec(nil))
+	if a := offered(g, "g1"); !a["v3_op_write"] || !a["v3_op_delete"] {
+		t.Fatalf("not offered again after restart and healthy: %v", a)
+	}
+	g.m.FaultRan(FaultKill, "blockvolume:0", tr.OutcomeOK)
+	g.m.FaultRan(FaultRestart, "blockvolume:0", tr.OutcomeUnknown)
+	g.m.Observed(healthyRec(nil))
+	if g.vols["g1"].state != stUnknown || len(offered(g, "g1")) != 0 {
+		t.Fatalf("an unknown restart: %q %v", g.vols["g1"].state, offered(g, "g1"))
 	}
 }

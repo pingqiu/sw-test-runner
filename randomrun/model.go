@@ -122,6 +122,10 @@ type Model interface {
 	// order, after the operation or fault event that wrote it: a model learns
 	// what was observed from the record, not from the invoke.
 	Observed(r tr.HistoryRecord)
+	// FaultRan tells the model a kill or restart of process ran and what it
+	// answered (ok, refused, unknown): a subject whose holder the run killed
+	// is offered nothing but observation until it serves again.
+	FaultRan(action, process, outcome string)
 	// KillTarget resolves a scheduled kill at kill time: the process that
 	// holds for the scheduled name now, deterministically from the state;
 	// ok false when none holds (the kill is skipped).

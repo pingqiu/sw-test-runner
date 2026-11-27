@@ -196,6 +196,11 @@ type genVol struct {
 	moved bool
 	// due: forced operations owed on this volume, in order (Due).
 	due []GenOp
+	// killed: the run killed its holder (kill ok or unknown); offered
+	// nothing but observation (no negative either: they assume a live
+	// holder) until its restart answers ok (restarted) and a healthy record
+	// shows it serving. Guest I/O to a dead holder holds.
+	killed, restarted bool
 	// inheritedLBAs: a restore target's content at its restore, read first
 	// after its first attach (C2); attached: it has been attached once.
 	inheritedLBAs []int
@@ -337,6 +342,9 @@ func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
 	}
 	for _, n := range m.order {
 		v := m.vols[n]
+		if v.killed {
+			continue // its holder was killed: nothing but observation until it serves again
+		}
 		switch v.state {
 		case stCreated:
 			if !v.held[v.host] {
@@ -409,7 +417,7 @@ func (m *blockModel) Negatives() []GenOp {
 	unborn := m.firstName(func(v *genVol) bool { return v.state == stUnborn })
 	for _, n := range m.order {
 		v := m.vols[n]
-		if v.state == stUnknown {
+		if v.state == stUnknown || v.killed {
 			continue
 		}
 		switch v.state {
@@ -696,14 +704,14 @@ func sameOp(a, b GenOp) bool {
 //   - C1: the volume's dirty lbas are read back.
 func (m *blockModel) Before(o GenOp) []GenOp {
 	v := m.vols[o.Volume]
-	if o.Negative != "" || v == nil || v.fenced || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
+	if o.Negative != "" || v == nil || v.fenced || v.killed || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
 		return nil
 	}
 	var out []GenOp
 	pending := maps.Clone(v.dirty) // the dirty lbas no pair read covers
 	pair := func(src, tgt *genVol) {
 		key := src.name + "|" + tgt.name
-		if src.pairDone[key] || src.state != stServing || tgt.state != stServing || src.fenced || tgt.fenced {
+		if src.pairDone[key] || src.state != stServing || tgt.state != stServing || src.fenced || tgt.fenced || src.killed || tgt.killed {
 			return
 		}
 		src.pairDone[key] = true
@@ -753,7 +761,7 @@ func (m *blockModel) Before(o GenOp) []GenOp {
 func (m *blockModel) Due() []GenOp {
 	for _, n := range m.order {
 		v := m.vols[n]
-		if len(v.due) > 0 && v.due[0].Action == "v3_op_read" && (v.state != stServing || v.fenced) {
+		if len(v.due) > 0 && v.due[0].Action == "v3_op_read" && (v.state != stServing || v.fenced || v.killed) {
 			v.due = nil
 		}
 		if len(v.due) > 0 {
@@ -786,7 +794,7 @@ func (m *blockModel) Sweep() []GenOp {
 		v := m.vols[n]
 		switch v.state {
 		case stServing:
-			if v.fenced {
+			if v.fenced || v.killed {
 				out = append(out, m.Observe(n))
 				continue
 			}
@@ -853,6 +861,15 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 			}
 			for _, v := range m.vols {
 				v.fenced = out[v.name] && v.state == stServing
+			}
+			// A restarted holder serves again once a healthy record shows it:
+			// healthy, or not listed not serving and named among the holders.
+			holders, _ := r.Result["holders"].(map[string]any)
+			for _, v := range m.vols {
+				h, _ := holders[v.name].(map[string]any)
+				if v.killed && v.restarted && (r.Result["healthy"] == true || (!out[v.name] && h["pid"] != nil)) {
+					v.killed, v.restarted = false, false
+				}
 			}
 		}
 		third, _ := r.Result["third_state"].([]any)
@@ -1022,6 +1039,27 @@ func (m *blockModel) OutageRestart() GenOp {
 	return GenOp{Action: "v3_op_restart", Params: map[string]string{"process": genOutage.master, "ready_seconds": strconv.Itoa(genOutage.maxSeconds)}}
 }
 
+// FaultRan learns a holder kill or restart that ran ("blockvolume:<k>", the
+// k-th spec volume): a kill answered ok or unknown leaves its holder dead;
+// its restart answered ok waits for a healthy record showing it serving,
+// any other answer takes the volume out (a third state is C6's).
+func (m *blockModel) FaultRan(action, process, outcome string) {
+	rest, ok := strings.CutPrefix(process, "blockvolume:")
+	k, err := strconv.Atoi(rest)
+	if !ok || err != nil || k < 0 || k >= len(m.order) {
+		return
+	}
+	v := m.vols[m.order[k]]
+	switch {
+	case action == FaultKill && (outcome == tr.OutcomeOK || outcome == tr.OutcomeUnknown):
+		v.killed, v.restarted = true, false
+	case action == FaultRestart && v.killed && outcome == tr.OutcomeOK:
+		v.restarted = true
+	case action == FaultRestart && v.killed:
+		v.killed, v.state = false, stUnknown
+	}
+}
+
 // KillTarget resolves a scheduled holder kill "blockvolume:<i>" at kill
 // time: among the volumes that hold now (serving and not fenced, in pool
 // order) the (i mod n)-th, named by its place in the spec ("blockvolume:<k>",
@@ -1035,7 +1073,7 @@ func (m *blockModel) KillTarget(scheduled string) (string, bool) {
 	}
 	var holding []int
 	for k, n := range m.order {
-		if v := m.vols[n]; v.state == stServing && !v.fenced {
+		if v := m.vols[n]; v.state == stServing && !v.fenced && !v.killed {
 			holding = append(holding, k)
 		}
 	}
@@ -1050,7 +1088,7 @@ func (m *blockModel) KillTarget(scheduled string) (string, bool) {
 func (m *blockModel) OutageWrites(after int) []GenOp {
 	var out []GenOp
 	for _, n := range m.order {
-		if m.vols[n].state == stServing {
+		if v := m.vols[n]; v.state == stServing && !v.killed {
 			out = append(out, op("v3_op_write", n, "lbas", strconv.Itoa(after%m.blocks), "round", fmt.Sprintf("o%d", after)))
 		}
 	}
