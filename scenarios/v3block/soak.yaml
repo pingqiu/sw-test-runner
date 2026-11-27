@@ -1,0 +1,210 @@
+# Block soak on the tier-1 declared workload loop (no model): M2's setup and
+# teardown, with the random run replaced by one v3_loop_run of the loop
+# "soak" in packs/v3block/product/loops.json. Setup creates and attaches every
+# volume of the pool; each iteration writes 4 random lbas per volume and reads
+# them back, every 10th takes a snapshot and deletes the one taken three
+# snapshots earlier; then every written lba is read back and every volume
+# observed; last each volume is stopped. The seeded fault schedule (the same
+# derivation as M2's) kills and restarts processes between cycle operations,
+# each restart followed by a healthy point and the resolution of unknown
+# outcomes. Each operation is recorded into the run's history; the checkers
+# judge that file after the run, with no model-dependent checker. No step
+# here decides a result.
+#
+# One host, run as root (kernel NVMe/TCP). Inputs: product_src (a checkout of
+# the product under test), runner_src (this checkout), weed (the pinned
+# SeaweedFS binary). Concurrent runs: as M2 (distinct port_base and run_tag).
+#
+#   swblock run -env product_src=/path/seaweed-block -env runner_src=$PWD #     -env weed=/path/weed -env port_base=22000 -env run_tag=s1 -env loop_seed=7 #     scenarios/v3block/soak.yaml
+
+name: v3block-soak
+timeout: 6h
+always_timeout: 5m
+
+env:
+  product_src: ""
+  runner_src: ""
+  weed: ""
+  # Every listening port of the run is computed from port_base (v3_run_plan).
+  port_base: "21000"
+  # The work directory is work_prefix + tag and the NQN prefix carries the tag;
+  # empty: the run id without its dashes.
+  run_tag: ""
+  work_prefix: "/root/soak-run-"
+  # The loop. loop_seed seeds the lbas each iteration draws and the fault
+  # schedule. loop_iterations is the cycle's length (and the cap of
+  # loop_duration, a Go duration such as 4h; empty: run the iterations).
+  loop: "soak"
+  loop_seed: "1"
+  loop_iterations: "200"
+  loop_duration: ""
+  loop_blocks: "64"
+  # The fault schedule: after each cycle operation, while nothing is down, a
+  # kill with chance faults; its restart 1..fault_restart_within cycle
+  # operations later. blockvolume:<i> is the holder of the i-th pool name.
+  faults: "0.02"
+  fault_processes: "blockmaster blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
+  fault_restart_within: "20"
+  # As M2: the pages bound a restarted holder's recovery by its lease re-grant
+  # (at most 65 s after it stopped) plus the start wait (30 s)
+  # (docs/volume-lifecycle.md). Not a latency bound.
+  fault_healthy_wait: "95"
+  # The subjects: every name is created and attached in setup and lives for
+  # the whole run. Each name costs 10 holder ports (v3_op_spec).
+  loop_pool: "v01 v02 v03 v04"
+  chunk_path: "/m1"
+  lock_dirs_test_only: "true"
+  # Every typed operation reads these as vars (work, master_port and
+  # weed_filer_grpc_port are set by v3_run_plan; the ops expand them).
+  bin_dir: "{{ work }}/bin"
+  master: "127.0.0.1:{{ master_port }}"
+  filer: "127.0.0.1:{{ weed_filer_grpc_port }}"
+  root: "{{ work }}/vol"
+  client: "c1"
+  own_script: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+
+topology:
+  nodes:
+    host:
+      is_local: true
+
+phases:
+  - name: build
+    actions:
+      # This run's ports, work directory and NQN prefix, before anything uses
+      # them (vars: work, nqn_prefix, the ports).
+      - action: v3_run_plan
+        node: host
+        port_base: "{{ port_base }}"
+        volumes: "{{ loop_pool }}"
+        run_tag: "{{ run_tag }}"
+        work_prefix: "{{ work_prefix }}"
+      # Acquire the work directory exclusively: every later step, and the
+      # teardown, acts only under the token this returns.
+      - action: exec
+        node: host
+        timeout: 30s
+        save_as: owner
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.WORK: "{{ work }}"
+        cmd: bash "$OWN" claim "$WORK"
+      - action: exec
+        node: host
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.WORK: "{{ work }}"
+        env.V3CTL: "{{ runner_src }}/packs/v3block/v3ctl/main.go"
+        cmd: |
+          set -eu
+          [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
+          [ -f "$V3CTL" ] || { echo "runner_src is not this checkout: $V3CTL" >&2; exit 2; }
+          mkdir -p "$WORK/bin" "$WORK/log"
+          git -C "$SRC" rev-parse HEAD > "$WORK/product.sha"
+          for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
+          d="$SRC/.runner-v3ctl-$$"; mkdir "$d"; tail -n +2 "$V3CTL" > "$d/main.go"
+          (cd "$SRC" && go build -o "$WORK/bin/v3ctl" "./$(basename "$d")"); rm -r "$d"
+          cat "$WORK/product.sha"
+
+  - name: store
+    actions:
+      - action: exec
+        node: host
+        timeout: 5m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WEED: "{{ weed }}"
+        env.WORK: "{{ work }}"
+        env.MP: "{{ weed_master_port }}"
+        env.MG: "{{ weed_master_grpc_port }}"
+        env.VP: "{{ weed_volume_port }}"
+        env.VG: "{{ weed_volume_grpc_port }}"
+        env.FP: "{{ weed_filer_port }}"
+        env.FG: "{{ weed_filer_grpc_port }}"
+        cmd: |
+          set -eu
+          [ -x "$WEED" ] || { echo "weed is not executable: $WEED" >&2; exit 2; }
+          mkdir -p "$WORK/weed/m" "$WORK/weed/v" "$WORK/weed/f"
+          "$WEED" version > "$WORK/weed.version"
+          # Each daemon is refused if its ports already listen, and ready only when IT holds them.
+          bash "$OWN" spawn "$WORK" "$TOK" weed-master $MP $MG -- "$WEED" master -ip=127.0.0.1 -port=$MP -port.grpc=$MG -mdir="$WORK/weed/m" -volumeSizeLimitMB=256 -defaultReplication=000
+          bash "$OWN" spawn "$WORK" "$TOK" weed-volume $VP $VG -- "$WEED" volume -ip=127.0.0.1 -port=$VP -port.grpc=$VG -dir="$WORK/weed/v" -master=127.0.0.1:$MP -max=32
+          bash "$OWN" spawn "$WORK" "$TOK" weed-filer $FP $FG -- "$WEED" filer -ip=127.0.0.1 -port=$FP -port.grpc=$FG -master=127.0.0.1:$MP -defaultStoreDir="$WORK/weed/f"
+          for i in $(seq 1 120); do curl -s -m 5 -F file=@"$WORK/product.sha" "http://127.0.0.1:$FP/m1-probe/" >/dev/null && exit 0; sleep 0.5; done
+          echo "filer never accepted a write" >&2; exit 1
+  - name: master
+    actions:
+      # Every name of the pool, declared before the master starts.
+      - action: v3_op_spec
+        node: host
+        volumes: "{{ loop_pool }}"
+        spec_path: "{{ work }}/cluster-spec.yaml"
+        base_port: "{{ holder_base_port }}"
+        nqn_prefix: "{{ nqn_prefix }}"
+      - action: exec
+        node: host
+        timeout: 3m
+        save_as: bm_pid
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WORK: "{{ work }}"
+        env.MP: "{{ master_port }}"
+        env.FG: "{{ weed_filer_grpc_port }}"
+        env.CP: "{{ chunk_path }}"
+        cmd: |
+          set -eu
+          mkdir -p "$WORK/master/authority" "$WORK/master/lifecycle"
+          bash "$OWN" spawn "$WORK" "$TOK" blockmaster $MP -- "$WORK/bin/blockmaster" --listen 127.0.0.1:$MP \
+            --authority-store "$WORK/master/authority" --lifecycle-store "$WORK/master/lifecycle" \
+            --cluster-spec "$WORK/cluster-spec.yaml" --expected-slots-per-volume 1 \
+            --workspace-rpc --chunk-filer 127.0.0.1:$FG --chunk-path "$CP"
+  - name: soak
+    actions:
+      - action: v3_loop_run
+        node: host
+        loop: "{{ loop }}"
+        seed: "{{ loop_seed }}"
+        iterations: "{{ loop_iterations }}"
+        duration: "{{ loop_duration }}"
+        blocks: "{{ loop_blocks }}"
+        pool: "{{ loop_pool }}"
+        faults: "{{ faults }}"
+        fault_processes: "{{ fault_processes }}"
+        fault_restart_within: "{{ fault_restart_within }}"
+        fault_healthy_wait: "{{ fault_healthy_wait }}"
+
+  # Only what this run acquired: nothing at all if the claim failed.
+  - name: teardown
+    always: true
+    actions:
+      - action: exec
+        node: host
+        timeout: 3m
+        env.OWN: "{{ runner_src }}/scenarios/v3block/m0-own.sh"
+        env.TOK: "{{ owner }}"
+        env.WORK: "{{ work }}"
+        env.NQN: "{{ nqn_prefix }}"
+        cmd: bash "$OWN" teardown "$WORK" "$TOK" "$NQN"
+
+  # After teardown, whatever happened: the daemons' logs into the bundle, then
+  # the checkers judge the history alone. Their verdicts decide the run.
+  - name: judge
+    always: true
+    actions:
+      # Close the history first: its end record says it is the whole run.
+      - action: v3_history_end
+        node: host
+      - action: collect_path
+        node: host
+        path: "{{ work }}/log"
+        name: "daemon-logs"
+      - action: collect_path
+        node: host
+        path: "{{ work }}/vol"
+        name: "volume-logs"
+      - action: exec
+        node: host
+        timeout: 2m
+        env.HIST: "{{ bundle_dir }}/history.jsonl"
+        env.OUT: "{{ artifacts_dir }}/checks.json"
+        env.CHECK: "{{ runner_src }}/checkers/history_check.py"
+        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT" --product "{{ runner_src }}/packs/v3block/product" --checkers C0,C1,C6,DUR
