@@ -23,12 +23,12 @@ func TestSnapshotHeadConflictRatio(t *testing.T) {
 		line    string
 		k, n    int
 	}{
-		// The conflict is rerun (the page's retry): its rerun is an attempt
-		// too, so three snapshots make four attempts and the conflict stays
+		// The conflict decodes unknown and is not re-issued (only a refused
+		// attempt is): three snapshots make three attempts, the conflict
 		// counted.
-		"one conflict in three snapshots, rerun": {[]eqAnswer{{}, conflict, {}, {}}, "head_conflict per snapshot attempted: 1/4", 1, 4},
-		"none in two":                            {[]eqAnswer{{}, {}}, "head_conflict per snapshot attempted: 0/2", 0, 2},
-		"no snapshot":                            {nil, "head_conflict per snapshot attempted: 0/0 (no snapshot attempted)", 0, 0},
+		"one conflict in three snapshots": {[]eqAnswer{{}, conflict, {}, {}}, "head_conflict per snapshot attempted: 1/3", 1, 3},
+		"none in two":                     {[]eqAnswer{{}, {}}, "head_conflict per snapshot attempted: 0/2", 0, 2},
+		"no snapshot":                     {nil, "head_conflict per snapshot attempted: 0/0 (no snapshot attempted)", 0, 0},
 	} {
 		node := &eqNode{rules: []eqRule{{"ops chunk snapshot", c.answers}}, n: make([]int, 1)}
 		if c.answers == nil {

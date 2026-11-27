@@ -81,7 +81,7 @@ const desc = head + `
  "exceptions": [{"action": "p_attach", "why": "a process start", "declarable_with": "a process step", "runner_deadline_seconds": 30}]}`
 
 func lookup(action, path, code, message string) (string, map[string]any) {
-	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) {
+	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) || (code == "busy" && message == "later") {
 		return tr.OutcomeRefused, nil
 	}
 	if code == "reserved" {
@@ -145,8 +145,22 @@ func TestRetryWhileCode(t *testing.T) {
 	n = &node{answers: []answer{busy, {code: 0}}}
 	x, actx = setup(t, n, &subject{f: map[string]string{}})
 	out, _ = driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}})
-	if out["value"] != tr.OutcomeUnknown || len(n.calls) != 1 {
+	if out["value"] != tr.OutcomeRefused || len(n.calls) != 1 {
 		t.Fatalf("expected refusal: %v after %d calls", out, len(n.calls))
+	}
+}
+
+// Red control: an UNKNOWN is never re-issued, even when its detail is the
+// page's answer (an unknown may have changed the subject, and the next
+// attempt would have no "before"): exactly one call, and the request ends
+// unknown.
+func TestAnUnknownIsNeverReissued(t *testing.T) {
+	n := &node{answers: []answer{{out: `{"code":"busy","message":"later"}`, code: 1}, {code: 0}}}
+	x, actx := setup(t, n, &subject{f: map[string]string{}})
+	x.Lookup = func(string, string, string, string) (string, map[string]any) { return tr.OutcomeUnknown, nil }
+	out, err := driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	if err != nil || out["value"] != tr.OutcomeUnknown || out["detail"] != "busy: later" || len(n.calls) != 1 {
+		t.Fatalf("%v %v after %d calls", out, err, len(n.calls))
 	}
 }
 
@@ -359,7 +373,7 @@ func TestRerunAttemptsAreOperations(t *testing.T) {
 		last    string
 	}{
 		"twice busy then ok":     {[]answer{busy, busy, {code: 0}}, 3, tr.OutcomeOK},
-		"busy to the bound":      {[]answer{busy}, 5, tr.OutcomeUnknown},
+		"busy to the bound":      {[]answer{busy}, 5, tr.OutcomeRefused},
 		"the page's answer only": {[]answer{other, {code: 0}}, 1, tr.OutcomeUnknown},
 	} {
 		n := &node{answers: c.answers}
@@ -473,11 +487,11 @@ func TestExecutorRunsOneAttempt(t *testing.T) {
 	n := &node{answers: []answer{busy, busy, {code: 0}}}
 	x, actx := setup(t, n, &subject{f: map[string]string{}})
 	out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
-	if err != nil || len(out) != 1 || out["value"] != tr.OutcomeUnknown || len(n.calls) != 1 {
+	if err != nil || len(out) != 1 || out["value"] != tr.OutcomeRefused || len(n.calls) != 1 {
 		t.Fatalf("%v %v after %d calls", out, err, len(n.calls))
 	}
 	out, err = x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60", "attempt": "2"}})
-	if err != nil || out["value"] != tr.OutcomeUnknown || out["detail"] != "busy: later" || len(n.calls) != 2 {
+	if err != nil || out["value"] != tr.OutcomeRefused || out["detail"] != "busy: later" || len(n.calls) != 2 {
 		t.Fatalf("attempt 2: %v %v after %d calls", out, err, len(n.calls))
 	}
 	actx.History.Close()
@@ -516,7 +530,7 @@ func TestExecutorRunsOneAttempt(t *testing.T) {
 func TestRerunIsTheDeclaration(t *testing.T) {
 	x, _ := setup(t, &node{}, &subject{f: map[string]string{}})
 	p := map[string]string{"volume": "v1", "key": "k", "n": "60"}
-	busy := map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later"}
+	busy := map[string]string{"value": tr.OutcomeRefused, "detail": "busy: later"}
 	for name, c := range map[string]struct {
 		action string
 		params map[string]string
@@ -526,18 +540,20 @@ func TestRerunIsTheDeclaration(t *testing.T) {
 		again  bool
 		why    string
 	}{
-		"the page's answer":                {"p_put", p, 1, 0, busy, true, ""},
-		"the last attempt":                 {"p_put", p, 4, 0, busy, true, ""},
-		"past max_attempts":                {"p_put", p, 5, 0, busy, false, "max_attempts"},
-		"an answer the page does not name": {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: never"}, false, ""},
-		"another code":                     {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "nope: later"}, false, ""},
-		"ok":                               {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeOK, "detail": "busy: later"}, false, ""},
-		"a transport failure":              {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later", "transport": "true"}, false, ""},
-		"past the guard":                   {"p_put", p, 1, 61 * time.Second, busy, false, "guard"},
-		"the guard's default":              {"p_put", map[string]string{"volume": "v1", "key": "k"}, 1, 8 * time.Second, busy, false, "guard"},
-		"an expected refusal":              {"p_put", map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}, 1, 0, busy, false, ""},
-		"an action with no rerun":          {"p_make", map[string]string{"volume": "v1"}, 1, 0, busy, false, ""},
-		"an action not declared":           {"p_none", p, 1, 0, busy, false, ""},
+		"the page's answer":                       {"p_put", p, 1, 0, busy, true, ""},
+		"the last attempt":                        {"p_put", p, 4, 0, busy, true, ""},
+		"past max_attempts":                       {"p_put", p, 5, 0, busy, false, "max_attempts"},
+		"an answer the page does not name":        {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: never"}, false, ""},
+		"another code":                            {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "nope: later"}, false, ""},
+		"ok":                                      {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeOK, "detail": "busy: later"}, false, ""},
+		"an unknown with the page's answer":       {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later"}, false, ""},
+		"a refused_effect with the page's answer": {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeRefusedEffect, "detail": "busy: later"}, false, ""},
+		"a transport failure":                     {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later", "transport": "true"}, false, ""},
+		"past the guard":                          {"p_put", p, 1, 61 * time.Second, busy, false, "guard"},
+		"the guard's default":                     {"p_put", map[string]string{"volume": "v1", "key": "k"}, 1, 8 * time.Second, busy, false, "guard"},
+		"an expected refusal":                     {"p_put", map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}, 1, 0, busy, false, ""},
+		"an action with no rerun":                 {"p_make", map[string]string{"volume": "v1"}, 1, 0, busy, false, ""},
+		"an action not declared":                  {"p_none", p, 1, 0, busy, false, ""},
 	} {
 		again, pause, why := x.Rerun(c.action, c.params, c.n, c.since, c.out)
 		if again != c.again || why != c.why || (again && pause != time.Millisecond) {

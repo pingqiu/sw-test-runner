@@ -700,11 +700,13 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 	}
 }
 
-// The snapshot reruns ONLY the answers the operator page names
-// (docs/operator-guide.md:220-225): head_conflict, then an internal "is not
-// in HEAD after its commit"; at most three attempts, each its own operation
-// with the request and the attempt; every attempt is counted.
-func TestDeclaredSnapshotReruns(t *testing.T) {
+// The snapshot's page-named answers (docs/operator-guide.md:220-225):
+// head_conflict, then an internal "is not in HEAD after its commit". Both
+// decode UNKNOWN (outcomes.json: the page does not say what they leave), and
+// an unknown is never re-issued: one attempt, recorded with the request and
+// attempt 1, and the request ends unknown. Red control of the condition
+// that only a refused attempt is re-issued.
+func TestDeclaredSnapshotUnknownsAreNotReissued(t *testing.T) {
 	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
 	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
 	conflict := chunkErr("head_conflict", "storage: capture CAS not applied: storage: chunk HEAD precondition failed")
@@ -713,11 +715,11 @@ func TestDeclaredSnapshotReruns(t *testing.T) {
 		answers  []eqAnswer
 		outcomes []string
 	}{
-		"a conflict, then ok":                   {[]eqAnswer{conflict, {}}, []string{"unknown", "ok"}},
-		"a conflict, the known defect, then ok": {[]eqAnswer{conflict, notInHead, {}}, []string{"unknown", "unknown", "ok"}},
-		"conflicts to the bound":                {[]eqAnswer{conflict}, []string{"unknown", "unknown", "unknown"}},
-		"another internal is not rerun":         {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
-		"a layout refusal is not rerun":         {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
+		"a conflict, then ok":           {[]eqAnswer{conflict, {}}, []string{"unknown"}},
+		"the known defect, then ok":     {[]eqAnswer{notInHead, {}}, []string{"unknown"}},
+		"conflicts to the bound":        {[]eqAnswer{conflict}, []string{"unknown"}},
+		"another internal is not rerun": {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
+		"a layout refusal is not rerun": {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
 	} {
 		r := runEq(t, reissued("v3_op_snapshot"), eqCase{params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", c.answers}}}, true)
 		var got []string

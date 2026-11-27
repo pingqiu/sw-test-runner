@@ -405,7 +405,8 @@ type Decode struct {
 // that answer: PageCite is that page line (docs/<page>.md:<line>), and an
 // answer in the product marked "retryable" is not one. The rerun is for the
 // answer whose error code is WhileCode and whose message contains
-// WhileMessageContains (the page's answer). The executor runs ONE attempt
+// WhileMessageContains (the page's answer), and only when that answer
+// decodes refused: an unknown is never re-issued. The executor runs ONE attempt
 // per call and never loops: the DRIVER re-issues the action (Rerun says
 // when), so every attempt is its OWN operation in the history: an invoke
 // and a complete, its args carrying the request id (RequestArg, one of the
@@ -1468,9 +1469,12 @@ func (x *Executor) RequestArg(name string) string {
 // Rerun is action name's declared rerun, read by the DRIVER, which
 // re-issues the action: whether attempt n+1 follows attempt n, which
 // answered out (the handler's value, detail and transport) since the
-// first attempt began, and after what pause. Only for an answer the
-// operator page names (Retry.matches), never after a transport failure or
-// an ok; a step that declares expect=refused only when its
+// first attempt began, and after what pause. ONLY after an attempt that
+// answered refused, with an answer the operator page names
+// (Retry.matches): never after an unknown, even one whose detail matches
+// (an unknown may have changed the subject, and the next attempt would
+// have no "before"), never after a refused_effect, an ok or a transport
+// failure. A step that declares expect=refused only when its
 // expected_refusal param is true. The COUNT is the bound: at most
 // max_attempts attempts. within_param (seconds) is only a guard, a wall
 // clock past which no attempt follows (why "guard"). It reads nothing but
@@ -1481,7 +1485,7 @@ func (x *Executor) Rerun(name string, params map[string]string, n int, since tim
 		return false, 0, ""
 	}
 	r := a.Retry
-	if out["transport"] != "" || out["value"] == tr.OutcomeOK || !r.matches(out["detail"]) {
+	if out["transport"] != "" || out["value"] != tr.OutcomeRefused || !r.matches(out["detail"]) {
 		return false, 0, ""
 	}
 	if params["expect"] == tr.OutcomeRefused {
