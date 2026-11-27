@@ -42,7 +42,9 @@ code is 0 only when every checker passes.
       replica other than the one a line at that epoch names; a write through
       a holder below a successor whose write completed before it (a stale
       primary; reported, not failed, on a best-effort volume). FAIL: an epoch
-      going down within one operation with the same process identity. A read
+      going down within one operation with the same process identity; two
+      lines of a volume at one epoch naming different replicas (no write
+      needed; such a history is exercised). A read
       below the line is a "stale read", reported on PASS. FAIL (not
       exercised) unless a line changed epoch with acknowledged writes on both
       sides
@@ -1855,10 +1857,12 @@ def c4(recs):
     a write through another holder completed before its invoke (a stale
     primary): FAIL in an acknowledging volume, reported and counted in a
     best-effort one. Also FAIL: a holder epoch decreasing within one
-    operation with the same process identity. A read answered ok below an
-    observed line is a "stale read", reported, not failed. FAIL (not
-    exercised) unless a volume's line changed epoch with acknowledged
-    writes on both sides of the change."""
+    operation with the same process identity; and, with no write needed,
+    two lines of one volume at one epoch naming different replicas (the
+    authority breaking its own rule; such a history counts as exercised).
+    A read answered ok below an observed line is a "stale read", reported,
+    not failed. FAIL (not exercised) otherwise unless a volume's line
+    changed epoch with acknowledged writes on both sides of the change."""
     lines = []   # (seq, volume, replica, epoch), in file order
     for r in recs:
         if r['kind'] == 'observe':
@@ -1922,6 +1926,21 @@ def c4(recs):
         writes.setdefault(inv.get('volume'), []).append((inv, comp, holder, lo, hi))
     judged = sum(len(w) for w in writes.values())
 
+    # Rule 0, the authority's own: a line at an epoch names one replica. Two
+    # lines of one volume at one epoch naming different replicas FAIL by
+    # themselves, with no write needed; every write is then judged against
+    # each replica named (rule 3).
+    named_at = {}   # volume -> epoch -> {replica: first observation seq}
+    for s_, v, rep, ep in lines:
+        named_at.setdefault(v, {}).setdefault(ep, {}).setdefault(rep, s_)
+    split = 0
+    for vol, eps in sorted(named_at.items()):
+        for ep, reps in sorted(eps.items()):
+            if len(reps) > 1:
+                split += 1
+                f.append('the line names %d replicas at one epoch: %s epoch %d: %s' % (
+                    len(reps), vol, ep, ', '.join('%s (seq %d)' % x for x in sorted(reps.items(), key=lambda x: x[1]))))
+
     for vol, ws in sorted(writes.items()):
         # Rule 1: one holder per epoch.
         at = {}   # epoch -> {holder: first write seq} of writes with one possible epoch
@@ -1945,14 +1964,7 @@ def c4(recs):
                 f.append('two holders at one epoch: write seq %d %s through %s/%s at epoch either %d..%d, every epoch taken by another holder: %s' % (
                     inv['seq'], vol, holder[0], holder[1], lo, hi, '; '.join(others)))
         # Rule 3: a line at an epoch names one replica, whenever it was observed.
-        named = {}   # epoch -> {replica: first observation seq}
-        for s, v, rep, ep in lines:
-            if v == vol:
-                named.setdefault(ep, {}).setdefault(rep, s)
-        for ep, reps in sorted(named.items()):
-            if len(reps) > 1:
-                notes.append('%s: the lines name %d replicas at epoch %d: %s' % (
-                    vol, len(reps), ep, ', '.join('%s (seq %d)' % x for x in sorted(reps.items(), key=lambda x: x[1]))))
+        named = named_at.get(vol, {})
         for inv, comp, holder, lo, hi in ws:
             if lo != hi:
                 continue
@@ -1999,7 +2011,9 @@ def c4(recs):
     if not lines:
         notes.append('no line of the master observed: rules 2 and 3 and stale reads not judged')
     unexercised = []
-    if not judged:
+    if split:
+        pass   # the authority broke its own rule: exercised, whatever the writes
+    elif not judged:
         unexercised.append('no acknowledged write carries holder and epoch samples (args.holder, result.holder): C4 not exercised')
     elif not changes:
         unexercised.append('no line changed epoch with acknowledged writes on both sides of the change: C4 not exercised')

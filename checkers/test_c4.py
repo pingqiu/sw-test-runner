@@ -143,6 +143,20 @@ class C4(unittest.TestCase):
         self.assert_c4('PASS', ACK, ('w', 'v1', 'x-v1', 'r1', 1, 1, 'ok'), ('line', 'v1', 'r1', 1),
                        ('line', 'v1', 'r2', 2), ('w', 'v1', 'b-v1', 'r2', 2, 2, 'ok'))
 
+    def test_red_two_replicas_named_at_one_epoch_fail_with_no_write(self):
+        v = self.assert_c4('FAIL', ACK, ('line', 'v1', 'r1', 2), ('line', 'v1', 'r2', 2),
+                           contains='the line names 2 replicas at one epoch: v1 epoch 2: r1 (seq 2), r2 (seq 3)')
+        self.assertFalse(any('not exercised' in x for x in v['findings']), 'a split line is exercised by itself')
+        # with writes: the split fails, and each write is judged against both replicas
+        v = self.assert_c4('FAIL', ACK, *HANDOVER, ('line', 'v1', 'r9', 2),
+                           contains=['the line names 2 replicas at one epoch: v1 epoch 2: r2 (seq 5), r9 (seq 8)',
+                                     'write seq 6 v1 through b-v1/r2 at epoch 2, the line at epoch 2 names r9 (seq 8)'])
+
+    def test_the_same_replica_named_twice_at_one_epoch_passes(self):
+        self.assert_c4('PASS', ACK, *HANDOVER, ('line', 'v1', 'r2', 2), ('line', 'v1', 'r2', 2))
+        # and alone it is no evidence: not exercised
+        self.assert_c4('FAIL', ACK, ('line', 'v1', 'r2', 2), ('line', 'v1', 'r2', 2), contains='C4 not exercised')
+
     def test_an_either_write_is_not_judged_by_rule_3(self):
         self.assert_c4('PASS', ACK, ('w', 'v1', 'x-v1', 'r5', 0, 1, 'ok'), ('line', 'v1', 'r1', 1),
                        ('line', 'v1', 'r2', 2), ('w', 'v1', 'b-v1', 'r2', 2, 2, 'ok'))
