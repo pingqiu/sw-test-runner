@@ -456,6 +456,8 @@ type faultRun struct {
 	gen     *Generator   // nil in a replay
 	wait    string       // the healthy operation's wait ("" for its default: look once)
 	outages map[int][]Op // a replay's recorded outage writes, by after_op
+	// outageSkips: a replay's recorded skipped outages, by after_op.
+	outageSkips map[int]bool
 	// kills are a replay's recorded kill decisions, in order (nil: decide
 	// from the look); skip is the process whose kill was skipped, so its
 	// restart is skipped too.
@@ -624,7 +626,12 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 	return f.healthy(ctx, actx)
 }
 
-// outage runs one short master outage after operation e.AfterOp, in this
+// OutageNothingServing is a master_outage marker's "skipped" when no volume
+// served at the outage: the outage is not run.
+const OutageNothingServing = "nothing serving"
+
+// outage runs one short master outage after operation e.AfterOp (skipped,
+// with the marker saying so, when nothing serves), in this
 // order (the shapes checker MO reads):
 //   - an observe record "master_outage": after_op, process, max_seconds and
 //     the outage's writes (a replay re-runs the same writes from it);
@@ -644,12 +651,22 @@ func (f *faultRun) outage(ctx context.Context, actx *tr.ActionContext, e FaultEv
 		return fmt.Errorf("master outage of %s after operation %d: the product's master is %q", e.Process, e.AfterOp, master)
 	}
 	writes := f.outages[e.AfterOp]
+	skip := f.outageSkips[e.AfterOp]
 	if f.gen != nil {
 		writes = f.gen.m.OutageWrites(e.AfterOp)
+		skip = len(writes) == 0
 	}
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "master_outage",
-		Result: map[string]any{"after_op": e.AfterOp, "process": master, "max_seconds": maxSec, "writes": opList(writes)}}); err != nil {
+	res := map[string]any{"after_op": e.AfterOp, "process": master, "max_seconds": maxSec, "writes": opList(writes)}
+	if skip {
+		// Nothing serves: no write to make, nothing MO could judge. Skipped,
+		// and recorded so a replay skips it too.
+		res["skipped"] = OutageNothingServing
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "master_outage", Result: res}); err != nil {
 		return err
+	}
+	if skip {
+		return nil
 	}
 	if err := f.healthy(ctx, actx); err != nil {
 		return err
