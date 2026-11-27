@@ -400,7 +400,9 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 		return fail("mkdir")
 	}
 	logPath := fmt.Sprintf("%s/%s.%d.log", e.root, h.Server, time.Now().UnixNano())
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s >%s 2>&1 </dev/null & echo $!", strings.Join(quoteAll(argv), " "), shellQuote(logPath)))
+	// Through the unit wrapper (faults.go): the holder keeps its own pid, and
+	// its exit status lands in a per-launch file.
+	stdout, stderr, code, err := node.Run(ctx, holderLaunchCmd(argv, logPath))
 	pid := strings.TrimSpace(stdout)
 	if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return fail("start: " + firstLine(stderr))
@@ -412,6 +414,7 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 		return tr.OutcomeUnknown, res
 	}
 	v.PID, v.PIDStart = pid, start
+	setLaunch(v, argv, logPath)
 	if why := e.recordOwned(ctx, node, "blockvolume-"+h.Server, pid); why != "" {
 		res["detail"] = why
 		return tr.OutcomeUnknown, res
@@ -426,9 +429,9 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 			// the reason" (the product's standalone-deployment guide), not
 			// "nothing changed": it is also head_fenced, a fence after the
 			// start (cmd/blockvolume/process_exit.go:166-176), and the reason
-			// is only in that log line (process_exit.go:118-124). The
-			// process is not the runner's child once launched, so its exit
-			// code is not read either.
+			// is only in that log line (process_exit.go:118-124). Its exit
+			// status (the wrapper's file) is the unit's business: the
+			// supervision step in faults.go reads it.
 			res["detail"] = "blockvolume exited before serving"
 			return tr.OutcomeUnknown, res
 		case procRunning:

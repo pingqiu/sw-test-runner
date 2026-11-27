@@ -236,7 +236,7 @@ func TestRestartHolderWithItsOwnCommandLine(t *testing.T) {
 			if f.issued("nvme-fabrics") != c.connect {
 				t.Errorf("connect issued %v, want %v", f.issued("nvme-fabrics"), c.connect)
 			}
-			if !f.issued("setsid "+strings.Join(quoteAll(holderArgv), " ")+" >") || !f.issued("/own.sh record /w tok blockvolume-a-v1 5555") {
+			if !f.issued("' sh "+strings.Join(quoteAll(holderArgv), " ")+" >/dev/null") || !f.issued("/own.sh record /w tok blockvolume-a-v1 5555") {
 				t.Errorf("not the killed command line, or not recorded as owned: %v", f.calls)
 			}
 			v := vol1(t, actx)
@@ -593,5 +593,194 @@ func TestHealthySingleLookLooksOnceAndSaysSo(t *testing.T) {
 	}
 	if _, err := v3OpHealthy(context.Background(), actx, tr.Action{Action: "v3_op_healthy", Params: map[string]string{"look": "twice"}}); err == nil {
 		t.Error("look=twice accepted")
+	}
+}
+
+// --- the holder's unit (supervise) ---
+
+const oldExit = "/r/a-v1.1.log.exit"
+
+// exited puts v1 in the state of a holder launched through the wrapper.
+func exited(t *testing.T, actx *tr.ActionContext) {
+	v := vol1(t, actx)
+	b, _ := json.Marshal(holderArgv)
+	v.Extra = map[string]string{"launch_argv": string(b), "exit_file": oldExit}
+	saveVolume(actx, v)
+}
+
+// exitAnswer is the exit file's content and the host's clock, ago before now.
+func exitAnswer(status int, ago time.Duration) fakeAnswer {
+	const now = int64(2_000_000_000_000_000_000)
+	return ok(fmt.Sprintf("%d %d\n%d\n", status, now-int64(ago), now))
+}
+
+// unitNode: the holder 4242 is gone; its exit file answers exit; a relaunch
+// starts 5555, which serves.
+func unitNode(exit fakeAnswer) *fakeNode {
+	own := "LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"blockvolume\",pid=5555,fd=9))\nLISTEN 0 4096 127.0.0.1:21013 0.0.0.0:* users:((\"blockvolume\",pid=5555,fd=10))"
+	return (&fakeNode{}).
+		on("setsid", ok("5555\n")). // first: the launch names its own exit file
+		on("/proc/4242", ok("absent\n")).
+		on(oldExit, exit).
+		on("a-v1.1.log", ok("blockvolume: exiting status=75 reason=lease_expired\n")).
+		on("ss -Hltnp", ok(""), ok(own)).
+		on("mkdir -p", ok("")).
+		on("/proc/5555", ok("start 200\n")).
+		on("/own.sh record", ok("")).
+		on("/status?volume=v1", ok(statusAt(3, true))).
+		on("subsysnqn", ok("ctrl nvme3\nns nvme3c3n1\nend\n"))
+}
+
+func unitRecords(recs []tr.HistoryRecord) []tr.HistoryRecord {
+	var out []tr.HistoryRecord
+	for _, r := range recs {
+		if r.Verb == "unit_restart" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func readsTheLog(f *fakeNode) bool {
+	for _, c := range f.calls {
+		if strings.Contains(c, "a-v1.1.log") && !strings.Contains(c, oldExit) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestHolderUnitFactsFromChecks(t *testing.T) {
+	if !holderUnitOK || holderUnit.RestartSec != 5 || !slices.Equal(holderUnit.NoRestart, []int{0, 78}) || !strings.Contains(holderUnit.Cite, "sw-blockvolume.service") {
+		t.Errorf("holder_unit %+v ok=%v", holderUnit, holderUnitOK)
+	}
+	for _, b := range []string{`{}`, `{"holder_unit":{"restart_sec":5,"no_restart_status":[0,78]}}`, `{"holder_unit":{"restart_sec":0,"no_restart_status":[78],"cite":"x"}}`} {
+		if _, ok := readUnitFacts([]byte(b)); ok {
+			t.Errorf("%s accepted", b)
+		}
+	}
+}
+
+// A held volume's holder that exited 75 (fenced: lease expired) is launched
+// again with its recorded command line, and the relaunch is its own record.
+func TestSuperviseRelaunchesAFencedHolder(t *testing.T) {
+	actx, p, e := faultSetup(t)
+	exited(t, actx)
+	f := unitNode(exitAnswer(75, 10*time.Second))
+	if err := e.supervise(context.Background(), actx, f); err != nil {
+		t.Fatal(err)
+	}
+	v := vol1(t, actx)
+	if v.PID != "5555" || v.PIDStart != "200" || v.Extra["exit_file"] == oldExit || !strings.HasSuffix(v.Extra["exit_file"], ".log.exit") {
+		t.Errorf("state %+v", v)
+	}
+	if !f.issued("' sh " + strings.Join(quoteAll(holderArgv), " ") + " >/dev/null") {
+		t.Error("not relaunched with its recorded command line")
+	}
+	if readsTheLog(f) {
+		t.Error("the holder's log was read")
+	}
+	us := unitRecords(closeRecords(t, actx, p))
+	if len(us) != 1 {
+		t.Fatalf("unit records %+v", us)
+	}
+	r := us[0]
+	if r.Kind != tr.HistoryObserve || r.Client != "runner" || r.Result["volume"] != "v1" || r.Result["exit_status"] != float64(75) ||
+		r.Result["old_pid"] != "4242" || r.Result["old_start"] != "100" || r.Result["new_pid"] != "5555" || r.Result["new_start"] != "200" || r.Result["launch"] != tr.OutcomeOK {
+		t.Errorf("unit_restart %+v", r.Result)
+	}
+}
+
+// Red control: the relaunch waits RestartSec after the exit, not less.
+func TestSuperviseWaitsRestartSecAfterTheExit(t *testing.T) {
+	actx, _, e := faultSetup(t)
+	exited(t, actx)
+	f := unitNode(exitAnswer(75, 4500*time.Millisecond))
+	start := time.Now()
+	if err := e.supervise(context.Background(), actx, f); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < 450*time.Millisecond || d > 3*time.Second {
+		t.Errorf("relaunched %s after the look; the exit was 4.5 s before it, RestartSec 5 s", d)
+	}
+	if vol1(t, actx).PID != "5555" {
+		t.Error("not relaunched")
+	}
+}
+
+// Red controls: the unit does not relaunch after status 78 or 0, without a
+// status from the process (whatever the log says), for a volume stopped ok,
+// for a holder the runner killed (the schedule restarts it), or while the
+// holder runs.
+func TestSuperviseLeavesAloneWhatTheUnitWouldNotRestart(t *testing.T) {
+	for name, c := range map[string]struct {
+		exit  fakeAnswer
+		setup func(v *opVolume)
+		rule  *fakeRule
+	}{
+		"status 78 (no restart)":             {exit: exitAnswer(78, time.Minute)},
+		"status 0 (a planned exit)":          {exit: exitAnswer(0, time.Minute)},
+		"no status written, the log says 75": {exit: ok("none\n2000000000000000000\n")},
+		"exit file unreadable":               {exit: fakeAnswer{errOut: "denied", code: 3}},
+		"volume stopped ok":                  {exit: exitAnswer(75, time.Minute), setup: func(v *opVolume) { v.PID, v.PIDStart = "", "" }},
+		"killed by the runner":               {exit: exitAnswer(137, time.Minute), setup: func(v *opVolume) { v.Extra["killed_pid"] = "4242" }},
+		"holder still running":               {exit: exitAnswer(75, time.Minute), rule: &fakeRule{match: "/proc/4242", answers: []fakeAnswer{ok("start 100\n")}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			actx, p, e := faultSetup(t)
+			exited(t, actx)
+			if c.setup != nil {
+				v := vol1(t, actx)
+				c.setup(v)
+				saveVolume(actx, v)
+			}
+			f := unitNode(c.exit)
+			if c.rule != nil {
+				f.rules = append([]fakeRule{*c.rule}, f.rules...)
+			}
+			if err := e.supervise(context.Background(), actx, f); err != nil {
+				t.Fatal(err)
+			}
+			if f.issued("setsid") || readsTheLog(f) {
+				t.Errorf("relaunched, or read the log: %v", f.calls)
+			}
+			if us := unitRecords(closeRecords(t, actx, p)); len(us) != 0 {
+				t.Errorf("unit records %+v", us)
+			}
+		})
+	}
+}
+
+// The supervision step runs before each healthy look, and after a master restart.
+func TestHealthyAndMasterRestartSupervise(t *testing.T) {
+	actx, p, e := faultSetup(t)
+	exited(t, actx)
+	f := unitNode(exitAnswer(75, time.Minute))
+	f.on("cat /w/owned", ok(masterLedger)).on("/proc/77", ok("start 700\n")).on("v3ctl resolve", fakeAnswer{out: resolveRefused, code: 1})
+	if out, err := e.healthy(context.Background(), actx, f, 0); err != nil || out["healthy"] != "true" {
+		t.Fatalf("%v %v", out, err)
+	}
+	recs := closeRecords(t, actx, p)
+	if len(recs) != 2 || recs[0].Verb != "unit_restart" || recs[1].Verb != "healthy" {
+		t.Fatalf("records %+v", recs)
+	}
+
+	actx, p, e = faultSetup(t)
+	exited(t, actx)
+	masterKilled(actx)
+	f = unitNode(exitAnswer(75, time.Minute))
+	f.rules = append([]fakeRule{
+		{match: "/proc/77", answers: []fakeAnswer{ok("absent\n")}},
+		{match: "cat /w/owned", answers: []fakeAnswer{ok(masterLedger), ok(masterLedger + "88 800 blockmaster-restart1\n")}},
+		{match: "/own.sh spawn", answers: []fakeAnswer{ok("88\n")}},
+		{match: "/proc/88", answers: []fakeAnswer{ok("start 800\n")}},
+		{match: "v3ctl resolve", answers: []fakeAnswer{{out: resolveRefused, code: 1}}},
+	}, f.rules...)
+	if out, err := e.restart(context.Background(), actx, f, "blockmaster", 2*time.Second); err != nil || out["value"] != tr.OutcomeOK {
+		t.Fatalf("%v %v", out, err)
+	}
+	recs = closeRecords(t, actx, p)
+	if len(recs) != 3 || recs[1].Kind != tr.HistoryComplete || recs[2].Verb != "unit_restart" {
+		t.Errorf("records %+v", recs)
 	}
 }

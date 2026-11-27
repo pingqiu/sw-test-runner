@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -253,7 +254,7 @@ func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, pr
 // call that answers.
 func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
-	return record(actx, e, "restart", "", p.args(process), func() (string, map[string]any) {
+	out, err := record(actx, e, "restart", "", p.args(process), func() (string, map[string]any) {
 		switch {
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}
@@ -273,6 +274,11 @@ func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner,
 		}
 		return e.restartMaster(ctx, actx, node, p, bound)
 	})
+	// After a master restart, the unit: holders that fenced while it was down.
+	if err == nil && p != nil && p.vol == nil {
+		err = e.supervise(ctx, actx, node)
+	}
+	return out, err
 }
 
 func (e opEnv) restartHolder(ctx context.Context, actx *tr.ActionContext, node runner, p *faultProc, bound time.Duration) (string, map[string]any) {
@@ -428,6 +434,9 @@ func (e opEnv) healthy(ctx context.Context, actx *tr.ActionContext, node runner,
 	var ok bool
 	var err error
 	for attempts := 1; ; attempts++ {
+		if err = e.supervise(ctx, actx, node); err != nil {
+			return nil, err
+		}
 		if res, ok, err = e.healthCheck(ctx, actx, node); err != nil {
 			return nil, err
 		}
@@ -443,6 +452,135 @@ func (e opEnv) healthy(ctx context.Context, actx *tr.ActionContext, node runner,
 	}
 	actx.Log("  v3_op_healthy: %v", res)
 	return map[string]string{"value": tr.OutcomeOK, "healthy": strconv.FormatBool(ok)}, nil
+}
+
+// The holder's unit. In a deployment the product's systemd unit restarts a
+// holder that exits by itself (holder_unit in product/checks.json: not after
+// status 0 or 78, RestartSec after the exit). Here the runner plays that unit:
+// every holder is launched through a wrapper that keeps the holder's own pid
+// and start time as its identity (it is the wrapper's child, not the
+// wrapper) and writes the holder's exit status to a per-launch file; the
+// supervision step reads that file, never the holder's log.
+
+type unitFacts struct {
+	RestartSec int    `json:"restart_sec"`
+	NoRestart  []int  `json:"no_restart_status"`
+	Cite       string `json:"cite"`
+}
+
+func readUnitFacts(b []byte) (unitFacts, bool) {
+	var c struct {
+		Unit *unitFacts `json:"holder_unit"`
+	}
+	if json.Unmarshal(b, &c) != nil || c.Unit == nil || c.Unit.RestartSec <= 0 || len(c.Unit.NoRestart) == 0 || c.Unit.Cite == "" {
+		return unitFacts{}, false
+	}
+	return *c.Unit, true
+}
+
+var holderUnit, holderUnitOK = readUnitFacts(checksJSON)
+
+// holderLaunchCmd starts argv under the unit wrapper and prints the holder's
+// pid. The wrapper (its own session) starts the holder with its output in
+// logPath, writes its pid to logPath.pid, waits for it and writes
+// "<wait status> <unix ns>" to logPath.exit (each file written whole, by a
+// rename). A wait status above 128 is a signal (128+n), as the shell reports it.
+func holderLaunchCmd(argv []string, logPath string) string {
+	pidf, exitf := logPath+".pid", logPath+".exit"
+	wrap := fmt.Sprintf(`"$@" >%[1]s 2>&1 </dev/null & p=$!; echo "$p" >%[2]s.tmp && mv %[2]s.tmp %[2]s; wait "$p"; s=$?; echo "$s $(date +%%s%%N)" >%[3]s.tmp && mv %[3]s.tmp %[3]s`,
+		shellQuote(logPath), shellQuote(pidf), shellQuote(exitf))
+	return fmt.Sprintf(`setsid sh -c %s sh %s >/dev/null 2>&1 </dev/null & for i in $(seq 1 100); do [ -s %[3]s ] && exec cat %[3]s; sleep 0.05; done; echo "no pid file %[3]s" >&2; exit 1`,
+		shellQuote(wrap), strings.Join(quoteAll(argv), " "), shellQuote(pidf))
+}
+
+// setLaunch records the running holder's command line and exit-status file.
+func setLaunch(v *opVolume, argv []string, logPath string) {
+	if v.Extra == nil {
+		v.Extra = map[string]string{}
+	}
+	b, _ := json.Marshal(argv)
+	v.Extra["launch_argv"], v.Extra["exit_file"] = string(b), logPath+".exit"
+}
+
+// readExit reads a holder's exit file: its wait status and how long ago it
+// exited, by the host's clock. why is set when there is no status (yet).
+func readExit(ctx context.Context, node runner, file string) (status int, ago time.Duration, why string) {
+	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf(`if [ -e %[1]s ]; then cat %[1]s || exit 3; else echo none; fi; date +%%s%%N`, shellQuote(file)))
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if err != nil || code != 0 || len(lines) != 2 {
+		return 0, 0, fmt.Sprintf("exit file unreadable (exit %d): %s", code, firstLine(stderr))
+	}
+	if lines[0] == "none" {
+		return 0, 0, "no exit status written"
+	}
+	f := strings.Fields(lines[0])
+	now, err1 := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
+	if len(f) != 2 || err1 != nil {
+		return 0, 0, "exit file malformed: " + firstLine(lines[0])
+	}
+	s, err2 := strconv.Atoi(f[0])
+	at, err3 := strconv.ParseInt(f[1], 10, 64)
+	if err2 != nil || err3 != nil {
+		return 0, 0, "exit file malformed: " + firstLine(lines[0])
+	}
+	return s, time.Duration(now - at), ""
+}
+
+// held: the volume is to be served, so its holder is the unit's to restart.
+func held(v *opVolume) bool { return v.PID != "" }
+
+// supervise is the unit: every held volume whose holder (not one the runner
+// killed) exited by itself with a restartable status is launched again with
+// its recorded command line, RestartSec after the exit. Each relaunch is an
+// observe record "unit_restart". A holder whose status is not written yet is
+// looked at again at the next step.
+func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runner) error {
+	if !holderUnitOK {
+		return fmt.Errorf("product/checks.json states no holder_unit: the runner cannot play the holder's unit")
+	}
+	for _, n := range strings.Fields(actx.Vars[specOrderVar]) {
+		v, err := loadVolume(actx, n)
+		if err != nil {
+			return err
+		}
+		if !held(v) || v.PID == "" || v.Extra["exit_file"] == "" || v.Extra["killed_pid"] == v.PID {
+			continue
+		}
+		if procState(ctx, node, v.PID, v.PIDStart) != procGone {
+			continue
+		}
+		status, ago, why := readExit(ctx, node, v.Extra["exit_file"])
+		if why != "" || slices.Contains(holderUnit.NoRestart, status) {
+			continue
+		}
+		var argv []string
+		if json.Unmarshal([]byte(v.Extra["launch_argv"]), &argv) != nil || len(argv) == 0 {
+			continue
+		}
+		if wait := time.Duration(holderUnit.RestartSec)*time.Second - ago; wait > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+		oldPID, oldStart := v.PID, v.PIDStart
+		out, res := e.launchHolder(ctx, node, v, v.Hosts[v.Cur], argv, 0, true)
+		saveVolume(actx, v)
+		r := map[string]any{"volume": n, "exit_status": status, "exited_ms_before": ago.Milliseconds(), "restart_sec": holderUnit.RestartSec,
+			"old_pid": oldPID, "old_start": oldStart, "launch": out}
+		if v.PID != oldPID {
+			r["new_pid"], r["new_start"] = v.PID, v.PIDStart
+		}
+		if d, ok := res["detail"]; ok {
+			r["detail"] = d
+		}
+		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "unit_restart", Result: r}); err != nil {
+			return err
+		}
+		actx.Log("  unit_restart(%s): exit %d, pid %s -> %s (%s)", n, status, oldPID, v.PID, out)
+	}
+	return nil
 }
 
 // v3OpKill kills one daemon by its recorded identity. Params: process
@@ -469,6 +607,9 @@ func v3OpRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 // wait, marked result.look "single" (a short master outage's looks).
 func (e opEnv) singleLook(ctx context.Context, actx *tr.ActionContext, node runner) (map[string]string, error) {
 	start := time.Now()
+	if err := e.supervise(ctx, actx, node); err != nil {
+		return nil, err
+	}
 	res, ok, err := e.healthCheck(ctx, actx, node)
 	if err != nil {
 		return nil, err
