@@ -85,6 +85,17 @@ class R4CloudPack(unittest.TestCase):
         self.assertIn("rf=3", scenarios[0])
         self.assertIn("rf=2", scenarios[1])
 
+    def test_accepted_degradation_is_recorded_before_any_scenario_can_fail(self):
+        status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        self.assertEqual(self.run_pack(first_scenario_exit=7, degraded_status=status), 7)
+        summary = json.loads((self.out / "SUMMARY.json").read_text())
+        node = summary["nodes"]["node-3"]
+        self.assertEqual(node["message"], "provisioning degraded, accepted: " +
+                         status["recoverable_errors"]["WARNING"][0])
+        self.assertEqual(node["status"], status)
+        self.assertEqual(node["cloud_init_wait_exit"], 2)
+        self.assertEqual(node["long_status_exit"], 2)
+
     def test_degraded_status_with_real_or_unrecognized_error_never_starts_scenario(self):
         captured = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
         cases = {}
