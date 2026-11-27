@@ -138,6 +138,9 @@ func (o *oracle) allowed(op GenOp) bool {
 		h, _ := strconv.Atoi(op.Params["host"])
 		return (st == "created" || st == "moved") && op.Params["host"] == fmt.Sprint(o.host[v]) && !o.held[v][h] && op.Params["blocks"] == ""
 	case "v3_op_read":
+		if op.Forced != "" { // a forced read names the lbas its reason needs (C2, C3)
+			return st == "serving"
+		}
 		return st == "serving" && o.readOK(v, op.Params["lbas"])
 	case "v3_op_write", "v3_op_stop":
 		return st == "serving"
@@ -1060,3 +1063,168 @@ func TestGeneratorReadsBackBeforeAStopOrMove(t *testing.T) {
 		}
 	}
 }
+
+// pairGaps states C2's and C3's needs on a proposal list answered as
+// answer() answers: a restore target's first operations after its first
+// attach read every inherited lba; and before an ordinary stop or move of a
+// source or target whose pair both serve, both sides read the same lbas
+// (the union of their contents) since the restore. It returns the gaps.
+func pairGaps(ops []GenOp) []string {
+	content := map[string]map[string]bool{}
+	serving := map[string]bool{}
+	source := map[string]string{}    // target -> source (live pair)
+	inherit := map[string][]string{} // target -> inherited lbas, until read
+	attached := map[string]bool{}
+	read := map[string]map[string]bool{}  // "src|tgt|vol" -> lbas read on vol since the restore
+	snapc := map[string]map[string]bool{} // "vol|snapshot" -> its content
+	var bad []string
+	set := func(v string) map[string]bool {
+		if content[v] == nil {
+			content[v] = map[string]bool{}
+		}
+		return content[v]
+	}
+	for _, o := range ops {
+		v := o.Volume
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if in := inherit[v]; len(in) > 0 && attached[v] && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its inherited lbas %v were read", o.No, o.Action, v, in))
+			delete(inherit, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				set(v)[b] = true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				inherit[v] = slices.DeleteFunc(inherit[v], func(x string) bool { return x == b })
+				for t, s := range source {
+					if v == t || v == s {
+						k := s + "|" + t + "|" + v
+						if read[k] == nil {
+							read[k] = map[string]bool{}
+						}
+						read[k][b] = true
+					}
+				}
+			}
+		case "v3_op_attach":
+			serving[v] = true
+			attached[v] = true
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			source[t] = v
+			for b := range snapc[v+"|"+o.Params["snapshot"]] {
+				set(t)[b] = true
+				inherit[t] = append(inherit[t], b)
+			}
+		case "v3_op_snapshot":
+			snapc[v+"|"+o.Params["name"]] = maps.Clone(set(v))
+		case "v3_op_stop", "v3_op_move":
+			for t, s := range source {
+				if (v == s || v == t) && serving[s] && serving[t] {
+					for _, side := range []string{s, t} {
+						for b := range content[s] {
+							if !read[s+"|"+t+"|"+side][b] {
+								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, s, b, side))
+							}
+						}
+						for b := range content[t] {
+							if !read[s+"|"+t+"|"+side][b] {
+								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, t, b, side))
+							}
+						}
+					}
+				}
+			}
+			serving[v] = false
+		case "v3_op_delete":
+			delete(source, v)
+		}
+	}
+	return bad
+}
+
+// C2 and C3: a restore target's first reads are its inherited lbas; before
+// a source or target of a live pair leaves while both serve, both sides
+// read the same lbas.
+func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
+	var inherited, pairs int
+	for seed := uint64(1); seed <= 30; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		// The pair needs every content lba read on both sides; content is
+		// tracked here from the shadow's view at restore (the target starts
+		// with the source snapshot's lbas, known to the generator only), so
+		// check inherited reads through the proposals' reasons and the pair
+		// reads through pairGaps on the reads' coverage of written lbas.
+		for _, o := range ops {
+			inherited += btoi(o.Forced == "inherited")
+			pairs += btoi(o.Forced == "pair")
+		}
+		if bad := pairGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+	}
+	if inherited == 0 || pairs == 0 {
+		t.Fatalf("%d inherited reads, %d pair reads", inherited, pairs)
+	}
+	// The generator's own state: the inherited lbas come first after the
+	// first attach; the pair window covers both sides.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_attach", "g2", "host", "0"))
+	if d := g.m.Due(); len(d) != 1 || d[0].Volume != "g2" || d[0].Params["lbas"] != "2 6" || d[0].Forced != "inherited" {
+		t.Fatalf("due after the target's first attach: %+v", d)
+	}
+	drive(g, d0(g))
+	drive(g, op("v3_op_write", "g2", "lbas", "5", "round", "r2"))
+	b := g.m.Before(op("v3_op_stop", "g1"))
+	var got []string
+	for _, o := range b {
+		got = append(got, o.Forced+" "+o.Volume+" "+o.Params["lbas"])
+	}
+	want := []string{"pair g1 2 5 6", "pair g2 2 5 6", "readback g1 "}
+	if len(got) < 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("before a stop of the source: %q", got)
+	}
+	drive(g, b...)
+	drive(g, op("v3_op_write", "g2", "lbas", "7", "round", "r3"))
+	if again := g.m.Before(op("v3_op_stop", "g2")); len(again) != 1 || again[0].Forced != "readback" || again[0].Params["lbas"] != "7" {
+		t.Fatalf("the pair window ran twice, or the readback is wrong: %+v", again)
+	}
+	// Red controls for the checker: a target written before its inherited
+	// read, a source stopped with its target unread at the source's write.
+	w := func(v, lbas string) GenOp { return op("v3_op_write", v, "lbas", lbas, "round", "r") }
+	r := func(v, lbas string) GenOp { return op("v3_op_read", v, "lbas", lbas) }
+	pairBase := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("g1", "1"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_attach", "g2", "host", "0")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"a target written before its inherited read": {
+			red:   append(slices.Clone(pairBase), w("g2", "1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g2", "1")),
+		},
+		"a source stopped before the pair read": {
+			red:   append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), r("g2", "1 3"), op("v3_op_stop", "g1")),
+		},
+	} {
+		if bad := pairGaps(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := pairGaps(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
+	}
+	_ = want
+}
+
+// d0 is the first due operation of g.
+func d0(g *Generator) GenOp { return g.m.Due()[0] }

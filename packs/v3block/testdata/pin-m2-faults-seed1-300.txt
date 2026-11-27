@@ -856,30 +856,34 @@ observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{
 observe gen fault_kill   null {"after_op":170,"down":[],"process":"blockvolume:11","scheduled":"blockvolume:1","skipped":false}
 invoke  kill   {"process":"blockvolume:11"} null
 complete  kill  ok null null
-observe gen gen_step g12  null {"action":"v3_op_write","opno":171,"params":{"lbas":"5","round":"g171","volume":"g12"}}
-invoke  write g12  null null
-complete  write g12 unknown null null
-observe gen gen_step g12  null {"action":"v3_op_read","opno":172,"params":{"lbas":"0 2","volume":"g12"}}
+observe gen gen_step g12  null {"action":"v3_op_read","forced":"inherited","opno":171,"params":{"lbas":"0 1 2 4","volume":"g12"}}
+invoke  read g12  null null
+complete  read g12 ok null null
+observe gen gen_step g12  null {"action":"v3_op_read","forced":"inherited","opno":172,"params":{"lbas":"5 6 7","volume":"g12"}}
 invoke  read g12  null null
 complete  read g12 ok null null
 invoke  restart   {"process":"blockvolume:11"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+observe gen gen_step g12  null {"action":"v3_op_write","opno":173,"params":{"lbas":"5","round":"g173","volume":"g12"}}
+invoke  write g12  null null
+complete  write g12 ok null null
+observe gen gen_step g12  null {"action":"v3_op_read","opno":174,"params":{"lbas":"0 2","volume":"g12"}}
 invoke  read g12  null null
 complete  read g12 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":173,"params":{"lbas":"2","round":"g173","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":175,"params":{"lbas":"2","round":"g175","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":174,"params":{"lbas":"0 1","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":176,"params":{"lbas":"0 1","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":175,"params":{"lbas":"4 6 7","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":177,"params":{"lbas":"4 6 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_snapshot","opno":176,"params":{"name":"g6-s1","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_snapshot","opno":178,"params":{"name":"g6-s1","volume":"g6"}}
 invoke  snapshot g6  null null
 complete  snapshot g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":177,"params":{"lbas":"0 4 5 3","round":"g177","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":179,"params":{"lbas":"0 4 5 3","round":"g179","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -888,7 +892,7 @@ invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g12  null {"action":"v3_op_write","opno":178,"params":{"lbas":"6 7 5 0","round":"g178","volume":"g12"}}
+observe gen gen_step g12  null {"action":"v3_op_write","opno":180,"params":{"lbas":"6 7 5 0","round":"g180","volume":"g12"}}
 invoke  write g12  null null
 complete  write g12 ok null null
 invoke  write g12  null null
@@ -897,21 +901,21 @@ invoke  write g12  null null
 complete  write g12 ok null null
 invoke  write g12  null null
 complete  write g12 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":179,"params":{"lbas":"4 3 1","round":"g179","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":181,"params":{"lbas":"4 3 1","round":"g181","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":180,"params":{"lbas":"1 6 7","round":"g180","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":182,"params":{"lbas":"1 6 7","round":"g182","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":181,"params":{"lbas":"1 0 3 4","round":"g181","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":183,"params":{"lbas":"1 0 3 4","round":"g183","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -920,44 +924,44 @@ invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":182,"params":{"lbas":"4 6","round":"g182","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":184,"params":{"lbas":"4 6","round":"g184","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":183,"params":{"expect":"refused","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":185,"params":{"expect":"refused","volume":"g6"}}
 observe  observe g6  null null
 observe  observe g6  null null
 invoke  delete g6  null null
 complete  delete g6 refused null null
 observe  observe g6  null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":184,"params":{"lbas":"6 7","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":186,"params":{"lbas":"6 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g12  null {"action":"v3_op_read","opno":185,"params":{"lbas":"0 2 5 6","volume":"g12"}}
+observe gen gen_step g12  null {"action":"v3_op_read","opno":187,"params":{"lbas":"0 2 5 6","volume":"g12"}}
 invoke  read g12  null null
 complete  read g12 ok null null
-observe gen gen_step g12  null {"action":"v3_op_read","forced":"readback","opno":186,"params":{"lbas":"7","volume":"g12"}}
+observe gen gen_step g12  null {"action":"v3_op_read","forced":"readback","opno":188,"params":{"lbas":"7","volume":"g12"}}
 invoke  read g12  null null
 complete  read g12 ok null null
-observe gen gen_step g12  null {"action":"v3_op_stop","opno":187,"params":{"volume":"g12"}}
+observe gen gen_step g12  null {"action":"v3_op_stop","opno":189,"params":{"volume":"g12"}}
 invoke  stop g12  null null
 complete  stop g12 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":188,"params":{"lbas":"0 7","round":"g188","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":190,"params":{"lbas":"0 7","round":"g190","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g13  null {"action":"v3_op_create","opno":189,"params":{"volume":"g13"}}
+observe gen gen_step g13  null {"action":"v3_op_create","opno":191,"params":{"volume":"g13"}}
 invoke  create g13  null null
 complete  create g13 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":190,"params":{"lbas":"1","round":"g190","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":192,"params":{"lbas":"1","round":"g192","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g1  null {"action":"v3_op_delete","opno":191,"params":{"volume":"g1"}}
+observe gen gen_step g1  null {"action":"v3_op_delete","opno":193,"params":{"volume":"g1"}}
 invoke  delete g1  null null
 complete  delete g1 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":192,"params":{"lbas":"7 5 2 1","round":"g192","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":194,"params":{"lbas":"7 5 2 1","round":"g194","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -966,25 +970,12 @@ invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":193,"params":{"lbas":"7","round":"g193","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":195,"params":{"lbas":"7","round":"g195","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":194,"params":{"lbas":"4 6 0 2","round":"g194","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":196,"params":{"lbas":"4 6 0 2","round":"g196","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":195,"params":{"expect":"refused","volume":"g6"}}
-observe  observe g6  null null
-observe  observe g6  null null
-invoke  delete g6  null null
-complete  delete g6 refused null null
-observe  observe g6  null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":196,"params":{"lbas":"3 7 4","round":"g196","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -995,13 +986,26 @@ observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{
 observe gen fault_kill   null {"after_op":196,"down":[],"process":"blockvolume:5","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:5"} null
 complete  kill  ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":197,"params":{"lbas":"2 3 4 7","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":197,"params":{"expect":"refused","volume":"g6"}}
+observe  observe g6  null null
+observe  observe g6  null null
+invoke  delete g6  null null
+complete  delete g6 refused null null
+observe  observe g6  null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":198,"params":{"lbas":"3 7 4","round":"g198","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
+invoke  write g6  null null
+complete  write g6 unknown null null
+invoke  write g6  null null
+complete  write g6 unknown null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":199,"params":{"lbas":"2 3 4 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":198,"params":{"lbas":"2 5 6","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":200,"params":{"lbas":"2 5 6","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":199,"params":{"lbas":"1 7 6 3","round":"g199","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":201,"params":{"lbas":"1 7 6 3","round":"g201","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1010,50 +1014,50 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":200,"params":{"lbas":"2","round":"g200","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":202,"params":{"lbas":"2","round":"g202","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g14  null {"action":"v3_op_create","opno":201,"params":{"volume":"g14"}}
+observe gen gen_step g14  null {"action":"v3_op_create","opno":203,"params":{"volume":"g14"}}
 invoke  create g14  null null
 complete  create g14 unknown null null
-observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":202,"params":{"expect":"refused","volume":"g10"}}
+observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":204,"params":{"expect":"refused","volume":"g10"}}
 observe  observe g10  null null
 observe  observe g10  null null
 invoke  delete g10  null null
 complete  delete g10 refused null null
 observe  observe g10  null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":203,"params":{"lbas":"1 0 2","round":"g203","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":205,"params":{"lbas":"1 0 2","round":"g205","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":204,"params":{"lbas":"5 0 6","round":"g204","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":206,"params":{"lbas":"5 0 6","round":"g206","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":205,"params":{"lbas":"2 6","round":"g205","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":207,"params":{"lbas":"2 6","round":"g207","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":206,"params":{"lbas":"2 5 7","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":208,"params":{"lbas":"2 5 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":207,"params":{"expect":"refused","volume":"g10"}}
+observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":209,"params":{"expect":"refused","volume":"g10"}}
 observe  observe g10  null null
 observe  observe g10  null null
 invoke  delete g10  null null
 complete  delete g10 refused null null
 observe  observe g10  null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":208,"params":{"lbas":"0 6","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":210,"params":{"lbas":"0 6","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":209,"params":{"lbas":"0 6 1 3","round":"g209","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":211,"params":{"lbas":"0 6 1 3","round":"g211","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1062,7 +1066,7 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":210,"params":{"lbas":"0 3 5 7","round":"g210","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":212,"params":{"lbas":"0 3 5 7","round":"g212","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1071,13 +1075,13 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g10  null {"action":"v3_op_snapshot_delete","negative":"delete a snapshot that has a restore target","opno":211,"params":{"expect":"refused","name":"g10-s2","volume":"g10"}}
+observe gen gen_step g10  null {"action":"v3_op_snapshot_delete","negative":"delete a snapshot that has a restore target","opno":213,"params":{"expect":"refused","name":"g10-s2","volume":"g10"}}
 observe  observe g10  null null
 observe  observe g10  null null
 invoke  snapshot_delete g10  null null
 complete  snapshot_delete g10 refused null null
 observe  observe g10  null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":212,"params":{"lbas":"4 5 1 6","round":"g212","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":214,"params":{"lbas":"4 5 1 6","round":"g214","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1086,25 +1090,17 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":213,"params":{"lbas":"1","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":215,"params":{"lbas":"1","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":214,"params":{"lbas":"0","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":216,"params":{"lbas":"0","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":215,"params":{"lbas":"0 6","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":216,"params":{"lbas":"3 6 4","round":"g216","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 unknown null null
-invoke  write g6  null null
-complete  write g6 unknown null null
-invoke  write g6  null null
-complete  write g6 unknown null null
 invoke  restart   {"process":"blockvolume:5"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+invoke  read g6  null null
+complete  read g6 ok null null
 invoke  read g6  null null
 complete  read g6 ok null null
 invoke  read g6  null null
@@ -1122,29 +1118,37 @@ invoke  read g6  null null
 complete  read g6 ok null null
 invoke  read g6  null null
 complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":217,"params":{"lbas":"0 6","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":217,"params":{"expect":"refused","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":218,"params":{"lbas":"3 6 4","round":"g218","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_delete","negative":"delete while attached","opno":219,"params":{"expect":"refused","volume":"g6"}}
 observe  observe g6  null null
 observe  observe g6  null null
 invoke  delete g6  null null
 complete  delete g6 refused null null
 observe  observe g6  null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":218,"params":{"lbas":"2 7","round":"g218","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":220,"params":{"lbas":"2 7","round":"g220","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":219,"params":{"lbas":"0 1 3","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":221,"params":{"lbas":"0 1 3","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":220,"params":{"lbas":"0 5","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":222,"params":{"lbas":"0 5","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_snapshot_delete","opno":221,"params":{"name":"g6-s1","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_snapshot_delete","opno":223,"params":{"name":"g6-s1","volume":"g6"}}
 invoke  snapshot_delete g6  null null
 complete  snapshot_delete g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":222,"params":{"lbas":"4 2 0 3","round":"g222","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":224,"params":{"lbas":"4 2 0 3","round":"g224","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -1153,30 +1157,18 @@ invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":223,"params":{"lbas":"6","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":225,"params":{"lbas":"6","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":224,"params":{"lbas":"2 3","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":226,"params":{"lbas":"2 3","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":225,"params":{"lbas":"7 4","round":"g225","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":227,"params":{"lbas":"7 4","round":"g227","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
 complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":226,"params":{"lbas":"1 5 3 4","round":"g226","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":227,"params":{"lbas":"7","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":228,"params":{"lbas":"6 1 5 3","round":"g228","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":228,"params":{"lbas":"1 5 3 4","round":"g228","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 ok null null
 invoke  write g6  null null
@@ -1189,16 +1181,10 @@ observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{
 observe gen fault_kill   null {"after_op":228,"down":[],"process":"blockvolume:5","scheduled":"blockvolume:1","skipped":false}
 invoke  kill   {"process":"blockvolume:5"} null
 complete  kill  ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":229,"params":{"lbas":"0","round":"g229","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":230,"params":{"lbas":"0 3 6","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":229,"params":{"lbas":"7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":231,"params":{"lbas":"5","round":"g231","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":232,"params":{"lbas":"5 3 6 0","round":"g232","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":230,"params":{"lbas":"6 1 5 3","round":"g230","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1207,7 +1193,16 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":233,"params":{"lbas":"2 0 3 5","round":"g233","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":231,"params":{"lbas":"0","round":"g231","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":232,"params":{"lbas":"0 3 6","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":233,"params":{"lbas":"5","round":"g233","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":234,"params":{"lbas":"5 3 6 0","round":"g234","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1216,10 +1211,11 @@ invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":234,"params":{"lbas":"5","round":"g234","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":235,"params":{"lbas":"2 0 3 5","round":"g235","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":235,"params":{"lbas":"5 2","round":"g235","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
@@ -1227,25 +1223,24 @@ complete  write g6 unknown null null
 observe gen gen_step g6  null {"action":"v3_op_write","opno":236,"params":{"lbas":"5","round":"g236","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":237,"params":{"lbas":"4 0 1","round":"g237","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_write","opno":237,"params":{"lbas":"5 2","round":"g237","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
+invoke  write g6  null null
+complete  write g6 unknown null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":238,"params":{"lbas":"5","round":"g238","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 unknown null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":239,"params":{"lbas":"4 0 1","round":"g239","volume":"g6"}}
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
 invoke  write g6  null null
 complete  write g6 unknown null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":238,"params":{"lbas":"3","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":240,"params":{"lbas":"3","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":239,"params":{"lbas":"2 3 6 7","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":240,"params":{"expect":"refused","volume":"g10"}}
-observe  observe g10  null null
-observe  observe g10  null null
-invoke  delete g10  null null
-complete  delete g10 refused null null
-observe  observe g10  null null
 invoke  restart   {"process":"blockvolume:5"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
@@ -1265,266 +1260,277 @@ invoke  read g6  null null
 complete  read g6 ok null null
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":241,"params":{"lbas":"2 3 4","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":242,"params":{"lbas":"0 1 4 5","volume":"g6"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":241,"params":{"lbas":"2 3 6 7","volume":"g6"}}
 invoke  read g6  null null
 complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":243,"params":{"lbas":"2 3 5 6","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":244,"params":{"lbas":"4 7","round":"g244","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","opno":245,"params":{"lbas":"4 7","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":246,"params":{"lbas":"7","round":"g246","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":247,"params":{"lbas":"6 5","round":"g247","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":248,"params":{"lbas":"7 3 4 6","round":"g248","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_snapshot","opno":249,"params":{"name":"g6-s2","volume":"g6"}}
-invoke  snapshot g6  null null
-complete  snapshot g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":250,"params":{"lbas":"4 1 0 5","round":"g250","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_snapshot_delete","opno":251,"params":{"name":"g6-s2","volume":"g6"}}
-invoke  snapshot_delete g6  null null
-complete  snapshot_delete g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_write","opno":252,"params":{"lbas":"4 5 0 3","round":"g252","volume":"g6"}}
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-invoke  write g6  null null
-complete  write g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","forced":"readback","opno":253,"params":{"lbas":"0 1 3 4","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_read","forced":"readback","opno":254,"params":{"lbas":"5 6 7","volume":"g6"}}
-invoke  read g6  null null
-complete  read g6 ok null null
-observe gen gen_step g6  null {"action":"v3_op_stop","opno":255,"params":{"volume":"g6"}}
-invoke  stop g6  null null
-complete  stop g6 ok null null
-observe gen gen_step g4  null {"action":"v3_op_create","negative":"create a deleted name","opno":256,"params":{"expect":"refused","volume":"g4"}}
-observe  observe g4  null null
-observe  observe g4  null null
-invoke  create g4  null null
-complete  create g4 refused null null
-observe  observe g4  null null
-observe gen gen_step g15  null {"action":"v3_op_create","opno":257,"params":{"volume":"g15"}}
-invoke  create g15  null null
-complete  create g15 ok null null
-observe gen gen_step g13  null {"action":"v3_op_attach","opno":258,"params":{"host":"0","volume":"g13"}}
-invoke  attach g13  null null
-complete  attach g13 ok null null
-observe gen gen_step g13  null {"action":"v3_op_write","opno":259,"params":{"lbas":"5 0 1 7","round":"g259","volume":"g13"}}
-invoke  write g13  null null
-complete  write g13 ok null null
-invoke  write g13  null null
-complete  write g13 ok null null
-invoke  write g13  null null
-complete  write g13 ok null null
-invoke  write g13  null null
-complete  write g13 ok null null
-observe gen gen_step g13  null {"action":"v3_op_read","forced":"readback","opno":260,"params":{"lbas":"0 1 5 7","volume":"g13"}}
-invoke  read g13  null null
-complete  read g13 ok null null
-observe gen gen_step g13  null {"action":"v3_op_stop","opno":261,"params":{"volume":"g13"}}
-invoke  stop g13  null null
-complete  stop g13 ok null null
-observe gen gen_step g16  null {"action":"v3_op_create","opno":262,"params":{"volume":"g16"}}
-invoke  create g16  null null
-complete  create g16 ok null null
-observe gen gen_step g17  null {"action":"v3_op_create","opno":263,"params":{"volume":"g17"}}
-invoke  create g17  null null
-complete  create g17 ok null null
-observe gen gen_step g18  null {"action":"v3_op_create","opno":264,"params":{"volume":"g18"}}
-invoke  create g18  null null
-complete  create g18 ok null null
-observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":265,"params":{"expect":"refused","volume":"g10"}}
+observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":242,"params":{"expect":"refused","volume":"g10"}}
 observe  observe g10  null null
 observe  observe g10  null null
 invoke  delete g10  null null
 complete  delete g10 refused null null
 observe  observe g10  null null
-observe gen gen_step g15  null {"action":"v3_op_attach","opno":266,"params":{"host":"0","volume":"g15"}}
-invoke  attach g15  null null
-complete  attach g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":267,"params":{"lbas":"3","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_write","opno":268,"params":{"lbas":"2 6 7","round":"g268","volume":"g15"}}
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_write","opno":269,"params":{"lbas":"5 2","round":"g269","volume":"g15"}}
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":270,"params":{"lbas":"2 5 7","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":271,"params":{"lbas":"7","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g16  null {"action":"v3_op_attach","opno":272,"params":{"host":"0","volume":"g16"}}
-invoke  attach g16  null null
-complete  attach g16 ok null null
-observe gen gen_step g15  null {"action":"v3_op_write","opno":273,"params":{"lbas":"1 0","round":"g273","volume":"g15"}}
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_write","opno":274,"params":{"lbas":"6 1 4","round":"g274","volume":"g15"}}
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-observe gen gen_step g1  null {"action":"v3_op_create","negative":"create a deleted name","opno":275,"params":{"expect":"refused","volume":"g1"}}
-observe  observe g1  null null
-observe  observe g1  null null
-invoke  create g1  null null
-complete  create g1 refused null null
-observe  observe g1  null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":276,"params":{"lbas":"6 2 7 5","round":"g276","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":277,"params":{"lbas":"5 6","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":278,"params":{"lbas":"0 2 4 7","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_write","opno":279,"params":{"lbas":"2 3 0 4","round":"g279","volume":"g15"}}
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-invoke  write g15  null null
-complete  write g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":280,"params":{"lbas":"0 1 4","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":281,"params":{"lbas":"2 6 7","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","opno":282,"params":{"lbas":"1 4","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_read","forced":"readback","opno":283,"params":{"lbas":"2 3 6","volume":"g15"}}
-invoke  read g15  null null
-complete  read g15 ok null null
-observe gen gen_step g15  null {"action":"v3_op_stop","opno":284,"params":{"volume":"g15"}}
-invoke  stop g15  null null
-complete  stop g15 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":285,"params":{"lbas":"3","round":"g285","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":286,"params":{"lbas":"5 6","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":287,"params":{"lbas":"2 0","round":"g287","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":288,"params":{"lbas":"3 6 7","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":289,"params":{"lbas":"0 6","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":290,"params":{"lbas":"2 5","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":291,"params":{"lbas":"2 6","round":"g291","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g10  null {"action":"v3_op_snapshot_delete","negative":"delete a snapshot that has a restore target","opno":292,"params":{"expect":"refused","name":"g10-s2","volume":"g10"}}
-observe  observe g10  null null
-observe  observe g10  null null
-invoke  snapshot_delete g10  null null
-complete  snapshot_delete g10 refused null null
-observe  observe g10  null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":293,"params":{"lbas":"1 4 3 5","round":"g293","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g19  null {"action":"v3_op_create","opno":294,"params":{"volume":"g19"}}
-invoke  create g19  null null
-complete  create g19 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":295,"params":{"lbas":"5","round":"g295","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":296,"params":{"lbas":"1 2 6 7","volume":"g16"}}
-invoke  read g16  null null
-complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":297,"params":{"lbas":"6 1","round":"g297","volume":"g16"}}
-invoke  write g16  null null
-complete  write g16 ok null null
-invoke  write g16  null null
-complete  write g16 ok null null
-observe gen gen_step g4  null {"action":"v3_op_create","negative":"create a deleted name","opno":298,"params":{"expect":"refused","volume":"g4"}}
+observe gen gen_step g6  null {"action":"v3_op_read","opno":243,"params":{"lbas":"2 3 4","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":244,"params":{"lbas":"0 1 4 5","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":245,"params":{"lbas":"2 3 5 6","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":246,"params":{"lbas":"4 7","round":"g246","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","opno":247,"params":{"lbas":"4 7","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":248,"params":{"lbas":"7","round":"g248","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":249,"params":{"lbas":"6 5","round":"g249","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":250,"params":{"lbas":"7 3 4 6","round":"g250","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_snapshot","opno":251,"params":{"name":"g6-s2","volume":"g6"}}
+invoke  snapshot g6  null null
+complete  snapshot g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":252,"params":{"lbas":"4 1 0 5","round":"g252","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_snapshot_delete","opno":253,"params":{"name":"g6-s2","volume":"g6"}}
+invoke  snapshot_delete g6  null null
+complete  snapshot_delete g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_write","opno":254,"params":{"lbas":"4 5 0 3","round":"g254","volume":"g6"}}
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+invoke  write g6  null null
+complete  write g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","forced":"readback","opno":255,"params":{"lbas":"0 1 3 4","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_read","forced":"readback","opno":256,"params":{"lbas":"5 6 7","volume":"g6"}}
+invoke  read g6  null null
+complete  read g6 ok null null
+observe gen gen_step g6  null {"action":"v3_op_stop","opno":257,"params":{"volume":"g6"}}
+invoke  stop g6  null null
+complete  stop g6 ok null null
+observe gen gen_step g4  null {"action":"v3_op_create","negative":"create a deleted name","opno":258,"params":{"expect":"refused","volume":"g4"}}
 observe  observe g4  null null
 observe  observe g4  null null
 invoke  create g4  null null
 complete  create g4 refused null null
 observe  observe g4  null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":299,"params":{"lbas":"0 1","volume":"g16"}}
+observe gen gen_step g15  null {"action":"v3_op_create","opno":259,"params":{"volume":"g15"}}
+invoke  create g15  null null
+complete  create g15 ok null null
+observe gen gen_step g13  null {"action":"v3_op_attach","opno":260,"params":{"host":"0","volume":"g13"}}
+invoke  attach g13  null null
+complete  attach g13 ok null null
+observe gen gen_step g13  null {"action":"v3_op_write","opno":261,"params":{"lbas":"5 0 1 7","round":"g261","volume":"g13"}}
+invoke  write g13  null null
+complete  write g13 ok null null
+invoke  write g13  null null
+complete  write g13 ok null null
+invoke  write g13  null null
+complete  write g13 ok null null
+invoke  write g13  null null
+complete  write g13 ok null null
+observe gen gen_step g13  null {"action":"v3_op_read","forced":"readback","opno":262,"params":{"lbas":"0 1 5 7","volume":"g13"}}
+invoke  read g13  null null
+complete  read g13 ok null null
+observe gen gen_step g13  null {"action":"v3_op_stop","opno":263,"params":{"volume":"g13"}}
+invoke  stop g13  null null
+complete  stop g13 ok null null
+observe gen gen_step g16  null {"action":"v3_op_create","opno":264,"params":{"volume":"g16"}}
+invoke  create g16  null null
+complete  create g16 ok null null
+observe gen gen_step g17  null {"action":"v3_op_create","opno":265,"params":{"volume":"g17"}}
+invoke  create g17  null null
+complete  create g17 ok null null
+observe gen gen_step g18  null {"action":"v3_op_create","opno":266,"params":{"volume":"g18"}}
+invoke  create g18  null null
+complete  create g18 ok null null
+observe gen gen_step g10  null {"action":"v3_op_delete","negative":"delete a source whose snapshot has a restore target","opno":267,"params":{"expect":"refused","volume":"g10"}}
+observe  observe g10  null null
+observe  observe g10  null null
+invoke  delete g10  null null
+complete  delete g10 refused null null
+observe  observe g10  null null
+observe gen gen_step g15  null {"action":"v3_op_attach","opno":268,"params":{"host":"0","volume":"g15"}}
+invoke  attach g15  null null
+complete  attach g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","opno":269,"params":{"lbas":"3","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_write","opno":270,"params":{"lbas":"2 6 7","round":"g270","volume":"g15"}}
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_write","opno":271,"params":{"lbas":"5 2","round":"g271","volume":"g15"}}
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","opno":272,"params":{"lbas":"2 5 7","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","opno":273,"params":{"lbas":"7","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g16  null {"action":"v3_op_attach","opno":274,"params":{"host":"0","volume":"g16"}}
+invoke  attach g16  null null
+complete  attach g16 ok null null
+observe gen gen_step g15  null {"action":"v3_op_write","opno":275,"params":{"lbas":"1 0","round":"g275","volume":"g15"}}
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_write","opno":276,"params":{"lbas":"6 1 4","round":"g276","volume":"g15"}}
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+observe gen gen_step g1  null {"action":"v3_op_create","negative":"create a deleted name","opno":277,"params":{"expect":"refused","volume":"g1"}}
+observe  observe g1  null null
+observe  observe g1  null null
+invoke  create g1  null null
+complete  create g1 refused null null
+observe  observe g1  null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":278,"params":{"lbas":"6 2 7 5","round":"g278","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":279,"params":{"lbas":"5 6","volume":"g16"}}
 invoke  read g16  null null
 complete  read g16 ok null null
-observe gen gen_step g20  null {"action":"v3_op_create","opno":300,"params":{"volume":"g20"}}
+observe gen gen_step g15  null {"action":"v3_op_read","opno":280,"params":{"lbas":"0 2 4 7","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_write","opno":281,"params":{"lbas":"2 3 0 4","round":"g281","volume":"g15"}}
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+invoke  write g15  null null
+complete  write g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","opno":282,"params":{"lbas":"0 1 4","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":283,"params":{"lbas":"2 6 7","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","opno":284,"params":{"lbas":"1 4","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_read","forced":"readback","opno":285,"params":{"lbas":"2 3 6","volume":"g15"}}
+invoke  read g15  null null
+complete  read g15 ok null null
+observe gen gen_step g15  null {"action":"v3_op_stop","opno":286,"params":{"volume":"g15"}}
+invoke  stop g15  null null
+complete  stop g15 ok null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":287,"params":{"lbas":"3","round":"g287","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":288,"params":{"lbas":"5 6","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":289,"params":{"lbas":"2 0","round":"g289","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":290,"params":{"lbas":"3 6 7","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":291,"params":{"lbas":"0 6","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":292,"params":{"lbas":"2 5","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":293,"params":{"lbas":"2 6","round":"g293","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g10  null {"action":"v3_op_snapshot_delete","negative":"delete a snapshot that has a restore target","opno":294,"params":{"expect":"refused","name":"g10-s2","volume":"g10"}}
+observe  observe g10  null null
+observe  observe g10  null null
+invoke  snapshot_delete g10  null null
+complete  snapshot_delete g10 refused null null
+observe  observe g10  null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":295,"params":{"lbas":"1 4 3 5","round":"g295","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g19  null {"action":"v3_op_create","opno":296,"params":{"volume":"g19"}}
+invoke  create g19  null null
+complete  create g19 ok null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":297,"params":{"lbas":"5","round":"g297","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":298,"params":{"lbas":"1 2 6 7","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g16  null {"action":"v3_op_write","opno":299,"params":{"lbas":"6 1","round":"g299","volume":"g16"}}
+invoke  write g16  null null
+complete  write g16 ok null null
+invoke  write g16  null null
+complete  write g16 ok null null
+observe gen gen_step g4  null {"action":"v3_op_create","negative":"create a deleted name","opno":300,"params":{"expect":"refused","volume":"g4"}}
+observe  observe g4  null null
+observe  observe g4  null null
+invoke  create g4  null null
+complete  create g4 refused null null
+observe  observe g4  null null
+observe gen gen_step g16  null {"action":"v3_op_read","opno":301,"params":{"lbas":"0 1","volume":"g16"}}
+invoke  read g16  null null
+complete  read g16 ok null null
+observe gen gen_step g20  null {"action":"v3_op_create","opno":302,"params":{"volume":"g20"}}
 invoke  create g20  null null
 complete  create g20 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":301,"params":{"lbas":"4 6 7 2","round":"g301","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_write","opno":303,"params":{"lbas":"4 6 7 2","round":"g303","volume":"g16"}}
 invoke  write g16  null null
 complete  write g16 ok null null
 invoke  write g16  null null
@@ -1533,31 +1539,31 @@ invoke  write g16  null null
 complete  write g16 ok null null
 invoke  write g16  null null
 complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":302,"params":{"lbas":"1 6","round":"g302","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_write","opno":304,"params":{"lbas":"1 6","round":"g304","volume":"g16"}}
 invoke  write g16  null null
 complete  write g16 ok null null
 invoke  write g16  null null
 complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":303,"params":{"lbas":"0 3 4","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_read","opno":305,"params":{"lbas":"0 3 4","volume":"g16"}}
 invoke  read g16  null null
 complete  read g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_snapshot","opno":304,"params":{"name":"g16-s1","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_snapshot","opno":306,"params":{"name":"g16-s1","volume":"g16"}}
 invoke  snapshot g16  null null
 complete  snapshot g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":305,"params":{"lbas":"2","round":"g305","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_write","opno":307,"params":{"lbas":"2","round":"g307","volume":"g16"}}
 invoke  write g16  null null
 complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_restore","opno":306,"params":{"snapshot":"g16-s1","target_volume":"g21","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_restore","opno":308,"params":{"snapshot":"g16-s1","target_volume":"g21","volume":"g16"}}
 invoke  restore g16  null null
 complete  restore g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_write","opno":307,"params":{"lbas":"5 0 6","round":"g307","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_write","opno":309,"params":{"lbas":"5 0 6","round":"g309","volume":"g16"}}
 invoke  write g16  null null
 complete  write g16 ok null null
 invoke  write g16  null null
 complete  write g16 ok null null
 invoke  write g16  null null
 complete  write g16 ok null null
-observe gen gen_step g16  null {"action":"v3_op_read","opno":308,"params":{"lbas":"3 4","volume":"g16"}}
+observe gen gen_step g16  null {"action":"v3_op_read","opno":310,"params":{"lbas":"3 4","volume":"g16"}}
 invoke  read g16  null null
 complete  read g16 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
@@ -1581,5 +1587,5 @@ observe  observe g18  null null
 observe  observe g19  null null
 observe  observe g20  null null
 observe  observe g21  null null
-observe gen gen_coverage   null {"actions":{"v3_op_attach":10,"v3_op_create":21,"v3_op_delete":25,"v3_op_read":102,"v3_op_release":1,"v3_op_restore":11,"v3_op_snapshot":11,"v3_op_snapshot_delete":6,"v3_op_stop":6,"v3_op_write":115},"cells":{"v3_op_attach|created":10,"v3_op_create|deleted":4,"v3_op_create|unborn":17,"v3_op_delete|created":1,"v3_op_delete|serving":16,"v3_op_delete|stopped":8,"v3_op_read|serving":102,"v3_op_release|serving":1,"v3_op_restore|serving":11,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":2,"v3_op_snapshot|serving":11,"v3_op_stop|serving":6,"v3_op_write|serving":115},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","v3_op_release|stopped","while_down|v3_op_move","while_down|v3_op_release","while_down|v3_op_snapshot","while_down|v3_op_stop"],"drawn":300,"ended":"ops","estimated_ops_per_hour":540,"fault_cells":{"kill|blockvolume:0":4,"kill|blockvolume:1":6,"restart|blockvolume:0":4,"restart|blockvolume:1":6,"while_down|v3_op_attach":2,"while_down|v3_op_create":4,"while_down|v3_op_delete":10,"while_down|v3_op_read":37,"while_down|v3_op_restore":3,"while_down|v3_op_snapshot_delete":1,"while_down|v3_op_write":43},"forced":8,"proposed":308}
+observe gen gen_coverage   null {"actions":{"v3_op_attach":10,"v3_op_create":21,"v3_op_delete":25,"v3_op_read":104,"v3_op_release":1,"v3_op_restore":11,"v3_op_snapshot":11,"v3_op_snapshot_delete":6,"v3_op_stop":6,"v3_op_write":115},"cells":{"v3_op_attach|created":10,"v3_op_create|deleted":4,"v3_op_create|unborn":17,"v3_op_delete|created":1,"v3_op_delete|serving":16,"v3_op_delete|stopped":8,"v3_op_read|serving":104,"v3_op_release|serving":1,"v3_op_restore|serving":11,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":2,"v3_op_snapshot|serving":11,"v3_op_stop|serving":6,"v3_op_write|serving":115},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","v3_op_release|stopped","while_down|v3_op_move","while_down|v3_op_release","while_down|v3_op_snapshot","while_down|v3_op_stop"],"drawn":300,"ended":"ops","estimated_ops_per_hour":543,"fault_cells":{"kill|blockvolume:0":4,"kill|blockvolume:1":6,"restart|blockvolume:0":4,"restart|blockvolume:1":6,"while_down|v3_op_attach":2,"while_down|v3_op_create":4,"while_down|v3_op_delete":10,"while_down|v3_op_read":37,"while_down|v3_op_restore":3,"while_down|v3_op_snapshot_delete":1,"while_down|v3_op_write":43},"forced":10,"proposed":310}
 end     null {"open_invocations":0}

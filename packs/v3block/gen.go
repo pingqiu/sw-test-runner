@@ -191,6 +191,12 @@ type genVol struct {
 	moved bool
 	// due: forced operations owed on this volume, in order (Due).
 	due []GenOp
+	// inheritedLBAs: a restore target's content at its restore, read first
+	// after its first attach (C2); attached: it has been attached once.
+	inheritedLBAs []int
+	attached      bool
+	// pairDone: the restore pairs (source|target) whose pair window ran.
+	pairDone map[string]bool
 }
 
 // blockModel is the block product's randomrun.Model. Its zero value is a
@@ -213,7 +219,7 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
 	for _, n := range pool {
 		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
-			snapRewrote: map[string]bool{}, dirty: map[int]bool{}}
+			snapRewrote: map[string]bool{}, dirty: map[int]bool{}, pairDone: map[string]bool{}}
 		m.order = append(m.order, n)
 	}
 	return nil
@@ -526,6 +532,12 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_attach":
 		v.state, v.fenced = stServing, false // a new holder: no earlier not_serving applies
 		v.held[v.host] = true
+		if v.source != "" && !v.attached && len(v.inheritedLBAs) > 0 {
+			// C2: a restore target's first reads are its inherited lbas,
+			// before anything writes them.
+			v.due = append(v.due, m.readsOf(v, v.inheritedLBAs, "inherited")...)
+		}
+		v.attached = true
 		if v.moved {
 			// The move's own data check: every acknowledged lba read once on
 			// the new host.
@@ -559,6 +571,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			t.lbas[b] = true
 		}
 		t.inherited, t.rewrote = len(v.snapLBAs[o.Params["snapshot"]]) > 0, false
+		t.inheritedLBAs = slices.Clone(v.snapLBAs[o.Params["snapshot"]])
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
 		v.state = stStopped
@@ -614,15 +627,44 @@ func sameOp(a, b GenOp) bool {
 	return a.Action == b.Action && a.Volume == b.Volume && a.Forced == b.Forced && maps.Equal(a.Params, b.Params)
 }
 
-// Before (C1): an ordinary stop or move would leave the volume's dirty lbas
-// unread for good; they are read back first (not on a fenced volume: it
-// cannot be read).
+// Before an ordinary stop or move (not on a fenced volume: it cannot be
+// read):
+//   - C3, the pair window: when the volume is the source of a live target,
+//     or the target of a live source, and both serve, the same lbas (the
+//     content of either) are read on both, once per pair, so both
+//     directions are exercised before one side leaves;
+//   - C1: the volume's dirty lbas are read back.
 func (m *blockModel) Before(o GenOp) []GenOp {
 	v := m.vols[o.Volume]
 	if o.Negative != "" || v == nil || v.fenced || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
 		return nil
 	}
-	return m.readsOf(v, sortedLBAs(v.dirty), "readback")
+	var out []GenOp
+	pending := maps.Clone(v.dirty) // the dirty lbas no pair read covers
+	pair := func(src, tgt *genVol) {
+		key := src.name + "|" + tgt.name
+		if src.pairDone[key] || src.state != stServing || tgt.state != stServing || src.fenced || tgt.fenced {
+			return
+		}
+		src.pairDone[key] = true
+		u := maps.Clone(src.lbas)
+		maps.Copy(u, tgt.lbas)
+		lbas := sortedLBAs(u)
+		out = append(out, m.readsOf(src, lbas, "pair")...)
+		out = append(out, m.readsOf(tgt, lbas, "pair")...)
+		for b := range u {
+			delete(pending, b)
+		}
+	}
+	for _, s := range slices.Sorted(maps.Keys(v.targets)) {
+		pair(v, m.vols[v.targets[s]])
+	}
+	if v.source != "" {
+		if src := m.vols[v.source]; src != nil && src.targets[v.fromSnap] == v.name {
+			pair(src, v)
+		}
+	}
+	return append(out, m.readsOf(v, sortedLBAs(pending), "readback")...)
 }
 
 // Due is the first owed operation of a volume, in pool order. Owed reads of
