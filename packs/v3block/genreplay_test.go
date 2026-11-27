@@ -201,6 +201,11 @@ func TestGenReplayRefusesABadScriptBeforeAnyCall(t *testing.T) {
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},
+		"generator m1-gen/2": func(h *tr.History) {
+			obs(h, "gen_header", "", map[string]any{"generator": "m1-gen/2"})
+			obs(h, "gen_step", "g1", step)
+			opRec(h, "create", "g1", tr.OutcomeOK)
+		},
 		"other generator": func(h *tr.History) {
 			obs(h, "gen_header", "", map[string]any{"generator": "m1-gen/0"})
 			obs(h, "gen_step", "g1", step)

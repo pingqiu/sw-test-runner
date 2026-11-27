@@ -80,12 +80,19 @@ type oracle struct {
 	held     map[string]map[int]bool    // hosts that served the volume once (a local root lies there)
 	content  map[string]map[string]bool // vol -> lbas with acknowledged content
 	snapCont map[string]map[string]bool // "vol|snapshot" -> lbas with content when it was taken
+	// A restore target names a source chunk while it has not rewritten it:
+	// inherited (the source snapshot had content), wrote (an ok write since
+	// its restore), snapWrote ("vol|snapshot": wrote when it was taken).
+	inherited map[string]bool
+	wrote     map[string]bool
+	snapWrote map[string]bool
 }
 
 func newOracle() *oracle {
 	return &oracle{state: map[string]string{}, snaps: map[string]map[string]bool{},
 		targets: map[string]map[string]bool{}, target: map[string]string{}, fromSn: map[string]string{}, host: map[string]int{},
-		held: map[string]map[int]bool{}, content: map[string]map[string]bool{}, snapCont: map[string]map[string]bool{}}
+		held: map[string]map[int]bool{}, content: map[string]map[string]bool{}, snapCont: map[string]map[string]bool{},
+		inherited: map[string]bool{}, wrote: map[string]bool{}, snapWrote: map[string]bool{}}
 }
 
 func (o *oracle) init(v string) {
@@ -185,12 +192,16 @@ func (o *oracle) refusal(op GenOp) string {
 			return "restore into a deleted name"
 		case ts != "" && ts != "unknown" && !(o.target[t] == v && o.fromSn[t] == s):
 			return "restore into an existing name"
-		case ts == "" && o.target[v] != "":
+		case ts == "" && o.target[v] != "" && o.inherited[v] && !o.snapWrote[v+"|"+s]:
+			// Refused only while the snapshot names a source chunk
+			// (layout/snapshots.go:102-107).
 			return "restore from a snapshot of a restore target"
 		}
 	case "v3_op_release":
 		t := op.Params["target_volume"]
-		if ts := o.state[t]; o.target[t] == v && (ts == "created" || ts == "serving" || ts == "stopped") {
+		// Refused only while a root of the target names a source chunk
+		// (layout/delete.go:250-257).
+		if ts := o.state[t]; o.target[t] == v && (ts == "created" || ts == "serving" || ts == "stopped") && o.inherited[t] && !o.wrote[t] {
 			return "release a live restore target"
 		}
 	}
@@ -211,8 +222,10 @@ func (o *oracle) apply(op GenOp) {
 		for _, b := range strings.Fields(op.Params["lbas"]) {
 			o.content[v][b] = true
 		}
+		o.wrote[v] = true
 	case "v3_op_snapshot":
 		o.snaps[v][op.Params["name"]] = true
+		o.snapWrote[v+"|"+op.Params["name"]] = o.wrote[v]
 		c := map[string]bool{}
 		for b := range o.content[v] {
 			c[b] = true
@@ -228,6 +241,7 @@ func (o *oracle) apply(op GenOp) {
 		for b := range o.snapCont[v+"|"+op.Params["snapshot"]] {
 			o.content[t][b] = true
 		}
+		o.inherited[t], o.wrote[t] = len(o.snapCont[v+"|"+op.Params["snapshot"]]) > 0, false
 	case "v3_op_stop":
 		o.state[v] = "stopped"
 	case "v3_op_move":
@@ -552,6 +566,30 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 			red:   append(withTarget(), op("v3_op_release", "g1", "target_volume", "g2")),
 			green: append(withTarget(), neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
 		},
+		"a target released after it wrote": {
+			// v11 at run 3: a target that rewrote the source's chunk no longer
+			// names it, and its release is admitted.
+			red: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
+			green: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_read", "g2", "lbas", "3"),
+				neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
+		},
+		"a restore from a target's snapshot taken after it wrote": {
+			// v09 at run 3: its snapshot named only its own chunk, and the
+			// restore was admitted.
+			red: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				op("v3_op_snapshot", "g2", "name", "g2-s1"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")),
+			green: append(targetServes(), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")),
+		},
+		"a restore from a target that inherited nothing": {
+			red: []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_snapshot", "g1", "name", "g1-s1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0"),
+				op("v3_op_snapshot", "g2", "name", "g2-s1"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")},
+			green: row8(),
+		},
 		"a read of the written set": {
 			red:   append(base(), op("v3_op_read", "g1", "lbas", "written")),
 			green: append(base(), op("v3_op_read", "g1", "lbas", "3 5")),
@@ -723,6 +761,32 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 		if c.op.Action == "v3_op_attach" {
 			t.Errorf("an attach proposed on a volume moved back: %v", c.op)
 		}
+	}
+
+	// A target names the source's chunk until it writes: then its release is
+	// no negative, and only its snapshots taken before the write are.
+	g = newG()
+	drive(g, append(src(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_snapshot", "g2", "name", "g2-s1"))...)
+	if !has(g.negatives(), "v3_op_release", "g1", limReleaseLive, "target_volume", "g2") {
+		t.Error("no negative release of a target that never wrote")
+	}
+	drive(g, op("v3_op_write", "g2", "lbas", "4", "round", "r3"), op("v3_op_snapshot", "g2", "name", "g2-s2"))
+	if has(g.negatives(), "v3_op_release", "g1", limReleaseLive) {
+		t.Error("a target that wrote since its restore is released as a negative")
+	}
+	if !has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget, "snapshot", "g2-s1") || has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget, "snapshot", "g2-s2") {
+		t.Error("the restore negative does not use the target's snapshot taken before its write")
+	}
+	drive(g, op("v3_op_snapshot_delete", "g2", "name", "g2-s1"))
+	if has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget) {
+		t.Error("a restore negative from a snapshot taken after the target wrote")
+	}
+	// An unknown write in a fault run may have persisted: no release negative.
+	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster"}})
+	drive(gf, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
+	gf.Learn(op("v3_op_write", "g2", "lbas", "4", "round", "r3"), "unknown")
+	if has(gf.negatives(), "v3_op_release", "g1", limReleaseLive) {
+		t.Error("a target whose write was unknown is released as a negative")
 	}
 
 	g = newG()

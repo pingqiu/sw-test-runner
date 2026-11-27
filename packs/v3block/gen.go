@@ -33,13 +33,15 @@ import (
 // version is refused. m1-gen/2: the shadow follows the documented refusals
 // (reserved and bound names, no attach on an earlier local root or after a
 // stop, no ordinary delete of a serving volume), proposes the negatives the
-// typed actions can answer, and names every read's lbas.
-const GenVersion = "m1-gen/2"
+// typed actions can answer, and names every read's lbas. m1-gen/3: a restore
+// from a target's snapshot and a release of a target are negatives only while
+// the target still names a source chunk.
+const GenVersion = "m1-gen/3"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
-// history replays as before.
-const GenVersionFaults = "m2-gen/1"
+// history replays as before. m2-gen/2: as m1-gen/3.
+const GenVersionFaults = "m2-gen/2"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -136,6 +138,18 @@ type genVol struct {
 	lbas     map[int]bool      // lbas with acknowledged content (written here, or inherited by a restore target)
 	snapLBAs map[string][]int  // live snapshot name -> the lbas with content when it was taken
 	snapSeq  int
+	// A restore target's root names the source's chunk until the target
+	// rewrites that chunk and the write is committed (a read fill does not
+	// re-own it); every lba here lies in one chunk. inherited: the source
+	// snapshot had content, so the target's root names a source chunk.
+	// rewrote: the target has had a write answered ok (or, in a fault run,
+	// unknown) since its restore; snapRewrote: the same, as it stood when
+	// each live snapshot was taken. While a root names a source chunk the
+	// product refuses a restore from that snapshot and a release of the
+	// target (layout/snapshots.go:102-107, layout/delete.go:250-257).
+	inherited   bool
+	rewrote     bool
+	snapRewrote map[string]bool
 	// held[h]: a holder on host h served this volume once, so h has a local
 	// root for it. The local root is per host and the runner never moves it
 	// aside, so an attach on a host that held the volume earlier is against
@@ -168,7 +182,8 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	}
 	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
 	for _, n := range pool {
-		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{}}
+		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
+			snapRewrote: map[string]bool{}}
 		m.order = append(m.order, n)
 	}
 	return nil
@@ -341,6 +356,17 @@ func (m *blockModel) Negatives() []GenOp {
 			}
 			if len(v.snaps) > 0 {
 				s := v.snaps[0]
+				if v.source != "" {
+					// Only a snapshot taken before the target's first write still
+					// names a source chunk, and only if it inherited one.
+					s = ""
+					for _, x := range v.snaps {
+						if v.inherited && !v.snapRewrote[x] {
+							s = x
+							break
+						}
+					}
+				}
 				if v.source == "" {
 					// Into a name that exists, not this restore's own replay
 					// (target_exists).
@@ -350,7 +376,7 @@ func (m *blockModel) Negatives() []GenOp {
 					}); t != "" {
 						add(op("v3_op_restore", n, "snapshot", s, "target_volume", t), limRestoreExisting)
 					}
-				} else if unborn != "" {
+				} else if unborn != "" && s != "" {
 					add(op("v3_op_restore", n, "snapshot", s, "target_volume", unborn), limRestoreTarget)
 				}
 			}
@@ -361,11 +387,13 @@ func (m *blockModel) Negatives() []GenOp {
 		}
 		// Snapshots with a live restore target: their delete is refused, through
 		// the holder while it serves, store direct otherwise; a live target is
-		// not released.
+		// not released while it names a source chunk (it inherited one and has
+		// not written since its restore).
 		if v.state == stServing || v.state == stStopped || v.state == stReserved {
 			for s, t := range v.targets {
 				add(op("v3_op_snapshot_delete", n, "name", s), limDeleteSnapDep)
-				if ts := m.vols[t].state; ts == stCreated || ts == stServing || ts == stStopped {
+				tv := m.vols[t]
+				if ts := tv.state; (ts == stCreated || ts == stServing || ts == stStopped) && tv.inherited && !tv.rewrote {
 					add(op("v3_op_release", n, "target_volume", t), limReleaseLive)
 				}
 			}
@@ -414,6 +442,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			}
 		}
 		v.unresolved++
+		v.rewrote = true // it may have persisted: the target may no longer name the source
 		return
 	}
 	if outcome == "refused" || outcome == "unknown" {
@@ -454,13 +483,16 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 				v.lbas[b] = true
 			}
 		}
+		v.rewrote = true
 	case "v3_op_snapshot":
 		v.snapSeq++
 		v.snaps = append(v.snaps, o.Params["name"])
 		v.snapLBAs[o.Params["name"]] = sortedLBAs(v.lbas)
+		v.snapRewrote[o.Params["name"]] = v.rewrote
 	case "v3_op_snapshot_delete":
 		v.snaps = slices.DeleteFunc(v.snaps, func(s string) bool { return s == o.Params["name"] })
 		delete(v.snapLBAs, o.Params["name"])
+		delete(v.snapRewrote, o.Params["name"])
 	case "v3_op_restore":
 		// The target's content is the source's at the snapshot.
 		t := m.vols[o.Params["target_volume"]]
@@ -468,6 +500,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		for _, b := range v.snapLBAs[o.Params["snapshot"]] {
 			t.lbas[b] = true
 		}
+		t.inherited, t.rewrote = len(v.snapLBAs[o.Params["snapshot"]]) > 0, false
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
 		v.state = stStopped
