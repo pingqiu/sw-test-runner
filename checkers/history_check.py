@@ -155,6 +155,14 @@ code is 0 only when every checker passes.
       with no write or no look is UNKNOWN ("short master outage not exercised
       in window"). Reported: "short master outages judged: <n>". FAIL (not
       exercised) when the history holds no ok kill of the master.
+  LIN linearizability per block (M3): each block a register, every operation
+      taking effect at one point inside its interval (mono_ns), concurrent
+      writers allowed. An unknown write may take effect from its invoke until
+      its holder is known dead or its volume's epoch advanced, or never; a
+      kill reaching the volume falls the register back to what DUR's rule
+      allows. Cut per block where nothing is in flight; a piece over 2,000
+      operations or 60 s is NOT JUDGED, never PASS. FAIL when no order of a
+      piece explains its reads. No ok read: FAIL (not exercised)
 
 A fault is an operation of module Runner (verbs fault_apply and fault_restore,
 args fault_key, resource, vm_id), never a record kind of its own. A fault is
@@ -175,6 +183,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 
 ZERO = None       # sha256 of one block of zeros, the product's block_bytes: set by load_product
 KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
@@ -1141,6 +1150,287 @@ def dur(recs):
     return {'verdict': 'FAIL' if f else 'PASS', 'findings': f + notes}
 
 
+# LIN (M3): per block, the register. Budgets per piece (kb: 2,000 operations,
+# 60 s); a test patches them. More pieces not judged than LIN_FEW: the
+# scenario's concurrency per block is too high for the checker.
+LIN_MAX_OPS = 2000
+LIN_SECONDS = 60
+LIN_FEW = 3
+_INF = float('inf')
+_EMPTY = frozenset()
+
+
+class _LinOp:
+    """One operation on one block's register. inv and comp are its interval on
+    the history's clock; an optional operation (a write whose outcome is
+    unknown) has no completion and may take effect up to close, or never."""
+    __slots__ = ('kind', 'seq', 'inv', 'comp', 'close', 'value', 'flush', 'image', 'optional')
+
+    def __init__(self, kind, seq, inv, comp, value=None, flush=False, image=None, optional=False, close=_INF):
+        self.kind, self.seq, self.inv, self.comp, self.close = kind, seq, inv, comp, close
+        self.value, self.flush, self.image, self.optional = value, flush, image, optional
+
+    def describe(self):
+        if self.kind == 'read':
+            return 'read seq %d returned %s' % (self.seq, self.value)
+        if self.kind == 'write':
+            return '%swrite seq %d of %s' % ('unknown ' if self.optional else '', self.seq, self.value)
+        return '%s seq %d' % (self.kind, self.seq)
+
+
+def _lin_step(op, cur, durable, newer):
+    """The register's transitions: the states (value, durable set, writes
+    since the durable point) after `op` from (cur, durable, newer); none when
+    op cannot take effect there. cur None is a state the history does not
+    determine (after a piece not judged): any read fits it and fixes it."""
+    k = op.kind
+    if k == 'read':
+        return [(op.value, durable, newer)] if cur is None or cur == op.value else []
+    if k == 'write':
+        if op.flush and not op.optional:   # acknowledged with its fsync: durable
+            return [(op.value, frozenset((op.value,)), _EMPTY)]
+        return [(op.value, durable, newer | {op.value})]
+    if k == 'flush':
+        return [(cur, None if cur is None else frozenset((cur,)), _EMPTY)]
+    if k == 'kill':
+        if durable is None:
+            return [(None, None, _EMPTY)]
+        return [(v, frozenset(durable_after_kill(durable, newer, v)), _EMPTY) for v in sorted(kill_fallback(durable, newer))]
+    # restore: the target holds its snapshot's content, as written
+    if op.image is None:
+        return [(None, None, _EMPTY)]
+    return [(v, frozenset((v,)), _EMPTY) for v in sorted(op.image)]
+
+
+def _lin_blocks(recs):
+    """{(volume, lba): [_LinOp]} of every block a write or read names, with
+    its volume's flushes and restores and the kills reaching it; the count of
+    unknown writes whose window an epoch advance closes; the kills."""
+    _, _, images = replay(recs)
+    line_epoch = getattr(PRODUCT, 'line_epoch', None)
+    epochs = {}   # volume -> [(seq, mono, epoch)]
+    if line_epoch is not None:
+        for r in recs:
+            if r['kind'] in ('observe', 'complete') and r.get('volume'):
+                e = line_epoch(r)
+                if e is not None:
+                    epochs.setdefault(r['volume'], []).append((r['seq'], r['mono_ns'], e))
+
+    def close_of(vol, inv):
+        # The first record after the invoke showing the volume's epoch above
+        # the one last shown before it; no epoch shown before: never.
+        before = None
+        for seq, mono, e in epochs.get(vol, ()):
+            if seq < inv['seq']:
+                before = e
+            elif before is not None and e > before:
+                return mono
+        return _INF
+
+    blocks, per_volume, closed = {}, {}, 0
+    for inv, comp in operations(recs):
+        verb, vol, args = inv['verb'], inv['volume'], inv.get('args') or {}
+        out = comp['outcome'] if comp is not None else 'unknown'   # never completed: unknown
+        if verb == 'write' and out in ('ok', 'unknown'):
+            if out == 'ok':
+                op = _LinOp('write', inv['seq'], inv['mono_ns'], comp['mono_ns'], args['sha256'], flushed(args))
+            else:
+                close = close_of(vol, inv)
+                closed += close < _INF
+                op = _LinOp('write', inv['seq'], inv['mono_ns'], _INF, args['sha256'], flushed(args), optional=True, close=close)
+            blocks.setdefault((vol, args['lba']), []).append(op)
+        elif verb == 'read' and out == 'ok':
+            got = (comp.get('result') or {}).get('sha256')
+            blocks.setdefault((vol, args['lba']), []).append(_LinOp('read', inv['seq'], inv['mono_ns'], comp['mono_ns'], got))
+        elif verb in ('flush', 'restore') and out == 'ok':
+            per_volume.setdefault(vol, []).append((verb, inv, comp))
+    kills = holder_kills(recs)
+    for (vol, lba), ops_ in blocks.items():
+        for verb, inv, comp in per_volume.get(vol, ()):
+            image = None
+            if verb == 'restore':
+                snap = images.get(comp['seq'])
+                image = None if snap is None else set(snap.get(lba, {ZERO}))
+            ops_.append(_LinOp(verb, inv['seq'], inv['mono_ns'], comp['mono_ns'], image=image))
+        for k in kills:
+            if k['scope'] is None or vol in k['scope']:
+                ops_.append(_LinOp('kill', k['seq'], k['start'], max(k['start'], k['end'])))
+        ops_.sort(key=lambda o: (o.inv, o.seq))
+    return blocks, closed, kills
+
+
+def _lin_pieces(ops_):
+    """Cut a block's operations (sorted by invoke) where no operation that
+    completes is in flight; an unknown write never holds a cut open, it is
+    carried into the later pieces while its window is open."""
+    pieces, cur, last = [], [], -_INF
+    for o in ops_:
+        if cur and o.inv > last:
+            pieces.append(cur)
+            cur = []
+        cur.append(o)
+        if not o.optional:
+            last = max(last, o.comp)
+    if cur:
+        pieces.append(cur)
+    return pieces
+
+
+def _lin_piece(piece, starts, seconds):
+    """Every register state a linearization of `piece` may end in, from any of
+    `starts` ((value, durable, newer, pending unknown writes)): ('judged',
+    finals), ('fail', what the deepest search reached) or ('not judged', why).
+    The search is WGL's: at each step any not yet placed operation that no
+    unplaced completed operation precedes in real time may take effect; a
+    state is (placed set, register state), memoized, so each is expanded
+    once. An unknown write may be placed or left; it is dropped once an
+    operation invoked after its window closed is placed, or a kill invoked
+    after it (its holder is then known dead)."""
+    carried = sorted({o for s in starts for o in s[3]}, key=lambda o: (o.inv, o.seq))
+    ops_ = sorted(carried + piece, key=lambda o: (o.inv, o.seq))
+    n = len(ops_)
+    index = {o: i for i, o in enumerate(ops_)}
+    mand = 0
+    for i, o in enumerate(ops_):
+        if not o.optional:
+            mand |= 1 << i
+    opt = [i for i, o in enumerate(ops_) if o.optional]
+    deadline = time.monotonic() + seconds
+    stack, seen, finals = [], set(), set()
+    for cur, durable, newer, pending in starts:
+        mask = 0
+        for o in carried:
+            if o not in pending:
+                mask |= 1 << index[o]
+        stack.append((mask, cur, durable, newer))
+    best = (-1, None, set())   # (operations placed, placed set, register values) of the deepest state
+    count = 0
+    while stack:
+        st = stack.pop()
+        if st in seen:
+            continue
+        if count % 256 == 0 and time.monotonic() >= deadline:
+            return 'not judged', 'over the budget of %s s (%d states)' % (seconds, count)
+        count += 1
+        seen.add(st)
+        mask, cur, durable, newer = st
+        if mask & mand == mand:
+            finals.add((cur, durable, newer, frozenset(ops_[j] for j in opt if not mask >> j & 1)))
+            continue
+        depth = bin(mask & mand).count('1')
+        if depth > best[0]:
+            best = (depth, mask, {cur})
+        elif depth == best[0] and mask == best[1]:
+            best[2].add(cur)
+        low = ((~mask) & (mask + 1)).bit_length() - 1
+        min_comp, cands = _INF, []
+        for i in range(low, n):
+            if mask >> i & 1:
+                continue
+            o = ops_[i]
+            if o.inv > min_comp:   # a completed operation precedes it, and every later one
+                break
+            cands.append(i)
+            if not o.optional and o.comp < min_comp:
+                min_comp = o.comp
+        for i in cands:
+            o = ops_[i]
+            nm = mask | (1 << i)
+            for j in opt:
+                if not nm >> j & 1 and (ops_[j].close < o.inv or (o.kind == 'kill' and ops_[j].inv < o.inv)):
+                    nm |= 1 << j
+            for c2, d2, n2 in _lin_step(o, cur, durable, newer):
+                if (nm, c2, d2, n2) not in seen:
+                    stack.append((nm, c2, d2, n2))
+    if finals:
+        return 'judged', finals
+    depth, mask, curs = best
+    left = [o for i, o in enumerate(ops_) if mand >> i & 1 and not mask >> i & 1]
+    return 'fail', '%d of %d placed; not placeable next: %s (the block could hold %s)' % (
+        depth, bin(mand).count('1'), '; '.join(o.describe() for o in left[:3]),
+        ', '.join('any value' if c is None else c for c in sorted(curs, key=str)))
+
+
+def lin(recs):
+    """Linearizability, per block (M3). The model: each block is a register,
+    independent of every other; a write sets it to its value hash, a read
+    returns it. Every operation has an interval from its invoke to its
+    completion on the history's clock (mono_ns; records with equal clocks
+    are concurrent) and an acknowledged operation took effect at one point
+    inside it. A write whose outcome is unknown (or that never completed)
+    may take effect at any point after its invoke UNTIL its holder is known
+    dead (a kill invoked after it reaching its volume, holder_kills) or its
+    volume's epoch advanced (the product's line_epoch: the first record
+    after the invoke showing an epoch above the last one shown before it),
+    or never. A refused write and a read not answered ok are not in the
+    model.
+    Durability is part of the register: its state is (value, durable set,
+    writes since the durable point); an acknowledged write with its fsync
+    and an acknowledged flush of the volume make the value durable, and a
+    flush is an operation of every block of its volume. A kill reaching the
+    volume is an operation with its own interval: at it the register falls
+    back to any value DUR's rule allows (kill_fallback, durable_after_kill;
+    an open unknown landing at the kill is the search placing it just
+    before). A restore sets each block of its target to a value its
+    snapshot held (C2's image).
+    Size: per block, the history is cut where no operation that completes
+    is in flight; pieces chain by the set of states the previous one may
+    end in. A piece over LIN_MAX_OPS operations, or whose search passes
+    LIN_SECONDS, is NOT JUDGED and reported, never passed; the next piece
+    starts from a state the history does not determine (the first read
+    fixes the value), so later pieces are still judged. More than LIN_FEW
+    pieces not judged: the scenario's concurrency per block is too high.
+    Search: WGL with memoization of (placed set, register state). Bound per
+    piece: states <= (downward-closed sets of the piece's interval order)
+    x (register states), each expanded in O(w + u), w the operations in
+    flight at once, u the open unknown writes; a sequential piece has n + 1
+    placed sets, one with at most c operations in flight at once at most
+    n * 2^c.
+    FAIL: a piece no order explains (a stale read, a value no write
+    produced, a value back after it was overwritten and made durable, an
+    unknown that lands after its holder died). UNKNOWN: a fault operation
+    without a known outcome, or a piece not judged. No ok read: FAIL, not
+    exercised."""
+    u = unknown_environment(recs)
+    if u is not None:
+        return {'verdict': 'UNKNOWN', 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
+    blocks, closed, kills = _lin_blocks(recs)
+    if not any(o.kind == 'read' for ops_ in blocks.values() for o in ops_):
+        return verdict(['no read in the history: LIN judges nothing'])
+    f, unjudged = [], []
+    npieces, largest = 0, 0
+    for (vol, lba) in sorted(blocks):
+        starts = {(ZERO, frozenset((ZERO,)), _EMPTY, _EMPTY)}
+        for piece in _lin_pieces(blocks[(vol, lba)]):
+            npieces += 1
+            largest = max(largest, len(piece))
+            where = '%s lba %d, piece of %d operation(s) seq %d..%d' % (
+                vol, lba, len(piece), min(o.seq for o in piece), max(o.seq for o in piece))
+            if len(piece) > LIN_MAX_OPS:
+                status, res = 'not judged', 'over the budget of %d operations' % LIN_MAX_OPS
+            else:
+                status, res = _lin_piece(piece, starts, LIN_SECONDS)
+            if status == 'judged':
+                starts = res
+                continue
+            if status == 'fail':
+                f.append('%s: no order of its operations explains them: %s' % (where, res))
+            else:
+                unjudged.append('NOT JUDGED: %s: %s' % (where, res))
+            pending = frozenset(o for s in starts for o in s[3]) | frozenset(o for o in piece if o.optional)
+            starts = {(None, None, _EMPTY, pending)}
+    notes = ['pieces judged: %d of %d; largest piece: %d operation(s)' % (npieces - len(f) - len(unjudged), npieces, largest),
+             'unknown writes whose window an epoch advance closed: %d' % closed]
+    if any(k['scope'] is None for k in kills):
+        notes.append('kill(s) naming no volume, applied to every volume: seq %s' % ', '.join(str(k['seq']) for k in kills if k['scope'] is None))
+    if len(unjudged) > LIN_FEW:
+        notes.append("%d pieces not judged: the scenario's concurrency per block is too high for the checker; the scenario changes, not the checker" % len(unjudged))
+    if f:
+        return {'verdict': 'FAIL', 'findings': f + unjudged + notes}
+    if unjudged:
+        return {'verdict': 'UNKNOWN', 'findings': unjudged + notes}
+    return {'verdict': 'PASS', 'findings': notes}
+
 
 # C6 latency bounds (BOUNDS) and recovery terms (RECOVERY) come from the
 # product's checks.json, each with its cite: only a bound a page states, never
@@ -1513,7 +1803,7 @@ def mo(recs):
     return {'verdict': 'PASS', 'findings': notes + [count]}
 
 
-CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur, 'MO': mo}
+CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur, 'MO': mo, 'LIN': lin}
 
 load_product(DEFAULT_PRODUCT)   # the default; main() loads --product over it
 
