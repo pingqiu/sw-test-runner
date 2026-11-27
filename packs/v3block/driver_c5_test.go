@@ -28,8 +28,9 @@ func checkerPython() string {
 
 // End to end, from the driver to the checker: a delete refused twice (the
 // lease-horizon refusal before persistence), then ok, run by the random
-// run's driver over the declared handlers, observed after each refused
-// attempt; the history is judged by checkers/history_check.py. Green: HEAD
+// run's driver over the declared handlers, observed right after each
+// refused attempt and right before the next; the history is judged by
+// checkers/history_check.py. Green: HEAD
 // stays put, C5 judges both refused attempts under "ordinary delete" and
 // passes. Red control: the observation after the first refused attempt
 // shows HEAD moved; C5 FAILS, although the request's last attempt is ok.
@@ -95,4 +96,13 @@ func TestDriverRerunJudgedByC5(t *testing.T) {
 	if red["verdict"] != "FAIL" || !strings.Contains(findings(red), "(attempt 1, replaced by a later attempt) (ordinary delete) refused but its head changed") {
 		t.Fatalf("red: %s", findings(red))
 	}
+	// HEAD moves during the pause after attempt 1 (between the observation
+	// right after it and the one right before attempt 2): a baseline
+	// difference, C5 UNKNOWN, and neither attempt is blamed.
+	pause := judge([]eqAnswer{head("5"), head("5"), head("5"), head("6")})
+	if pause["verdict"] != "UNKNOWN" || !strings.Contains(findings(pause), "baseline: v1 changed with no operation on it") ||
+		strings.Contains(findings(pause), "refused but its") {
+		t.Fatalf("a change during the pause: %s", findings(pause))
+	}
+	t.Logf("a change during the pause, C5 findings: %s", findings(pause))
 }

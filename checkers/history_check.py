@@ -931,8 +931,9 @@ def c5(recs):
         return {'verdict': 'FAIL', 'judged': judged, 'findings': f + report + notes}
     unjudged = [lim for lim, (n, j) in sorted(per.items()) if not j]
     if unjudged or guarded:
-        head = (['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] if unjudged else [])             + (['limit(s) a rerun guard left not judged: %s' % ', '.join(sorted(guarded))] if guarded else [])
-        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': head + report + notes}
+        first = ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] if unjudged else []
+        first += ['limit(s) a rerun guard left not judged: %s' % ', '.join(sorted(guarded))] if guarded else []
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': first + report + notes}
     return {'verdict': 'PASS', 'judged': judged, 'findings': report + notes}
 
 

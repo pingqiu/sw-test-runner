@@ -96,8 +96,8 @@ func shape(t *testing.T, p string) []string {
 func jsonOf(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 // The driver re-issues a declared rerun as separate operations, observing
-// the subject after each refused attempt it re-issues (the "after" of
-// attempt n, the "before" of n+1); at most the declared count; the last
+// the subject right after each refused attempt it re-issues (the "after" of
+// attempt n) and again after the pause (the "before" of n+1); at most the declared count; the last
 // attempt's outcome is the step's, and Step observes after it as after any
 // refusal.
 func TestDriverReissuesAndObservesAfterEachRefusedAttempt(t *testing.T) {
@@ -108,13 +108,13 @@ func TestDriverReissuesAndObservesAfterEachRefusedAttempt(t *testing.T) {
 	}{
 		"refused, refused, ok": {[]string{"refused", "refused", "ok"}, []string{
 			"observe gen_step",
-			"invoke delete attempt 1", "complete refused", "observe observe",
-			"invoke delete attempt 2", "complete refused", "observe observe",
+			"invoke delete attempt 1", "complete refused", "observe observe", "observe observe",
+			"invoke delete attempt 2", "complete refused", "observe observe", "observe observe",
 			"invoke delete attempt 3", "complete ok"}, tr.OutcomeOK},
 		"refused past the count": {[]string{"refused"}, []string{
 			"observe gen_step",
-			"invoke delete attempt 1", "complete refused", "observe observe",
-			"invoke delete attempt 2", "complete refused", "observe observe",
+			"invoke delete attempt 1", "complete refused", "observe observe", "observe observe",
+			"invoke delete attempt 2", "complete refused", "observe observe", "observe observe",
 			"invoke delete attempt 3", "complete refused", "observe observe"}, tr.OutcomeRefused},
 		"an answer not rerun": {[]string{"unknown", "ok"}, []string{
 			"observe gen_step",

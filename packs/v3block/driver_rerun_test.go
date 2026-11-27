@@ -31,8 +31,8 @@ func recordShape(r eqRun) []string {
 // The delete refused twice (the lease-horizon refusal before persistence),
 // then ok, as a SCRIPTED step runs it (the handler register.go registers)
 // and as a random run's driver runs it (Runner.Exec over the bare
-// handlers): three operations, the volume observed after each refused
-// attempt the driver re-issues. Red control (f): a registration that
+// handlers): three operations, the volume observed right after each refused
+// attempt the driver re-issues and again right before the next. Red control (f): a registration that
 // bypasses the driver makes one call.
 func TestDriverObservesAfterEachRefusedAttempt(t *testing.T) {
 	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
@@ -41,8 +41,8 @@ func TestDriverObservesAfterEachRefusedAttempt(t *testing.T) {
 	deleted := eqAnswer{out: `{"volume":"v1","state":"deleted"}`}
 	c := eqCase{params: map[string]string{"volume": "v1"}, rules: []eqRule{{"volume-delete", []eqAnswer{live, live, deleted}}}}
 	want := []string{
-		"invoke delete v1 attempt 1", "complete refused", "observe observe v1",
-		"invoke delete v1 attempt 2", "complete refused", "observe observe v1",
+		"invoke delete v1 attempt 1", "complete refused", "observe observe v1", "observe observe v1",
+		"invoke delete v1 attempt 2", "complete refused", "observe observe v1", "observe observe v1",
 		"invoke delete v1 attempt 3", "complete ok",
 	}
 	deletes := func(r eqRun) int {

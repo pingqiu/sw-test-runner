@@ -1850,17 +1850,19 @@ class Attempts(unittest.TestCase):
 
     def attempts(self, vol, outcomes, expect=False, between=None):
         """Steps of one delete request answered `outcomes` in turn; between,
-        when given, is the observation step the driver records after each
-        refused attempt it re-issues (every refused attempt but the last), or
-        a function of the attempt number giving it."""
+        when given, is the observation step the driver records twice after
+        each refused attempt it re-issues (every refused attempt but the
+        last): right after it, and after the pause right before the next; or
+        a function of (attempt number, 'after' or 'before') giving it."""
         out = []
         for n, o in enumerate(outcomes, 1):
             args = {'request': 'delete-' + vol, 'layout_id': '0' * 32, 'attempt': n}
             if expect:
                 args['expect'] = 'refused'
             out.append(('delete', vol, args, o))
-            if between is not None and n < len(outcomes) and o in ('refused', 'refused_effect'):
-                out.append(between(n) if callable(between) else between)
+            if between is not None and n < len(outcomes) and o == 'refused':
+                for when in ('after', 'before'):
+                    out.append(between(n, when) if callable(between) else between)
         return out
 
     def finish(self, recs, details):
@@ -1918,7 +1920,7 @@ class Attempts(unittest.TestCase):
         # 5, seen by the driver's observation after it); the request's last
         # attempt is ok. End to end through the checker's command line.
         import tempfile
-        recs = self.case_ordinary(between=('obs', 'v1', 5, FILES, WS))
+        recs = self.case_ordinary(between=('obs', 'v1', 5, FILES, WS))   # both observations after attempt 1 show gen 5
         with tempfile.TemporaryDirectory() as d:
             hist, out = Path(d) / 'h.jsonl', Path(d) / 'v.json'
             hist.write_text('\n'.join(dump(recs)) + '\n', encoding='utf-8')
@@ -1931,6 +1933,35 @@ class Attempts(unittest.TestCase):
         self.assertTrue(v['C5']['findings'][0].startswith(
             'seq %d delete v1 (attempt 1, replaced by a later attempt) (ordinary delete) refused but its head changed' % first['seq']), v['C5'])
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])   # the request itself answered ok
+
+    def test_a_change_during_the_pause_is_a_baseline_difference_blamed_on_neither_attempt(self):
+        # HEAD moves between the observation right after attempt 1 and the
+        # one right before attempt 2: those two are a baseline pair, so C5 is
+        # UNKNOWN for the run, and neither attempt is a FAIL.
+        moved = lambda n, when: ('obs', 'v1', 4 if (n, when) == (1, 'after') else 5, FILES, WS)
+        v = hc.check(dump(self.case_ordinary(between=moved)))
+        self.assertEqual(v['C5']['verdict'], 'UNKNOWN', v['C5'])
+        self.assertTrue(v['C5']['findings'][0].startswith('baseline: v1 changed with no operation on it (head; observations seq 6, 7)'), v['C5'])
+        self.assertFalse(any('refused but its' in x for x in v['C5']['findings']), v['C5'])
+        self.assertIn('limit ordinary delete: 2 of 2 refusal(s) judged', v['C5']['findings'])
+
+    def test_each_attempt_is_judged_by_its_own_pair(self):
+        # Attempt n by (before n, right after n); attempt n+1 by (right
+        # before n+1, after n+1). A change at attempt 2 names the
+        # observation right before it and the one right after it.
+        moved = lambda n, when: ('obs', 'v1', 5 if n == 2 else 4, FILES, WS)
+        recs = self.case_ordinary(between=moved)
+        v = hc.check(dump(recs))
+        dels = [r['seq'] for r in recs if r['kind'] == 'invoke' and r['verb'] == 'delete']
+        obs = [r['seq'] for r in recs if r['kind'] == 'observe' and r.get('volume') == 'v1']
+        self.assertEqual(v['C5']['verdict'], 'FAIL', v['C5'])
+        self.assertEqual(len([x for x in v['C5']['findings'] if 'refused but its' in x]), 1, v['C5'])
+        before2 = max(o for o in obs if o < dels[1])
+        after2 = min(o for o in obs if o > dels[1])
+        self.assertIn('seq %d delete v1 (attempt 2, replaced by a later attempt) (ordinary delete) refused but its head changed' % dels[1], v['C5']['findings'][0])
+        self.assertIn('(observations seq %d, %d)' % (before2, after2), v['C5']['findings'][0])
+        # the baseline pair across the first pause (gen 4, 4) was read
+        self.assertEqual(hc.baseline(hc.read_history(dump(recs)))[0] >= 2, True)
 
     def test_attempts_without_the_drivers_observation_leave_their_limit_unjudged(self):
         # The shape before the driver observed between attempts: two refusals

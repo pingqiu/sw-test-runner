@@ -19,9 +19,10 @@ package randomrun
 //     after every negative operation and every refusal, so "a refused
 //     operation changed nothing" is judged from the observations around it;
 //     an action with a declared rerun is re-issued by the driver, each
-//     attempt its own operation, and one observation follows each refused
-//     attempt that is re-issued (attempts.go): it is the "after" of that
-//     attempt and the "before" of the next;
+//     attempt its own operation; a refused attempt that is re-issued is
+//     observed right after it (its "after") and again after the pause,
+//     right before the next attempt (that one's "before"), a baseline pair
+//     across the pause (attempts.go);
 //   - after the last operation (in a fault run, after the final healthy
 //     point), the model's coverage tail (Model.Tail: gen_steps forced
 //     "tail"), then the end-of-run sweep: an observe record "gen_sweep" listing the
@@ -72,8 +73,8 @@ func worseOutcome(a, b string) string {
 // splits it into, so that every part's outcome counts: the worst is
 // returned. An observation answers no outcome (""). A part of an action
 // with a declared rerun (Rerunner) is re-issued by the driver (Attempts):
-// its outcome is its last attempt's, and the subjects are observed after
-// each refused attempt that is re-issued.
+// its outcome is its last attempt's, and the subjects are observed right
+// after each refused attempt that is re-issued and right before the next.
 func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
 	got, _, err := r.exec(ctx, actx, o)
 	return got, err
