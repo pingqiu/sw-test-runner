@@ -63,6 +63,14 @@ type outcomeRow struct {
 	// Effect is what a refused_effect call changed anyway, as a page states
 	// it: the observation part, its value after, and the PAGE line.
 	Effect *rowEffect `json:"effect,omitempty"`
+	// PendingPin marks a refused_effect row whose effect matches a phrase
+	// no product test pins yet: while any of its phrases is unpinned it
+	// decodes as unknown (its effect kept in the table, the row listed in
+	// product_gaps). Once the phrase's pinned_by is set it counts, with no
+	// other edit.
+	PendingPin bool `json:"pending_pin,omitempty"`
+	// effective is the outcome the row decides with (set at load).
+	effective string
 }
 
 type rowEffect struct {
@@ -92,12 +100,23 @@ type pageGap struct {
 }
 
 type outcomeTable struct {
-	Product  string       `json:"product"`
-	ReadAt   string       `json:"read_at"`
-	About    string       `json:"about"`
-	Rows     []outcomeRow `json:"rows"`
-	PageGaps []pageGap    `json:"page_gaps,omitempty"`
-	Phrases  []phrase     `json:"phrases,omitempty"`
+	Product     string       `json:"product"`
+	ReadAt      string       `json:"read_at"`
+	About       string       `json:"about"`
+	Rows        []outcomeRow `json:"rows"`
+	PageGaps    []pageGap    `json:"page_gaps,omitempty"`
+	Phrases     []phrase     `json:"phrases,omitempty"`
+	ProductGaps []productGap `json:"product_gaps,omitempty"`
+}
+
+// productGap is a row kept unknown because the product does not pin the
+// text its effect matches: the row, the phrase and the gap.
+type productGap struct {
+	Action string `json:"action"`
+	Path   string `json:"path"`
+	Code   string `json:"code"`
+	Phrase string `json:"phrase"`
+	Gap    string `json:"gap"`
 }
 
 // phrase is a match on PRODUCT TEXT the table relies on (an effect's
@@ -192,9 +211,14 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 				return t, fmt.Errorf("%s: message_contains %q is product text not listed in phrases", at, r.MessageContains)
 			}
 		}
+		t.Rows[i].effective = r.Outcome
+		if r.PendingPin && r.Outcome != "refused_effect" {
+			return t, fmt.Errorf("%s: pending_pin marks a refused_effect row only", at)
+		}
 		if r.Effect == nil {
 			continue
 		}
+		unpinned := ""
 		for k, v := range r.Effect.To {
 			text, isText := v.(string)
 			if !strings.HasSuffix(k, "_contains") {
@@ -207,8 +231,27 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 			case !ok:
 				return t, fmt.Errorf("%s: effect %s %q is product text not listed in phrases", at, k, text)
 			case ph.PinnedBy == nil:
-				return t, fmt.Errorf("%s: effect %s %q relies on a phrase no product test pins (pinned_by null): the row stays unknown", at, k, text)
+				unpinned = text
 			}
+		}
+		if unpinned == "" {
+			continue
+		}
+		if !r.PendingPin {
+			return t, fmt.Errorf("%s: the effect relies on %q, which no product test pins (pinned_by null): mark the row pending_pin, so it decodes unknown until the pin exists", at, unpinned)
+		}
+		listed := false
+		for _, g := range t.ProductGaps {
+			listed = listed || (g.Action == r.Action && g.Path == r.Path && g.Code == r.Code && g.Phrase == unpinned)
+		}
+		if !listed {
+			return t, fmt.Errorf("%s: pending on the unpinned phrase %q, but not listed in product_gaps", at, unpinned)
+		}
+		t.Rows[i].effective = "unknown"
+	}
+	for i, g := range t.ProductGaps {
+		if _, ok := phrases[g.Phrase]; !ok || g.Action == "" || g.Path == "" || g.Code == "" || strings.TrimSpace(g.Gap) == "" {
+			return t, fmt.Errorf("outcomes product gap %d: action, path, code, a listed phrase and the gap are required", i)
 		}
 	}
 	for i, g := range t.PageGaps {
@@ -243,7 +286,7 @@ func (t outcomeTable) decide(p opPath, code, message string) (string, *rowEffect
 		if !r.matches(p, code) {
 			continue
 		}
-		if r.Outcome == "unknown" {
+		if r.decides() == "unknown" {
 			return "unknown", nil
 		}
 		if hit == nil && (r.MessageContains == "" || strings.Contains(message, r.MessageContains)) {
@@ -251,9 +294,22 @@ func (t outcomeTable) decide(p opPath, code, message string) (string, *rowEffect
 		}
 	}
 	if hit != nil {
-		return hit.Outcome, hit.Effect
+		if hit.decides() != "refused_effect" {
+			return hit.decides(), nil
+		}
+		return hit.decides(), hit.Effect
 	}
 	return "unknown", nil
+}
+
+// decides is the outcome the row decides with: its outcome, or unknown
+// while it is pending a product pin (set at load; a table built in code
+// without loading decides with its outcomes).
+func (r outcomeRow) decides() string {
+	if r.effective != "" {
+		return r.effective
+	}
+	return r.Outcome
 }
 
 func (t outcomeTable) hasRow(action, path, code, outcome string) bool {

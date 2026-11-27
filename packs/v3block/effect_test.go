@@ -1,6 +1,7 @@
 package v3block
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,7 +117,7 @@ func TestEffectPhrasesArePinned(t *testing.T) {
 	}
 	// The embedded table: every effect phrase is pinned.
 	for _, r := range outcomes.Rows {
-		if r.Effect == nil {
+		if r.Effect == nil || r.PendingPin {
 			continue
 		}
 		for k, v := range r.Effect.To {
@@ -130,5 +131,64 @@ func TestEffectPhrasesArePinned(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A refused_effect row on an unpinned phrase: marked pending_pin it decodes
+// unknown (and must be listed in product_gaps); without the mark the table
+// is refused. Pinning the phrase, and nothing else, makes it count.
+func TestPendingPin(t *testing.T) {
+	table := func(pinned, pending, listed bool) string {
+		pin := "null"
+		if pinned {
+			pin = `"a_test.go:9"`
+		}
+		mark := ""
+		if pending {
+			mark = `"pending_pin": true, `
+		}
+		gaps := ""
+		if listed {
+			gaps = `, "product_gaps": [{"action": "delete", "path": "ops chunk volume-delete", "code": "reserved_here", "phrase": "the text", "gap": "phrase not pinned by a product test"}]`
+		}
+		return `{"product": "block", "read_at": "x", "about": "a",
+		  "phrases": [{"phrase": "the text", "source": "a.go:1", "pinned_by": ` + pin + `}],
+		  "rows": [{"action": "delete", "path": "ops chunk volume-delete", "code": "reserved_here", "outcome": "refused_effect", ` + mark + `
+		    "cite": "x.go:1", "effect": {"part": "workspace", "to": {"exit": 1, "stderr_contains": "the text"}, "cite": "docs/operator-guide.md:193-196"}}]` + gaps + `}`
+	}
+	p := opPath{"delete", "ops chunk volume-delete"}
+	decide := func(b string) (string, error) {
+		tab, err := loadOutcomes([]byte(b))
+		if err != nil {
+			return "", err
+		}
+		out, eff := tab.decide(p, "reserved_here", "")
+		if (out == tr.OutcomeRefusedEffect) != (eff != nil) {
+			return "", fmt.Errorf("outcome %s with effect %v", out, eff)
+		}
+		return out, nil
+	}
+	if out, err := decide(table(false, true, true)); err != nil || out != tr.OutcomeUnknown {
+		t.Fatalf("unpinned, pending: %s %v; want unknown", out, err)
+	}
+	if out, err := decide(table(true, true, true)); err != nil || out != tr.OutcomeRefusedEffect {
+		t.Fatalf("pinned (only pinned_by flipped): %s %v; want refused_effect", out, err)
+	}
+	if out, err := decide(table(true, false, false)); err != nil || out != tr.OutcomeRefusedEffect {
+		t.Fatalf("pinned, unmarked: %s %v; want refused_effect", out, err)
+	}
+	// Red controls.
+	if _, err := decide(table(false, false, false)); err == nil {
+		t.Error("an unpinned phrase without pending_pin loaded")
+	}
+	if _, err := decide(table(false, true, false)); err == nil {
+		t.Error("a pending row missing from product_gaps loaded")
+	}
+	if _, err := loadOutcomes([]byte(`{"product": "block", "read_at": "x", "about": "a", "rows": [{"action": "a", "path": "p", "code": "c", "outcome": "refused", "pending_pin": true, "cite": "x.go:1"}]}`)); err == nil {
+		t.Error("pending_pin on a plain refusal loaded")
+	}
+	// The embedded table: the delete row is pending and decodes unknown.
+	if out, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", ""); out != tr.OutcomeUnknown || eff != nil {
+		t.Fatalf("embedded delete row: %s %v", out, eff)
 	}
 }
