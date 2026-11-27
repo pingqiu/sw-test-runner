@@ -22,8 +22,10 @@ package v3block
 // AT STAGE S, what is written into the history record's result at that
 // stage (package declared states the stages), never a decision.
 //
-// Pending, and kept as it is until it moves: the "retry" of the delete and
-// of the snapshot (to the driver, in a separate change).
+// Done: the "retry" of the delete and of the snapshot moved to the driver.
+// Its declaration stays here (which answer, how many, how often, the page
+// line), read by the driver (randomrun.Attempts); the executor runs one
+// attempt per call and never loops.
 
 import (
 	"encoding/json"
@@ -72,7 +74,7 @@ var vocabulary = map[string][]string{
 	".actions[].record.args.*": typed,
 	".actions[].plus_param":    {"name", "default"},
 	".actions[].derived.*":     {"kind", "from", "error", "map"},
-	// Pending: moves to the driver after the rc.2 pin.
+	// Done: the driver re-issues (randomrun.Attempts) and reads this.
 	".actions[].retry": {"while_code", "while_message_contains", "answers", "max_attempts", "every_seconds", "within_param",
 		"request_arg", "page_cite", "expected_refusal", "note"},
 	".actions[].retry.answers[]":        {"code", "message_contains"},
