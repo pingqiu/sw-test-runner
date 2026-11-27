@@ -568,3 +568,30 @@ func TestFaultActionsRegisteredAndNeedAHistory(t *testing.T) {
 		}
 	}
 }
+
+// A single look looks once and waits for nothing, even when the look is not
+// healthy, and says so in its record.
+func TestHealthySingleLookLooksOnceAndSaysSo(t *testing.T) {
+	actx, p, e := faultSetup(t)
+	f := healthNode()
+	f.rules = append([]fakeRule{{match: "/status?volume=v1", answers: []fakeAnswer{ok(statusAt(3, false)), ok(statusAt(4, true))}}}, f.rules...)
+	out, err := e.singleLook(context.Background(), actx, f)
+	if err != nil || out["healthy"] != "false" {
+		t.Fatalf("%v %v", out, err)
+	}
+	r := healthyRecord(t, actx, p)
+	if r["look"] != "single" || r["attempts"] != float64(1) || len(r["not_serving"].([]any)) != 1 || r["holders"] == nil {
+		t.Errorf("result %v", r)
+	}
+	// A normal record carries no look.
+	actx, p, e = faultSetup(t)
+	if _, err := e.healthy(context.Background(), actx, healthNode(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if r := healthyRecord(t, actx, p); r["look"] != nil {
+		t.Errorf("a normal healthy record says look %v", r["look"])
+	}
+	if _, err := v3OpHealthy(context.Background(), actx, tr.Action{Action: "v3_op_healthy", Params: map[string]string{"look": "twice"}}); err == nil {
+		t.Error("look=twice accepted")
+	}
+}

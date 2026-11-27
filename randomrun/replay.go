@@ -51,6 +51,8 @@ type Script struct {
 	Steps  []ReplayStep
 	Events []FaultEvent // the fault schedule of a fault-run history; nil otherwise
 	Sweep  []Op         // the end-of-run sweep; nil when the history has none
+	// Outages are the writes of each recorded master outage, by after_op.
+	Outages map[int][]Op
 }
 
 // ReplayStep is one step of a recorded script with its recorded outcome.
@@ -85,6 +87,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	var header map[string]any
 	var steps []ReplayStep
 	var events, sweep = []FaultEvent(nil), []Op(nil)
+	outages := map[int][]Op{}
 	faulty, needSchedule := false, false
 	cur := -1 // the index of the step whose records are being read; -1 for none
 	s := bufio.NewScanner(f)
@@ -116,7 +119,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 					return Script{}, fmt.Errorf("%s: %s line %d: a %s history without fault_schedule after its header", name, path, line, faults)
 				}
 				needSchedule = false
-				if events, err = replaySchedule(header, r.Result, d.ValidProcess); err != nil {
+				if events, err = replaySchedule(header, r.Result, d); err != nil {
 					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 				}
 				continue
@@ -137,9 +140,17 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				if sweep != nil {
 					return Script{}, fmt.Errorf("%s: %s line %d: a second gen_sweep", name, path, line)
 				}
-				if sweep, err = parseSweep(r.Result); err != nil {
+				if sweep, err = parseOps(r.Result, "ops"); err != nil {
 					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 				}
+				cur = -1
+			case "master_outage":
+				k, ok := r.Result["after_op"].(float64)
+				w, err := parseOps(r.Result, "writes")
+				if !ok || k != float64(int(k)) || err != nil || outages[int(k)] != nil {
+					return Script{}, fmt.Errorf("%s: %s line %d: master_outage %v %v", name, path, line, r.Result["after_op"], err)
+				}
+				outages[int(k)] = w
 				cur = -1
 			case "gen_coverage", "gen_replay", "healthy":
 				cur = -1
@@ -168,11 +179,16 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	if len(steps) == 0 {
 		return Script{}, fmt.Errorf("%s: %s: no gen_step records", name, path)
 	}
-	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep}, nil
+	for _, e := range events {
+		if e.Action == FaultMasterOutage && outages[e.AfterOp] == nil {
+			return Script{}, fmt.Errorf("%s: %s: the master outage after operation %d has no master_outage record", name, path, e.AfterOp)
+		}
+	}
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages}, nil
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.
-func replaySchedule(header, res map[string]any, valid func(string) bool) ([]FaultEvent, error) {
+func replaySchedule(header, res map[string]any, d Driver) ([]FaultEvent, error) {
 	events, err := parseFaultEvents(res)
 	if err != nil {
 		return nil, err
@@ -182,8 +198,13 @@ func replaySchedule(header, res map[string]any, valid func(string) bool) ([]Faul
 	if res["seed"] != header["seed"] {
 		return nil, fmt.Errorf("fault_schedule seed %v, header seed %v", res["seed"], header["seed"])
 	}
-	if err := CheckFaultSchedule(events, int(ops), int(within), valid); err != nil {
+	if err := CheckFaultSchedule(events, int(ops), int(within), d.ValidProcess); err != nil {
 		return nil, fmt.Errorf("fault_schedule: %w", err)
+	}
+	for _, e := range events {
+		if master, _, ok := d.MasterOutage(); e.Action == FaultMasterOutage && (!ok || e.Process != master) {
+			return nil, fmt.Errorf("fault_schedule: a master outage of %s, the product's master is %q", e.Process, master)
+		}
 	}
 	return events, nil
 }
@@ -245,7 +266,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_schedule", Result: sched.Record()}); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(r, events, nil, header)
+		fr = newFaultRun(r, events, nil, header, sc.Outages)
 	}
 	diffs := []replayDiff{}
 	for _, st := range steps {

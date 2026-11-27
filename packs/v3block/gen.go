@@ -632,6 +632,34 @@ func (m *blockModel) Healthy(wait string) GenOp {
 
 func (m *blockModel) ValidProcess(p string) bool { return ValidFaultProcess(p) }
 
+// MasterOutage: the master and the short-outage bound, from
+// product/checks.json (master_outage, fault_targets).
+func (m *blockModel) MasterOutage() (string, int, bool) {
+	return genOutage.master, genOutage.maxSeconds, genOutageOK
+}
+
+// Look is v3_op_healthy look=single: one look, no wait.
+func (m *blockModel) Look() GenOp {
+	return GenOp{Action: "v3_op_healthy", Params: map[string]string{"look": "single"}}
+}
+
+// OutageRestart is v3_op_restart of the master, ready within the outage bound.
+func (m *blockModel) OutageRestart() GenOp {
+	return GenOp{Action: "v3_op_restart", Params: map[string]string{"process": genOutage.master, "ready_seconds": strconv.Itoa(genOutage.maxSeconds)}}
+}
+
+// OutageWrites is one write on every serving volume, of one lba (after mod
+// blocks: no draw from the run's random stream), in pool order.
+func (m *blockModel) OutageWrites(after int) []GenOp {
+	var out []GenOp
+	for _, n := range m.order {
+		if m.vols[n].state == stServing {
+			out = append(out, op("v3_op_write", n, "lbas", strconv.Itoa(after%m.blocks), "round", fmt.Sprintf("o%d", after)))
+		}
+	}
+	return out
+}
+
 // GenConfig sets a block run: the generic config and the lbas used.
 type GenConfig struct {
 	Seed     uint64
@@ -645,6 +673,7 @@ type GenConfig struct {
 	Faults         float64  // chance of a kill after each operation while nothing is down
 	FaultProcesses []string // the processes the schedule may kill
 	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
+	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
 }
 
 // Generator is the generic generator over the block model; the model's
@@ -662,7 +691,7 @@ func NewGenerator(cfg GenConfig) (*Generator, error) {
 	}
 	m := &blockModel{blocks: cfg.Blocks}
 	g, err := randomrun.New(randomrun.Config{Seed: cfg.Seed, Ops: cfg.Ops, Pool: cfg.Pool, Negative: cfg.Negative, Weights: cfg.Weights,
-		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin}, m)
+		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin, MasterOutage: cfg.MasterOutage}, m)
 	if err != nil {
 		return nil, err
 	}

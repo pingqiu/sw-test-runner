@@ -31,6 +31,7 @@ type Config struct {
 	Faults         float64  // chance of a kill after each operation while nothing is down
 	FaultProcesses []string // the processes the schedule may kill
 	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
+	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
 }
 
 // Generator proposes operations; Learn feeds back each outcome.
@@ -68,13 +69,13 @@ func New(cfg Config, m Model) (*Generator, error) {
 			return nil, fmt.Errorf("generator: weight for unknown operation %q or negative", a)
 		}
 	}
-	if cfg.Faults != 0 {
+	if cfg.Faults != 0 || cfg.MasterOutage != 0 {
 		if cfg.RestartWithin == 0 {
 			cfg.RestartWithin = DefaultRestartWithin
 		}
 		cfg.FaultProcesses = slices.Clone(cfg.FaultProcesses)
 		slices.Sort(cfg.FaultProcesses)
-		if _, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess); err != nil {
+		if _, err := schedule(cfg, m); err != nil {
 			return nil, fmt.Errorf("generator: %w", err)
 		}
 	}
@@ -107,12 +108,29 @@ func (g *Generator) Header() map[string]any {
 		h["faults"] = g.cfg.Faults
 		h["fault_processes"] = slices.Clone(g.cfg.FaultProcesses)
 		h["fault_restart_within"] = g.cfg.RestartWithin
+		if g.cfg.MasterOutage != 0 {
+			h["fault_master_outage"] = g.cfg.MasterOutage
+		}
 	}
 	return h
 }
 
-// Faulty says a fault schedule is active.
-func (g *Generator) Faulty() bool { return g.cfg.Faults != 0 }
+// Faulty says a fault schedule is active (process faults or master outages).
+func (g *Generator) Faulty() bool { return g.cfg.Faults != 0 || g.cfg.MasterOutage != 0 }
+
+// schedule derives a config's fault schedule: kills and restarts, then the
+// master outages.
+func schedule(cfg Config, m Model) (FaultSchedule, error) {
+	s, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess)
+	if err != nil || cfg.MasterOutage == 0 {
+		return s, err
+	}
+	master, _, ok := m.MasterOutage()
+	if !ok {
+		return s, fmt.Errorf("master outages on, but the product states no master outage")
+	}
+	return AddMasterOutages(s, cfg.Ops, master, cfg.MasterOutage, m.ValidProcess)
+}
 
 // Proposed is the number of operations proposed so far.
 func (g *Generator) Proposed() int { return g.no }
@@ -122,7 +140,7 @@ func (g *Generator) Schedule() FaultSchedule {
 	if !g.Faulty() {
 		return FaultSchedule{Seed: g.cfg.Seed, Events: []FaultEvent{}}
 	}
-	s, _ := NewFaultSchedule(g.cfg.Seed, g.cfg.Ops, g.cfg.FaultProcesses, g.cfg.Faults, g.cfg.RestartWithin, g.m.ValidProcess)
+	s, _ := schedule(g.cfg, g.m)
 	return s
 }
 
@@ -244,8 +262,13 @@ func (g *Generator) Coverage() map[string]any {
 			fcells[k] = v
 		}
 		var want []string
-		for _, p := range g.cfg.FaultProcesses {
-			want = append(want, FaultKill+"|"+p, FaultRestart+"|"+p)
+		if g.cfg.Faults != 0 {
+			for _, p := range g.cfg.FaultProcesses {
+				want = append(want, FaultKill+"|"+p, FaultRestart+"|"+p)
+			}
+		}
+		if master, _, ok := g.m.MasterOutage(); ok && g.cfg.MasterOutage != 0 {
+			want = append(want, FaultMasterOutage+"|"+master)
 		}
 		for a := range all {
 			want = append(want, "while_down|"+a)

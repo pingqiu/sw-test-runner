@@ -132,7 +132,8 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 
 // ParseConfig reads a run's generic parameters through get: seed, ops, pool,
 // negative, weights ("action=integer ..."), and the fault schedule (faults:
-// a rate above 0, or off; fault_processes; fault_restart_within).
+// a rate above 0, or off; fault_processes; fault_restart_within;
+// fault_master_outage: the rate of short master outages, or off).
 func ParseConfig(name string, get func(string) string) (Config, error) {
 	var c Config
 	var err error
@@ -159,10 +160,17 @@ func ParseConfig(name string, get func(string) string) (Config, error) {
 			c.Weights[k] = n
 		}
 	}
+	if s := get("fault_master_outage"); s != "" && s != "off" {
+		if c.MasterOutage, err = strconv.ParseFloat(s, 64); err != nil {
+			return c, fmt.Errorf("%s: fault_master_outage: %w", name, err)
+		}
+	}
 	if s := get("faults"); s != "" && s != "off" {
 		if c.Faults, err = strconv.ParseFloat(s, 64); err != nil {
 			return c, fmt.Errorf("%s: faults: %w", name, err)
 		}
+	}
+	if c.Faults != 0 || c.MasterOutage != 0 {
 		c.FaultProcesses = strings.Fields(get("fault_processes"))
 		if s := get("fault_restart_within"); s != "" {
 			if c.RestartWithin, err = strconv.Atoi(s); err != nil || c.RestartWithin < 1 {
@@ -203,7 +211,7 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_schedule", Result: s.Record()}); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(r, s.Events, g, header)
+		fr = newFaultRun(r, s.Events, g, header, nil)
 	}
 	for {
 		if ctx.Err() != nil {
@@ -251,15 +259,7 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 // replay re-executes the same sweep from the history alone) and runs each
 // through Exec. The outcomes are facts for the checkers; nothing is judged.
 func (r Runner) sweep(ctx context.Context, actx *tr.ActionContext, ops []Op) error {
-	list := make([]any, 0, len(ops))
-	for _, o := range ops {
-		p := map[string]any{}
-		for k, v := range o.Params {
-			p[k] = v
-		}
-		list = append(list, map[string]any{"action": o.Action, "volume": o.Volume, "params": p})
-	}
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_sweep", Result: map[string]any{"ops": list}}); err != nil {
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_sweep", Result: map[string]any{"ops": opList(ops)}}); err != nil {
 		return err
 	}
 	for _, o := range ops {
@@ -273,29 +273,42 @@ func (r Runner) sweep(ctx context.Context, actx *tr.ActionContext, ops []Op) err
 	return nil
 }
 
-// parseSweep reads the operations of a recorded gen_sweep result.
-func parseSweep(res map[string]any) ([]Op, error) {
-	raw, ok := res["ops"].([]any)
+// opList is a record's list of operations: action, volume, params.
+func opList(ops []Op) []any {
+	list := make([]any, 0, len(ops))
+	for _, o := range ops {
+		p := map[string]any{}
+		for k, v := range o.Params {
+			p[k] = v
+		}
+		list = append(list, map[string]any{"action": o.Action, "volume": o.Volume, "params": p})
+	}
+	return list
+}
+
+// parseOps reads a record's list of operations (opList's form) under key.
+func parseOps(res map[string]any, key string) ([]Op, error) {
+	raw, ok := res[key].([]any)
 	if !ok {
-		return nil, fmt.Errorf("gen_sweep: ops %v", res["ops"])
+		return nil, fmt.Errorf("%s %v", key, res[key])
 	}
 	out := make([]Op, 0, len(raw))
 	for i, x := range raw {
 		m, ok := x.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("gen_sweep: op %d is %T", i, x)
+			return nil, fmt.Errorf("%s: op %d is %T", key, i, x)
 		}
 		a, _ := m["action"].(string)
 		v, _ := m["volume"].(string)
 		ps, ok := m["params"].(map[string]any)
 		if a == "" || !ok {
-			return nil, fmt.Errorf("gen_sweep: op %d %v", i, m)
+			return nil, fmt.Errorf("%s: op %d %v", key, i, m)
 		}
 		o := Op{Action: a, Volume: v, Params: map[string]string{}}
 		for k, pv := range ps {
 			s, ok := pv.(string)
 			if !ok {
-				return nil, fmt.Errorf("gen_sweep: op %d param %s is %T", i, k, pv)
+				return nil, fmt.Errorf("%s: op %d param %s is %T", key, i, k, pv)
 			}
 			o.Params[k] = s
 		}
@@ -314,6 +327,8 @@ func parseSweep(res map[string]any) ([]Op, error) {
 //     RESOLVED as the Driver's Resolution says: by its check, or by
 //     observing its subjects. A check that does not answer ok leaves the
 //     operation pending for the next healthy point;
+//   - a short master outage after operation k (see outage) runs as one
+//     event, nothing else down meanwhile;
 //   - at the end of the run a process still down is restarted (its scheduled
 //     restart lay after the last operation), and the run ends on a healthy
 //     point with its resolution, so no unknown is left unobserved.
@@ -326,14 +341,15 @@ type faultRun struct {
 	next    int    // the first event not yet run
 	down    string // the process down now
 	pending []Op
-	gen     *Generator // nil in a replay
-	wait    string     // the healthy operation's wait ("" for its default: look once)
+	gen     *Generator   // nil in a replay
+	wait    string       // the healthy operation's wait ("" for its default: look once)
+	outages map[int][]Op // a replay's recorded outage writes, by after_op
 }
 
 // newFaultRun takes the header's fault_healthy_wait (absent: "").
-func newFaultRun(r Runner, events []FaultEvent, g *Generator, header map[string]any) *faultRun {
+func newFaultRun(r Runner, events []FaultEvent, g *Generator, header map[string]any, outages map[int][]Op) *faultRun {
 	w, _ := header["fault_healthy_wait"].(string)
-	return &faultRun{r: r, events: events, gen: g, wait: w}
+	return &faultRun{r: r, events: events, gen: g, wait: w, outages: outages}
 }
 
 // note takes an operation's outcome: an unknown is pending resolution,
@@ -369,6 +385,9 @@ func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 }
 
 func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
+	if e.Action == FaultMasterOutage {
+		return f.outage(ctx, actx, e)
+	}
 	if _, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e)); err != nil {
 		return fmt.Errorf("%s %s after operation %d: %w", e.Action, e.Process, e.AfterOp, err)
 	}
@@ -380,6 +399,73 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 		return nil
 	}
 	f.down = ""
+	return f.healthy(ctx, actx)
+}
+
+// outage runs one short master outage after operation e.AfterOp, in this
+// order (the shapes checker MO reads):
+//   - an observe record "master_outage": after_op, process, max_seconds and
+//     the outage's writes (a replay re-runs the same writes from it);
+//   - a healthy point (a normal healthy record: the holders' identities
+//     before the kill), resolving as any healthy point does;
+//   - the kill of the master; a single look; one write on every serving
+//     subject (learnt, an unknown pending like any other); a single look;
+//   - the master's restart, bounded by the outage bound, then a healthy point.
+//
+// Nothing waits on the master in between, so the window from the kill's
+// completion to the restart's is the writes and the looks. Whether it was
+// short enough, and what the product answered, MO judges.
+func (f *faultRun) outage(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
+	d := f.r.Driver
+	master, maxSec, ok := d.MasterOutage()
+	if !ok || e.Process != master {
+		return fmt.Errorf("master outage of %s after operation %d: the product's master is %q", e.Process, e.AfterOp, master)
+	}
+	writes := f.outages[e.AfterOp]
+	if f.gen != nil {
+		writes = f.gen.m.OutageWrites(e.AfterOp)
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "master_outage",
+		Result: map[string]any{"after_op": e.AfterOp, "process": master, "max_seconds": maxSec, "writes": opList(writes)}}); err != nil {
+		return err
+	}
+	if err := f.healthy(ctx, actx); err != nil {
+		return err
+	}
+	look := func() error {
+		o := d.Look()
+		h, ok := f.r.Handlers[o.Action]
+		if !ok {
+			return fmt.Errorf("no handler for %s", o.Action)
+		}
+		_, err := h(ctx, actx, tr.Action{Action: o.Action, Node: f.r.Node, Params: o.Params})
+		return err
+	}
+	if _, err := f.r.Exec(ctx, actx, d.Fault(FaultEvent{AfterOp: e.AfterOp, Action: FaultKill, Process: master})); err != nil {
+		return fmt.Errorf("master outage after operation %d: kill: %w", e.AfterOp, err)
+	}
+	if err := look(); err != nil {
+		return err
+	}
+	for _, w := range writes {
+		got, err := f.r.Exec(ctx, actx, w)
+		if err != nil {
+			return fmt.Errorf("master outage after operation %d: %s %s: %w", e.AfterOp, w.Action, w.Volume, err)
+		}
+		if f.gen != nil {
+			f.gen.Learn(w, got)
+		}
+		f.note(w, got)
+	}
+	if err := look(); err != nil {
+		return err
+	}
+	if _, err := f.r.Exec(ctx, actx, d.OutageRestart()); err != nil {
+		return fmt.Errorf("master outage after operation %d: restart: %w", e.AfterOp, err)
+	}
+	if f.gen != nil {
+		f.gen.Fault(FaultMasterOutage, master)
+	}
 	return f.healthy(ctx, actx)
 }
 

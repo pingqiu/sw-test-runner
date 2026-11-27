@@ -8,7 +8,8 @@ package v3block
 // points and resolutions, gen_coverage) is documented in randomrun/run.go.
 // Params: seed, ops, blocks, pool, negative, weights, nightly_seed, and for
 // faults: faults (a rate above 0), fault_processes, fault_restart_within,
-// fault_healthy_wait (v3_op_healthy's wait_seconds).
+// fault_healthy_wait (v3_op_healthy's wait_seconds), fault_master_outage (the
+// rate of short master outages).
 
 import (
 	"context"
@@ -44,7 +45,7 @@ func genExec(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 func genConfig(act tr.Action, actx *tr.ActionContext) (GenConfig, error) {
 	c, err := randomrun.ParseConfig("v3_gen_run", func(k string) string { return opParam(act, actx, k) })
 	cfg := GenConfig{Seed: c.Seed, Ops: c.Ops, Pool: c.Pool, Negative: c.Negative, Weights: c.Weights,
-		Faults: c.Faults, FaultProcesses: c.FaultProcesses, RestartWithin: c.RestartWithin}
+		Faults: c.Faults, FaultProcesses: c.FaultProcesses, RestartWithin: c.RestartWithin, MasterOutage: c.MasterOutage}
 	if err != nil {
 		return cfg, err
 	}

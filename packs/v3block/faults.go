@@ -465,11 +465,35 @@ func v3OpRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	return e.restart(ctx, actx, node, optionalParam(act, "process"), time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60))*time.Second)
 }
 
-// v3OpHealthy writes the healthy observation. Param: wait_seconds (0).
+// singleLook writes one healthy observation of exactly one look, with no
+// wait, marked result.look "single" (a short master outage's looks).
+func (e opEnv) singleLook(ctx context.Context, actx *tr.ActionContext, node runner) (map[string]string, error) {
+	start := time.Now()
+	res, ok, err := e.healthCheck(ctx, actx, node)
+	if err != nil {
+		return nil, err
+	}
+	res["look"], res["attempts"], res["elapsed_ms"] = "single", 1, time.Since(start).Milliseconds()
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: res}); err != nil {
+		return nil, err
+	}
+	actx.Log("  v3_op_healthy look=single: %v", res)
+	return map[string]string{"value": tr.OutcomeOK, "healthy": strconv.FormatBool(ok)}, nil
+}
+
+// v3OpHealthy writes the healthy observation. Params: wait_seconds (0), look
+// ("single": one look, no wait, recorded as such).
 func v3OpHealthy(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	look := optionalParam(act, "look")
+	if look != "" && look != "single" {
+		return nil, fmt.Errorf("v3_op_healthy: look %q (single, or absent)", look)
+	}
 	node, e, err := opConfig(actx, act, "v3_op_healthy")
 	if err != nil {
 		return nil, err
+	}
+	if look == "single" {
+		return e.singleLook(ctx, actx, node)
 	}
 	return e.healthy(ctx, actx, node, time.Duration(actions.ParseInt(optionalParam(act, "wait_seconds"), 0))*time.Second)
 }
