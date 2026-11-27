@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -75,38 +74,9 @@ func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
 }
 
 // nvmeDisconnectCount is nvmeDisconnect, also answering how many
-// controllers it deleted (-1 when that is not known).
+// controllers it deleted (declared.NVMeDisconnectCount).
 func nvmeDisconnectCount(ctx context.Context, node runner, nqn string) (int, string) {
-	cmd := fmt.Sprintf(`n=0; for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo 1 > "$d/delete_controller" || exit 4; n=$((n+1)); done; echo "deleted $n"`, shellQuote(nqn))
-	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
-	if err != nil || code != 0 {
-		return -1, fmt.Sprintf("nvme disconnect: exit %d: %s", code, firstLine(stderr))
-	}
-	n := -1
-	if f := strings.Fields(stdout); len(f) == 2 && f[0] == "deleted" {
-		n, _ = strconv.Atoi(f[1])
-	}
-	why := nvmeConfirmGone(ctx, node, nqn)
-	return n, why
-}
-
-// nvmeConfirmGone waits until a scan finds no controller of nqn.
-func nvmeConfirmGone(ctx context.Context, node runner, nqn string) string {
-	end := time.Now().Add(5 * time.Second)
-	for {
-		state, _, why := nvmeScan(ctx, node, nqn)
-		switch {
-		case state == nvmeAbsent:
-			return ""
-		case state == nvmeUnreadable:
-			return "nvme disconnect: cannot confirm: " + why
-		case time.Now().After(end):
-			return "nvme disconnect: a controller of " + nqn + " remains"
-		}
-		if !pause(ctx, 250*time.Millisecond) {
-			return "nvme disconnect: a controller of " + nqn + " remains at the runner deadline"
-		}
-	}
+	return declared.NVMeDisconnectCount(ctx, node, nqn)
 }
 
 // What a scan of the kernel's NVMe controllers says about one subsystem
@@ -173,25 +143,4 @@ func alive(ctx context.Context, node runner, pid, start string) bool {
 // is reported, not taken for an exit.
 func waitGone(ctx context.Context, node runner, pid, start string, bound time.Duration) string {
 	return declared.WaitGone(ctx, node, pid, start, bound)
-}
-
-// parseDetach reads the sealed generation of a plain detach: the JSON answer
-// on stdout and exactly "sealed HEAD generation: G" on stderr, both naming
-// the same generation, for this volume at this epoch.
-func parseDetach(stdout, stderr, vol string, epoch uint64) (uint64, error) {
-	var a struct {
-		VolumeID  string `json:"volumeID"`
-		HeadGen   uint64 `json:"headGen"`
-		HeadEpoch uint64 `json:"headEpoch"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil {
-		return 0, fmt.Errorf("detach answer is not JSON: %q", firstLine(stdout))
-	}
-	if a.VolumeID != vol || a.HeadGen == 0 || a.HeadEpoch != epoch {
-		return 0, fmt.Errorf("detach answer %+v; want %s at epoch %d with a generation", a, vol, epoch)
-	}
-	if strings.TrimSpace(stderr) != fmt.Sprintf("sealed HEAD generation: %d", a.HeadGen) {
-		return 0, fmt.Errorf("detach stderr %q does not state generation %d", firstLine(stderr), a.HeadGen)
-	}
-	return a.HeadGen, nil
 }

@@ -99,7 +99,7 @@ func TestExceptionEndsAtItsRunnerDeadline(t *testing.T) {
 		params map[string]string
 		stuck  string
 	}{
-		"stop: the guest disconnect hangs": {v3OpStop, map[string]string{"volume": "v1"}, "delete_controller"},
+		"stop: the guest disconnect hangs": {blockActions.Handler("v3_op_stop"), map[string]string{"volume": "v1"}, "delete_controller"},
 		"attach: the listener check hangs": {blockActions.Handler("v3_op_attach"), map[string]string{"volume": "v1"}, "ss -Hltnp"},
 		"flush: the device scan hangs":     {blockActions.Handler("v3_op_flush"), map[string]string{"volume": "v1"}, "subsysnqn"},
 	} {
@@ -308,7 +308,7 @@ func TestAbandonedDeviceIOIsWatchedToTheEnd(t *testing.T) {
 // Every disconnect the runner performs inside an operation (the planned
 // stop's and the move's hand-over) writes an observe record "disconnect".
 func TestDisconnectIsRecorded(t *testing.T) {
-	for name, h := range map[string]tr.ActionHandlerFunc{"stop": v3OpStop, "move": v3OpMove} {
+	for name, h := range map[string]tr.ActionHandlerFunc{"stop": blockActions.Handler("v3_op_stop"), "move": blockActions.Handler("v3_op_move")} {
 		f := (&fakeNode{}).on("delete_controller", ok("deleted 1\n")).on("subsysnqn", ok("end\n"))
 		actx, p := deadlineCtx(t, f)
 		if _, err := h(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
@@ -329,7 +329,7 @@ func TestDisconnectIsRecorded(t *testing.T) {
 	// A failed disconnect is recorded too, not ok.
 	f := (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "permission denied", code: 4})
 	actx, p := deadlineCtx(t, f)
-	_, _ = v3OpStop(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+	_, _ = blockActions.Handler("v3_op_stop")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
 	_ = actx.History.Close()
 	n := 0
 	for _, r := range historyRecords(t, p) {

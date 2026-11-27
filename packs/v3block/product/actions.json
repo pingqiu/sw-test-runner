@@ -1,7 +1,7 @@
 {
   "product": "block",
   "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
-  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (name, nqn, layout_id, status_addr: the current host's status address, holder_alive: the recorded holder runs), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The exceptions are the actions that stay Go handlers, each with its reason.",
+  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (a volume: name, nqn, layout_id, epoch, pid, pid_start, written; the current host's server, data_addr, ctrl_addr, status_addr, nvme_addr; the move target's next_cur, next_server, next_data_addr, next_ctrl_addr; holder_alive: the recorded holder runs. A process: pid, pid_start, killed_pid, killed_argv, volume, and its volume's fields), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The step kinds (package declared) run one operation under the action's own runner_deadline_seconds: device (I/O through the subject's block device), process (a long-lived process by its recorded identity: start, kill, restart) and sequence (product steps that feed each other; any failure after the first state change is unknown). The exceptions are the actions that stay Go handlers, each with its reason.",
   "config": {
     "keys": [
       {"name": "bin_dir", "required": true},
@@ -270,6 +270,92 @@
       "note": "a restart, by the schedule or the unit, is not a lifecycle operation: it leaves the volume's intended state as it is"
     },
     {
+      "action": "v3_op_stop", "verb": "stop", "op": "HolderInterface.StopCommit", "kind": "sequence", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 300,
+      "record": {"volume": "{{volume.name}}", "args": {"server": "{{volume.server}}", "epoch": {"template": "{{volume.epoch}}", "type": "int"}}},
+      "sequence": {
+        "changes_from": "disconnect",
+        "result": {"epoch": {"template": "{{volume.epoch}}", "type": "int"}},
+        "steps": [
+          {"name": "disconnect", "kind": "nvme_disconnect", "subsystem": "{{volume.nqn}}", "failure": "{{why}}",
+           "cite": "the guest lets go of the device first (nvme disconnect -n, through sysfs); recorded, so the checkers close an unknown write's window on it"},
+          {"name": "detach", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "detach", "--plain", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--timeout", "120s"],
+           "judge": {"kind": "error_body", "action": "detach", "path": "ops chunk detach"},
+           "failure": "detach: {{detail}}", "not_run": "{{error}}", "result_failure": {"detach": "{{outcome}}"},
+           "answer": {
+             "kind": "json", "schema": {"volumeID": "string", "headGen": "uint", "headEpoch": "uint"},
+             "unreadable": "detach answer is not JSON: {{stdout_first_line|q}}",
+             "checks": [
+               {"holds": [{"path": "volumeID", "equals": "{{volume.name}}"}, {"path": "headGen", "above": "0"}, {"path": "headEpoch", "equals": "{{volume.epoch}}"}],
+                "failure": "detach answer {VolumeID:{{answer.volumeID}} HeadGen:{{answer.headGen}} HeadEpoch:{{answer.headEpoch}}}; want {{volume.name}} at epoch {{volume.epoch}} with a generation"},
+               {"stderr_equals": "sealed HEAD generation: {{answer.headGen}}", "failure": "detach stderr {{stderr_first_line|q}} does not state generation {{answer.headGen}}"}
+             ],
+             "capture": {"gen": "headGen"}
+           },
+           "result": {"sealed_gen": {"template": "{{step.detach.gen}}", "type": "int"}},
+           "cite": "the holder seals HEAD (ops chunk detach --plain): the JSON answer on stdout and exactly 'sealed HEAD generation: G' on stderr name the same generation, for this volume at this epoch; G feeds the revoke"},
+          {"name": "revoke", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "revoke", "--replica", "r1", "--epoch", "{{volume.epoch}}", "--sealed-gen", "{{step.detach.gen}}", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "judge": {"kind": "exit_code", "path": "ops workspace revoke"},
+           "failure": "revoke: {{output_first_line}}",
+           "result_failure": {"revoke_exit": {"template": "{{exit}}", "type": "int"}}, "result_not_run": {"revoke_exit": {"template": "{{exit}}", "type": "int"}},
+           "cite": "ops workspace revoke with the sealed generation the detach answered (product/outcomes.json: the stop's and the move's revoke rows)"},
+          {"name": "exit", "kind": "wait_gone", "pid": "{{volume.pid}}", "start": "{{volume.pid_start}}", "within_seconds": 40,
+           "failure": "the holder did not exit by itself after the revoke: {{why}}",
+           "on_ok_set": {"volume.pid": "", "volume.pid_start": ""},
+           "cite": "after the revoke the holder exits by itself; its exit is certified by its recorded identity, never by a name"},
+          {"name": "ack", "kind": "poll",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "show", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "pattern": "(?m)^recorded ACK: r1@{{volume.epoch}} HEAD generation (\\d+)\\r?$", "every_ms": 500, "within_seconds": 30,
+           "capture": {"gen": "1"},
+           "result": {"ack_gen": "{{step.ack.gen}}"},
+           "failure": "no recorded ACK of r1@{{volume.epoch}}",
+           "cite": "ops workspace show: the master's recorded ACK of (replica, epoch), its generation recorded, not compared"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the planned stop with no move: the volume is then held by no one, as a volume delete requires. Any failure after the disconnect is unknown, whatever the step's own answer, since the earlier steps already changed state (product/outcomes.json, the stop's revoke rows)"
+    },
+    {
+      "action": "v3_op_move", "verb": "move", "op": "MoveAdmission.IssueClean", "kind": "sequence", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 360,
+      "record": {"volume": "{{volume.name}}", "args": {"from": "{{volume.server}}", "to": "{{volume.next_server}}", "epoch": {"template": "{{volume.epoch}}", "type": "int"}, "request": "{{volume.name}}-move-{{volume.epoch}}"}},
+      "sequence": {
+        "steps_of": {"action": "v3_op_stop", "detail_prefix": "stop: "},
+        "changes_from": "disconnect",
+        "result": {"epoch": {"template": "{{volume.epoch}}", "type": "int"}},
+        "steps": [
+          {"name": "move", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "move", "--clean", "--replica", "r1", "--epoch", "{{volume.epoch}}",
+             "--target-host", "{{volume.next_server}}", "--target-data", "{{volume.next_data_addr}}", "--target-ctrl", "{{volume.next_ctrl_addr}}",
+             "--request-id", "{{volume.name}}-move-{{volume.epoch}}", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "judge": {"kind": "exit_code", "path": "ops workspace move --clean"},
+           "not_run": "{{error}}", "not_run_drops_result": true,
+           "result_answered": {"exit": {"template": "{{exit}}", "type": "int"}},
+           "failure": "{{output_first_line}}",
+           "answer": {
+             "kind": "first_line",
+             "pattern": "^clean move issued: volume (\\S+) request (\\S+): r1@(\\d+) -> r1@(\\d+) on (\\S+) \\(sealed HEAD gen (\\d+), remote LSN (\\d+)\\)\\r?$",
+             "match": {"1": "{{volume.name}}", "2": "{{volume.name}}-move-{{volume.epoch}}", "3": "{{volume.epoch}}", "5": "{{volume.next_server}}"},
+             "failure": "the move answer does not name this move: {{stdout_first_line}}",
+             "capture": {"new_epoch": "4", "head_gen": "6", "remote_lsn": "7"}
+           },
+           "result": {"new_epoch": "{{step.move.new_epoch}}", "head_gen": "{{step.move.head_gen}}", "remote_lsn": "{{step.move.remote_lsn}}"},
+           "on_ok_set": {"volume.cur": "{{volume.next_cur}}"},
+           "cite": "ops workspace move --clean to the volume's other host: its answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes; never refused, the hand-over already sealed and revoked (product/outcomes.json, the move's rows)"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the planned move: the stop's hand-over, then move --clean; a move that answered ok leaves the volume held by no one until the attach on its target (v3_op_attach host=1)"
+    },
+    {
       "action": "v3_op_write", "verb": "write", "op": "HolderInterface.Write", "kind": "device", "runs_on": "step_node",
       "params": [
         {"name": "volume", "kind": "subject", "vars": true},
@@ -527,8 +613,6 @@
     {"action": "v3_history_end", "why": "closes the run's history file (its end record) so a later phase judges a whole history; a runner bookkeeping step with no product call"}
   ],
   "exceptions": [
-    {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "declarable_with": "a step sequence with data passed between steps (the sealed generation parsed from detach feeds revoke), waits for a process's exit by its recorded identity and a poll for an answer line, and an outcome rule other than the worst step's (any failure after the first change is unknown)", "runner_deadline_seconds": 300},
-    {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "declarable_with": "the stop's step sequence (see v3_op_stop), then a command whose answer must match the operation's own args before a subject field (the current host) is updated", "runner_deadline_seconds": 360},
     {"action": "v3_op_restart_master", "why": "the blockmaster's restart (v3_op_restart hands it here): it relaunches through the ownership script's spawn, which records the new identity in the ledger, the identity is read back from the ledger whatever spawn's exit, it is ready when a master call (a resolve of the first volume) answers ok or refused, and after it the unit's supervision relaunches holders that fenced while the master was down", "declarable_with": "a process restart whose launcher is a declared command that records the identity itself (read back from a ledger subject), a readiness probe that is a self-reported answer of ok or refused, and a step after the operation that runs the unit's supervision", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],

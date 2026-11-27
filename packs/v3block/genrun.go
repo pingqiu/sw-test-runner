@@ -23,7 +23,7 @@ import (
 var genHandlers = map[string]tr.ActionHandlerFunc{
 	"v3_op_create": blockActions.Handler("v3_op_create"), "v3_op_attach": blockActions.Handler("v3_op_attach"), "v3_op_write": blockActions.Handler("v3_op_write"), "v3_op_read": blockActions.Handler("v3_op_read"),
 	"v3_op_snapshot": blockActions.Handler("v3_op_snapshot"), "v3_op_snapshot_delete": blockActions.Handler("v3_op_snapshot_delete"), "v3_op_restore": blockActions.Handler("v3_op_restore"),
-	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": blockActions.Handler("v3_op_delete"), "v3_op_observe": blockActions.Handler("v3_op_observe"),
+	"v3_op_stop": blockActions.Handler("v3_op_stop"), "v3_op_move": blockActions.Handler("v3_op_move"), "v3_op_delete": blockActions.Handler("v3_op_delete"), "v3_op_observe": blockActions.Handler("v3_op_observe"),
 	"v3_op_kill": blockActions.Handler("v3_op_kill"), "v3_op_restart": blockActions.Handler("v3_op_restart"), "v3_op_healthy": v3OpHealthy,
 	"v3_op_flush":   blockActions.Handler("v3_op_flush"),
 	"v3_op_release": blockActions.Handler("v3_op_release"),

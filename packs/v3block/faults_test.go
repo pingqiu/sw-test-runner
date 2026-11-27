@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -966,26 +965,23 @@ func TestIntentIsSetByTheAnswer(t *testing.T) {
 			t.Errorf("%s, %s answered %q: intent %q, want %q", c.before, c.target, c.answer, v.Extra["intent"], c.want)
 		}
 	}
-	// The lifecycle operations record their answer through it: attach holds,
-	// stop and move release.
-	src, err := os.ReadFile("ops.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for verb, target := range map[string]string{"stop": "intentNotHeld", "move": "intentNotHeld"} {
-		if !strings.Contains(string(src), "lifecycle(v, "+target+")(recordBounded(ctx, actx, e, \""+verb+"\",") {
-			t.Errorf("v3_op_%s does not set the intended state from its answer", verb)
-		}
-	}
-	// The declared attach: ok holds, unknown unsettles, a refusal nothing.
+	// The lifecycle operations (declared) record their answer through the
+	// intended state: attach holds, stop and move release, unknown
+	// unsettles, a refusal nothing.
+	want := map[string]string{"v3_op_attach": intentHeld, "v3_op_stop": intentNotHeld, "v3_op_move": intentNotHeld}
 	for _, a := range blockActions.File.Actions {
-		if a.Action != "v3_op_attach" {
+		target, ok := want[a.Action]
+		if !ok {
 			continue
 		}
+		delete(want, a.Action)
 		set := a.OnOutcomeSet
-		if len(set) != 2 || set[tr.OutcomeOK]["volume.intent"] != intentHeld || set[tr.OutcomeUnknown]["volume.intent"] != intentUnsettled {
-			t.Errorf("v3_op_attach does not set the intended state from its answer: %v", set)
+		if len(set) != 2 || set[tr.OutcomeOK]["volume.intent"] != target || set[tr.OutcomeUnknown]["volume.intent"] != intentUnsettled {
+			t.Errorf("%s does not set the intended state from its answer: %v", a.Action, set)
 		}
+	}
+	if len(want) != 0 {
+		t.Errorf("not declared: %v", want)
 	}
 }
 func unsettledSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {

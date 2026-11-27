@@ -61,6 +61,14 @@ func (s *volumeSubject) Field(ctx context.Context, node declared.Runner, f strin
 		}
 		h := v.Hosts[v.Cur]
 		return map[string]string{"server": h.Server, "data_addr": h.Data, "ctrl_addr": h.Ctrl, "nvme_addr": h.NVMe}[f], nil
+	case "next_cur", "next_server", "next_data_addr", "next_ctrl_addr":
+		// The planned move's target: the volume's other host.
+		to := 1 - v.Cur
+		if to < 0 || to >= len(v.Hosts) {
+			return "", fmt.Errorf("volume %q: no move target from host %d", v.Name, v.Cur)
+		}
+		h := v.Hosts[to]
+		return map[string]string{"next_cur": strconv.Itoa(to), "next_server": h.Server, "next_data_addr": h.Data, "next_ctrl_addr": h.Ctrl}[f], nil
 	case "epoch":
 		return strconv.FormatUint(v.Epoch, 10), nil
 	case "pid":
