@@ -281,13 +281,13 @@ func mustJSON(t *testing.T, s string) any {
 // rows (declared.Placement): the key "placement", each row's keys, the one
 // "by", the four cases and the four outcomes.
 var placementVocabulary = map[string][]string{
-	".placement[]":          {"verb", "by", "part", "arg", "outcomes", "cite", "what"},
-	".placement[].by":       {declared.PlaceByNames},
+	".placement[]":          {"verb", "by", "field", "arg", "outcomes", "cite", "what"},
+	".placement[].by":       {declared.PlaceByListMember},
 	".placement[].outcomes": {"present_before", "others_lost", "present", "absent"},
 	".placement[].outcome":  declared.PlacementOutcomes,
 }
 
-// The placement table loads (one row: the snapshot, by snapshot_names), its
+// The placement table loads (one row: the snapshot, by list_member), its
 // keys are the vocabulary's, and a row outside it does not load (red
 // controls: another by, another outcome, a case missing or added, another
 // key).
@@ -296,7 +296,7 @@ func TestPlacementVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows["snapshot"] == nil || rows["snapshot"].By != declared.PlaceByNames {
+	if len(rows) != 1 || rows["snapshot"] == nil || rows["snapshot"].By != declared.PlaceByListMember {
 		t.Fatalf("placement rows %+v", rows)
 	}
 	var d struct {
@@ -321,7 +321,7 @@ func TestPlacementVocabulary(t *testing.T) {
 		}
 	}
 	for name, c := range map[string][2]string{
-		"another by":      {`"by": "snapshot_names"`, `"by": "root_objects"`},
+		"another by":      {`"by": "list_member"`, `"by": "snapshot_names"`},
 		"another outcome": {`"absent": "did_not"`, `"absent": "maybe"`},
 		"a case missing":  {`, "absent": "did_not"`, ``},
 		"a case added":    {`"absent": "did_not"`, `"absent": "did_not", "gone": "third"`},

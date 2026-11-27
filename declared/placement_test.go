@@ -2,8 +2,8 @@ package declared
 
 import "testing"
 
-func TestPlaceByNames(t *testing.T) {
-	rows, err := ParsePlacements([]byte(`{"placement": [{"verb": "v", "by": "snapshot_names", "part": "names", "arg": "name",
+func TestPlaceByListMember(t *testing.T) {
+	rows, err := ParsePlacements([]byte(`{"placement": [{"verb": "v", "by": "list_member", "field": "names", "arg": "name",
 		"outcomes": {"present_before": "not_placed", "others_lost": "third", "present": "took_effect", "absent": "did_not"}, "cite": "docs/x.md:1"}]}`))
 	if err != nil {
 		t.Fatal(err)

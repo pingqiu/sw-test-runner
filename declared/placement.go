@@ -26,22 +26,22 @@ const (
 // PlacementOutcomes is the enumeration, in order.
 var PlacementOutcomes = []string{PlacedTookEffect, PlacedDidNot, PlacedThird, PlacedNotPlaced}
 
-// PlaceByNames is the one way to place now: the observation's list Part
-// holds the names a request of the verb creates, and the request's Arg is
-// the name it creates. The cases, each mapped to an outcome by the row:
+// PlaceByListMember is the one way to place now: the observation's list
+// Field holds the names a request of the verb creates, and the request's Arg
+// is the name it creates (membership of that name in that list). The cases, each mapped to an outcome by the row:
 // present_before (the name is already in the list before the request),
 // others_lost (a name of the list before is gone after), present (the name
 // is in the list after), absent (it is not).
-const PlaceByNames = "snapshot_names"
+const PlaceByListMember = "list_member"
 
-// placeCases are PlaceByNames' cases, in the order they are decided.
+// placeCases are PlaceByListMember's cases, in the order they are decided.
 var placeCases = []string{"present_before", "others_lost", "present", "absent"}
 
 // Placement is one row of the placement table.
 type Placement struct {
 	Verb     string            `json:"verb"`
 	By       string            `json:"by"`
-	Part     string            `json:"part"`
+	Field    string            `json:"field"`
 	Arg      string            `json:"arg"`
 	Outcomes map[string]string `json:"outcomes"`
 	Cite     string            `json:"cite"`
@@ -79,11 +79,11 @@ func ParsePlacements(b []byte) (map[string]*Placement, error) {
 }
 
 func (p *Placement) check() error {
-	if p.Verb == "" || p.Part == "" || p.Arg == "" || !pageCite.MatchString(p.Cite) {
-		return fmt.Errorf("a row needs its verb, part, arg and the page line it rests on (cite docs/<page>.md:<line>)")
+	if p.Verb == "" || p.Field == "" || p.Arg == "" || !pageCite.MatchString(p.Cite) {
+		return fmt.Errorf("a row needs its verb, field, arg and the page line it rests on (cite docs/<page>.md:<line>)")
 	}
-	if p.By != PlaceByNames {
-		return fmt.Errorf("by %q; the one way to place is %q", p.By, PlaceByNames)
+	if p.By != PlaceByListMember {
+		return fmt.Errorf("by %q; the one way to place is %q", p.By, PlaceByListMember)
 	}
 	if len(p.Outcomes) != len(placeCases) {
 		return fmt.Errorf("outcomes %v; want exactly the cases %s", p.Outcomes, strings.Join(placeCases, ", "))
@@ -106,10 +106,10 @@ func (p *Placement) check() error {
 // list of names) cannot place it: PlacedNotPlaced, and ok is false (the
 // list was not recorded, so nothing is decided from it).
 func (p *Placement) Place(name string, before, after map[string]any) (outcome, why string, ok bool) {
-	bn, okb := nameList(before[p.Part])
-	an, oka := nameList(after[p.Part])
+	bn, okb := nameList(before[p.Field])
+	an, oka := nameList(after[p.Field])
 	if !okb || !oka {
-		return PlacedNotPlaced, fmt.Sprintf("%s not recorded as a list by both observations", p.Part), false
+		return PlacedNotPlaced, fmt.Sprintf("%s not recorded as a list by both observations", p.Field), false
 	}
 	var lost []string
 	for _, n := range bn {

@@ -44,10 +44,10 @@ _master = None
 # checks.json placement: {verb: row}, how an unknown of the verb is placed by
 # a list of names (the one definition the driver's rerun reads too).
 _placement = {}
-PLACEMENT_BY = ('snapshot_names',)
+PLACEMENT_BY = ('list_member',)
 PLACEMENT_CASES = ('present_before', 'others_lost', 'present', 'absent')
 PLACEMENT_OUTCOMES = {'took_effect': 'took effect', 'did_not': 'did not', 'third': 'third', 'not_placed': None}
-PLACEMENT_KEYS = {'verb', 'by', 'part', 'arg', 'outcomes', 'cite', 'what'}
+PLACEMENT_KEYS = {'verb', 'by', 'field', 'arg', 'outcomes', 'cite', 'what'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
 # later) values time alone may step it through.
@@ -71,8 +71,8 @@ def placement_rows(checks):
         bad = [o for o in outcomes.values() if o not in PLACEMENT_OUTCOMES]
         if bad:
             raise ValueError('placement row %r: outcomes %s outside %s' % (row.get('verb'), bad, sorted(PLACEMENT_OUTCOMES)))
-        if not row.get('part') or not row.get('arg') or row.get('verb') in out:
-            raise ValueError('placement row %r: its part and arg, one row per verb' % row.get('verb'))
+        if not row.get('field') or not row.get('arg') or row.get('verb') in out:
+            raise ValueError('placement row %r: its field and arg, one row per verb' % row.get('verb'))
         out[row['verb']] = row
     return out
 
@@ -330,7 +330,7 @@ def effect_state(part, to, after):
 # --- C6 placement ----------------------------------------------------------
 
 def place_by_names(row, name, bnames, names, base):
-    """C6's placement by a placement row (by snapshot_names): the case the
+    """C6's placement by a placement row (by list_member): the case the
     two lists of names show, mapped by the row to its outcome."""
     lost = sorted(set(bnames) - set(names))
     if name in bnames:
@@ -358,7 +358,7 @@ def place_by_status(inv, obs, base):
         # objects only when neither does (code, here alone).
         bres = base.get('result') or {}
         row = _placement.get(verb)
-        part = row['part'] if row else 'snapshots'
+        part = row['field'] if row else 'snapshots'
         bnames, names = bres.get(part), res.get(part)
         if row and isinstance(bnames, list) and isinstance(names, list):
             return place_by_names(row, args.get(row['arg']), bnames, names, base)

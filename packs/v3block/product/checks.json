@@ -28,12 +28,12 @@
  "block_bytes": {"bytes": 4096, "cite": "cmd/blockvolume/main.go:239",
    "what": "the block size in bytes on first create (the daemon's --durable-blocksize default; the runner also passes 4096); the checkers' ZERO is the sha256 of one block of zeros"},
  "placement": [
-  {"verb": "snapshot", "by": "snapshot_names", "part": "snapshots", "arg": "name",
+  {"verb": "snapshot", "by": "list_member", "field": "snapshots", "arg": "name",
    "outcomes": {"present_before": "not_placed", "others_lost": "third", "present": "took_effect", "absent": "did_not"},
    "cite": "docs/operator-guide.md:222-223 (the volume's data is committed either way; the snapshot name exists only after a request for it succeeds)",
-   "what": "an unknown snapshot is placed by HEAD's snapshot names (the observation's snapshots part) after it, against the observation before it: its name already there before it cannot place it; another name lost is a third state; its name there after it: it took effect; absent: it did not. The checker's C6 (product_block.py) and the driver's rerun read this row; when neither observation records the names, the checker places by the root/ objects (its own code) and the driver re-issues nothing"}
+   "what": "an unknown snapshot is placed by HEAD's snapshot names (the observation's snapshots field) after it, against the observation before it: its name already there before it cannot place it; another name lost is a third state; its name there after it: it took effect; absent: it did not. The checker's C6 (product_block.py) and the driver's rerun read this row; when neither observation records the names, the checker places by the root/ objects (its own code) and the driver re-issues nothing"}
  ],
- "placement_note": "The placement table, one row per verb placed by a list of names; a closed vocabulary: by is snapshot_names, the four cases are present_before, others_lost, present and absent, and each maps to one of took_effect, did_not, third, not_placed.",
+ "placement_note": "The placement table, one row per verb placed by a list of names; a closed vocabulary: by is list_member (the request's name in the observation's list field), the four cases are present_before, others_lost, present and absent, and each maps to one of took_effect, did_not, third, not_placed.",
  "observation": {
   "compared": ["head", "snapshots", "workspace", "dirs", "files"],
   "required": ["head", "workspace"],

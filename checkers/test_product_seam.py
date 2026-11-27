@@ -320,7 +320,7 @@ class ProductFlag(unittest.TestCase):
 
 class PlacementRow(unittest.TestCase):
     """The placement table in checks.json is a closed vocabulary: one way to
-    place (by snapshot_names), four cases, each mapped to one of four fixed
+    place (by list_member), four cases, each mapped to one of four fixed
     outcomes. product_block reads the names branch of C6's snapshot rule from
     it; a row outside the vocabulary does not load (red controls)."""
 
@@ -343,7 +343,7 @@ class PlacementRow(unittest.TestCase):
         import product_block as pb
         good = self.rows()
         for name, seed in {
-            'another by': lambda r: r.update(by='root_objects'),
+            'another by': lambda r: r.update(by='snapshot_names'),
             'another outcome': lambda r: r['outcomes'].update(absent='maybe'),
             'a case missing': lambda r: r['outcomes'].pop('present'),
             'a case added': lambda r: r['outcomes'].update(gone='third'),
