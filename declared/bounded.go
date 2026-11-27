@@ -157,7 +157,13 @@ func (x *Executor) bounded(s *scope, actx *tr.ActionContext, act tr.Action, a *A
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
 	}
-	actx.Log("  %s(%s): %s", a.Action, vol, outcome)
+	// The log names the action as the step named it (a product handler may
+	// run a declared action for one of its own).
+	logged := a.Action
+	if act.Action != "" {
+		logged = act.Action
+	}
+	actx.Log("  %s(%s): %s", logged, vol, outcome)
 	return map[string]string{"value": outcome}, nil
 }
 

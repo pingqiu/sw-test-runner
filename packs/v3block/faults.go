@@ -182,7 +182,7 @@ func decodeArgv(b64 string) ([]string, error) { return declared.DecodeArgv(b64) 
 // line it ran with, through the ownership script's spawn (ready when it
 // holds its port) and then a master call that answers; then the unit:
 // holders that fenced while it was down. A holder's restart is the declared
-// v3_op_restart, which hands the blockmaster here.
+// v3_op_restart_holder (v3OpRestart hands it there).
 func (e opEnv) restartMasterOp(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
 	out, err := recordBounded(ctx, actx, e, "restart", "", p.args(process), func(ctx context.Context) (string, map[string]any) {
@@ -190,7 +190,7 @@ func (e opEnv) restartMasterOp(ctx context.Context, actx *tr.ActionContext, node
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}
 		case p.vol != nil:
-			return tr.OutcomeRefused, map[string]any{"detail": process + " is a holder: v3_op_restart restarts it, nothing started"}
+			return tr.OutcomeRefused, map[string]any{"detail": process + " is a holder: v3_op_restart_holder restarts it, nothing started"}
 		case p.PID == "" || p.KilledPID != p.PID:
 			return tr.OutcomeRefused, map[string]any{"detail": process + " was not killed by the runner: nothing started"}
 		case len(p.Argv) == 0:
@@ -670,11 +670,18 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 	return nil
 }
 
-// v3OpRestartMaster starts the killed blockmaster again (the declared
-// v3_op_restart hands it here; product/actions.json exceptions). Params:
-// process, ready_seconds (60).
-func v3OpRestartMaster(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, err := opConfig(actx, act, "v3_op_restart_master")
+// v3OpRestart starts a killed daemon again (product/actions.json lists it
+// as an exception): the blockmaster here; every other process through the
+// declared v3_op_restart_holder, unchanged. Params: process, ready_seconds
+// (60).
+func v3OpRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	if optionalParam(act, "process") != "blockmaster" {
+		if act.Action == "" {
+			act.Action = "v3_op_restart"
+		}
+		return blockActions.Handler("v3_op_restart_holder")(ctx, actx, act)
+	}
+	node, e, err := opConfig(actx, act, "v3_op_restart")
 	if err != nil {
 		return nil, err
 	}

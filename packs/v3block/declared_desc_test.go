@@ -62,7 +62,9 @@ func TestActionsDescription(t *testing.T) {
 		paths[[2]string{row.Action, row.Path}] = true
 	}
 	for _, a := range blockActions.File.Actions {
-		if a.Action != "v3_op_"+a.Verb {
+		// The action is v3_op_<verb>, or v3_op_<verb>_<case> for a declared
+		// case of an action a Go handler keeps (v3_op_restart_holder).
+		if a.Action != "v3_op_"+a.Verb && !strings.HasPrefix(a.Action, "v3_op_"+a.Verb+"_") {
 			t.Errorf("%s: verb %q does not name the action", a.Action, a.Verb)
 		}
 		if a.Op != opIDs[a.Verb] || (ops[a.Action] != "" && ops[a.Action] != a.Op) {

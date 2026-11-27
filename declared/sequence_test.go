@@ -169,3 +169,29 @@ func TestSequenceParseRefusals(t *testing.T) {
 		}
 	}
 }
+
+// steps_of is one level: the action it names has no steps_of of its own.
+// Red control: a chain of two (p_far takes p_move's steps, which take
+// p_handover's) fails at load; its green twin, p_far taking p_handover's
+// steps, loads.
+func TestStepsOfIsOneLevel(t *testing.T) {
+	far := func(of string) string {
+		return strings.Replace(sequenceDesc, `"on_ok_set": {"svc.host": "{{step.move.to}}"}, "cite": "x.go:6"}]}}`,
+			`"on_ok_set": {"svc.host": "{{step.move.to}}"}, "cite": "x.go:6"}]}},
+  {"action": "p_far", "verb": "far", "op": "Svc.Far", "kind": "sequence", "runs_on": "step_node",
+   "params": [{"name": "svc", "kind": "subject", "vars": true}],
+   "runner_deadline_seconds": 30,
+   "record": {"volume": "{{svc.name}}", "args": {}},
+   "sequence": {"steps_of": {"action": "`+of+`", "detail_prefix": "far: "}, "changes_from": "seal",
+    "steps": [{"name": "far", "kind": "command", "command": ["far"], "judge": {"kind": "exit0"}, "failure": "far: {{output_first_line}}", "cite": "x.go:7"}]}}`, 1)
+	}
+	if far("p_handover") == sequenceDesc {
+		t.Fatal("the seed did not apply")
+	}
+	if _, err := Parse([]byte(far("p_handover"))); err != nil {
+		t.Fatalf("green twin: %v", err)
+	}
+	if _, err := Parse([]byte(far("p_move"))); err == nil || !strings.Contains(err.Error(), "one level only") {
+		t.Errorf("red control: a chain of two steps_of: %v", err)
+	}
+}

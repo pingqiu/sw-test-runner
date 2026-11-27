@@ -3,12 +3,12 @@ package declared
 // Device actions (kind "device"). A device action does its I/O through the
 // subject's block device on the step's node:
 //
-//   - Device: the device is resolved by a declared lookup before each
-//     invocation. Resolver "nvme_namespace" is the one namespace of the one
-//     kernel NVMe controller of a subsystem NQN (Subsystem, a template),
-//     waited for up to WithinSeconds. A sysfs scan that cannot be read, or a
-//     subsystem that never becomes exactly one device, ends the operation
-//     unknown: no I/O goes to a device the runner could not establish.
+//   - Device: the device is resolved before each invocation by a device
+//     resolver the product declares (Resolver, resolver.go) for Subsystem (a
+//     template), waited for up to WithinSeconds. A scan that cannot be read,
+//     or a subsystem that never becomes exactly one device, ends the
+//     operation unknown: no I/O goes to a device the runner could not
+//     establish.
 //   - Each: one operation per item of a list param ({{item}}), each with its
 //     own invoke and complete.
 //   - Input: a runner-generated input, made on the node BEFORE the invoke and
@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -70,129 +69,6 @@ type IO struct {
 	// an I/O that gave no answer (its deadline ended it, or it could not run).
 	Result           map[string]string `json:"result,omitempty"`
 	ResultUnanswered map[string]string `json:"result_unanswered,omitempty"`
-}
-
-// What a scan of the kernel's NVMe controllers says about one subsystem.
-const (
-	NVMeAbsent     = "absent"     // no controller of the subsystem: a scan that read everything
-	NVMeOne        = "one"        // one controller with exactly one namespace: its device
-	NVMeIncomplete = "incomplete" // a controller without exactly one namespace (still coming up, or not ours)
-	NVMeUnreadable = "unreadable" // the scan failed: nothing may be concluded
-)
-
-var nsName = regexp.MustCompile(`c[0-9]+n`)
-
-// NVMeScan reads every controller's subsystem NQN in sysfs and the
-// namespaces of the ones that match nqn. A read error, or a command that
-// fails, is unreadable: absent and present are concluded only from a scan
-// that completed.
-func NVMeScan(ctx context.Context, node Runner, nqn string) (state, dev, why string) {
-	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo "ctrl $(basename "$d")"; for n in "$d"/nvme*n*; do [ -e "$n" ] && echo "ns $(basename "$n")"; done; done; echo end`, ShellQuote(nqn))
-	stdout, stderr, code, err := Call(ctx, node.Run, cmd)
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	if err != nil || code != 0 || len(lines) == 0 || lines[len(lines)-1] != "end" {
-		return NVMeUnreadable, "", fmt.Sprintf("sysfs scan exit %d: %s", code, FirstLine(stderr))
-	}
-	var ctrls, nss []string
-	for _, l := range lines[:len(lines)-1] {
-		switch {
-		case strings.HasPrefix(l, "ctrl "):
-			ctrls = append(ctrls, l[5:])
-		case strings.HasPrefix(l, "ns "):
-			nss = append(nss, nsName.ReplaceAllString(l[3:], "n"))
-		default:
-			return NVMeUnreadable, "", "sysfs scan printed " + FirstLine(l)
-		}
-	}
-	switch {
-	case len(ctrls) == 0:
-		return NVMeAbsent, "", ""
-	case len(ctrls) == 1 && len(nss) == 1:
-		return NVMeOne, "/dev/" + nss[0], ""
-	}
-	return NVMeIncomplete, "", fmt.Sprintf("subsystem %s: %d controllers, %d namespaces", nqn, len(ctrls), len(nss))
-}
-
-// NVMeDevice waits until the subsystem has exactly one controller with one
-// namespace and returns its device. An unreadable scan or a subsystem that
-// never becomes exactly one device is a reason, not a device.
-func NVMeDevice(ctx context.Context, node Runner, nqn string, bound time.Duration) (string, string) {
-	end := time.Now().Add(bound)
-	for {
-		state, dev, why := NVMeScan(ctx, node, nqn)
-		if state == NVMeOne {
-			return dev, ""
-		}
-		if state == NVMeUnreadable {
-			return "", why
-		}
-		if time.Now().After(end) {
-			if state == NVMeAbsent {
-				return "", "no controller of " + nqn
-			}
-			return "", why
-		}
-		if !Pause(ctx, 250*time.Millisecond) {
-			return "", "no single device of " + nqn + " by the runner deadline"
-		}
-	}
-}
-
-var nvmeHost, nvmePort, nvmeNQN = regexp.MustCompile(`^[0-9.]+$`), regexp.MustCompile(`^[0-9]+$`), regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`)
-var nvmeOptions = regexp.MustCompile(`^(,[a-z_]+=-?[0-9]+)*$`)
-
-// NVMeConnect connects the kernel NVMe/TCP host to nqn at host:port through
-// the kernel's fabrics interface, the call nvme-cli makes (no tool needed);
-// extra is ",key=value..." of kernel options. "" or the reason it failed.
-func NVMeConnect(ctx context.Context, node Runner, host, port, nqn, extra string) string {
-	if !nvmeHost.MatchString(host) || !nvmePort.MatchString(port) || !nvmeNQN.MatchString(nqn) {
-		return "nvme connect: malformed address or nqn"
-	}
-	if !nvmeOptions.MatchString(extra) {
-		return "nvme connect: malformed options " + extra
-	}
-	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s%s", host, port, nqn, extra)
-	if _, stderr, code, err := Call(ctx, node.RunRoot, fmt.Sprintf("printf %%s %s > /dev/nvme-fabrics", ShellQuote(opts))); err != nil || code != 0 {
-		return "nvme connect: " + FirstLine(stderr)
-	}
-	return ""
-}
-
-// NVMeDisconnectCount deletes every kernel controller of subsystem nqn
-// through sysfs (what `nvme disconnect -n` does) and says how many it
-// deleted (-1 when that is not known). It certifies the disconnect only from
-// a successful scan that then finds no controller of nqn: a failed delete,
-// or a scan that cannot read sysfs, is a reason, not "disconnected".
-func NVMeDisconnectCount(ctx context.Context, node Runner, nqn string) (int, string) {
-	cmd := fmt.Sprintf(`n=0; for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo 1 > "$d/delete_controller" || exit 4; n=$((n+1)); done; echo "deleted $n"`, ShellQuote(nqn))
-	stdout, stderr, code, err := Call(ctx, node.RunRoot, cmd)
-	if err != nil || code != 0 {
-		return -1, fmt.Sprintf("nvme disconnect: exit %d: %s", code, FirstLine(stderr))
-	}
-	n := -1
-	if f := strings.Fields(stdout); len(f) == 2 && f[0] == "deleted" {
-		n, _ = strconv.Atoi(f[1])
-	}
-	return n, NVMeConfirmGone(ctx, node, nqn)
-}
-
-// NVMeConfirmGone waits until a scan finds no controller of nqn.
-func NVMeConfirmGone(ctx context.Context, node Runner, nqn string) string {
-	end := time.Now().Add(5 * time.Second)
-	for {
-		state, _, why := NVMeScan(ctx, node, nqn)
-		switch {
-		case state == NVMeAbsent:
-			return ""
-		case state == NVMeUnreadable:
-			return "nvme disconnect: cannot confirm: " + why
-		case time.Now().After(end):
-			return "nvme disconnect: a controller of " + nqn + " remains"
-		}
-		if !Pause(ctx, 250*time.Millisecond) {
-			return "nvme disconnect: a controller of " + nqn + " remains at the runner deadline"
-		}
-	}
 }
 
 // Pause waits d, or less when ctx ends; false when ctx has ended.
@@ -263,8 +139,8 @@ func (a *Action) checkDevice(defined func(map[string]bool) func(string) error, s
 			return err
 		}
 	}
-	if d.Resolver != "nvme_namespace" || d.WithinSeconds < 0 || strings.TrimSpace(d.Cite) == "" {
-		return errors.New("device: resolver nvme_namespace, within_seconds and cite")
+	if d.Resolver == "" || d.WithinSeconds < 0 || strings.TrimSpace(d.Cite) == "" {
+		return errors.New("device: a resolver, within_seconds and cite")
 	}
 	if err := defined(names)(d.Subsystem); err != nil || d.Subsystem == "" {
 		return fmt.Errorf("device: subsystem: %v", err)
@@ -387,7 +263,7 @@ func (x *Executor) deviceIO(s *scope, ctx context.Context, a *Action) (string, m
 	if err != nil {
 		return tr.OutcomeUnknown, map[string]any{"detail": err.Error()}
 	}
-	dev, why := NVMeDevice(ctx, s.node, nqn, time.Duration(d.WithinSeconds)*time.Second)
+	dev, why := x.DeviceOf(ctx, s.node, d.Resolver, nqn, time.Duration(d.WithinSeconds)*time.Second)
 	if why != "" {
 		return tr.OutcomeUnknown, map[string]any{"detail": why}
 	}

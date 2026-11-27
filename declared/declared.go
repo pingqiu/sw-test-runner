@@ -10,6 +10,18 @@
 // about an outcome: how to find the node, how to read and update a subject
 // (the runner's own record of one volume, say), and its outcome table.
 // This package imports no product pack (the import guard checks it).
+//
+// Result keys. A key "result" or "result_<S>" is the RESULT AT STAGE S:
+// the fields written into the history record's result when the step
+// reaches that stage, and nothing else. The stages are: result (the stage
+// of its place: a decoded answer, an ok I/O, a sequence's start, a
+// sequence step that holds), result_ok (a decoded ok), result_unanswered (an
+// I/O that gave no answer), result_launched and result_ready (a process
+// launched, then ready), result_failure, result_not_run and
+// result_answered (a sequence step that failed, could not run, or
+// answered at all). No result key decides an outcome; each is read where
+// its stage is reached (Decode, device.go IO, process.go Process,
+// sequence.go SeqStep and Sequence).
 package declared
 
 import (
@@ -66,6 +78,10 @@ type File struct {
 	// kinds ({{run.<name>}}), each with why; the executor's Values supplies
 	// them, and a step it cannot supply them for does not run.
 	RunValues []RunValue `json:"run_values,omitempty"`
+	// DeviceResolvers are the product's declared guest-device resolvers, by
+	// name (resolver.go).
+	DeviceResolvers map[string]*Resolver `json:"device_resolvers,omitempty"`
+	scripts         map[string]string
 	// Guest is the product's guest configuration, read by the product's
 	// own code; the executor does not interpret it.
 	Guest json.RawMessage `json:"guest,omitempty"`
@@ -73,7 +89,8 @@ type File struct {
 
 // Config is the configuration every declared action shares, each key read
 // from the step's params, else from the run's vars (a var naming other vars
-// is expanded). No key may stay unresolved.
+// is expanded). No key may stay unresolved. A Computed key is not read:
+// the product computes it from the other keys (Executor.Compute).
 type Config struct {
 	Keys []ConfigKey `json:"keys"`
 	// Client is the key whose value is the history's client name.
@@ -85,6 +102,9 @@ type ConfigKey struct {
 	Name     string `json:"name"`
 	Required bool   `json:"required,omitempty"`
 	Default  string `json:"default,omitempty"`
+	// Computed says how the product computes the key (and where); such a
+	// key has no default and is not required.
+	Computed string `json:"computed,omitempty"`
 }
 
 // Exception names an action that stays a Go handler, why, and its runner
@@ -186,9 +206,6 @@ type Action struct {
 	// OnOutcomeSet updates subjects' fields after the operation completed
 	// with that outcome: outcome -> "<subject param>.<field>" -> template.
 	OnOutcomeSet map[string]map[string]string `json:"on_outcome_set,omitempty"`
-	// Coded hands one case of the action to a Go handler the description
-	// lists as an exception.
-	Coded *Coded `json:"coded,omitempty"`
 	// Kind "sequence" (sequence.go).
 	Sequence *Sequence `json:"sequence,omitempty"`
 }
@@ -254,13 +271,17 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 // of templates written as one JSON word; every such word is shell quoted.
 // {"raw": "&&"} is shell text written as it is (an operator or a
 // redirection; it takes no template). {"when": cond, "words": [...]} is a
-// group of words used only when the condition holds.
+// group of words used only when the condition holds. {"script": path} is
+// one word: the text of a script file the product supplies (ParseWith),
+// without its final newline, shell quoted (a program given to an
+// interpreter's -c, kept out of the description as a file with its own tests).
 type Word struct {
-	Text  string
-	JSON  map[string]string
-	Raw   string
-	When  *Cond
-	Words []Word
+	Text   string
+	JSON   map[string]string
+	Raw    string
+	When   *Cond
+	Words  []Word
+	Script string
 }
 
 func (w *Word) UnmarshalJSON(b []byte) error {
@@ -268,13 +289,21 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 		return json.Unmarshal(b, &w.Text)
 	}
 	var o struct {
-		JSON  map[string]string `json:"json"`
-		Raw   string            `json:"raw"`
-		When  *Cond             `json:"when"`
-		Words []Word            `json:"words"`
+		JSON   map[string]string `json:"json"`
+		Raw    string            `json:"raw"`
+		When   *Cond             `json:"when"`
+		Words  []Word            `json:"words"`
+		Script string            `json:"script"`
 	}
 	if err := strict(b, &o); err != nil {
 		return err
+	}
+	if o.Script != "" {
+		if o.JSON != nil || o.Raw != "" || o.When != nil || o.Words != nil {
+			return errors.New("a script word names its script only")
+		}
+		w.Script = o.Script
+		return nil
 	}
 	switch {
 	case len(o.JSON) > 0 && o.Raw == "" && o.When == nil && o.Words == nil:
@@ -284,7 +313,7 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 	case o.When != nil && len(o.Words) > 0 && o.JSON == nil && o.Raw == "":
 		w.When, w.Words = o.When, o.Words
 	default:
-		return errors.New("a command word is a string, {\"json\": {...}}, {\"raw\": text} or {\"when\": cond, \"words\": [...]}")
+		return errors.New("a command word is a string, {\"json\": {...}}, {\"raw\": text}, {\"script\": path} or {\"when\": cond, \"words\": [...]}")
 	}
 	return nil
 }
@@ -295,6 +324,33 @@ type Cond struct {
 	Equals string `json:"equals"`
 	// NotEquals, when set, holds when the field's value differs from it.
 	NotEquals *string `json:"not_equals,omitempty"`
+}
+
+// UnmarshalJSON reads a condition as the vocabulary allows it: ONE field
+// compared, by equals or by not_equals (not both), with a constant (no
+// template).
+func (c *Cond) UnmarshalJSON(b []byte) error {
+	var o struct {
+		Field     string  `json:"field"`
+		Equals    *string `json:"equals"`
+		NotEquals *string `json:"not_equals"`
+	}
+	if err := strict(b, &o); err != nil {
+		return err
+	}
+	if o.Field == "" || (o.Equals == nil) == (o.NotEquals == nil) {
+		return errors.New("a condition is one field with equals or not_equals")
+	}
+	for _, v := range []*string{o.Equals, o.NotEquals} {
+		if v != nil && strings.Contains(*v, "{{") {
+			return fmt.Errorf("condition on %s: its value is a constant, not a template", o.Field)
+		}
+	}
+	c.Field, c.NotEquals = o.Field, o.NotEquals
+	if o.Equals != nil {
+		c.Equals = *o.Equals
+	}
+	return nil
 }
 
 // Variant is one way to run the action: its command and its decoding.
@@ -379,6 +435,36 @@ type RerunAnswer struct {
 	MessageContains string `json:"message_contains,omitempty"`
 }
 
+// scriptRefs lists the paths every {"script": path} word of a description
+// names, in order of first appearance.
+func scriptRefs(b []byte) []string {
+	var d any
+	if json.Unmarshal(b, &d) != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	var walk func(any)
+	walk = func(o any) {
+		switch o := o.(type) {
+		case map[string]any:
+			if p, ok := o["script"].(string); ok && len(o) == 1 && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+			for _, v := range o {
+				walk(v)
+			}
+		case []any:
+			for _, v := range o {
+				walk(v)
+			}
+		}
+	}
+	walk(d)
+	return out
+}
+
 // answers is the retry's rerun answers: WhileCode's, then Answers.
 func (r *Retry) answers() []RerunAnswer {
 	var out []RerunAnswer
@@ -432,8 +518,25 @@ func names(t string) []string {
 // node, at least one variant, and each variant a command, a cite, a timeout
 // and a known decoding; every template names only what is defined where it
 // is used; no action is both declared and an exception.
-func Parse(b []byte) (*File, error) {
+func Parse(b []byte) (*File, error) { return ParseWith(b, nil) }
+
+// ParseWith is Parse for a description whose script words name files of
+// scripts (repository path -> text). A script that is not supplied, or
+// whose text is not a file's (a carriage return, or no final newline),
+// refuses the description.
+func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 	var f File
+	f.scripts = map[string]string{}
+	for _, p := range scriptRefs(b) {
+		text, ok := scripts[p]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("actions: script %s is not supplied", p)
+		case strings.Contains(text, "\r") || !strings.HasSuffix(text, "\n"):
+			return nil, fmt.Errorf("actions: script %s: LF line ends and a final newline", p)
+		}
+		f.scripts[p] = strings.TrimSuffix(text, "\n")
+	}
 	if err := strict(b, &f); err != nil {
 		return nil, fmt.Errorf("actions: %w", err)
 	}
@@ -443,6 +546,9 @@ func Parse(b []byte) (*File, error) {
 	keys := map[string]bool{}
 	for _, k := range f.Config.Keys {
 		keys[k.Name] = true
+		if k.Computed != "" && (k.Required || k.Default != "") {
+			return nil, fmt.Errorf("actions: config key %s is computed: no default, not required", k.Name)
+		}
 	}
 	if f.Config.Client != "" && !keys[f.Config.Client] {
 		return nil, fmt.Errorf("actions: client key %q is not a config key", f.Config.Client)
@@ -466,6 +572,19 @@ func Parse(b []byte) (*File, error) {
 		seen[a.Action] = true
 	}
 	if err := f.checkSequences(keys, run); err != nil {
+		return nil, err
+	}
+	for name, r := range f.DeviceResolvers {
+		if err := r.check(); err != nil {
+			return nil, fmt.Errorf("actions: device resolver %s: %w", name, err)
+		}
+	}
+	for _, n := range f.resolverRefs() {
+		if f.DeviceResolvers[n] == nil {
+			return nil, fmt.Errorf("actions: device resolver %q is named and not declared", n)
+		}
+	}
+	if err := f.checkReadbacks(); err != nil {
 		return nil, err
 	}
 	if len(f.Actions) > 0 {
@@ -496,17 +615,6 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[x.Action] = true
 	}
-	for _, a := range f.Actions {
-		if c := a.Coded; c != nil {
-			found := false
-			for _, x := range f.Exceptions {
-				found = found || x.Action == c.Handler
-			}
-			if !found {
-				return nil, fmt.Errorf("actions: %s: coded handler %s is not an exception", a.Action, c.Handler)
-			}
-		}
-	}
 	for _, x := range f.RunnerSetup {
 		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
 			return nil, fmt.Errorf("actions: runner setup %q needs its action and why", x.Action)
@@ -534,11 +642,11 @@ func (a *Action) check(keys, run map[string]bool) error {
 		return errors.New("no variant")
 	}
 	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil ||
-		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil || a.Sequence != nil) {
-		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and coded belong to the step kinds")
+		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Sequence != nil) {
+		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and sequence belong to the step kinds")
 	}
-	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
-		return errors.New("process, on_outcome_set and coded belong to process actions")
+	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0) {
+		return errors.New("process and on_outcome_set do not belong to a device action")
 	}
 	for o := range a.OnOutcomeSet {
 		if o != tr.OutcomeOK && o != tr.OutcomeUnknown {
@@ -638,14 +746,9 @@ func (a *Action) check(keys, run map[string]bool) error {
 				}
 			}
 		}
-		if c := a.Coded; c != nil {
-			if !plain[c.Param] || c.Handler == "" || strings.TrimSpace(c.Why) == "" {
-				return errors.New("coded: a param of the action, a handler and why")
-			}
-		}
 		if a.Kind == "sequence" {
-			if len(a.OnInvokeSet) != 0 || a.Coded != nil {
-				return errors.New("a sequence has no on_invoke_set and no coded case")
+			if len(a.OnInvokeSet) != 0 {
+				return errors.New("a sequence has no on_invoke_set")
 			}
 			for _, v := range a.Record.Args {
 				if err := base(v.Template); err != nil {
@@ -843,13 +946,16 @@ type Executor struct {
 	// Values supplies the description's run values (RunValues) for a step
 	// of a step kind; an error stops the step before anything is recorded.
 	Values func(actx *tr.ActionContext, act tr.Action) (map[string]string, error)
+	// Compute supplies the description's computed configuration keys from
+	// the others (by name, without "config."): each key's value, or why it
+	// cannot be computed. A step that names a key that cannot be computed
+	// does not run (as a value it cannot expand).
+	Compute func(config map[string]string) (vals, why map[string]string)
 	// OpDeadline, when set, replaces a step kind's runner deadline (tests).
 	OpDeadline func(declared time.Duration) time.Duration
 	// Process resolves a process param: the process's record as a subject,
 	// or why the runner knows no such process (the operation is refused).
 	Process func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node Runner, name string) (Subject, string)
-	// Coded is the product's Go handler an action's Coded names.
-	Coded func(name string) (tr.ActionHandlerFunc, bool)
 }
 
 // Handlers returns one handler per declared action, by its name.
@@ -881,7 +987,12 @@ type scope struct {
 	vals     map[string]string
 	subjects map[string]Subject
 	derived  map[string]Derived
-	params   map[string]string // the step's own params
+	// uncomputed: computed configuration the product could not compute,
+	// and why.
+	uncomputed map[string]string
+	params     map[string]string // the step's own params
+	// scripts: the description's script files, by path.
+	scripts map[string]string
 	// unresolved: process params the product could not resolve, and why.
 	unresolved map[string]string
 	procName   string
@@ -897,6 +1008,9 @@ func (s *scope) get(n string) (string, error) {
 	}
 	if v, ok := s.vals[n]; ok {
 		return v, nil
+	}
+	if why, ok := s.uncomputed[n]; ok {
+		return "", derivedError{why}
 	}
 	if d, ok := strings.CutPrefix(n, "derived."); ok && s.derived != nil {
 		if spec, ok := s.derived[d]; ok {
@@ -943,6 +1057,12 @@ func (s *scope) words(words []Word) ([]string, error) {
 	var out []string
 	for _, w := range words {
 		switch {
+		case w.Script != "":
+			text, ok := s.scripts[w.Script]
+			if !ok {
+				return nil, fmt.Errorf("script %s is not supplied", w.Script)
+			}
+			out = append(out, ShellQuote(text))
 		case w.Raw != "":
 			out = append(out, w.Raw)
 		case w.When != nil:
@@ -985,7 +1105,7 @@ func (s *scope) argv(words []Word) ([]string, error) {
 	var out []string
 	for _, w := range words {
 		switch {
-		case w.Raw != "" || w.JSON != nil:
+		case w.Raw != "" || w.JSON != nil || w.Script != "":
 			return nil, errors.New("an argv word is a template or a group")
 		case w.When != nil:
 			hold, err := s.holds(w.When)
@@ -1011,6 +1131,38 @@ func (s *scope) argv(words []Word) ([]string, error) {
 }
 
 var varRef = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+
+// computeConfig sets the computed configuration keys from the others.
+func (x *Executor) computeConfig(s *scope, computed []string) error {
+	if len(computed) == 0 {
+		return nil
+	}
+	if x.Compute == nil {
+		return errors.New("the description names computed configuration and the product computes none")
+	}
+	cfg := map[string]string{}
+	for k, v := range s.vals {
+		if n, ok := strings.CutPrefix(k, "config."); ok {
+			cfg[n] = v
+		}
+	}
+	vals, whys := x.Compute(cfg)
+	for _, k := range computed {
+		if why, ok := whys[k]; ok {
+			if s.uncomputed == nil {
+				s.uncomputed = map[string]string{}
+			}
+			s.uncomputed["config."+k] = why
+			continue
+		}
+		v, ok := vals[k]
+		if !ok {
+			return fmt.Errorf("computed configuration %q not supplied", k)
+		}
+		s.vals["config."+k] = v
+	}
+	return nil
+}
 
 // configValue is a param, else a var; a var's value may name other vars,
 // expanded here (bounded; an unknown name stays).
@@ -1046,17 +1198,6 @@ func andList(ns []string) string {
 
 func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Action, a *Action) (map[string]string, error) {
 	name := a.Action
-	if c := a.Coded; c != nil && act.Params[c.Param] == c.Equals {
-		var h tr.ActionHandlerFunc
-		ok := false
-		if x.Coded != nil {
-			h, ok = x.Coded(c.Handler)
-		}
-		if !ok {
-			return nil, fmt.Errorf("%s: the product has no handler %s", name, c.Handler)
-		}
-		return h(ctx, actx, act)
-	}
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
 	}
@@ -1064,14 +1205,19 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}, params: act.Params}
+	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}, params: act.Params, scripts: x.File.scripts}
 	expect := act.Params["expect"]
 	if expect != "" && expect != tr.OutcomeRefused {
 		return nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, expect, tr.OutcomeRefused)
 	}
 	var required []string
 	missing := false
+	var computed []string
 	for _, k := range x.File.Config.Keys {
+		if k.Computed != "" {
+			computed = append(computed, k.Name)
+			continue
+		}
 		v := configValue(act, actx, k.Name)
 		if strings.Contains(v, "{{") {
 			return nil, fmt.Errorf("%s: unresolved configuration %q", name, v)
@@ -1087,6 +1233,9 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	}
 	if missing {
 		return nil, fmt.Errorf("%s: %s are required (params or vars)", name, andList(required))
+	}
+	if err := x.computeConfig(s, computed); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	for _, p := range a.Params {
 		switch p.Kind {

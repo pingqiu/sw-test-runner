@@ -9,7 +9,7 @@ package v3block
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -24,6 +24,24 @@ import (
 
 //go:embed product/actions.json
 var actionsJSON []byte
+
+// The scripts the description names by path ({"script": ...}), each with
+// its own tests (scripts/test_*.py).
+//
+//go:embed scripts/*.py
+var scriptFS embed.FS
+
+// declaredScripts is every script file by its repository path.
+func declaredScripts() map[string]string {
+	out := map[string]string{}
+	ents, _ := scriptFS.ReadDir("scripts")
+	for _, e := range ents {
+		if b, err := scriptFS.ReadFile("scripts/" + e.Name()); err == nil {
+			out["packs/v3block/scripts/"+e.Name()] = string(b)
+		}
+	}
+	return out
+}
 
 // opNode finds the node a step names; a test replaces it with a fake.
 var opNode = func(actx *tr.ActionContext, name string) (runner, error) {
@@ -50,6 +68,10 @@ func (s *volumeSubject) Field(ctx context.Context, node declared.Runner, f strin
 		return v.NQN, nil
 	case "layout_id":
 		return v.LayoutID, nil
+	case "layout8":
+		// The first 8 characters of the layout id: the volume's directory
+		// is <name>-<layout8> (core/frontend/chunkstore/layout/volume.go:55-61).
+		return v.LayoutID[:min(8, len(v.LayoutID))], nil
 	case "status_addr":
 		if v.Cur < 0 || v.Cur >= len(v.Hosts) {
 			return "", fmt.Errorf("volume %q: no current host %d", v.Name, v.Cur)
@@ -232,7 +254,7 @@ func (s *volumeSubject) Save() { saveVolume(s.actx, s.v) }
 // blockActions is the executor of product/actions.json. A description that
 // does not load stops the pack, as a bad outcome table does.
 var blockActions = func() *declared.Executor {
-	f, err := declared.Parse(actionsJSON)
+	f, err := declared.ParseWith(actionsJSON, declaredScripts())
 	if err != nil {
 		panic(err)
 	}
@@ -268,6 +290,14 @@ func init() {
 		return map[string]string{"guest_connect": c.Label, "guest_connect_options": c.Options,
 			"guest_connect_name": c.Name, "guest_connect_evidence": strconv.FormatBool(c.Evidence)}, nil
 	}
+	// The computed configuration: the chunk path's filer listing.
+	blockActions.Compute = func(cfg map[string]string) (map[string]string, map[string]string) {
+		l, why := chunkListing(cfg["filer"], cfg["chunk_path"])
+		if why != "" {
+			return nil, map[string]string{"chunk_listing": why}
+		}
+		return map[string]string{"chunk_listing": l}, nil
+	}
 	// A process param: the runner's record of the process (faults.go). A
 	// name it does not know is a refusal the history records.
 	blockActions.Process = func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node declared.Runner, name string) (declared.Subject, string) {
@@ -281,11 +311,7 @@ func init() {
 		}
 		return s, ""
 	}
-	// The cases the description hands to Go handlers (its exceptions).
-	blockActions.Coded = func(name string) (tr.ActionHandlerFunc, bool) {
-		h, ok := map[string]tr.ActionHandlerFunc{"v3_op_restart_master": v3OpRestartMaster}[name]
-		return h, ok
-	}
+
 }
 
 // boundedNode bounds every command of a Go handler: a command runs at most
@@ -498,4 +524,17 @@ func strictJSON(b []byte, v any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	return d.Decode(v)
+}
+
+// chunkListing is the chunk path in the filer's HTTP listing: the filer's
+// HTTP port is its gRPC port minus 10000 (SeaweedFS's convention), and the
+// chunk path loses its trailing slashes. A filer with no port above 10000
+// has no listing.
+func chunkListing(filer, chunkPath string) (string, string) {
+	host, port, ok := strings.Cut(filer, ":")
+	p, err := strconv.Atoi(port)
+	if !ok || err != nil || p <= 10000 {
+		return "", "filer has no SeaweedFS gRPC port"
+	}
+	return fmt.Sprintf("http://%s:%d%s", host, p-10000, strings.TrimRight(chunkPath, "/")), ""
 }

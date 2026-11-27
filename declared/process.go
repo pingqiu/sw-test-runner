@@ -95,16 +95,16 @@ type Ready struct {
 //   - "json": Command's stdout decodes against Schema (as encoding/json
 //     decodes a struct of those fields) and every Holds row holds; Capture
 //     names values {{ready.<name>}} from paths.
-//   - "nvme_connect": connect the kernel NVMe/TCP host to Subsystem at
+//   - "device_connect": connect the guest to Subsystem by Resolver at
 //     Address with Options (",key=value..."); with UnlessPresent only when
 //     a scan finds no controller of the subsystem.
 //   - "device": the one namespace of Subsystem within WithinSeconds,
 //     {{device}} and the result field Into.
-//   - "nvme_readback": the controller's effective connect values read back
-//     from the kernel (Files: option -> sysfs file) into Into, compared with
-//     Expect (the connect's options); a mismatch ends the step, and with
-//     FailRun fails the run (readback.go). RecordVerb names the run's one
-//     record of its first read-back, with RecordFields.
+//   - "device_readback": the effective connect values of Subsystem read
+//     back by Resolver (Files: option -> the resolver's file name) into
+//     Into, compared with Expect (the connect's options); a mismatch ends
+//     the step, and with FailRun fails the run (readback.go). RecordVerb
+//     names the run's one record of its first read-back, with RecordFields.
 type Probe struct {
 	Name          string                     `json:"name"`
 	Kind          string                     `json:"kind"`
@@ -122,6 +122,7 @@ type Probe struct {
 	Subsystem     string                     `json:"subsystem,omitempty"`
 	Options       string                     `json:"options,omitempty"`
 	UnlessPresent bool                       `json:"unless_present,omitempty"`
+	Resolver      string                     `json:"resolver,omitempty"`
 	WithinSeconds int                        `json:"within_seconds,omitempty"`
 	Into          string                     `json:"into,omitempty"`
 	Expect        string                     `json:"expect,omitempty"`
@@ -291,16 +292,6 @@ func ListenerPIDs(ctx context.Context, node Runner, ports []string) (map[string]
 
 // PortOf is the port of host:port.
 func PortOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
-
-// Coded hands a step whose param Param equals Equals to the product's Go
-// handler Handler (an exception of the description, with its why): a case
-// of an action the step kind does not declare.
-type Coded struct {
-	Param   string `json:"param"`
-	Equals  string `json:"equals"`
-	Handler string `json:"handler"`
-	Why     string `json:"why"`
-}
 
 // checkProcess checks a process action.
 func (a *Action) checkProcess(defined func(map[string]bool) func(string) error, subjects, ints map[string]bool) error {
@@ -482,9 +473,9 @@ func (pr *Probe) check(defined func(string) error, subjects map[string]bool, rea
 				return errors.New("a hold has a path and exactly one of equals, above, at_least")
 			}
 		}
-	case "nvme_connect":
-		if ready || pr.Address == "" || pr.Subsystem == "" {
-			return errors.New("nvme_connect: address and subsystem, not a ready probe")
+	case "device_connect":
+		if ready || pr.Resolver == "" || pr.Address == "" || pr.Subsystem == "" {
+			return errors.New("device_connect: a resolver, address and subsystem, not a ready probe")
 		}
 		for _, t := range []string{pr.Address, pr.Subsystem, pr.Options} {
 			if err := defined(t); err != nil {
@@ -492,17 +483,17 @@ func (pr *Probe) check(defined func(string) error, subjects map[string]bool, rea
 			}
 		}
 	case "device":
-		if ready || pr.Subsystem == "" || pr.Into == "" || pr.WithinSeconds < 0 {
-			return errors.New("device: subsystem, into and within_seconds, not a ready probe")
+		if ready || pr.Resolver == "" || pr.Subsystem == "" || pr.Into == "" || pr.WithinSeconds < 0 {
+			return errors.New("device: a resolver, subsystem, into and within_seconds, not a ready probe")
 		}
 		return defined(pr.Subsystem)
-	case "nvme_readback":
-		if ready || pr.Subsystem == "" || pr.Into == "" || len(pr.Files) == 0 {
-			return errors.New("nvme_readback: subsystem, into and files, not a ready probe")
+	case "device_readback":
+		if ready || pr.Resolver == "" || pr.Subsystem == "" || pr.Into == "" || len(pr.Files) == 0 {
+			return errors.New("device_readback: a resolver, subsystem, into and files, not a ready probe")
 		}
 		for o, f := range pr.Files {
 			if o == "" || f == "" || strings.ContainsAny(f, "/ ") {
-				return fmt.Errorf("nvme_readback: file %q of %q is not a sysfs file name", f, o)
+				return fmt.Errorf("device_readback: file %q of %q is not a file name", f, o)
 			}
 		}
 		for _, t := range append([]string{pr.Subsystem, pr.Expect}, mapValues(pr.RecordFields)...) {
@@ -924,7 +915,7 @@ func (x *Executor) probe(s *scope, ctx context.Context, pr *Probe, res map[strin
 			s.vals["ready."+k] = valueText(lookupPath(data, pr.Capture[k]))
 		}
 		return "", "", true
-	case "nvme_connect":
+	case "device_connect":
 		addr, err := s.expand(pr.Address)
 		if err != nil {
 			return tr.OutcomeUnknown, err.Error(), false
@@ -938,27 +929,26 @@ func (x *Executor) probe(s *scope, ctx context.Context, pr *Probe, res map[strin
 			return tr.OutcomeUnknown, err.Error(), false
 		}
 		if pr.UnlessPresent {
-			state, _, why := NVMeScan(ctx, s.node, nqn)
-			if state == NVMeUnreadable {
+			state, _, why := x.DeviceScan(ctx, s.node, pr.Resolver, nqn)
+			if state == DeviceUnreadable {
 				return tr.OutcomeUnknown, why, false
 			}
-			if state != NVMeAbsent {
+			if state != DeviceAbsent {
 				return "", "", true // the kernel reconnects the controller it kept by itself
 			}
 		}
-		host, port, _ := strings.Cut(addr, ":")
-		if why := NVMeConnect(ctx, s.node, host, port, nqn, opts); why != "" {
+		if why := x.DeviceConnect(ctx, s.node, pr.Resolver, addr, nqn, opts); why != "" {
 			return tr.OutcomeUnknown, why, false
 		}
 		return "", "", true
-	case "nvme_readback":
+	case "device_readback":
 		return x.readback(s, ctx, pr, res)
 	case "device":
 		nqn, err := s.expand(pr.Subsystem)
 		if err != nil {
 			return tr.OutcomeUnknown, err.Error(), false
 		}
-		dev, why := NVMeDevice(ctx, s.node, nqn, time.Duration(pr.WithinSeconds)*time.Second)
+		dev, why := x.DeviceOf(ctx, s.node, pr.Resolver, nqn, time.Duration(pr.WithinSeconds)*time.Second)
 		if why != "" {
 			return tr.OutcomeUnknown, why, false
 		}

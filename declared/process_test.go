@@ -35,15 +35,13 @@ const processDesc = head + `
   {"action": "p_restart", "verb": "restart", "op": "Env.Restart", "kind": "process", "runs_on": "step_node",
    "params": [{"name": "proc", "kind": "process"}, {"name": "ready_seconds", "kind": "int", "default": "1"}],
    "runner_deadline_seconds": 30,
-   "coded": {"param": "proc", "equals": "boss", "handler": "p_restart_boss", "why": "the boss restarts another way"},
    "record": {"volume": "", "args": {"proc": "{{proc}}"}},
    "process": {"op": "restart", "subject": "proc", "name": "svcd", "cite": "x.go:6",
      "log": "/logs/r.{{now_ns}}.log",
      "ready": {"within_param": "ready_seconds", "every_ms": 10,
        "probes": [{"name": "own", "kind": "listeners_held", "addresses": ["{{proc.addr}}"], "cite": "x.go:4"}],
        "not_ready": "not ready within {{ready.within}}", "not_ready_by_deadline": "not ready by the deadline"}}}
- ],
- "exceptions": [{"action": "p_restart_boss", "why": "another launcher", "declarable_with": "a launcher step", "runner_deadline_seconds": 30}]}`
+ ]}`
 
 func processSetup(t *testing.T, n Runner, subs map[string]*subject) (*Executor, *tr.ActionContext, string) {
 	t.Helper()
@@ -157,7 +155,7 @@ func TestProcessKillByRecordedIdentity(t *testing.T) {
 
 // A restart: only a process the runner killed and that no longer runs,
 // relaunched with its recorded command line; the new identity clears the
-// killed one. The coded case goes to the product's handler.
+// killed one.
 func TestProcessRestartOnlyWhatTheRunnerKilled(t *testing.T) {
 	n := (&ruleNode{}).on("/proc/5555", answer{out: "absent\n"}).on("setsid sh -c", answer{out: "6666\n"}).
 		on("/proc/6666", answer{out: "start 88\n"}).on("ss -Hltnp", answer{out: strings.ReplaceAll(held, "5555", "6666")})
@@ -183,18 +181,6 @@ func TestProcessRestartOnlyWhatTheRunnerKilled(t *testing.T) {
 			t.Errorf("%s: %v %q", name, out, n.calls)
 		}
 	}
-	// The coded case.
-	x, actx, _ = processSetup(t, &ruleNode{}, map[string]*subject{})
-	called := false
-	x.Coded = func(name string) (tr.ActionHandlerFunc, bool) {
-		return func(context.Context, *tr.ActionContext, tr.Action) (map[string]string, error) {
-			called = name == "p_restart_boss"
-			return map[string]string{"value": "ok"}, nil
-		}, true
-	}
-	if _, err := x.Handler("p_restart")(context.Background(), actx, tr.Action{Params: map[string]string{"proc": "boss"}}); err != nil || !called {
-		t.Fatalf("coded: %v %v", called, err)
-	}
 }
 
 func TestProcessParseRefusals(t *testing.T) {
@@ -206,7 +192,6 @@ func TestProcessParseRefusals(t *testing.T) {
 		"capture named before ready":   {`"log": "/logs/{{svc.name}}.{{now_ns}}.log"`, `"log": "/logs/{{ready.epoch}}.log"`},
 		"a refusal that changes state": {`"unknown": {"svc.state": "unsure"}`, `"refused": {"svc.state": "unsure"}`},
 		"a restart with its own argv":  {`"op": "restart", "subject": "proc", "name": "svcd", "cite": "x.go:6",`, `"op": "restart", "subject": "proc", "name": "svcd", "cite": "x.go:6", "argv": ["x"],`},
-		"coded to no exception":        {`"handler": "p_restart_boss"`, `"handler": "p_other"`},
 		"ports_free as a ready probe":  {`{"name": "own", "kind": "listeners_held", "addresses": ["{{svc.addr}}"]`, `{"name": "own", "kind": "ports_free", "addresses": ["{{svc.addr}}"]`},
 		"a kill without its bound":     {`"within_param": "kill_seconds"`, `"within_param": "nope"`},
 	} {

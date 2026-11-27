@@ -69,7 +69,7 @@ func RegisterPack(r *tr.Registry) {
 		"v3_op_release": blockActions.Handler("v3_op_release"), "v3_op_stop": blockActions.Handler("v3_op_stop"), "v3_op_move": blockActions.Handler("v3_op_move"), "v3_op_delete": blockActions.Handler("v3_op_delete"),
 		"v3_op_observe": blockActions.Handler("v3_op_observe"), "v3_op_flush": blockActions.Handler("v3_op_flush"),
 		// Process faults (faults.go): kill and restart by recorded identity, and the healthy observation.
-		"v3_op_kill": blockActions.Handler("v3_op_kill"), "v3_op_restart": blockActions.Handler("v3_op_restart"), "v3_op_restart_master": v3OpRestartMaster, "v3_op_healthy": v3OpHealthy,
+		"v3_op_kill": blockActions.Handler("v3_op_kill"), "v3_op_restart": v3OpRestart, "v3_op_restart_holder": blockActions.Handler("v3_op_restart_holder"), "v3_op_healthy": v3OpHealthy,
 	} {
 		r.RegisterFunc(name, tr.TierBlock, f)
 	}

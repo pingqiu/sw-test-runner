@@ -42,7 +42,11 @@ func (e opEnv) runDeclared(ctx context.Context, actx *tr.ActionContext, node run
 	for k, v := range params {
 		p[k] = v
 	}
-	return blockActions.Handler(action)(ctx, actx, tr.Action{Params: p})
+	h := blockActions.Handler
+	if action == "v3_op_restart" {
+		return v3OpRestart(ctx, actx, tr.Action{Params: p})
+	}
+	return h(action)(ctx, actx, tr.Action{Params: p})
 }
 
 // kill is the declared v3_op_kill of process on node.

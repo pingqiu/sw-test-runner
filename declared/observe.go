@@ -18,8 +18,8 @@ package declared
 //   - "json_strings": stdout is a JSON list of strings, into Into; when the
 //     command fails or the answer is not such a list, ErrorInto is Error.
 //
-// A step's When skips it; a derived value a step names that cannot be
-// computed puts its error in the step's ErrorInto and the command does not
+// A step's When skips it; a derived value, or a computed configuration
+// key, a step names that cannot be had puts its error in the step's ErrorInto and the command does not
 // run.
 
 import (
@@ -113,34 +113,26 @@ func (o *Out) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Derived is a value computed from a template, named {{derived.<name>}}:
-// "port_offset" moves the port of a host:port (Error when the port is not
-// above MinPort-1 after parsing), "trim_right" trims Chars from the right,
-// "prefix" keeps the first Length bytes.
+// Derived is a value looked up in a table, named {{derived.<name>}}: its
+// one kind is "map", the row Map has for the expanded From; a value with
+// no row is Error. A description computes nothing else: a value a function
+// of others would give is the product's to compute (Executor.Compute, or
+// a subject's field).
 type Derived struct {
-	Kind    string `json:"kind"`
-	From    string `json:"from"`
-	Offset  int    `json:"offset,omitempty"`
-	MinPort int    `json:"min_port,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Chars   string `json:"chars,omitempty"`
-	Length  int    `json:"length,omitempty"`
-	// Map ("map"): the value is the row of the expanded From; a value with
-	// no row is Error.
-	Map map[string]string `json:"map,omitempty"`
+	Kind  string            `json:"kind"`
+	From  string            `json:"from"`
+	Error string            `json:"error,omitempty"`
+	Map   map[string]string `json:"map,omitempty"`
 }
 
-// checkDerived checks derived values: a known kind over defined names.
+// checkDerived checks derived values: a map over defined names.
 func checkDerived(ds map[string]Derived, base func(string) error) error {
 	for k, d := range ds {
-		switch d.Kind {
-		case "port_offset", "trim_right", "prefix":
-		case "map":
-			if len(d.Map) == 0 || d.Error == "" {
-				return fmt.Errorf("derived %s: a map needs its rows and its error", k)
-			}
-		default:
-			return fmt.Errorf("derived %s: kind %q", k, d.Kind)
+		if d.Kind != "map" {
+			return fmt.Errorf("derived %s: kind %q; a derived value is a map (a lookup table)", k, d.Kind)
+		}
+		if len(d.Map) == 0 || d.Error == "" {
+			return fmt.Errorf("derived %s: a map needs its rows and its error", k)
 		}
 		if err := base(d.From); err != nil {
 			return fmt.Errorf("derived %s: %w", k, err)
@@ -154,26 +146,11 @@ func (d Derived) compute(s *scope) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	switch d.Kind {
-	case "port_offset":
-		host, port, ok := strings.Cut(from, ":")
-		p, err := strconv.Atoi(port)
-		if !ok || err != nil || p < d.MinPort {
-			return "", errors.New(d.Error)
-		}
-		return fmt.Sprintf("%s:%d", host, p+d.Offset), nil
-	case "trim_right":
-		return strings.TrimRight(from, d.Chars), nil
-	case "prefix":
-		return from[:min(d.Length, len(from))], nil
-	case "map":
-		v, ok := d.Map[from]
-		if !ok {
-			return "", errors.New(d.Error)
-		}
-		return v, nil
+	v, ok := d.Map[from]
+	if !ok {
+		return "", errors.New(d.Error)
 	}
-	return "", fmt.Errorf("derived kind %q", d.Kind)
+	return v, nil
 }
 
 // structType builds the Go struct type of a schema: "string", "int",
