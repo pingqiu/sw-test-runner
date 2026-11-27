@@ -153,6 +153,7 @@ type guestConfig struct {
 	DeviceIODeadlineSecs  int    `json:"device_io_runner_deadline_seconds"`
 	DeviceIODeadlineAbout string `json:"device_io_runner_deadline_about"`
 	Connect               struct {
+		About     string   `json:"about"`
 		Options   []string `json:"options"`
 		SelectVar string   `json:"select_var"`
 		Default   struct {
@@ -160,13 +161,10 @@ type guestConfig struct {
 			Evidence bool   `json:"evidence"`
 			Cite     string `json:"cite"`
 		} `json:"default"`
-		Variants []struct {
-			Name     string         `json:"name"`
-			Options  map[string]int `json:"options"`
-			Evidence bool           `json:"evidence"`
-			Source   string         `json:"source"`
-			Why      string         `json:"why"`
-		} `json:"variants"`
+		ValuesSeen []struct {
+			Value  string `json:"value"`
+			Source string `json:"source"`
+		} `json:"values_seen"`
 	} `json:"connect"`
 }
 
@@ -185,18 +183,9 @@ var guest = func() guestConfig {
 	if g.DeviceIODeadlineSecs <= 0 || g.Connect.SelectVar == "" || g.Connect.Default.Name == "" || !g.Connect.Default.Evidence {
 		panic("v3block: product/actions.json guest: device_io_runner_deadline_seconds, connect.select_var and an evidence default connect are required")
 	}
-	known := map[string]bool{}
-	for _, o := range g.Connect.Options {
-		known[o] = true
-	}
-	for _, v := range g.Connect.Variants {
-		if v.Evidence || v.Source == "" || len(v.Options) == 0 {
-			panic("v3block: guest connect variant " + v.Name + ": a variant is never evidence, names its source and sets options")
-		}
-		for o := range v.Options {
-			if !known[o] {
-				panic("v3block: guest connect variant " + v.Name + ": option " + o + " is not declared")
-			}
+	for _, v := range g.Connect.ValuesSeen {
+		if _, err := parseConnect(g.Connect.Options, v.Value); err != nil || v.Source == "" {
+			panic(fmt.Sprintf("v3block: guest connect value %q: %v (and a source is required)", v.Value, err))
 		}
 	}
 	return g
@@ -216,28 +205,54 @@ func deviceDeadline() time.Duration {
 	return time.Duration(guest.DeviceIODeadlineSecs) * time.Second
 }
 
-// selectConnect resolves the run's connect: "" or the default's name is
-// the product's plain connect (the only one whose results are release
-// evidence); a variant's name gives its options, labelled as a variant.
-func selectConnect(name string) (guestConnect, error) {
+// selectConnect resolves the run's connect from its guest_connect value:
+// empty is the product's plain connect (the only one whose results are
+// release evidence); otherwise the declared options it sets, in the
+// declared order, labelled as a variant.
+func selectConnect(value string) (guestConnect, error) {
 	c := guest.Connect
-	if name == "" || name == c.Default.Name {
+	set, err := parseConnect(c.Options, value)
+	if err != nil {
+		return guestConnect{}, fmt.Errorf("%s %q: %w", c.SelectVar, value, err)
+	}
+	if len(set) == 0 {
 		return guestConnect{Name: c.Default.Name, Label: c.Default.Name + " (the product's connect, kernel defaults)"}, nil
 	}
-	for _, v := range c.Variants {
-		if v.Name != name {
-			continue
+	var opts, parts []string
+	for _, o := range c.Options {
+		if n, ok := set[o]; ok {
+			opts = append(opts, fmt.Sprintf(",%s=%d", o, n))
+			parts = append(parts, fmt.Sprintf("%s=%d", o, n))
 		}
-		var opts, parts []string
-		for _, o := range c.Options {
-			if n, ok := v.Options[o]; ok {
-				opts = append(opts, fmt.Sprintf(",%s=%d", o, n))
-				parts = append(parts, fmt.Sprintf("%s=%d", o, n))
-			}
-		}
-		return guestConnect{Name: name, Options: strings.Join(opts, ""), Label: "guest connect variant: " + strings.Join(parts, ",")}, nil
 	}
-	return guestConnect{}, fmt.Errorf("%s %q is not a declared guest connect", c.SelectVar, name)
+	return guestConnect{Name: "variant", Options: strings.Join(opts, ""), Label: "guest connect variant: " + strings.Join(parts, ",")}, nil
+}
+
+// parseConnect reads "name=value" pairs (space or comma separated; a name
+// with - or _) into kernel option names; a name not among options, a value
+// that is not an integer, or a name given twice is refused.
+func parseConnect(options []string, value string) (map[string]int, error) {
+	known := map[string]bool{}
+	for _, o := range options {
+		known[o] = true
+	}
+	set := map[string]int{}
+	for _, kv := range strings.FieldsFunc(value, func(r rune) bool { return r == ' ' || r == ',' || r == '\t' }) {
+		k, v, ok := strings.Cut(kv, "=")
+		k = strings.ReplaceAll(strings.TrimLeft(k, "-"), "-", "_")
+		n, err := strconv.Atoi(v)
+		switch {
+		case !ok || err != nil:
+			return nil, fmt.Errorf("%q is not name=integer", kv)
+		case !known[k]:
+			return nil, fmt.Errorf("unknown connect option %q (known: %s)", k, strings.Join(options, ", "))
+		}
+		if _, dup := set[k]; dup {
+			return nil, fmt.Errorf("connect option %q given twice", k)
+		}
+		set[k] = n
+	}
+	return set, nil
 }
 
 func strictJSON(b []byte, v any) error {

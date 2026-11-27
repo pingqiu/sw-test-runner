@@ -138,18 +138,17 @@
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],
   "guest": {
-    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default.",
+    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; empty, it is the default.",
     "device_io_runner_deadline_seconds": 120,
     "device_io_runner_deadline_about": "The RUNNER's own bound on one read, write or flush through the kernel block device, not a product bound. Under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at this deadline and records the abandoned child by pid and start time. It lies above fast_io_fail_tmo of every connect variant.",
     "connect": {
-      "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
-      "select_var": "guest_connect_variant",
+      "about": "The run's guest connect is the run var select_var (a scenario env value): space- or comma-separated name=value pairs, names from options (written with _ or -), integer values, e.g. guest_connect: \"ctrl-loss-tmo=180 reconnect-delay=2\". They go into the kernel's fabrics connect string under the kernel's option names (the runner connects through /dev/nvme-fabrics, not nvme-cli, whose flags are --ctrl-loss-tmo, --reconnect-delay, --fast_io_fail_tmo, --keep-alive-tmo). An unknown name is refused. Empty is the default. Any value set is a variant: named 'guest connect variant: <values>' in the run header and in every attach, never release evidence, and no checker changes with it.",
+      "options": ["ctrl_loss_tmo", "reconnect_delay", "fast_io_fail_tmo", "keep_alive_tmo"],
+      "select_var": "guest_connect",
       "default": {"name": "plain", "evidence": true,
         "cite": "the product's own connects carry no timeout option: core/csi/linux_util.go:318 (nvme connect -t -a -s -n), docs/standalone-deployment.md:408; only this connect's results count as release evidence"},
-      "variants": [
-        {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
-         "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
-         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."}
+      "values_seen": [
+        {"value": "fast_io_fail_tmo=5 ctrl_loss_tmo=60", "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)"}
       ]
     }
   }

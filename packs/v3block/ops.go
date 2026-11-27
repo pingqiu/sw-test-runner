@@ -387,7 +387,7 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	h := v.Hosts[v.Cur]
 	defer saveVolume(actx, v)
-	return recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
+	return recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
 		if v.LayoutID == "" {
 			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
 			if err != nil {
