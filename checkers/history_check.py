@@ -854,6 +854,77 @@ def kill_scope(inv):
     return PRODUCT.kill_scope(inv)
 
 
+def holder_kills(recs):
+    """The kills of the history that reach a holder, in file order, each a
+    dict: seq (the record DUR applies it at), scope (kill_scope: a set of
+    volumes, or None for every volume), start and end (the interval, on the
+    history's clock, in which the holder died), note (what a finding says
+    about it, or '') and restarted (the report line of an inferred kill, or
+    None).
+    A recorded kill (verb kill, outcome not refused) reaching some volume
+    runs from its invoke to its completion (the end record when it never
+    completed). A holder restarted with no recorded kill is a kill too: a
+    healthy record whose result.holders gives a volume another identity
+    than the previous healthy record, with no kill or restart reaching that
+    volume between them; it is applied at the later healthy record and its
+    interval runs from the earlier one. DUR and LIN read kills only here."""
+    comp_of = {r['of']: r for r in recs if r['kind'] == 'complete'}
+    end_mono = recs[-1]['mono_ns'] if recs else 0
+    out = []
+    # Holder identities from healthy records: volume -> (pid, start) and the
+    # healthy record it was seen at; covered: volumes a kill or restart reached
+    # since (None: one that names no volume reached every volume).
+    holders, seen_at, covered = {}, {}, set()
+    for r in recs:
+        if r['kind'] == 'invoke':
+            if r['verb'] in ('kill', 'restart'):
+                # Either one explains a new holder at the next healthy record
+                # (a refused one too: the check is about explaining, not judging).
+                reach = kill_scope(r)
+                covered.update({None} if reach is None else reach)
+            comp = comp_of.get(r['seq'])
+            if killed(r, comp):
+                scope = kill_scope(r)
+                if scope != set():
+                    out.append({'seq': r['seq'], 'scope': scope, 'start': r['mono_ns'],
+                                'end': comp['mono_ns'] if comp is not None else end_mono,
+                                'note': ' (a kill naming no volume, applied to every volume)' if scope is None else '',
+                                'restarted': None})
+        elif r['kind'] == 'observe' and r.get('verb') == 'healthy':
+            # The product reader names each volume's holder identity in the
+            # healthy record; a changed identity is a restarted holder.
+            seen = PRODUCT.holder_identity(r)
+            for hv, ident in sorted(seen.items()):
+                if hv in holders and holders[hv] != ident and hv not in covered and None not in covered:
+                    prev = seen_at[hv]
+                    out.append({'seq': r['seq'], 'scope': {hv}, 'start': prev['mono_ns'], 'end': r['mono_ns'],
+                                'note': ' (holder of %s restarted with no recorded kill)' % hv,
+                                'restarted': 'holder of %s restarted with no recorded kill (healthy seq %d -> %d)' % (hv, prev['seq'], r['seq'])})
+                holders[hv], seen_at[hv] = ident, r
+            # A kill or restart is "between" two healthy records of a volume
+            # only until the volume's next one.
+            covered.difference_update(seen)
+            if seen:
+                covered.discard(None)
+    return out
+
+
+def kill_fallback(durable, newer, open_=()):
+    """What a block may hold right after a kill of its holder (the durability
+    rule, kb r1): its last durable values, any write after the durable point,
+    and any open unknown write (one whose holder was alive after it)."""
+    return set(durable) | set(newer) | set(open_)
+
+
+def durable_after_kill(durable, newer, got):
+    """What the next kill may leave once the block, after this kill, is known
+    to hold `got`: the durable set before this kill plus `got`, or `got`
+    alone when it is one of that durable set and of nothing newer (it names
+    which durable value it was). A value lost at a kill, or an unknown
+    settled as not taken effect, does not come back at the next."""
+    return {got} if got in durable and got not in newer else set(durable) | {got}
+
+
 @unknown_on_overlap
 def dur(recs):
     """Durability with flush.
@@ -915,10 +986,16 @@ def dur(recs):
     and every written block is read after its last write. No kill and no
     unflushed write: FAIL, not exercised."""
     ops_ = operations(recs)
-    comp_of = {inv['seq']: comp for inv, comp in ops_}
-    # Kills that reach a holder; a master kill reaches none.
-    nkills = sum(1 for inv, comp in ops_ if killed(inv, comp) and kill_scope(inv) != set())
-    unscoped = []   # seqs of kills applied to every volume
+    # Kills that reach a holder (a master kill reaches none), recorded or
+    # inferred from a restarted holder, by the record they apply at.
+    kills = holder_kills(recs)
+    kill_at = {}
+    for k in kills:
+        kill_at.setdefault(k['seq'], []).append(k)
+    nkills = sum(1 for k in kills if k['restarted'] is None)
+    unscoped = [k['seq'] for k in kills if k['scope'] is None]   # kills applied to every volume
+    restarted = [k['restarted'] for k in kills if k['restarted'] is not None]
+    kinds = {k['seq']: k['note'] for k in kills if k['note']}   # kill seq -> what the findings say about it
     nunflushed = sum(1 for inv, _ in ops_ if inv['verb'] == 'write' and not flushed(inv.get('args') or {}))
     if not nkills and not nunflushed:
         return verdict(['no kill of a holder and no unflushed write in the history: DUR not exercised'])
@@ -939,8 +1016,6 @@ def dur(recs):
                                   'produced': set(init), 'kill': None, 'settled': None}
         return b
 
-    kinds = {}   # kill seq -> what the findings say about it
-
     def apply_kill(seq, scope):
         # scope: a set of volumes, or None for every volume.
         for (kv, _), b in st.items():
@@ -949,16 +1024,10 @@ def dur(recs):
             drop_kill(b)
             vals = {s for s, _ in b['volatile']}
             early = b['open'] - b['durable'] - vals   # unknowns invoked before the durable point
-            allowed = b['durable'] | vals | b['open']
+            allowed = kill_fallback(b['durable'], vals, b['open'])
             b['kill'] = (seq, set(b['durable']), list(b['volatile']), early, set(b['open']))
             b['cur'], b['open'], b['durable'], b['volatile'] = set(allowed), set(), set(allowed), []
             b['settled'] = None
-
-    # Holder identities from healthy records: volume -> (pid, start) and the
-    # healthy seq it was seen at; covered: volumes a kill or restart reached
-    # since (None: one that names no volume reached every volume).
-    holders, holder_seq, covered = {}, {}, set()
-    restarted = []
 
     def drop_kill(b):
         # A block whose kill was never resolved by a read: its acknowledged
@@ -969,35 +1038,10 @@ def dur(recs):
         b['kill'] = None
 
     for i, r in enumerate(recs):
+        for k in kill_at.get(r['seq'], ()):
+            apply_kill(r['seq'], k['scope'])
         if r['kind'] == 'invoke':
             inv_of[r['seq']] = r
-            if r['verb'] in ('kill', 'restart'):
-                # Either one explains a new holder at the next healthy record
-                # (a refused one too: the check is about explaining, not judging).
-                reach = kill_scope(r)
-                covered.update({None} if reach is None else reach)
-            scope = kill_scope(r) if killed(r, comp_of.get(r['seq'])) else set()
-            if scope is None:
-                unscoped.append(r['seq'])
-                kinds[r['seq']] = ' (a kill naming no volume, applied to every volume)'
-            if scope != set():
-                apply_kill(r['seq'], scope)
-            continue
-        if r['kind'] == 'observe' and r.get('verb') == 'healthy':
-            # The product reader names each volume's holder identity in the
-            # healthy record; a changed identity is a restarted holder.
-            seen = PRODUCT.holder_identity(r)
-            for hv, ident in sorted(seen.items()):
-                if hv in holders and holders[hv] != ident and hv not in covered and None not in covered:
-                    restarted.append('holder of %s restarted with no recorded kill (healthy seq %d -> %d)' % (hv, holder_seq[hv], r['seq']))
-                    kinds[r['seq']] = ' (holder of %s restarted with no recorded kill)' % hv
-                    apply_kill(r['seq'], {hv})
-                holders[hv], holder_seq[hv] = ident, r['seq']
-            # A kill or restart is "between" two healthy records of a volume
-            # only until the volume's next one.
-            covered.difference_update(seen)
-            if seen:
-                covered.discard(None)
             continue
         if r['kind'] != 'complete':
             continue
@@ -1074,7 +1118,7 @@ def dur(recs):
                 # read that is one of that durable set and of nothing newer
                 # names the durable value: the others do not come back either.
                 newer = {s for s, _ in k[2]}   # writes after the durable point
-                b['durable'] = {got} if got in k[1] and got not in newer else k[1] | {got}
+                b['durable'] = durable_after_kill(k[1], newer, got)
                 b['settled'] = (k[0], inv['seq'], got)
             last_read[(vol, lba)] = i
     for b in st.values():
