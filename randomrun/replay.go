@@ -52,8 +52,10 @@ type Script struct {
 	Steps  []ReplayStep
 	Events []FaultEvent // the fault schedule of a fault-run history; nil otherwise
 	Sweep  []Op         // the end-of-run sweep; nil when the history has none
-	// Outages are the writes of each recorded master outage, by after_op.
-	Outages map[int][]Op
+	// Outages are the writes of each recorded master outage, by after_op;
+	// OutageSkips the outages recorded skipped.
+	Outages     map[int][]Op
+	OutageSkips map[int]bool
 	// Kills are the recorded kill decisions (fault_kill), in order; nil when
 	// the history has none.
 	Kills []KillDecision
@@ -91,7 +93,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	var header map[string]any
 	var steps []ReplayStep
 	var events, sweep = []FaultEvent(nil), []Op(nil)
-	outages := map[int][]Op{}
+	outages, outageSkips := map[int][]Op{}, map[int]bool{}
 	var kills []KillDecision
 	faulty, needSchedule := false, false
 	cur := -1 // the index of the step whose records are being read; -1 for none
@@ -166,6 +168,9 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 					return Script{}, fmt.Errorf("%s: %s line %d: master_outage %v %v", name, path, line, r.Result["after_op"], err)
 				}
 				outages[int(k)] = w
+				if r.Result["skipped"] != nil {
+					outageSkips[int(k)] = true
+				}
 				cur = -1
 			case "gen_coverage", "gen_replay", "gen_stop", VerbHealthy:
 				cur = -1
@@ -194,12 +199,18 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	if len(steps) == 0 {
 		return Script{}, fmt.Errorf("%s: %s: no gen_step records", name, path)
 	}
+	last := 0 // the last drawn step: events after it never ran
+	for _, s := range steps {
+		if s.Op.Forced != "tail" {
+			last = max(last, s.Op.No)
+		}
+	}
 	for _, e := range events {
-		if e.Action == FaultMasterOutage && outages[e.AfterOp] == nil {
+		if e.Action == FaultMasterOutage && e.AfterOp <= last && outages[e.AfterOp] == nil {
 			return Script{}, fmt.Errorf("%s: %s: the master outage after operation %d has no master_outage record", name, path, e.AfterOp)
 		}
 	}
-	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, Kills: kills}, nil
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills}, nil
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.
@@ -292,6 +303,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		}
 		fr = newFaultRun(r, events, nil, header, sc.Outages)
 		fr.kills = sc.Kills
+		fr.outageSkips = sc.OutageSkips
 		fr.stopOnUnhealthy = true
 	}
 	// The coverage tail's steps ran after the run's end (the final healthy

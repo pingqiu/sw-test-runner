@@ -1075,3 +1075,68 @@ func TestKillTargetsAVolumeThatHolds(t *testing.T) {
 		t.Errorf("a fenced holder is a target: %s", got)
 	}
 }
+
+// A master outage with no volume serving is skipped and recorded
+// ("skipped": "nothing serving"), and a replay skips it too; with one
+// volume serving it runs.
+func TestMasterOutageSkippedWhenNothingServes(t *testing.T) {
+	masterKills := func(log []string) int {
+		n := 0
+		for _, l := range log {
+			n += btoi(l == FaultKill+" blockmaster")
+		}
+		return n
+	}
+	outages := func(p string) (skipped, ran int) {
+		for _, r := range records(t, p) {
+			if r.Verb != "master_outage" {
+				continue
+			}
+			if r.Result["skipped"] == randomrun.OutageNothingServing {
+				w, _ := r.Result["writes"].([]any)
+				if len(w) != 0 {
+					t.Fatalf("a skipped outage with writes: %v", r.Result)
+				}
+				skipped++
+			} else {
+				ran++
+			}
+		}
+		return skipped, ran
+	}
+	for name, c := range map[string]struct {
+		pool, weights string
+		skips         bool
+	}{
+		"nothing serving": {"g1 g2 g3 g4 g5 g6 g7 g8", "v3_op_create=1", true},
+		"one serving":     {"g1", "v3_op_create=1 v3_op_attach=1 v3_op_write=1", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &faultFake{}
+			f.install(t)
+			actx, p := genRunCtx(t)
+			a := outageAct("40")
+			a.Params["pool"], a.Params["weights"], a.Params["fault_master_outage"] = c.pool, c.weights, "0.5"
+			if _, err := v3GenRun(context.Background(), actx, a); err != nil {
+				t.Fatal(err)
+			}
+			_ = actx.History.Close()
+			skipped, ran := outages(p)
+			kills := masterKills(f.log)
+			if c.skips && (skipped == 0 || ran != 0 || kills != 0) {
+				t.Fatalf("nothing serving: %d skipped, %d ran, %d master kills", skipped, ran, kills)
+			}
+			if !c.skips && (ran == 0 || kills != ran) {
+				t.Fatalf("one serving: %d skipped, %d ran, %d master kills", skipped, ran, kills)
+			}
+			f.log = nil
+			out, b, err := replayInto(t, p)
+			if err != nil || out["value"] != "match" || masterKills(f.log) != kills {
+				t.Fatalf("replay: %v %v, %d master kills", out, err, masterKills(f.log))
+			}
+			if s2, r2 := outages(b); s2 != skipped || r2 != ran {
+				t.Fatalf("replay outages %d skipped %d ran, recorded %d %d", s2, r2, skipped, ran)
+			}
+		})
+	}
+}

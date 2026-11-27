@@ -55,8 +55,9 @@ const GenVersion = "m1-gen/6"
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
-// m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6.
-const GenVersionFaults = "m2-gen/5"
+// m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6. m2-gen/6: a master outage
+// with nothing serving is skipped.
+const GenVersionFaults = "m2-gen/6"
 
 //go:embed product/operations.json
 var operationsJSON []byte
