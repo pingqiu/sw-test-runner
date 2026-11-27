@@ -9,6 +9,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 // spawnDaemon backgrounds a daemon via `setsid -f`, then discovers its PID via
@@ -48,15 +49,7 @@ func spawnDaemon(ctx context.Context, node nodeRunner, bin string, args []string
 // shellQuote leaves s bare only when every byte is plainly safe for a POSIX
 // shell; otherwise it wraps s in single quotes, escaping embedded ones. A
 // list of unsafe characters would miss some (| ; & < > ( ) * ? [ ] ~ # !).
-func shellQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	if strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-") == "" {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellQuote(s string) string { return declared.ShellQuote(s) }
 
 func quoteAll(args []string) []string {
 	out := make([]string, len(args))

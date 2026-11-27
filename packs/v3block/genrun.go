@@ -21,12 +21,12 @@ import (
 )
 
 var genHandlers = map[string]tr.ActionHandlerFunc{
-	"v3_op_create": v3OpCreate, "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
-	"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,
-	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete, "v3_op_observe": v3OpObserve,
+	"v3_op_create": blockActions.Handler("v3_op_create"), "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
+	"v3_op_snapshot": blockActions.Handler("v3_op_snapshot"), "v3_op_snapshot_delete": blockActions.Handler("v3_op_snapshot_delete"), "v3_op_restore": blockActions.Handler("v3_op_restore"),
+	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": blockActions.Handler("v3_op_delete"), "v3_op_observe": v3OpObserve,
 	"v3_op_kill": v3OpKill, "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	"v3_op_flush":   v3OpFlush,
-	"v3_op_release": v3OpRelease,
+	"v3_op_release": blockActions.Handler("v3_op_release"),
 }
 
 // genRunner executes through the block handlers (read when called, so a

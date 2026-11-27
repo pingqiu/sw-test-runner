@@ -80,7 +80,7 @@ func violations(files map[string][]string) []string {
 	var bad []string
 	for file, ims := range files {
 		for _, im := range ims {
-			if strings.HasPrefix(file, "randomrun/") && strings.HasPrefix(im, module+"/packs/") {
+			if (strings.HasPrefix(file, "randomrun/") || strings.HasPrefix(file, "declared/")) && strings.HasPrefix(im, module+"/packs/") {
 				bad = append(bad, file+" imports "+im+" (the generic machine imports no pack)")
 			}
 			if (im == module+"/packs/v3block" || strings.HasPrefix(im, module+"/packs/v3block/")) &&
@@ -97,6 +97,9 @@ func TestImportGuard(t *testing.T) {
 	if len(files["randomrun/model.go"]) == 0 && len(files["randomrun/run.go"]) == 0 {
 		t.Fatal("the walk did not reach this package")
 	}
+	if len(files["declared/declared.go"]) == 0 {
+		t.Fatal("the walk did not reach the declared-action executor")
+	}
 	if bad := violations(files); len(bad) != 0 {
 		t.Fatalf("import guard:\n%s", strings.Join(bad, "\n"))
 	}
@@ -108,6 +111,10 @@ func TestImportGuardRedControls(t *testing.T) {
 		"the generic machine imports the block pack": {
 			red:   map[string][]string{"randomrun/run.go": {module + "/packs/v3block"}},
 			green: map[string][]string{"randomrun/run.go": {module}},
+		},
+		"the declared-action executor imports the block pack": {
+			red:   map[string][]string{"declared/declared.go": {module + "/packs/v3block"}},
+			green: map[string][]string{"declared/declared.go": {module}},
 		},
 		"the generic machine imports another pack": {
 			red:   map[string][]string{"randomrun/x_test.go": {module + "/packs/seaweed"}},
