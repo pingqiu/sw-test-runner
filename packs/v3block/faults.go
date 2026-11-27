@@ -29,6 +29,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 const (
@@ -806,6 +807,10 @@ func v3OpHealthy(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 	}
 	node, e, err := opConfig(actx, act, "v3_op_healthy")
 	if err != nil {
+		return nil, err
+	}
+	// A healthy point: look at every abandoned child once.
+	if err := declared.Check(ctx, node, actx.History, false); err != nil {
 		return nil, err
 	}
 	if look == "single" {

@@ -59,6 +59,8 @@ type opEnv struct {
 	deadline, deviceDeadline time.Duration
 	ioDir                    string
 	connect                  guestConnect
+	// node is the bounded node, for the abandoned-child watcher.
+	node runner
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -180,7 +182,7 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
 		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
 	}
-	e.deadline, e.deviceDeadline, e.ioDir, e.connect = deadline, deviceDeadline(), e.root+"/.runner-io", conn
+	e.deadline, e.deviceDeadline, e.ioDir, e.connect, e.node = deadline, deviceDeadline(), e.root+"/.runner-io", conn, node
 	return node, e, nil
 }
 
@@ -198,11 +200,14 @@ func recordBounded(ctx context.Context, actx *tr.ActionContext, e opEnv, verb, v
 		}
 		args["expect"] = e.expect
 	}
+	if err := declared.Check(ctx, e.node, actx.History, false); err != nil {
+		return nil, err
+	}
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: e.client, Op: opIDs[verb], Verb: verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err
 	}
-	octx, cancel := context.WithTimeout(ctx, e.deadline)
+	octx, cancel := context.WithTimeout(declared.WithOp(ctx, declared.OpRef{History: actx.History, Seq: seq, Volume: vol}), e.deadline)
 	outcome, result := do(octx)
 	timedOut := octx.Err() == context.DeadlineExceeded && ctx.Err() == nil
 	cancel()
@@ -242,7 +247,7 @@ func pause(ctx context.Context, d time.Duration) bool {
 func (e opEnv) runDevice(ctx context.Context, node runner, cmd string) (string, string, int, map[string]any) {
 	stdout, stderr, code, err := declared.RunDetached(ctx, node, true, e.ioDir, cmd, e.deviceDeadline, devicePoll)
 	if t, ok := declared.AsDetached(err); ok {
-		return "", "", -1, declared.TimeoutResult(t)
+		return "", "", -1, declared.Abandon(ctx, t)
 	}
 	if err != nil {
 		return "", "", -1, map[string]any{"detail": err.Error()}
@@ -272,9 +277,18 @@ func fromChunk(op opPath, stdout string, code int, result map[string]any) (strin
 // later phase of the same run (the checkers) judges a history that says it is
 // whole. Every record after it is refused; the CLI's own close at the end of
 // the run is then a no-op.
-func v3HistoryEnd(_ context.Context, actx *tr.ActionContext, _ tr.Action) (map[string]string, error) {
+func v3HistoryEnd(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	if actx.History == nil {
 		return nil, errors.New("v3_history_end: no history (typed operations run only with a run bundle)")
+	}
+	// The run's end: every abandoned child still watched is recorded, gone
+	// or alive.
+	var node declared.Runner
+	if n, err := opNode(actx, act.Node); err == nil {
+		node = n
+	}
+	if err := declared.Check(ctx, node, actx.History, true); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
 	}
 	open := actx.History.Open()
 	if err := actx.History.Close(); err != nil {
@@ -754,13 +768,33 @@ func readCmd(dev string, lba uint64) string {
 	return fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba)))
 }
 
+// disconnect disconnects the guest from v and records it (observe
+// "disconnect": nqn, controllers deleted, ok) in the history of the
+// operation ctx carries: the checkers close an unknown write's window on a
+// recorded disconnect of the device it went through.
+func (e opEnv) disconnect(ctx context.Context, node runner, v *opVolume) string {
+	n, why := nvmeDisconnectCount(ctx, node, v.NQN)
+	if ref, ok := declared.OpOf(ctx); ok {
+		var controllers any
+		if n >= 0 {
+			controllers = n
+		}
+		res := map[string]any{"nqn": v.NQN, "controllers": controllers, "ok": why == ""}
+		if why != "" {
+			res["detail"] = why
+		}
+		_ = ref.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "disconnect", Volume: v.Name, Result: res})
+	}
+	return why
+}
+
 // handOver runs the planned stop of the holder: disconnect the guest, detach
 // --plain, revoke with the sealed generation, wait for the holder to exit by
 // itself, and wait for the master's recorded ACK of (replica, epoch). It
 // returns the result fields and "" or the reason the stop is not complete.
 func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
 	res := map[string]any{"epoch": v.Epoch}
-	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
+	if why := e.disconnect(ctx, node, v); why != "" {
 		return res, why
 	}
 	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk detach --plain --volume %s --status-addr %s --timeout 120s", shellQuote(e.cli()), shellQuote(v.Name), shellQuote(v.Hosts[v.Cur].Status)))

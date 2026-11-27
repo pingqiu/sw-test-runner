@@ -54,6 +54,9 @@ func (h *SimHost) do(ctx context.Context, cmd string, root bool) (string, string
 		return h.Inner.Run(ctx, cmd)
 	}
 	f := strings.Fields(strings.SplitN(cmd, ";", 2)[0])
+	if len(f) >= 3 && f[2] == "watch" {
+		return h.watch(f[3:]), "", 0, nil
+	}
 	if len(f) < 4 {
 		return "", "bad protocol command", 2, nil
 	}
@@ -125,4 +128,32 @@ func (h *SimHost) do(ctx context.Context, cmd string, root bool) (string, string
 		return "killed\n", "", 0, nil
 	}
 	return "", "bad protocol verb", 2, nil
+}
+
+// watch answers the abandoned-child watcher: a survivor (the job's command
+// process, pid+1) is alive until its job finishes, then gone with the
+// job's exit code as the waiter would have written it.
+func (h *SimHost) watch(pids []string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var b strings.Builder
+	for _, p := range pids {
+		var job *simJob
+		for _, j := range h.jobs {
+			if fmt.Sprint(j.pid+1) == p {
+				job = j
+			}
+		}
+		if job == nil {
+			fmt.Fprintf(&b, "gone %s - -\n", p)
+			continue
+		}
+		select {
+		case <-job.done:
+			fmt.Fprintf(&b, "gone %s %d %s\n", p, job.code, p)
+		default:
+			fmt.Fprintf(&b, "alive %s\n", p)
+		}
+	}
+	return b.String()
 }

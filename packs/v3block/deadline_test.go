@@ -110,7 +110,13 @@ func TestExceptionEndsAtItsRunnerDeadline(t *testing.T) {
 		}
 		_ = actx.History.Close()
 		rs := historyRecords(t, p)
-		if len(rs) != 3 || rs[1].Result["detail"] != "timeout after 0s" {
+		var done *tr.HistoryRecord
+		for i := range rs {
+			if rs[i].Kind == tr.HistoryComplete {
+				done = &rs[i]
+			}
+		}
+		if done == nil || done.Result["detail"] != "timeout after 0s" {
 			t.Errorf("%s: records %+v", name, rs)
 		}
 	}
@@ -255,4 +261,73 @@ func TestAttachRecordsTheGuestConnect(t *testing.T) {
 		t.Fatalf("an unknown option was not refused: %v", err)
 	}
 	_ = actx.History.Close()
+}
+
+// A device read abandoned at its deadline is watched: still alive at the
+// run's end (v3_history_end), it is recorded child_exit unknown, alive
+// true, naming the read's invoke seq.
+func TestAbandonedDeviceIOIsWatchedToTheEnd(t *testing.T) {
+	defer func(d, p time.Duration) { deviceDeadlineOverride, devicePoll = d, p }(deviceDeadlineOverride, devicePoll)
+	deviceDeadlineOverride, devicePoll = 200*time.Millisecond, 5*time.Millisecond
+	dev := (&fakeNode{}).on("subsysnqn", ok(oneDevice))
+	host := &declared.SimHost{Inner: stuckOn{match: "skip=0 ", inner: dev}, Unkillable: true}
+	actx, p := deadlineCtx(t, host)
+	if _, err := v3OpRead(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "lbas": "0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if declared.Watched(actx.History) != 1 {
+		t.Fatalf("%d watched, want 1", declared.Watched(actx.History))
+	}
+	if _, err := v3HistoryEnd(context.Background(), actx, tr.Action{}); err != nil {
+		t.Fatal(err)
+	}
+	var ce []tr.HistoryRecord
+	for _, r := range historyRecords(t, p) {
+		if r.Verb == "child_exit" {
+			ce = append(ce, r)
+		}
+	}
+	if len(ce) != 1 || ce[0].Result["outcome"] != tr.OutcomeUnknown || ce[0].Result["alive"] != true || ce[0].Result["op_seq"] != float64(1) || ce[0].Volume != "v1" {
+		t.Fatalf("child_exit %+v", ce)
+	}
+}
+
+// Every disconnect the runner performs inside an operation (the planned
+// stop's and the move's hand-over) writes an observe record "disconnect".
+func TestDisconnectIsRecorded(t *testing.T) {
+	for name, h := range map[string]tr.ActionHandlerFunc{"stop": v3OpStop, "move": v3OpMove} {
+		f := (&fakeNode{}).on("delete_controller", ok("deleted 1\n")).on("subsysnqn", ok("end\n"))
+		actx, p := deadlineCtx(t, f)
+		if _, err := h(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		var got []tr.HistoryRecord
+		for _, r := range historyRecords(t, p) {
+			if r.Verb == "disconnect" {
+				got = append(got, r)
+			}
+		}
+		if len(got) != 1 || got[0].Client != "runner" || got[0].Volume != "v1" || got[0].Result["ok"] != true ||
+			got[0].Result["controllers"] != float64(1) || got[0].Result["nqn"] != "nqn.2026-11.io.seaweedfs:op-v1" {
+			t.Fatalf("%s: disconnect records %+v", name, got)
+		}
+	}
+	// A failed disconnect is recorded too, not ok.
+	f := (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "permission denied", code: 4})
+	actx, p := deadlineCtx(t, f)
+	_, _ = v3OpStop(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+	_ = actx.History.Close()
+	n := 0
+	for _, r := range historyRecords(t, p) {
+		if r.Verb == "disconnect" {
+			n++
+			if r.Result["ok"] != false || r.Result["controllers"] != nil {
+				t.Fatalf("failed disconnect %+v", r)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d disconnect records for the failed one", n)
+	}
 }

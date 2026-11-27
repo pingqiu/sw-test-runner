@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 // shell runs commands with a local shell, as a node does (bash for Run;
@@ -64,7 +66,47 @@ func realShell(t *testing.T, sh shell) {
 	if o, _, _, _ := sh.Run(ctx, "pgrep -f 'slee[p] 300; echo late' || true"); strings.TrimSpace(o) != "" {
 		t.Fatalf("the killed session survives: %q", o)
 	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
 		t.Fatalf("exchange directories left: %d (only the killed one stays)", len(entries))
+	}
+	// The kill ended the command's session only: its waiter lived on and
+	// wrote the killed command's exit status.
+	time.Sleep(200 * time.Millisecond)
+	if rc, err := os.ReadFile(dir + "/" + entries[0].Name() + "/rc"); err != nil || strings.TrimSpace(string(rc)) != "137" {
+		t.Fatalf("the waiter's rc after the kill: %q %v", rc, err)
+	}
+}
+
+// The watcher's look at a real process (Linux): alive while it runs, then
+// gone with the exit its waiter wrote, decoded ok.
+func TestWatchRealShell(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs a Linux shell")
+	}
+	sh := shell{"sh"}
+	dir := t.TempDir()
+	out, _, _, err := sh.Run(context.Background(), `sleep 2 >/dev/null 2>&1 </dev/null & p=$!; s=$(cat /proc/$p/stat); s=${s##*) }; set -- $s; echo "$p ${20}"`)
+	f := strings.Fields(out)
+	if err != nil || len(f) != 2 {
+		t.Fatalf("%q %v", out, err)
+	}
+	if err := os.WriteFile(dir+"/cpid", []byte(f[0]+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := tr.OpenHistory(dir + "/h.jsonl")
+	defer h.Close()
+	Abandon(WithOp(context.Background(), OpRef{History: h, Seq: 5, Volume: "v"}), &Detached{Deadline: time.Second, Abandoned: []Proc{{PID: f[0], Start: f[1]}}, Dir: dir})
+	if err := Check(context.Background(), sh, h, false); err != nil || Watched(h) != 1 {
+		t.Fatalf("alive: %v, %d watched", err, Watched(h))
+	}
+	time.Sleep(2500 * time.Millisecond)
+	_ = os.WriteFile(dir+"/rc", []byte("0\n"), 0o644) // what the waiter writes on reaping it
+	if err := Check(context.Background(), sh, h, false); err != nil || Watched(h) != 0 {
+		t.Fatalf("gone: %v, %d watched", err, Watched(h))
+	}
+	b, _ := os.ReadFile(dir + "/h.jsonl")
+	if !strings.Contains(string(b), `"verb":"child_exit"`) || !strings.Contains(string(b), `"outcome":"ok"`) || !strings.Contains(string(b), `"op_seq":5`) {
+		t.Fatalf("history %s", b)
 	}
 }
