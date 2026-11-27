@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -298,8 +300,16 @@ func v3HistoryEnd(ctx context.Context, actx *tr.ActionContext, act tr.Action) (m
 	}
 	// The run's answer counts per verb (attempts, and each error code's
 	// answers: a snapshot's head_conflicts per snapshot attempted).
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "answer_counts", Result: declared.Counts(actx.History)}); err != nil {
+	counts, line := snapshotConflicts(declared.Counts(actx.History))
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "answer_counts", Result: counts}); err != nil {
 		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
+	actx.Log("%s", line)
+	if actx.Bundle != nil && actx.Bundle.Dir != "" {
+		b, _ := json.MarshalIndent(counts, "", "  ")
+		if err := os.WriteFile(filepath.Join(actx.Bundle.Dir, "answer-counts.json"), append(b, byte(10)), 0o644); err != nil {
+			return nil, fmt.Errorf("v3_history_end: answer-counts.json: %w", err)
+		}
 	}
 	open := actx.History.Open()
 	if err := actx.History.Close(); err != nil {
@@ -1045,4 +1055,24 @@ print(json.dumps(sorted(out)))`
 		return nil, "listing: " + firstLine(stderr)
 	}
 	return files, ""
+}
+
+// snapshotConflicts adds the release bar's ratio to the run's answer
+// counts, snapshot_head_conflict {conflicts, attempts} (every snapshot
+// attempt counts), and returns the summary line the run prints. A run with
+// no snapshot attempt says so: it cannot pass the bar silently.
+func snapshotConflicts(counts map[string]any) (map[string]any, string) {
+	k, n := 0, 0
+	if snap, ok := counts["snapshot"].(map[string]any); ok {
+		n, _ = snap["attempted"].(int)
+		if codes, ok := snap["codes"].(map[string]any); ok {
+			k, _ = codes["head_conflict"].(int)
+		}
+	}
+	counts["snapshot_head_conflict"] = map[string]any{"conflicts": k, "attempts": n}
+	line := fmt.Sprintf("head_conflict per snapshot attempted: %d/%d", k, n)
+	if n == 0 {
+		line += " (no snapshot attempted)"
+	}
+	return counts, line
 }
