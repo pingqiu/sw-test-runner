@@ -716,6 +716,29 @@ func (m *blockModel) OutageRestart() GenOp {
 	return GenOp{Action: "v3_op_restart", Params: map[string]string{"process": genOutage.master, "ready_seconds": strconv.Itoa(genOutage.maxSeconds)}}
 }
 
+// KillTarget resolves a scheduled holder kill "blockvolume:<i>" at kill
+// time: among the volumes that hold now (serving and not fenced, in pool
+// order) the (i mod n)-th, named by its place in the spec ("blockvolume:<k>",
+// the spec's volumes being the pool in order). None holding: ok false.
+// Another process name is its own target.
+func (m *blockModel) KillTarget(scheduled string) (string, bool) {
+	rest, isHolder := strings.CutPrefix(scheduled, "blockvolume:")
+	i, err := strconv.Atoi(rest)
+	if !isHolder || err != nil {
+		return scheduled, true
+	}
+	var holding []int
+	for k, n := range m.order {
+		if v := m.vols[n]; v.state == stServing && !v.fenced {
+			holding = append(holding, k)
+		}
+	}
+	if len(holding) == 0 {
+		return "", false
+	}
+	return "blockvolume:" + strconv.Itoa(holding[i%len(holding)]), true
+}
+
 // OutageWrites is one write on every serving volume, of one lba (after mod
 // blocks: no draw from the run's random stream), in pool order.
 func (m *blockModel) OutageWrites(after int) []GenOp {

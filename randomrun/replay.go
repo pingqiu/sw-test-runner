@@ -156,7 +156,8 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				if !ok || !ok2 || !ok3 || k != float64(int(k)) {
 					return Script{}, fmt.Errorf("%s: %s line %d: fault_kill %v", name, path, line, r.Result)
 				}
-				kills = append(kills, KillDecision{AfterOp: int(k), Process: p, Skipped: s})
+				sch, _ := r.Result["scheduled"].(string) // "" in a history from before targets were resolved
+				kills = append(kills, KillDecision{AfterOp: int(k), Scheduled: sch, Process: p, Skipped: s})
 				cur = -1
 			case "master_outage":
 				k, ok := r.Result["after_op"].(float64)

@@ -225,22 +225,39 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 	if !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.Record())) || len(want.Events) < 4 {
 		t.Fatalf("fault_schedule %v, want %v", recs[1].Result, want.Record())
 	}
-	// Each event ran after its operation: the last gen_step before it has its after_op.
-	lastStep, ev := 0, 0
+	// Each event ran after its operation (the last gen_step before it has its
+	// after_op), on the process its fault_kill record resolved; a kill the
+	// record skipped ran neither, nor did its restart.
+	lastStep, ev, ran := 0, 0, 0
+	target, skipped := "", false
 	for _, r := range recs {
 		if r.Verb == "gen_step" {
 			lastStep = int(r.Result["opno"].(float64))
 		}
+		for ev < len(want.Events) && skipped && want.Events[ev].Action == FaultRestart {
+			ev, skipped = ev+1, false // the skipped kill's restart
+		}
+		if r.Verb == "fault_kill" {
+			e := want.Events[ev]
+			if e.Action != FaultKill || r.Result["scheduled"] != e.Process || lastStep != e.AfterOp {
+				t.Fatalf("decision %+v for scheduled %+v after op %d", r.Result, e, lastStep)
+			}
+			target, skipped = r.Result["process"].(string), r.Result["skipped"] == true
+			if skipped {
+				ev++
+			}
+		}
 		if r.Kind == tr.HistoryInvoke && (r.Verb == FaultKill || r.Verb == FaultRestart) {
 			e := want.Events[ev]
-			if r.Verb != e.Action || r.Args["process"] != e.Process || lastStep != e.AfterOp {
-				t.Fatalf("event %d ran as %s %v after op %d, scheduled %+v", ev, r.Verb, r.Args, lastStep, e)
+			if r.Verb != e.Action || r.Args["process"] != target || lastStep != e.AfterOp {
+				t.Fatalf("event %d ran as %s %v after op %d, scheduled %+v, resolved %s", ev, r.Verb, r.Args, lastStep, e, target)
 			}
 			ev++
+			ran++
 		}
 	}
-	if ev != len(want.Events) || f.maxDown != 1 || f.down != "" {
-		t.Fatalf("%d of %d events ran, max down %d, down at end %q", ev, len(want.Events), f.maxDown, f.down)
+	if ran == 0 || ev != len(want.Events) || f.maxDown != 1 || f.down != "" {
+		t.Fatalf("%d of %d events done (%d ran), max down %d, down at end %q", ev, len(want.Events), ran, f.maxDown, f.down)
 	}
 	// After every restart, a healthy point.
 	for i, l := range f.log {
@@ -352,7 +369,8 @@ func TestGenRunWithFaultsEndsHealthyWhenTheRunEndsWhileDown(t *testing.T) {
 	actx, p := genRunCtx(t)
 	a := faultAct("1000", "1")
 	a.Params["pool"] = "g1 g2 g3"
-	a.Params["weights"] = "v3_op_create=1 v3_op_delete=1"
+	a.Params["weights"] = "v3_op_create=1 v3_op_attach=1" // holders to kill, then nothing ordinary left
+	a.Params["fault_restart_within"] = "1"                // kills often enough to meet a holder
 	out, err := v3GenRun(context.Background(), actx, a)
 	if err != nil {
 		t.Fatal(err)
@@ -832,19 +850,25 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	}
 	_ = actx.History.Close()
 	recs := records(t, a)
-	decided, ran := 0, kills(f.log)
+	decided, held, ran := 0, 0, kills(f.log)
 	for i, r := range recs {
 		if r.Verb != "fault_kill" {
 			continue
 		}
 		decided++
-		if recs[i-1].Verb != "healthy" || recs[i-1].Result["look"] != "single" || r.Result["skipped"] != false ||
-			recs[i+1].Kind != tr.HistoryInvoke || recs[i+1].Verb != FaultKill {
-			t.Fatalf("kill decision at %d: look %+v, decision %+v, then %+v", i, recs[i-1], r.Result, recs[i+1])
+		if recs[i-1].Verb != "healthy" || recs[i-1].Result["look"] != "single" {
+			t.Fatalf("kill decision at %d without its look: %+v", i, recs[i-1])
+		}
+		if r.Result["why"] == "nothing holds" {
+			continue // F10: no target
+		}
+		held++
+		if r.Result["skipped"] != false || recs[i+1].Kind != tr.HistoryInvoke || recs[i+1].Verb != FaultKill {
+			t.Fatalf("kill decision at %d: %+v, then %+v", i, r.Result, recs[i+1])
 		}
 	}
-	if decided == 0 || ran != 2*decided {
-		t.Fatalf("%d decisions, %d kills and restarts ran", decided, ran)
+	if held == 0 || ran != 2*held {
+		t.Fatalf("%d decisions with a target, %d kills and restarts ran", held, ran)
 	}
 	// The replay follows the recorded decisions, whatever its own looks show.
 	f.alsoDown = "blockvolume:7"
@@ -866,7 +890,7 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	for _, r := range records(t, b) {
 		if r.Verb == "fault_kill" {
 			d, _ := r.Result["down"].([]any)
-			if r.Result["skipped"] != true || len(d) != 1 || d[0] != "blockvolume:7" {
+			if r.Result["skipped"] != true || (r.Result["why"] != "nothing holds" && (len(d) != 1 || d[0] != "blockvolume:7")) {
 				t.Fatalf("decision %+v", r.Result)
 			}
 			skips++
@@ -978,4 +1002,66 @@ func TestGenRunLearnsFromSettledAndHealthyRecords(t *testing.T) {
 		t.Fatalf("%d fencing records, %d steps in the window", n, during)
 	}
 	_ = window{}
+}
+
+// F10: a scheduled holder kill resolves at kill time to a volume that holds
+// (serving per the model), recorded in its fault_kill record and in the
+// kill's args; with nothing holding, the kill is skipped.
+func TestKillTargetsAVolumeThatHolds(t *testing.T) {
+	f := &faultFake{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	names := pool(100)
+	serving := map[string]bool{}
+	var step map[string]any
+	var stepVol string
+	resolved, unresolvedHolds := 0, 0
+	for _, r := range records(t, p) {
+		switch {
+		case r.Verb == "gen_step":
+			step, stepVol = r.Result, r.Volume
+		case r.Kind == tr.HistoryComplete && step != nil && r.Outcome == tr.OutcomeOK && step["negative"] == nil && r.Volume == stepVol:
+			switch step["action"] {
+			case "v3_op_attach":
+				serving[stepVol] = true
+			case "v3_op_stop", "v3_op_move", "v3_op_delete":
+				serving[stepVol] = false
+			}
+		case r.Verb == "fault_kill" && r.Result["skipped"] == false:
+			proc := r.Result["process"].(string)
+			k, err := strconv.Atoi(strings.TrimPrefix(proc, "blockvolume:"))
+			if err != nil || !serving[names[k]] {
+				t.Fatalf("kill resolved to %s (%v), which does not hold", proc, err)
+			}
+			if sch := r.Result["scheduled"].(string); sch != proc {
+				resolved++
+			}
+			// The scheduled name taken literally would often name no holder.
+			if k2, _ := strconv.Atoi(strings.TrimPrefix(r.Result["scheduled"].(string), "blockvolume:")); !serving[names[k2]] {
+				unresolvedHolds++
+			}
+		}
+	}
+	if resolved == 0 || unresolvedHolds == 0 {
+		t.Fatalf("%d kills resolved away from their scheduled name, %d whose scheduled name held nothing", resolved, unresolvedHolds)
+	}
+	// Nothing holds: the model names no target.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(3), Blocks: 8})
+	if _, ok := g.m.KillTarget("blockvolume:0"); ok {
+		t.Fatal("a target with nothing holding")
+	}
+	drive(g, op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"), op("v3_op_create", "g3"), op("v3_op_attach", "g3", "host", "0"))
+	for sch, want := range map[string]string{"blockvolume:0": "blockvolume:1", "blockvolume:1": "blockvolume:2", "blockvolume:2": "blockvolume:1"} {
+		if got, ok := g.m.KillTarget(sch); !ok || got != want {
+			t.Errorf("%s resolved to %s %v, want %s", sch, got, ok, want)
+		}
+	}
+	g.m.Observed(healthyRec([]string{"g2"}))
+	if got, _ := g.m.KillTarget("blockvolume:0"); got != "blockvolume:2" {
+		t.Errorf("a fenced holder is a target: %s", got)
+	}
 }

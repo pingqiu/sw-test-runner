@@ -105,6 +105,10 @@ type Model interface {
 	// order, after the operation or fault event that wrote it: a model learns
 	// what was observed from the record, not from the invoke.
 	Observed(r tr.HistoryRecord)
+	// KillTarget resolves a scheduled kill at kill time: the process that
+	// holds for the scheduled name now, deterministically from the state;
+	// ok false when none holds (the kill is skipped).
+	KillTarget(scheduled string) (process string, ok bool)
 	// OutageWrites lists the writes of a short master outage after operation
 	// after: one on every serving subject. Learnt like any outcome.
 	OutageWrites(after int) []Op

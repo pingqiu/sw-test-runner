@@ -357,8 +357,11 @@ func parseOps(res map[string]any, key string) ([]Op, error) {
 //   - before each kill, one single look (Driver.Look): "one down at a time"
 //     is checked against what is observed, not only against what this run
 //     killed. When the look shows anything down the kill is skipped, and so
-//     is its restart. An observe record "fault_kill" {after_op, process,
-//     down, skipped} records the decision; a replay follows the recorded one;
+//     is its restart. The kill's target is resolved first: the model names,
+//     at kill time, the process that holds for the scheduled name
+//     (Model.KillTarget); none holding skips the kill too. An observe record
+//     "fault_kill" {after_op, scheduled, process, down, skipped, why}
+//     records the decision; a replay follows the recorded one;
 //   - after each restart, the Driver's healthy operation records a `healthy`
 //     observation; at a healthy point (it answers healthy=true) every
 //     operation whose outcome was unknown since the last healthy point is
@@ -389,8 +392,9 @@ type faultRun struct {
 	// kills are a replay's recorded kill decisions, in order (nil: decide
 	// from the look); skip is the process whose kill was skipped, so its
 	// restart is skipped too.
-	kills []KillDecision
-	skip  string
+	kills         []KillDecision
+	skip          string
+	downScheduled string // the scheduled name of the kill holding f.down down
 	// stopOnUnhealthy: a healthy point still false after its full wait ends
 	// the run (errUnhealthy) instead of carrying on against dead subjects.
 	stopOnUnhealthy bool
@@ -406,40 +410,68 @@ func stopRun(actx *tr.ActionContext, opno int) error {
 		Result: map[string]any{"after_op": opno, "why": errUnhealthy.Error()}})
 }
 
-// KillDecision is one recorded "fault_kill" record: whether the kill of
-// process after operation after_op ran.
+// KillDecision is one recorded "fault_kill" record: the scheduled process
+// of the kill after operation after_op, the process it resolved to, and
+// whether it ran.
 type KillDecision struct {
-	AfterOp int
-	Process string
-	Skipped bool
+	AfterOp   int
+	Scheduled string
+	Process   string
+	Skipped   bool
 }
 
-// killDecision takes the single look before a kill and decides: a kill only
-// while the look shows nothing down. It records the decision.
-func (f *faultRun) killDecision(ctx context.Context, actx *tr.ActionContext, e FaultEvent) (bool, error) {
+// killDecision resolves a scheduled kill and decides whether it runs. The
+// target is the process the model names for it now among those that hold
+// (Model.KillTarget; a replay takes the recorded one; with no model, the
+// scheduled name). Then one single look: the kill runs only while the look
+// shows nothing down and a target exists. The decision is recorded.
+func (f *faultRun) killDecision(ctx context.Context, actx *tr.ActionContext, e FaultEvent) (string, bool, error) {
+	target, why := e.Process, ""
+	if f.gen != nil {
+		if p, ok := f.gen.m.KillTarget(e.Process); ok {
+			target = p
+		} else {
+			target, why = "", "nothing holds"
+		}
+	}
 	o := f.r.Driver.Look()
 	h, ok := f.r.Handlers[o.Action]
 	if !ok {
-		return false, fmt.Errorf("no handler for %s", o.Action)
+		return "", false, fmt.Errorf("no handler for %s", o.Action)
 	}
 	out, err := h(ctx, actx, tr.Action{Action: o.Action, Node: f.r.Node, Params: o.Params})
 	if err != nil {
-		return false, fmt.Errorf("look before kill %s after operation %d: %w", e.Process, e.AfterOp, err)
+		return "", false, fmt.Errorf("look before kill %s after operation %d: %w", e.Process, e.AfterOp, err)
 	}
 	down := strings.Fields(out[DownKey])
-	skipped := len(down) > 0
+	if len(down) > 0 && why == "" {
+		why = "a process is down"
+	}
+	skipped := why != ""
 	if f.kills != nil {
-		if len(f.kills) == 0 || f.kills[0].AfterOp != e.AfterOp || f.kills[0].Process != e.Process {
-			return false, fmt.Errorf("kill %s after operation %d: no recorded fault_kill for it", e.Process, e.AfterOp)
+		k := KillDecision{}
+		if len(f.kills) > 0 {
+			k = f.kills[0]
 		}
-		skipped, f.kills = f.kills[0].Skipped, f.kills[1:]
+		if len(f.kills) == 0 || k.AfterOp != e.AfterOp || (k.Scheduled != e.Process && !(k.Scheduled == "" && k.Process == e.Process)) {
+			return "", false, fmt.Errorf("kill %s after operation %d: no recorded fault_kill for it", e.Process, e.AfterOp)
+		}
+		target, skipped, f.kills = k.Process, k.Skipped, f.kills[1:]
+		if skipped && why == "" {
+			why = "recorded skipped"
+		} else if !skipped {
+			why = ""
+		}
 	}
 	if down == nil {
 		down = []string{}
 	}
-	err = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_kill",
-		Result: map[string]any{"after_op": e.AfterOp, "process": e.Process, "down": down, "skipped": skipped}})
-	return skipped, err
+	res := map[string]any{"after_op": e.AfterOp, "scheduled": e.Process, "process": target, "down": down, "skipped": skipped}
+	if why != "" {
+		res["why"] = why
+	}
+	err = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_kill", Result: res})
+	return target, skipped, err
 }
 
 // newFaultRun takes the header's fault_healthy_wait (absent: "").
@@ -490,8 +522,9 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 	if e.Action == FaultMasterOutage {
 		return f.outage(ctx, actx, e)
 	}
+	scheduled := e.Process
 	if e.Action == FaultKill && e.AfterOp > 0 { // a scheduled kill (finish restarts with after_op 0)
-		skipped, err := f.killDecision(ctx, actx, e)
+		target, skipped, err := f.killDecision(ctx, actx, e)
 		if err != nil {
 			return err
 		}
@@ -499,22 +532,28 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 			f.skip = e.Process
 			return nil
 		}
+		e.Process = target
 	}
-	if e.Action == FaultRestart && f.skip != "" && f.skip == e.Process {
-		f.skip = ""
-		return nil
+	if e.Action == FaultRestart {
+		if f.skip != "" && f.skip == e.Process {
+			f.skip = ""
+			return nil
+		}
+		if e.Process == f.downScheduled && f.down != "" {
+			e.Process = f.down // the process the kill resolved to
+		}
 	}
 	if _, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e)); err != nil {
 		return fmt.Errorf("%s %s after operation %d: %w", e.Action, e.Process, e.AfterOp, err)
 	}
 	if f.gen != nil {
-		f.gen.Fault(e.Action, e.Process)
+		f.gen.Fault(e.Action, scheduled) // coverage by the schedule's names
 	}
 	if e.Action == FaultKill {
-		f.down = e.Process
+		f.down, f.downScheduled = e.Process, scheduled
 		return nil
 	}
-	f.down = ""
+	f.down, f.downScheduled = "", ""
 	return f.healthy(ctx, actx)
 }
 

@@ -13,7 +13,7 @@ observe gen gen_step g1  null {"action":"v3_op_attach","opno":4,"params":{"host"
 invoke  attach g1  null null
 complete  attach g1 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":4,"down":[],"process":"blockvolume:0","skipped":false}
+observe gen fault_kill   null {"after_op":4,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g2  null {"action":"v3_op_attach","opno":5,"params":{"host":"0","volume":"g2"}}
@@ -137,8 +137,8 @@ complete  write g1 ok null null
 invoke  write g1  null null
 complete  write g1 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":28,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":28,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_read","opno":29,"params":{"lbas":"3","volume":"g1"}}
 invoke  read g1  null null
@@ -149,7 +149,7 @@ complete  read g1 ok null null
 observe gen gen_step g1  null {"action":"v3_op_write","opno":31,"params":{"lbas":"1","round":"g31","volume":"g1"}}
 invoke  write g1  null null
 complete  write g1 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:0"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g1  null null
@@ -187,7 +187,7 @@ invoke  delete g1  null null
 complete  delete g1 refused null null
 observe  observe g1  null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":38,"down":[],"process":"blockvolume:0","skipped":false}
+observe gen fault_kill   null {"after_op":38,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_write","opno":39,"params":{"lbas":"7 1","round":"g39","volume":"g1"}}
@@ -420,8 +420,8 @@ observe gen gen_step g3  null {"action":"v3_op_read","opno":82,"params":{"lbas":
 invoke  read g3  null null
 complete  read g3 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":82,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":82,"down":[],"process":"blockvolume:2","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:2"} null
 complete  kill  ok null null
 observe gen gen_step g3  null {"action":"v3_op_restore","opno":83,"params":{"snapshot":"g3-s1","target_volume":"g7","volume":"g3"}}
 invoke  restore g3  null null
@@ -429,7 +429,7 @@ complete  restore g3 unknown null null
 observe gen gen_step g8  null {"action":"v3_op_create","opno":84,"params":{"volume":"g8"}}
 invoke  create g8  null null
 complete  create g8 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:2"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g3  null null
@@ -442,7 +442,7 @@ invoke  restore g1  null null
 complete  restore g1 refused null null
 observe  observe g1  null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":85,"down":[],"process":"blockvolume:0","skipped":false}
+observe gen fault_kill   null {"after_op":85,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_write","opno":86,"params":{"lbas":"1 0 5","round":"g86","volume":"g1"}}
@@ -532,8 +532,8 @@ observe gen gen_step g10  null {"action":"v3_op_read","opno":102,"params":{"lbas
 invoke  read g10  null null
 complete  read g10 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":102,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":102,"down":[],"process":"blockvolume:9","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:9"} null
 complete  kill  ok null null
 observe gen gen_step g9  null {"action":"v3_op_attach","opno":103,"params":{"host":"0","volume":"g9"}}
 invoke  attach g9  null null
@@ -559,7 +559,7 @@ complete  delete g4 unknown null null
 observe gen gen_step g11  null {"action":"v3_op_create","opno":107,"params":{"volume":"g11"}}
 invoke  create g11  null null
 complete  create g11 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:9"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g9  null null
@@ -657,8 +657,8 @@ observe gen gen_step g10  null {"action":"v3_op_read","opno":129,"params":{"lbas
 invoke  read g10  null null
 complete  read g10 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":129,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":129,"down":[],"process":"blockvolume:9","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:9"} null
 complete  kill  ok null null
 observe gen gen_step g10  null {"action":"v3_op_write","opno":130,"params":{"lbas":"7 0 1","round":"g130","volume":"g10"}}
 invoke  write g10  null null
@@ -730,7 +730,7 @@ complete  create g20 unknown null null
 observe gen gen_step g21  null {"action":"v3_op_create","opno":147,"params":{"volume":"g21"}}
 invoke  create g21  null null
 complete  create g21 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:9"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g10  null null
@@ -842,8 +842,8 @@ observe gen gen_step g22  null {"action":"v3_op_read","opno":170,"params":{"lbas
 invoke  read g22  null null
 complete  read g22 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":170,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":170,"down":[],"process":"blockvolume:21","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:21"} null
 complete  kill  ok null null
 observe gen gen_step g22  null {"action":"v3_op_snapshot_delete","opno":171,"params":{"name":"g22-s1","volume":"g22"}}
 invoke  snapshot_delete g22  null null
@@ -851,7 +851,7 @@ complete  snapshot_delete g22 unknown null null
 observe gen gen_step g23  null {"action":"v3_op_attach","opno":172,"params":{"host":"0","volume":"g23"}}
 invoke  attach g23  null null
 complete  attach g23 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:21"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g22  null null
@@ -963,8 +963,8 @@ observe gen gen_step g25  null {"action":"v3_op_read","opno":196,"params":{"lbas
 invoke  read g25  null null
 complete  read g25 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":196,"down":[],"process":"blockvolume:0","skipped":false}
-invoke  kill   {"process":"blockvolume:0"} null
+observe gen fault_kill   null {"after_op":196,"down":[],"process":"blockvolume:24","scheduled":"blockvolume:0","skipped":false}
+invoke  kill   {"process":"blockvolume:24"} null
 complete  kill  ok null null
 observe gen gen_step g25  null {"action":"v3_op_stop","opno":197,"params":{"volume":"g25"}}
 invoke  stop g25  null null
@@ -1029,7 +1029,7 @@ complete  create g42 unknown null null
 observe gen gen_step g43  null {"action":"v3_op_create","opno":216,"params":{"volume":"g43"}}
 invoke  create g43  null null
 complete  create g43 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:24"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g25  null null
@@ -1103,8 +1103,8 @@ observe gen gen_step g46  null {"action":"v3_op_read","opno":228,"params":{"lbas
 invoke  read g46  null null
 complete  read g46 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
-observe gen fault_kill   null {"after_op":228,"down":[],"process":"blockvolume:1","skipped":false}
-invoke  kill   {"process":"blockvolume:1"} null
+observe gen fault_kill   null {"after_op":228,"down":[],"process":"blockvolume:45","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:45"} null
 complete  kill  ok null null
 observe gen gen_step g46  null {"action":"v3_op_write","opno":229,"params":{"lbas":"1","round":"g229","volume":"g46"}}
 invoke  write g46  null null
@@ -1145,7 +1145,7 @@ complete  create g50 unknown null null
 observe gen gen_step g51  null {"action":"v3_op_create","opno":240,"params":{"volume":"g51"}}
 invoke  create g51  null null
 complete  create g51 unknown null null
-invoke  restart   {"process":"blockvolume:1"} null
+invoke  restart   {"process":"blockvolume:45"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g46  null null
