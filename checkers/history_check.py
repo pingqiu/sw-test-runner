@@ -116,6 +116,17 @@ code is 0 only when every checker passes.
       points and n = 0 PASSes; the night requires n > 0 in some run). FAIL
       (not exercised) if the history holds neither an unknown nor a healthy
       record.
+  MO  a short master outage interrupts nothing (checks.json master_outage):
+      the window runs from an ok kill of the master's completion to its next
+      ok restart's completion on the history's clock; one at most
+      max_seconds long is judged, a longer one (or one never restarted) is
+      NOT JUDGED and listed. Inside it: every write invoked is answered ok;
+      every single-look healthy record (result.look "single", one per look)
+      shows no volume not serving; and every holder identity such a look
+      shows equals the last one recorded before the kill. A judged window
+      with no write or no look is UNKNOWN ("short master outage not exercised
+      in window"). Reported: "short master outages judged: <n>". FAIL (not
+      exercised) when the history holds no ok kill of the master.
 
 A fault is an operation of module Runner (verbs fault_apply and fault_restore,
 args fault_key, resource, vm_id), never a record kind of its own. A fault is
@@ -153,6 +164,7 @@ RECOVERY = {}      # C6 recovery terms: term -> (seconds, cite); filled in place
 STATE_PARTS = ()   # the observation parts compared, in checks.json's order
 REQUIRED_PARTS = ()   # of those, the parts C5 requires in both observations of a judged refusal
 MASTER = None      # the fault target whose role is master
+MASTER_OUTAGE = None   # MO: (max seconds, cite) of an outage the pages say interrupts nothing, or None
 HOLDER_PREFIX = None   # a process whose name starts with this is a holder
 PLACED_BY_OBSERVATION = ('write',)   # extended by the product's PLACED_BY_STATUS
 
@@ -174,7 +186,7 @@ def _load_module(name, product_dir):
 def load_product(product_dir):
     """Read checks.json from `product_dir` and load its reader module. The
     tables BOUNDS and RECOVERY are filled in place (a test may patch them)."""
-    global CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS, MASTER, HOLDER_PREFIX, PLACED_BY_OBSERVATION, ZERO
+    global CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS, MASTER, HOLDER_PREFIX, PLACED_BY_OBSERVATION, ZERO, MASTER_OUTAGE
     with open(os.path.join(product_dir, 'checks.json'), encoding='utf-8') as fh:
         checks = json.load(fh)
     mod = _load_module(checks['reader']['module'], product_dir)
@@ -196,6 +208,8 @@ def load_product(product_dir):
     MASTER = roles['master']['name'] if 'master' in roles else None
     HOLDER_PREFIX = roles['holder'].get('prefix') if 'holder' in roles else None
     PLACED_BY_OBSERVATION = ('write',) + tuple(mod.PLACED_BY_STATUS)
+    mo_row = checks.get('master_outage')
+    MASTER_OUTAGE = (mo_row['max_seconds'], mo_row['cite']) if mo_row else None
 
 
 class Malformed(ValueError):
@@ -1233,7 +1247,89 @@ def c6(recs):
     return {'verdict': 'PASS', 'findings': notes + [count]}
 
 
-CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur}
+def master_windows(recs):
+    """(kill invoke, kill completion, restart invoke, restart completion or
+    None) of each master outage: an ok kill of the master and the next ok
+    restart of it after that kill's completion."""
+    out = []
+    ops_ = operations(recs)
+    for i, (inv, comp) in enumerate(ops_):
+        if inv['verb'] != 'kill' or PRODUCT.process_of(inv) != MASTER or comp is None or comp['outcome'] != 'ok':
+            continue
+        nxt = next(((i2, c2) for i2, c2 in ops_[i + 1:] if i2['verb'] == 'restart' and PRODUCT.process_of(i2) == MASTER
+                    and i2['seq'] > comp['seq'] and c2 is not None and c2['outcome'] == 'ok'), None)
+        out.append((inv, comp) + (nxt if nxt else (None, None)))
+    return out
+
+
+def mo(recs):
+    """A short master outage interrupts nothing: inside the window from an ok
+    kill of the master's completion to its ok restart's completion, when the
+    window is at most MASTER_OUTAGE seconds on the history's clock, (a) every
+    write invoked in it is answered ok, (b) every single-look healthy record
+    in it (result.look == "single") shows no volume not serving, (c) every
+    holder identity such a look shows equals the volume's last identity
+    recorded before the kill. A window with no write or no look is UNKNOWN; a
+    longer window, or a kill never restarted, is not judged and listed. FAIL
+    (not exercised) when the history holds no ok kill of the master."""
+    if MASTER is None or MASTER_OUTAGE is None:
+        return {'verdict': 'UNKNOWN', 'findings': ['the product description states no master or no short-outage bound: MO does not judge']}
+    windows = master_windows(recs)
+    if not windows:
+        return {'verdict': 'FAIL', 'findings': ['no ok kill of %s in the history: MO not exercised' % MASTER]}
+    limit, cite = MASTER_OUTAGE
+    ops_ = operations(recs)
+    healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
+    f, notes, unexercised, judged = [], [], [], 0
+    for kinv, kcomp, rinv, rcomp in windows:
+        name = 'outage kill seq %d' % kinv['seq']
+        if rcomp is None:
+            notes.append('not judged: %s: no ok restart of %s after it' % (name, MASTER))
+            continue
+        secs = (rcomp['mono_ns'] - kcomp['mono_ns']) / 1e9
+        if secs > limit:
+            notes.append('not judged: %s: %.3f s to the restart, above the %g s short outage (%s)' % (name, secs, limit, cite))
+            continue
+        lo, hi = kcomp['seq'], rcomp['seq']
+        name = '%s (%.3f s)' % (name, secs)
+        writes = [(i2, c2) for i2, c2 in ops_ if i2['verb'] == 'write' and lo < i2['seq'] < hi]
+        looks = [r for r in healthy if lo < r['seq'] < hi and (r.get('result') or {}).get('look') == 'single']
+        for i2, c2 in writes:
+            if c2 is None or c2['outcome'] != 'ok':
+                f.append('%s: write seq %d %s lba %s answered %s inside the window' % (
+                    name, i2['seq'], i2.get('volume'), (i2.get('args') or {}).get('lba'), 'nothing' if c2 is None else c2['outcome']))
+        before = {}
+        for r in healthy:
+            if r['seq'] >= kinv['seq']:
+                break
+            before.update(PRODUCT.holder_identity(r))
+        for r in looks:
+            ns = PRODUCT.not_serving(r)
+            if ns is None:
+                f.append('%s: look seq %d does not say which volumes serve' % (name, r['seq']))
+            elif ns:
+                f.append('%s: look seq %d shows not serving: %s' % (name, r['seq'], ', '.join(ns)))
+            for vol, ident in sorted(PRODUCT.holder_identity(r).items()):
+                if vol not in before:
+                    notes.append('%s: look seq %d: no identity of the holder of %s recorded before the kill' % (name, r['seq'], vol))
+                elif ident != before[vol]:
+                    f.append('%s: look seq %d: holder of %s is %r, was %r before the kill' % (name, r['seq'], vol, ident, before[vol]))
+        if not writes or not looks:
+            unexercised.append('short master outage not exercised in window: %s (%d write(s), %d look(s))' % (name, len(writes), len(looks)))
+            continue
+        judged += 1
+        unwritten = sorted(set(before) - {i2.get('volume') for i2, _ in writes})
+        if unwritten:
+            notes.append('%s: no write in the window on %s' % (name, ', '.join(unwritten)))
+    count = 'short master outages judged: %d' % judged
+    if f:
+        return {'verdict': 'FAIL', 'findings': f + unexercised + notes + [count]}
+    if unexercised or not judged:
+        return {'verdict': 'UNKNOWN', 'findings': unexercised + notes + [count]}
+    return {'verdict': 'PASS', 'findings': notes + [count]}
+
+
+CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur, 'MO': mo}
 
 load_product(DEFAULT_PRODUCT)   # the default; main() loads --product over it
 

@@ -357,7 +357,7 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL'})
         # DUR: flushed writes read back, no kill: not exercised.
         flushed_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))
@@ -1341,6 +1341,128 @@ class C6(unittest.TestCase):
             kv = hc.check(dump(m2(KILL, ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), RESTART, ('healthy', True))))['C6']
             self.assertEqual(kv['verdict'], 'PASS', kv)
             self.assertTrue(any('latency not judged' in x for x in kv['findings']), kv)
+
+
+HOLDERS = {'v1': {'pid': 101, 'start': 's101'}, 'v2': {'pid': 102, 'start': 's102'}}
+MRESTART = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
+
+
+def mo_history(window, secs=5, holders=HOLDERS):
+    """A short master outage: a healthy record naming the holders, an ok
+    master kill, the window's steps, the master's ok restart `secs` seconds
+    after the kill's completion, a healthy point. Window steps: an operation
+    (verb, volume, args, outcome, result), or ('look', not_serving, holders)
+    for a single-look healthy record."""
+    recs = []
+
+    def add(r):
+        r['seq'] = len(recs) + 1
+        recs.append(r)
+
+    def op(verb, vol, args, outcome, result):
+        add({'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args})
+        add({'kind': 'complete', 'of': recs[-1]['seq'], 'op': 'X.Y', 'verb': verb, 'volume': vol, 'outcome': outcome, 'result': result})
+
+    def healthy(ok, ns, hs, look=None):
+        res = {'healthy': ok, 'down': [] if ok else ['blockmaster'], 'not_serving': ns, 'holders': hs}
+        if look:
+            res['look'] = look
+        add({'kind': 'observe', 'client': 'runner', 'verb': 'healthy', 'volume': '', 'result': res})
+
+    s = 10**9
+    healthy(True, [], holders)
+    op(*MKILL)
+    kill_c = recs[-1]
+    for st in window:
+        if st[0] == 'look':
+            healthy(False, st[1], st[2], look='single')
+        else:
+            op(*st)
+    op(*MRESTART)
+    restart_c = recs[-1]
+    healthy(True, [], holders)
+    add({'kind': 'end'})
+    for r in recs:   # one clock: 1 ns per record, the restart's completion `secs` after the kill's
+        r['mono_ns'] = r['seq'] if r['seq'] <= restart_c['seq'] - 1 else r['seq'] + secs * s
+    restart_c['mono_ns'] = kill_c['mono_ns'] + secs * s
+    return recs
+
+
+class MO(unittest.TestCase):
+    def mo(self, window, **kw):
+        return hc.check(dump(mo_history(window, **kw)))['MO']
+
+    def assert_mo(self, want, window, contains=None, **kw):
+        v = self.mo(window, **kw)
+        self.assertEqual(v['verdict'], want, v)
+        if contains:
+            self.assertTrue(any(contains in x for x in v['findings']), v)
+        return v
+
+    GOOD = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('write', 'v2', {'lba': 0, 'sha256': A}, 'ok', {}),
+            ('look', [], HOLDERS), ('look', [], HOLDERS)]
+
+    def test_the_bound_is_the_pages_number_from_the_data(self):
+        self.assertEqual(hc.MASTER_OUTAGE, (10, 'docs/standalone-deployment.md:670'))
+
+    def test_a_short_outage_with_writes_ok_and_volumes_serving_passes(self):
+        v = self.assert_mo('PASS', self.GOOD)
+        self.assertEqual(v['findings'], ['short master outages judged: 1'])
+        self.assert_mo('PASS', self.GOOD, secs=10)   # the page's number itself is short
+
+    def test_red_a_refused_write_in_the_window(self):
+        w = list(self.GOOD)
+        w[1] = ('write', 'v2', {'lba': 0, 'sha256': A}, 'refused', {})
+        self.assert_mo('FAIL', w, contains='write seq 6 v2 lba 0 answered refused inside the window')
+
+    def test_red_an_unknown_write_in_the_window(self):
+        w = list(self.GOOD)
+        w[0] = ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {})
+        self.assert_mo('FAIL', w, contains='answered unknown inside the window')
+
+    def test_red_a_look_showing_a_volume_not_serving(self):
+        w = list(self.GOOD)
+        w[3] = ('look', ['v2'], HOLDERS)
+        self.assert_mo('FAIL', w, contains='shows not serving: v2')
+
+    def test_red_a_holder_pid_change(self):
+        w = list(self.GOOD)
+        w[3] = ('look', [], dict(HOLDERS, v1={'pid': 999, 'start': 's999'}))
+        self.assert_mo('FAIL', w, contains="holder of v1 is (999, 's999'), was (101, 's101') before the kill")
+
+    def test_red_a_12_s_outage_is_listed_not_judged(self):
+        w = list(self.GOOD)
+        w[1] = ('write', 'v2', {'lba': 0, 'sha256': A}, 'refused', {})   # would fail if judged
+        v = self.assert_mo('UNKNOWN', w, secs=12, contains='12.000 s to the restart, above the 10 s short outage')
+        self.assertIn('short master outages judged: 0', v['findings'])
+
+    def test_red_a_window_with_no_write_is_unknown(self):
+        v = self.assert_mo('UNKNOWN', [('look', [], HOLDERS)], contains='short master outage not exercised in window')
+        self.assertIn('(0 write(s), 1 look(s))', v['findings'][0])
+
+    def test_a_window_with_no_look_is_unknown(self):
+        self.assert_mo('UNKNOWN', self.GOOD[:2], contains='(2 write(s), 0 look(s))')
+
+    def test_each_look_is_evidence_and_a_waiting_record_is_no_look(self):
+        # the bad look is the first of two: not folded into the good second one
+        w = self.GOOD[:2] + [('look', ['v1'], HOLDERS), ('look', [], HOLDERS)]
+        self.assert_mo('FAIL', w, contains='shows not serving: v1')
+        # a healthy record without look "single" is not a look
+        recs = mo_history(self.GOOD[:2] + [('look', [], HOLDERS)])
+        for r in recs:
+            r.get('result', {}).pop('look', None) if isinstance(r.get('result'), dict) else None
+        self.assertIn('0 look(s)', hc.check(dump(recs))['MO']['findings'][0])
+
+    def test_a_kill_never_restarted_is_not_judged(self):
+        recs = synth(MKILL, ('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}))
+        v = hc.check(dump(recs))['MO']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('no ok restart of blockmaster after it' in x for x in v['findings']), v)
+
+    def test_no_master_kill_is_not_exercised(self):
+        v = hc.check(dump(synth(KILL, RESTART)))['MO']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('MO not exercised', v['findings'][0])
 
 
 if __name__ == '__main__':

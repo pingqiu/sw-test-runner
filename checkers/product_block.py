@@ -19,6 +19,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   process_of(inv)               the process a kill or restart names
   kill_scope(inv)               the volumes a kill reaches on the data path
   holder_identity(healthy_obs)  {volume: (pid, start)} of each holder, from a healthy record
+  not_serving(healthy_obs)      the volumes a healthy record shows not serving, or None
 """
 
 TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
@@ -231,6 +232,14 @@ def holder_identity(healthy_obs):
     restart reaching it had its holder restarted (DUR decides that)."""
     seen = (healthy_obs.get('result') or {}).get('holders') or {}
     return {vol: (h.get('pid'), h.get('start')) for vol, h in seen.items()}
+
+
+def not_serving(healthy_obs):
+    """The volumes a healthy record shows not serving (result.not_serving,
+    each holder's own /status, which does not need the master), as a sorted
+    list; None when the record does not say."""
+    ns = (healthy_obs.get('result') or {}).get('not_serving')
+    return sorted(ns) if isinstance(ns, list) else None
 
 
 def kill_scope(inv):
