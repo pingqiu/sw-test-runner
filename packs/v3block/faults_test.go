@@ -40,8 +40,19 @@ func faultSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {
 	saveVolume(actx, v)
 	actx.Vars[specOrderVar] = "v1"
 	e.master, e.work, e.ownScript, e.owner, e.client = "127.0.0.1:21003", "/w", "/own.sh", "tok", "c1"
+	pol, err := parseUnit(testUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(pol)
+	actx.Vars[unitPolicyVar] = string(b)
 	return actx, p, e
 }
+
+// testUnit has the [Service] lines of the product's shipped holder unit that
+// the runner reads (a fixture: at run time the policy is read from the
+// product tree, never from here).
+const testUnit = "[Unit]\nStartLimitBurst=10\n\n[Service]\nType=simple\nExecStart=/usr/local/bin/blockvolume \\\n  --master=${SWB_MASTER_ADDR} \\\n  --restart-note=Restart=always \\\n  $SWB_VOLUME_EXTRA_ARGS\n# blockvolume drains and closes on SIGTERM\nKillSignal=SIGTERM\nTimeoutStopSec=30s\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
 
 // closeRecords closes the history and returns its records but the end record.
 func closeRecords(t *testing.T, actx *tr.ActionContext, p string) []tr.HistoryRecord {
@@ -650,17 +661,6 @@ func readsTheLog(f *fakeNode) bool {
 	return false
 }
 
-func TestHolderUnitFactsFromChecks(t *testing.T) {
-	if !holderUnitOK || holderUnit.RestartSec != 5 || !slices.Equal(holderUnit.NoRestart, []int{0, 78}) || !strings.Contains(holderUnit.Cite, "sw-blockvolume.service") {
-		t.Errorf("holder_unit %+v ok=%v", holderUnit, holderUnitOK)
-	}
-	for _, b := range []string{`{}`, `{"holder_unit":{"restart_sec":5,"no_restart_status":[0,78]}}`, `{"holder_unit":{"restart_sec":0,"no_restart_status":[78],"cite":"x"}}`} {
-		if _, ok := readUnitFacts([]byte(b)); ok {
-			t.Errorf("%s accepted", b)
-		}
-	}
-}
-
 // A held volume's holder that exited 75 (fenced: lease expired) is launched
 // again with its recorded command line, and the relaunch is its own record.
 func TestSuperviseRelaunchesAFencedHolder(t *testing.T) {
@@ -869,5 +869,109 @@ func TestSuperviseByIntentLeavesAReleasedVolume(t *testing.T) {
 		if f.issued("setsid") != (intent == intentHeld) {
 			t.Errorf("intent %s: relaunched %v", intent, f.issued("setsid"))
 		}
+	}
+}
+
+// --- the unit policy, read from the product's unit file ---
+
+func TestParseUnitReadsThePolicy(t *testing.T) {
+	p, err := parseUnit(testUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The continuation line naming "Restart=always" inside ExecStart is not a key.
+	if p.Restart != "on-failure" || !slices.Equal(p.PreventStatus, []int{78}) || p.RestartSec != 5 || p.TimeoutStopSec != 30 || p.restartSec() != 5*time.Second {
+		t.Errorf("policy %+v", p)
+	}
+	for status, want := range map[int]bool{75: true, 1: true, 137: true, 0: false, 78: false, 143: false, 129: false} {
+		if p.restartable(status) != want {
+			t.Errorf("status %d: restartable %v", status, !want)
+		}
+	}
+	for _, s := range []string{"1min 30s", "500ms", "90"} {
+		if _, err := systemdSeconds(s); err != nil {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
+	// Red controls: what the runner cannot emulate is refused, never guessed.
+	for name, text := range map[string]string{
+		"no Restart":                "[Service]\nRestartSec=5s\n",
+		"Restart only in [Unit]":    "[Unit]\nRestart=on-failure\n[Service]\nRestartSec=5s\n",
+		"Restart=on-abnormal":       "[Service]\nRestart=on-abnormal\nRestartSec=5s\n",
+		"prevent by signal name":    "[Service]\nRestart=on-failure\nRestartPreventExitStatus=78 SIGKILL\nRestartSec=5s\n",
+		"no RestartSec":             "[Service]\nRestart=on-failure\n",
+		"RestartSec=infinity":       "[Service]\nRestart=on-failure\nRestartSec=infinity\n",
+		"TimeoutStopSec unreadable": "[Service]\nRestart=on-failure\nRestartSec=5s\nTimeoutStopSec=soon\n",
+	} {
+		if _, err := parseUnit(text); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+const productSHA = "14dff69b0f7cc139f9bde7849dec6ab34063c947"
+
+// The policy is read from the product checkout at the commit the run built,
+// once; unreadable, the runner refuses to emulate (and relaunches nothing).
+func TestUnitPolicyReadFromTheProductTree(t *testing.T) {
+	actx, _, e := faultSetup(t)
+	delete(actx.Vars, unitPolicyVar)
+	actx.Vars["product_src"] = "/src"
+	f := (&fakeNode{}).
+		on("cat /w/product.sha", ok(productSHA+"\n")).
+		on("git -C /src show "+productSHA+":deploy/systemd/sw-blockvolume.service", ok(testUnit))
+	p, err := loadUnitPolicy(context.Background(), actx, f, e)
+	if err != nil || p.File != "deploy/systemd/sw-blockvolume.service" || p.Commit != productSHA || p.RestartSec != 5 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if actx.Vars[unitPolicyVar] == "" {
+		t.Error("the policy was not kept for the run")
+	}
+	h := unitHeader(p)
+	if h["emulated"] != true || h["note"] != "This run is not evidence for the unit's own behaviour: the runner emulated the unit." || h["policy"].(unitPolicy).Commit != productSHA {
+		t.Errorf("header %v", h)
+	}
+	for name, f := range map[string]*fakeNode{
+		"file missing at the commit": (&fakeNode{}).on("cat /w/product.sha", ok(productSHA)).on("git -C", fakeAnswer{errOut: "fatal: path does not exist", code: 128}),
+		"commit unreadable":          (&fakeNode{}).on("cat /w/product.sha", fakeAnswer{code: 1}),
+		"unit not emulable":          (&fakeNode{}).on("cat /w/product.sha", ok(productSHA)).on("git -C", ok("[Service]\nRestart=on-watchdog\nRestartSec=5s\n")),
+	} {
+		actx, _, e := faultSetup(t)
+		delete(actx.Vars, unitPolicyVar)
+		actx.Vars["product_src"] = "/src"
+		exited(t, actx)
+		if _, err := loadUnitPolicy(context.Background(), actx, f, e); err == nil || !strings.Contains(err.Error(), "refuses to emulate") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if err := e.supervise(context.Background(), actx, f); err == nil || f.issued("setsid") {
+			t.Errorf("%s: supervised without a policy: %v", name, err)
+		}
+	}
+}
+
+// A run's header carries the pack's unit entry (randomrun.Runner.Header).
+func TestGenRunHeaderSaysUnitEmulated(t *testing.T) {
+	f := &fakeProduct{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	cfg, err := genConfig(genAct("5"), actx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := NewGenerator(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, _ := parseUnit(testUnit)
+	r := genRunner("v3_gen_run", "host", g.m)
+	r.Header = map[string]any{"unit": unitHeader(pol)}
+	if _, err := r.Run(context.Background(), actx, g.Generator, func(string) string { return "" }); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	h := records(t, p)[0]
+	u, _ := h.Result["unit"].(map[string]any)
+	if h.Verb != "gen_header" || u["emulated"] != true || u["note"] != unitNotEvidence {
+		t.Errorf("header %+v", h.Result)
 	}
 }

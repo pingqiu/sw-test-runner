@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -460,31 +459,12 @@ func (e opEnv) healthy(ctx context.Context, actx *tr.ActionContext, node runner,
 }
 
 // The holder's unit. In a deployment the product's systemd unit restarts a
-// holder that exits by itself (holder_unit in product/checks.json: not after
-// status 0 or 78, RestartSec after the exit). Here the runner plays that unit:
-// every holder is launched through a wrapper that keeps the holder's own pid
-// and start time as its identity (it is the wrapper's child, not the
-// wrapper) and writes the holder's exit status to a per-launch file; the
-// supervision step reads that file, never the holder's log.
-
-type unitFacts struct {
-	RestartSec int    `json:"restart_sec"`
-	NoRestart  []int  `json:"no_restart_status"`
-	Cite       string `json:"cite"`
-}
-
-func readUnitFacts(b []byte) (unitFacts, bool) {
-	var c struct {
-		Unit *unitFacts `json:"holder_unit"`
-	}
-	if json.Unmarshal(b, &c) != nil || c.Unit == nil || c.Unit.RestartSec <= 0 || len(c.Unit.NoRestart) == 0 || c.Unit.Cite == "" {
-		return unitFacts{}, false
-	}
-	return *c.Unit, true
-}
-
-var holderUnit, holderUnitOK = readUnitFacts(checksJSON)
-
+// holder that exits by itself; here the runner plays that unit, with the
+// policy read from the product's shipped unit file (unit.go). Every holder is
+// launched through a wrapper that keeps the holder's own pid and start time
+// as its identity (it is the wrapper's child, not the wrapper) and writes the
+// holder's exit status to a per-launch file; the supervision step reads that
+// file, never the holder's log.
 // holderLaunchCmd starts argv under the unit wrapper and prints the holder's
 // pid. The wrapper (its own session) starts the holder with its output in
 // logPath, writes its pid to logPath.pid, waits for it and writes
@@ -567,8 +547,9 @@ func held(actx *tr.ActionContext, v *opVolume) bool {
 // observe record "unit_restart". A holder whose status is not written yet is
 // looked at again at the next step.
 func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runner) error {
-	if !holderUnitOK {
-		return fmt.Errorf("product/checks.json states no holder_unit: the runner cannot play the holder's unit")
+	pol, err := loadUnitPolicy(ctx, actx, node, e)
+	if err != nil {
+		return err
 	}
 	for _, n := range strings.Fields(actx.Vars[specOrderVar]) {
 		v, err := loadVolume(actx, n)
@@ -582,14 +563,14 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 			continue
 		}
 		status, ago, why := readExit(ctx, node, v.Extra["exit_file"])
-		if why != "" || slices.Contains(holderUnit.NoRestart, status) {
+		if why != "" || !pol.restartable(status) {
 			continue
 		}
 		var argv []string
 		if json.Unmarshal([]byte(v.Extra["launch_argv"]), &argv) != nil || len(argv) == 0 {
 			continue
 		}
-		if wait := time.Duration(holderUnit.RestartSec)*time.Second - ago; wait > 0 {
+		if wait := pol.restartSec() - ago; wait > 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -599,7 +580,7 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 		oldPID, oldStart := v.PID, v.PIDStart
 		out, res := e.launchHolder(ctx, node, v, v.Hosts[v.Cur], argv, 0, true)
 		saveVolume(actx, v)
-		r := map[string]any{"volume": n, "exit_status": status, "exited_ms_before": ago.Milliseconds(), "restart_sec": holderUnit.RestartSec,
+		r := map[string]any{"volume": n, "exit_status": status, "exited_ms_before": ago.Milliseconds(), "restart_sec": pol.RestartSec,
 			"old_pid": oldPID, "old_start": oldStart, "launch": out}
 		if v.PID != oldPID {
 			r["new_pid"], r["new_start"] = v.PID, v.PIDStart

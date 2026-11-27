@@ -17,6 +17,7 @@ import (
 	"strconv"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/actions"
 	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
@@ -67,5 +68,23 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	if err != nil {
 		return nil, err
 	}
-	return genRunner("v3_gen_run", act.Node, g.m).Run(ctx, actx, g.Generator, func(k string) string { return opParam(act, actx, k) })
+	r := genRunner("v3_gen_run", act.Node, g.m)
+	if g.Faulty() {
+		// A fault run plays the holder's unit (faults.go supervise) with the
+		// policy read from the product's unit file; the header says so.
+		var node runner // only to read the policy, once
+		if actx.Vars[unitPolicyVar] == "" {
+			n, err := actions.GetNode(actx, act.Node)
+			if err != nil {
+				return nil, fmt.Errorf("v3_gen_run: %w", err)
+			}
+			node = n
+		}
+		pol, err := loadUnitPolicy(ctx, actx, node, opEnv{work: opParam(act, actx, "work")})
+		if err != nil {
+			return nil, fmt.Errorf("v3_gen_run: %w", err)
+		}
+		r.Header = map[string]any{"unit": unitHeader(pol)}
+	}
+	return r.Run(ctx, actx, g.Generator, func(k string) string { return opParam(act, actx, k) })
 }
