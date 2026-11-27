@@ -849,24 +849,31 @@ class C5(unittest.TestCase):
                          'result': {'head': {'gen': 4}, 'files': FILES}})
         self.assertEqual(hc.check(dump(renumber(recs)))['C5']['verdict'], 'UNKNOWN')
 
-    # refused_effect: judged strictly
-    EFFECT = {'part': 'workspace', 'to': {'exit_nonzero': True},
+    # refused_effect: the documented state after it, every other part unchanged
+    # PHRASE stands for the product's exact words for a volume reserved for
+    # deletion (the outcome-map row will carry the real phrase and its cite).
+    PHRASE = 'PLACEHOLDER reserved for deletion'
+    EFFECT = {'part': 'workspace', 'to': {'exit': 1, 'stderr_contains': PHRASE},
               'cite': 'docs/operator-guide.md:193-196; cmd/sw-block/workspace.go:18'}
-    REFUSED_WS = dict(WS, workspace={'exit': 1, 'text': ['']})   # the workspace query refused (a host run's seq 1042)
+    REFUSED_WS = dict(WS, workspace={'exit': 1, 'text': [''], 'stderr': ['sw-block ops workspace: rpc error: ' + PHRASE]})
 
-    def effect_history(self, after_gen=4, after=None, effect=EFFECT, expect=True):
-        """A clean pair around a delete answered refused_effect with `effect`."""
-        recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG if expect else {}, 'refused'),
-                                 ('obs', 'v1', after_gen, FILES, self.REFUSED_WS if after is None else after))))
-        comp = recs[-3]
-        self.assertEqual(comp['kind'], 'complete')
-        comp['outcome'] = 'refused_effect'
-        comp['result'] = {'detail': 'snapshot_has_dependents: layout: a snapshot has dependents'}
-        if effect is not None:
-            comp['result']['effect'] = effect
+    def effect_history(self, after_gen=4, after=None, effect=EFFECT, expect=True, before=None, repeat=False):
+        """A clean pair around a delete answered refused_effect with `effect`;
+        repeat: a second such delete and an observation after it."""
+        after = self.REFUSED_WS if after is None else after
+        steps = [('obs', 'v1', 4, FILES, WS if before is None else before), ('delete', 'v1', NEG if expect else {}, 'refused'),
+                 ('obs', 'v1', after_gen, FILES, after)]
+        if repeat:
+            steps += [('delete', 'v1', NEG, 'refused'), ('obs', 'v1', after_gen, FILES, after)]
+        recs = history(*(BASE + tuple(steps)))
+        for comp in [r for r in recs if r['kind'] == 'complete' and r['verb'] == 'delete']:
+            comp['outcome'] = 'refused_effect'
+            comp['result'] = {'detail': 'snapshot_has_dependents: layout: a snapshot has dependents'}
+            if effect is not None:
+                comp['result']['effect'] = effect
         return recs
 
-    def test_a_refused_effect_that_changed_exactly_its_part_passes(self):
+    def test_a_refused_effect_in_its_documented_state_passes(self):
         v = hc.check(dump(self.effect_history()))
         self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
         self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged'])
@@ -875,33 +882,52 @@ class C5(unittest.TestCase):
         # C6 has nothing to resolve: it is not an unknown
         self.assertIn('not exercised', v['C6']['findings'][0])
 
-    def test_red_refused_effect_its_part_and_another_part_changed(self):
+    def test_a_repeated_refused_effect_on_a_part_already_in_its_state_passes(self):
+        # The second refused delete of a reserved volume sees the workspace
+        # already refused, before and after: correct product behaviour.
+        v = hc.check(dump(self.effect_history(repeat=True)))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual(v['findings'], ['limit ordinary delete: 2 of 2 refusal(s) judged'])
+
+    def test_red_refused_effect_another_part_changed(self):
         v = hc.check(dump(self.effect_history(after_gen=5)))['C5']
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('seq 4 delete v1 (ordinary delete) refused_effect but its head changed', v['findings'][0])
-        self.assertEqual(len([x for x in v['findings'] if 'refused_effect but' in x]), 1, 'the named part itself is no finding')
+        self.assertEqual(len([x for x in v['findings'] if 'refused_effect but' in x]), 1, 'the effect part itself is no finding')
 
-    def test_red_refused_effect_its_part_changed_to_another_value(self):
-        # the workspace text changed, but the query still answered exit 0
-        text = ['volume: v1', 'replica: r1', 'epoch: 1', 'lease state: deleting', 'holder: r1@1', 'recorded ACK: none', 'host: unknown']
-        v = hc.check(dump(self.effect_history(after=dict(WS, workspace={'exit': 0, 'text': text}))))['C5']
-        self.assertEqual(v['verdict'], 'FAIL', v)
-        self.assertIn('refused_effect but its workspace changed to another value: workspace.exit is 0, effect exit_nonzero True', v['findings'][0])
-        # a field value: exit 1 named, exit 3 answered
-        v = hc.check(dump(self.effect_history(after=dict(WS, workspace={'exit': 3, 'text': ['']}),
-                                              effect=dict(self.EFFECT, to={'exit': 1}))))['C5']
-        self.assertEqual(v['verdict'], 'FAIL', v)
-        self.assertIn('workspace.exit is 3, effect 1', v['findings'][0])
-
-    def test_red_refused_effect_its_part_unchanged(self):
+    def test_red_refused_effect_its_part_lacks_the_documented_state(self):
+        # unchanged (still answering exit 0)
         v = hc.check(dump(self.effect_history(after=WS)))['C5']
         self.assertEqual(v['verdict'], 'FAIL', v)
-        self.assertIn('refused_effect but its workspace did not change', v['findings'][0])
+        self.assertIn('refused_effect but its workspace is not in the documented state: workspace.exit is 0, effect 1', v['findings'][0])
+        # exit 1, but for another reason: a master down is not the reservation
+        down = dict(WS, workspace={'exit': 1, 'text': [''], 'stderr': ['rpc error: code = Unavailable desc = connection refused']})
+        v = hc.check(dump(self.effect_history(after=down)))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn("workspace.stderr does not contain 'PLACEHOLDER reserved for deletion'", v['findings'][0])
+        # exit 3 against exit 1
+        v = hc.check(dump(self.effect_history(after=dict(self.REFUSED_WS, workspace=dict(self.REFUSED_WS['workspace'], exit=3)))))['C5']
+        self.assertIn('workspace.exit is 3, effect 1', v['findings'][0])
+
+    def test_a_condition_the_observation_cannot_evaluate_is_not_judged(self):
+        # no stderr recorded: never a pass
+        nostderr = dict(WS, workspace={'exit': 1, 'text': ['']})
+        v = hc.check(dump(self.effect_history(after=nostderr)))['C5']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 delete v1: observation seq 6 cannot show its effect: workspace.stderr not recorded' in x
+                            for x in v['findings']), v)
+        # the loose "exit non-zero" is not an accepted condition
+        v = hc.check(dump(self.effect_history(effect=dict(self.EFFECT, to={'exit_nonzero': True}))))['C5']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any("condition 'exit_nonzero' not accepted" in x for x in v['findings']), v)
+        # but another part changing still fails, evaluable or not
+        v = hc.check(dump(self.effect_history(after=nostderr, after_gen=5)))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
 
     def test_red_refused_effect_without_its_effect_is_unreadable(self):
         # The runner copies the effect from the outcome map; a record without
         # it breaks the writer's own rule: nothing is judged, by any checker.
-        for bad in (None, {'part': 'workspace', 'to': {'exit_nonzero': True}}, {'to': {}, 'cite': 'x'}):
+        for bad in (None, {'part': 'workspace', 'to': {'exit': 1}}, {'to': {}, 'cite': 'x'}):
             v = hc.check(dump(self.effect_history(effect=bad)))
             for name, r in v.items():
                 self.assertEqual(r['verdict'], 'UNKNOWN', (bad, name, r))
@@ -912,13 +938,15 @@ class C5(unittest.TestCase):
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('refusal not expected: delete v1 seq 4', v['findings'][0])
 
-    def test_effect_mismatches_reads_list_parts_and_refuses_unknown_conditions(self):
-        b = {'result': {'files': ['HEAD', 'VOLUME', 'root/a']}}
-        a = {'result': {'files': ['HEAD', 'VOLUME', 'root/a', 'root/b']}}
-        self.assertEqual(hc.PRODUCT.effect_mismatches('files', {'added': ['root/b']}, b, a), [])
-        self.assertTrue(hc.PRODUCT.effect_mismatches('files', {'removed': ['root/a']}, b, a))
-        self.assertTrue(hc.PRODUCT.effect_mismatches('workspace', {'exit_zero': True}, b, {'result': {'workspace': {'exit': 1}}}))
-        self.assertTrue(hc.PRODUCT.effect_mismatches('workspace', {}, b, a))
+    def test_effect_state_reads_list_parts_and_refuses_unknown_conditions(self):
+        a = {'result': {'files': ['HEAD', 'VOLUME', 'root/a'], 'workspace': {'exit': 1, 'text': ['']}}}
+        es = hc.PRODUCT.effect_state
+        self.assertEqual(es('files', {'has': ['HEAD'], 'lacks': ['seg/x']}, a), ([], []))
+        self.assertTrue(es('files', {'lacks': ['root/a']}, a)[0])
+        self.assertTrue(es('files', {'added': ['root/a']}, a)[1], 'a difference is not a state')
+        self.assertTrue(es('workspace', {'exit_zero': True}, a)[1])
+        self.assertTrue(es('workspace', {}, a)[1])
+        self.assertEqual(es('workspace', {'exit': 1, 'text_contains': ''}, a), ([], []))
 
     def test_no_refusal_fails_not_exercised(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', {}, 'ok'), ('obs', 'v1', 5, FILES))

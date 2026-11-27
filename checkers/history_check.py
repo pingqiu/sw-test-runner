@@ -65,11 +65,14 @@ code is 0 only when every checker passes.
       answered ok is a FAIL ("negative not refused"); one answered unknown is
       listed in a note (unknown is not ok).
       REFUSED_EFFECT: a refusal with a definite, documented change, its
-      complete carrying result.effect {part, to, cite}. It is judged like a
-      refusal, strictly: between the same two observations EXACTLY
-      effect.part changed, to exactly effect.to (the product reader's
-      effect_mismatches), and every other compared part is unchanged;
-      anything more or less FAILS. Baseline and limits as for refused. A
+      complete carrying result.effect {part, to, cite}. The effect is a
+      state that stays, judged on the same two observations as a refusal:
+      after the operation effect.part HAS the documented state (the product
+      reader's effect_state; before it, another value or already this one,
+      as for a repeated refusal), and every other compared part is
+      unchanged; anything else FAILS. A condition the observation cannot
+      evaluate (a stderr not recorded) leaves it NOT JUDGED, never passed.
+      Baseline and limits as for refused. A
       refused_effect without its effect breaks the writer's rule: the
       history is unreadable (UNKNOWN for every checker)
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
@@ -789,25 +792,25 @@ def c5(recs):
         if effect is not None and effect['part'] in missing:
             notes.append('not judged: %s: observations seq %d, %d record no %s (its effect)' % (name, before['seq'], after['seq'], effect['part']))
             continue
+        span = '(observations seq %d, %d)' % (before['seq'], after['seq'])
+        found = ['%s (%s) %s but its %s changed: %s -> %s %s'
+                 % (name, lim, comp['outcome'], part, show_part(b, part), show_part(a, part), span)
+                 for part in diff if effect is None or part != effect['part']]
+        if effect is not None:
+            # The effect is a state that stays: after the operation its part
+            # HAS the documented value (before: another value, or already
+            # this one, as for a repeated refusal); every other part is
+            # unchanged (above).
+            bad, cannot = PRODUCT.effect_state(effect['part'], effect['to'], after)
+            if bad:
+                found.append('%s (%s) refused_effect but its %s is not in the documented state: %s (effect %r, %s) %s'
+                             % (name, lim, effect['part'], '; '.join(bad), effect['to'], effect['cite'], span))
+            elif cannot and not found:
+                notes.append('not judged: %s: observation seq %d cannot show its effect: %s' % (name, after['seq'], '; '.join(cannot)))
+                continue
         gaps.update(missing)
         per[lim][1] += 1
-        span = '(observations seq %d, %d)' % (before['seq'], after['seq'])
-        for part in diff:
-            if effect is not None and part == effect['part']:
-                continue   # its own change, judged below
-            f.append('%s (%s) %s but its %s changed: %s -> %s %s'
-                     % (name, lim, comp['outcome'], part, show_part(b, part), show_part(a, part), span))
-        if effect is not None:
-            # Strict: exactly the effect's part changed, and to exactly its value.
-            part = effect['part']
-            if part not in diff:
-                f.append('%s (%s) refused_effect but its %s did not change (effect %r, %s) %s'
-                         % (name, lim, part, effect['to'], effect['cite'], span))
-            else:
-                bad = PRODUCT.effect_mismatches(part, effect['to'], before, after)
-                if bad:
-                    f.append('%s (%s) refused_effect but its %s changed to another value: %s (effect %r, %s) %s'
-                             % (name, lim, part, '; '.join(bad), effect['to'], effect['cite'], span))
+        f += found
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
     if gaps:
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
