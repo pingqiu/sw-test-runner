@@ -14,6 +14,8 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
   NOTED                         of those, the verbs whose placement C6 names in a note
+  code_of(comp)                 the product error code of a completion, or None
+  after_mismatches(allowed, before, after)   a documented unknown's allowed_after, checked
   place_by_status(inv, obs, base)   C6's per-verb placement rules
   after_delete_findings(vol, obs)   C7: the tombstone shape after an ok delete
   recreate_finding(vol, comp)       C7: a create of a deleted name must be refused
@@ -190,6 +192,42 @@ def show_part(state, part):
     if part in ('dirs', 'files'):
         return '%d entries' % len(v)
     return repr(v)[:120]
+
+
+def code_of(comp):
+    """The product's error code of a completion: the word before the first
+    colon of result.detail (ops chunk answers "<code>: <message>"); None
+    when there is no detail."""
+    detail = (comp.get('result') or {}).get('detail') if comp else None
+    if not isinstance(detail, str) or ':' not in detail:
+        return None
+    return detail.split(':', 1)[0].strip()
+
+
+def after_mismatches(allowed, before, after):
+    """What in the observation `after` breaks a documented unknown's
+    allowed_after, against the clean observation `before`: a part
+    'unchanged' must be recorded alike in both (observed_state), a part
+    given as fields must answer them (a 'cite' key is not a field). [] when
+    it matches."""
+    out = []
+    for part, want in allowed.items():
+        if want == 'unchanged':
+            (sb, bb), (sa, ba) = observed_state(before, [part]), observed_state(after, [part])
+            if part not in sb or part not in sa:
+                out.append('%s not recorded before and after (%s)' % (part, (bb or ba).get(part, 'absent')))
+            elif sb[part] != sa[part]:
+                out.append('%s changed: %s -> %s' % (part, show_part((sb, bb), part), show_part((sa, ba), part)))
+        elif isinstance(want, dict):
+            got = (after.get('result') or {}).get(part)
+            for k, v in want.items():
+                if k == 'cite':
+                    continue
+                if not isinstance(got, dict) or got.get(k) != v:
+                    out.append('%s.%s is %r, documented %r' % (part, k, got.get(k) if isinstance(got, dict) else got, v))
+        else:
+            out.append('%s: allowed_after %r is neither "unchanged" nor fields' % (part, want))
+    return out
 
 
 # --- C6 placement ----------------------------------------------------------

@@ -14,7 +14,9 @@ does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
 
-  C0  every invoke has its complete; no outcome is unknown; a refusal only
+  C0  every invoke has its complete; no outcome is unknown, except one the
+      product description documents (documented_unknowns: the same limit,
+      action and error code), which is a note and is placed by C6; a refusal only
       where its own step declared it (args.expect = refused), never by verb;
       a declared refusal answered ok is a finding (half of the spec's C6);
       every fault applied (outcome ok or unknown) is restored: a fault_restore
@@ -125,6 +127,11 @@ code is 0 only when every checker passes.
       supersedes it (noted; the verb's own rule then places it). A verb
       with an observation rule (delete, move) is still checked by it for a
       third state. Any `third_state` entry of a healthy record FAILS.
+      A documented unknown (documented_unknowns row: same limit, action and
+      error code) is resolved, and counted, by the volume's next
+      observation matching the row's allowed_after against the clean
+      observation before it; a mismatch FAILS ("documented unknown placed in
+      an undocumented state"), and so does a missing observation.
       A read changes nothing and needs no placing; an unknown of another
       verb has no rule and makes the verdict UNKNOWN. Every judged verdict
       carries the finding "unknowns resolved: <n>" (a run with healthy
@@ -320,9 +327,10 @@ def verdict(findings, unknown=False):
 def c0(recs):
     """A refusal is expected only where its own invocation declares it
     (args.expect == "refused", one step of the scenario), never by verb."""
-    f = []
+    f, notes = [], []
     if not operations(recs):
         return verdict(['no operation in the history: nothing was exercised'])
+    limit = limits_of(recs)
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
         if inv['verb'] in FAULT_VERBS:
@@ -336,7 +344,11 @@ def c0(recs):
         if comp is None:
             f.append('no completion: ' + name)
         elif comp['outcome'] == 'unknown':
-            f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
+            row = documented_unknown(inv, comp, limit)
+            if row is not None:   # its effect is placed by C6 against the row
+                notes.append('documented unknown: %s (%s): %s' % (row['limit'], row['cite'], name))
+            else:
+                f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'refused' and not expected:
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'ok' and expected:
@@ -344,7 +356,22 @@ def c0(recs):
     for key, resource, start, end in fault_windows(recs):
         if end is None:
             f.append('fault left applied: %s on %s (applied at seq %d, no fault_restore completed ok after it)' % (key, resource, start))
-    return verdict(f)
+    if f:
+        return {'verdict': 'FAIL', 'findings': f + notes}
+    return {'verdict': 'PASS', 'findings': notes}
+
+
+def documented_unknown(inv, comp, limit):
+    """The product description's documented_unknowns row an unknown matches:
+    the same limit (the generator's negative), action (verb) and product
+    error code; None when none does."""
+    if comp is None or comp['outcome'] != 'unknown':
+        return None
+    code = PRODUCT.code_of(comp)
+    for row in CHECKS.get('documented_unknowns', []):
+        if row.get('limit') == limit.get(inv['seq']) and row.get('action') == inv['verb'] and row.get('code') == code:
+            return row
+    return None
 
 
 class Shadow:
@@ -1266,8 +1293,32 @@ def c6(recs):
         for vol, why in PRODUCT.third_state(r):
             f.append('third state: %s at healthy seq %d: %s' % (vol, r['seq'], why))
     # None stays unknown.
+    limit = limits_of(recs)
     for inv, comp in unknowns:
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+        row = documented_unknown(inv, comp, limit)
+        if row is not None:
+            # Its documented effect: the volume's next observation, against
+            # the clean one before the operation, matches allowed_after.
+            vol = inv.get('volume')
+            base = _baseline(recs, vol, inv['seq'])
+            obs = _observation(recs, vol, comp['seq'])
+            ch = _volume_changed(recs, vol, comp['seq'], obs['seq']) if obs is not None else None
+            if base is None:
+                f.append('documented unknown not resolved: %s: no clean observation of %s before it' % (name, vol))
+            elif obs is None:
+                f.append('documented unknown not resolved: %s: no observation of %s after it' % (name, vol))
+            elif ch is not None:
+                f.append('documented unknown not resolved: %s: seq %d %s changed %s before the observation seq %d' % (name, ch['seq'], ch['verb'], vol, obs['seq']))
+            else:
+                bad = PRODUCT.after_mismatches(row['allowed_after'], base, obs)
+                if bad:
+                    f.append('documented unknown placed in an undocumented state: %s (%s; observations seq %d, %d): %s'
+                             % (name, row['cite'], base['seq'], obs['seq'], '; '.join(bad)))
+                else:
+                    resolved += 1
+                    notes.append('%s placed as documented: %s (%s)' % (name, row['limit'], row['cite']))
+            continue
         settled_ok = False
         if inv['verb'] in PRODUCT.NEEDS_SETTLED:
             # An unknown lifecycle operation is resolved by the settled record;
