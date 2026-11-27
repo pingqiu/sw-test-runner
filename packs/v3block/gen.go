@@ -57,11 +57,12 @@ func mustOperations(b []byte) randomrun.Operations {
 	return t
 }
 
-// genLimit is the name of a documented limit in the table (by its id).
+// genLimit is a documented limit the generator probes (by its id); a limit
+// the table lists as not proposed is never one.
 func genLimit(id string) randomrun.Limit {
 	l, ok := genTable.Limit(id)
-	if !ok {
-		panic("v3block: product/operations.json has no limit " + id)
+	if !ok || !l.IsProposed() {
+		panic("v3block: product/operations.json has no proposed limit " + id)
 	}
 	return l
 }
@@ -98,15 +99,10 @@ const (
 // volume-lifecycle.md, SD standalone-deployment.md, OG operator-guide.md, all
 // under docs/, in the comments below).
 //
-// Documented refusals NOT proposed, because the typed action cannot answer
-// them "refused" and an unknown outcome takes the volume out of the run:
-// every attach refusal (blockvolume exits 78 and the runner does not read the
-// reason: attach on the old host after a move VL:544, attach a deleted volume
-// VL:545, attach on a stale local root VL:155-160, attach with the wrong
-// geometry SD:682), attach after a stop (no grant, the attach times out:
-// VL:336-337), and a restore into a deleted name (VL:90-91: the restore's
-// not_admitted is not a refusal the runner can tell from a persisted one).
-// The shadow still keeps ordinary() from proposing those attaches.
+// The documented refusals NOT proposed (every attach refusal, and a restore
+// into a deleted name: the typed action cannot answer them refused) are rows
+// of the same table with proposed false and why. The shadow still keeps
+// Ordinary from proposing those attaches.
 var (
 	limCreateDeleted   = genLimit("create_deleted").Name            // VL:201-204
 	limDeleteAttached  = genLimit("delete_attached").Name           // VL:409-411, VL:527

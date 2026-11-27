@@ -29,12 +29,14 @@ type Operation struct {
 	// Cost is the operation's rough duration in seconds: the time half of the
 	// weighting (a proposal's chance is weight/cost) and the operations-per-hour
 	// estimate.
-	Cost float64 `json:"cost"`
-	Note string  `json:"note,omitempty"`
+	Cost       float64 `json:"cost"`
+	Note       string  `json:"note,omitempty"`
+	VerifiedAt string  `json:"verified_at,omitempty"` // the product commit a cite in the note was re-read at
 }
 
-// Limit is one refusal the product documents, probed by a negative
-// operation. Name is what a gen_step record carries as its negative.
+// Limit is one refusal the product documents. A proposed one is probed by
+// a negative operation, and Name is what a gen_step record carries as its
+// negative; one with proposed false is listed with why it is not proposed.
 type Limit struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -44,7 +46,13 @@ type Limit struct {
 	SideEffect string `json:"side_effect,omitempty"`
 	SideCite   string `json:"side_effect_cite,omitempty"`
 	Note       string `json:"note,omitempty"`
+	Proposed   *bool  `json:"proposed,omitempty"` // absent: true
+	Why        string `json:"why,omitempty"`      // why a limit is not proposed
+	VerifiedAt string `json:"verified_at,omitempty"`
 }
+
+// IsProposed says the generator probes the limit with negative operations.
+func (l Limit) IsProposed() bool { return l.Proposed == nil || *l.Proposed }
 
 // ParseOperations reads and checks an operations table.
 func ParseOperations(b []byte) (Operations, error) {
@@ -73,8 +81,14 @@ func ParseOperations(b []byte) (Operations, error) {
 			return t, fmt.Errorf("operations: limit %q (%q) empty or repeated", l.ID, l.Name)
 		}
 		ids[l.ID], names[l.Name] = true, true
-		if !acts[l.Action] || l.Cite == "" || (l.SideEffect != "") != (l.SideCite != "") {
-			return t, fmt.Errorf("operations: limit %s: action %q unknown, or a fact without its cite", l.ID, l.Action)
+		if l.Cite == "" || (l.SideEffect != "") != (l.SideCite != "") {
+			return t, fmt.Errorf("operations: limit %s: a fact without its cite", l.ID)
+		}
+		// A proposed limit's action is an operation of the table; one not
+		// proposed may name an action the generator never issues as a
+		// negative, and says why.
+		if (l.IsProposed() && !acts[l.Action]) || (!l.IsProposed() && (l.Why == "" || l.Action == "")) || (l.IsProposed() && l.Why != "") {
+			return t, fmt.Errorf("operations: limit %s: action %q unknown, or proposed %v with why %q", l.ID, l.Action, l.IsProposed(), l.Why)
 		}
 	}
 	return t, nil

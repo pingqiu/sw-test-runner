@@ -22,8 +22,15 @@ func TestParseOperations(t *testing.T) {
 	if !reflect.DeepEqual(tab.Costs(), map[string]float64{"a": 2, "b": 1}) {
 		t.Fatalf("costs %v", tab.Costs())
 	}
-	if l, ok := tab.Limit("x"); !ok || l.Name != "a twice" {
+	if l, ok := tab.Limit("x"); !ok || l.Name != "a twice" || !l.IsProposed() {
 		t.Fatalf("limit %v %v", l, ok)
+	}
+	// A limit not proposed may name an action outside the table, with why.
+	np := strings.Replace(goodTable, `]}`, `, {"id": "y", "name": "c refused", "action": "c", "cite": "docs/p.md:3", "proposed": false, "why": "w"}]}`, 1)
+	if tab, err := ParseOperations([]byte(np)); err != nil {
+		t.Fatal(err)
+	} else if l, _ := tab.Limit("y"); l.IsProposed() {
+		t.Fatal("proposed false read as proposed")
 	}
 	// Red controls: each seeded defect in a table is refused.
 	for name, edit := range map[string][2]string{
@@ -37,6 +44,8 @@ func TestParseOperations(t *testing.T) {
 		"a side effect no cite": {`, "side_effect_cite": "docs/p.md:2"`, ``},
 		"a limit name repeated": {`]}`, `, {"id": "y", "name": "a twice", "action": "a", "cite": "docs/p.md:3"}]}`},
 		"a limit id repeated":   {`]}`, `, {"id": "x", "name": "b", "action": "a", "cite": "docs/p.md:3"}]}`},
+		"not proposed, no why":  {`]}`, `, {"id": "y", "name": "b", "action": "a", "cite": "docs/p.md:3", "proposed": false}]}`},
+		"proposed with a why":   {`]}`, `, {"id": "y", "name": "b", "action": "a", "cite": "docs/p.md:3", "why": "w"}]}`},
 	} {
 		bad := strings.Replace(goodTable, edit[0], edit[1], 1)
 		if bad == goodTable {
