@@ -50,8 +50,8 @@ class Checkers(unittest.TestCase):
 
     def test_the_scenarios_name_known_checkers(self):
         root = Path(__file__).resolve().parent.parent / 'scenarios' / 'v3block'
-        want = {'m0-sequence': 'C0,C1,C2,C3,C7', 'm1-random': 'C0,C1,C2,C3,C5,C7',
-                'm2-faults': 'C0,C1,C2,C3,C5,C6,C7,DUR,MO'}
+        want = {'m0-sequence': 'C0,C1,C2,C3,C7,LIN', 'm1-random': 'C0,C1,C2,C3,C5,C7,LIN',
+                'm2-faults': 'C0,C1,C2,C3,C5,C6,C7,DUR,MO,LIN', 'soak': 'C0,C1,C6,DUR,LIN'}
         for name, cs in want.items():
             text = (root / (name + '.yaml')).read_text(encoding='utf-8')
             # One source: a literal list in the judge line, or the env value the judge line reads.

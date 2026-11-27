@@ -285,6 +285,30 @@ def synth(*steps):
 
 
 A, T, S = 'a' * 64, 't' * 64, 's' * 64
+def synthx(*steps):
+    """Like synth(); a step ('observe', verb, volume, result) is an
+    observation record in its place."""
+    plain = [st for st in steps if st[0] != 'observe']
+    base = synth(*plain)
+    out, k = [], 0
+    for st in steps:
+        if st[0] == 'observe':
+            out.append({'seq': 0, 'kind': 'observe', 'verb': st[1], 'volume': st[2], 'mono_ns': 0, 'result': st[3]})
+        else:
+            out += base[k:k + 2]
+            k += 2
+    out.append(base[-1])
+    for i, r in enumerate(out, 1):
+        r['mono_ns'] = i
+    return renumber(out)
+
+
+def disc(vol='v1'):
+    """The guest device of `vol` recorded as disconnected: it closes the
+    window of every unknown write of the volume invoked before it."""
+    return ('observe', 'disconnect', vol, {'volume': vol, 'nqn': 'nqn.test:' + vol})
+
+
 RESTORED = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
             ('snapshot', 'v1', {'name': 's1'}, 'ok', {}),
             ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok', {})]
@@ -358,7 +382,7 @@ class Evidence(unittest.TestCase):
         only_end = synth()
         v = verdicts(only_end)
         # C5 too: a run without a refusal did not exercise it.
-        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL'})
+        self.assertEqual(v, {'C0': 'FAIL', 'C1': 'FAIL', 'C2': 'FAIL', 'C3': 'FAIL', 'C4': 'FAIL', 'C5': 'FAIL', 'C6': 'FAIL', 'C7': 'FAIL', 'DUR': 'FAIL', 'MO': 'FAIL', 'LIN': 'FAIL'})
         # DUR: flushed writes read back, no kill: not exercised.
         flushed_only = synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}),
                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))
@@ -964,7 +988,7 @@ class C5(unittest.TestCase):
         self.assertIn('not exercised', v['findings'][0])
 
 
-B, C, JUNK = 'b' * 64, 'c' * 64, 'f' * 64
+B, C, JUNK, U = 'b' * 64, 'c' * 64, 'f' * 64, 'e' * 64
 # A holder kill of v1 (args.volume names it), a master kill, and a kill
 # naming no volume (an older history): applied to every volume.
 HKILL = ('kill', '', {'process': 'blockvolume:0', 'volume': 'v1', 'pid': 4242, 'signal': 'KILL'}, 'ok', {})
@@ -989,7 +1013,7 @@ def fl(outcome='ok', vol='v1'):
 
 class DUR(unittest.TestCase):
     def dur(self, *steps):
-        return hc.check(dump(synth(*steps)))['DUR']
+        return hc.check(dump(synthx(*steps)))['DUR']
 
     def assert_pass(self, v, lost):
         self.assertEqual(v['verdict'], 'PASS', v)
@@ -1067,12 +1091,16 @@ class DUR(unittest.TestCase):
         v = self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B))
         self.assertIn('unknown write landed after a later durable write: 0', v['findings'])
 
-    def test_red_an_unknown_settled_by_a_kill_does_not_land_later(self):
-        # The kill settles A (read B); a second kill may not bring A back.
-        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), HKILL, rd(0, A)), 'older value')
-        # An unknown invoked after the durable point, settled as not taken
+    def test_red_an_unknown_whose_window_closed_does_not_land_later(self):
+        # kb r3: the disconnect closes A's window (read B); a second kill may
+        # not bring A back.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, disc(), rd(0, B), HKILL, rd(0, A)), 'older value')
+        # An unknown invoked after the durable point, closed as not taken
         # effect (read ZERO), does not come back at a second kill.
-        self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), HKILL, rd(0, A)), 'no open unknown explains')
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, disc(), rd(0, hc.ZERO), HKILL, rd(0, A)), 'no open unknown explains')
+        # Green: a kill alone closes nothing; A may still land.
+        self.assert_pass(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), HKILL, rd(0, A)), lost=0)
+        self.assert_pass(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), HKILL, rd(0, A)), lost=0)
 
     # Review r1, change 1: the first read after a kill fixes what the next
     # kill may leave (the durable set before the kill plus the value read).
@@ -1101,8 +1129,10 @@ class DUR(unittest.TestCase):
     def test_red_a_value_that_changes_between_two_reads_after_a_kill(self):
         # Both A and B are allowed after the kill; the first read fixes B, a
         # later read of A with no write in between is a change.
-        steps = [w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B)]
-        self.assert_fail(self.dur(*steps, rd(0, A)), 'the value changed after the unknowns were settled')
+        steps = [w(0, A, outcome='unknown'), w(0, B), HKILL, disc(), rd(0, B)]
+        self.assert_fail(self.dur(*steps, rd(0, A)), 'the value changed after the first read after the kill')
+        # kb r3: with A's window still open (no disconnect) A may land after the read.
+        self.assert_pass(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), rd(0, A)), lost=0)
         self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A), rd(0, B)), 'the value changed')
         # Stable reads pass; a write in between resets it.
         self.assert_pass(self.dur(*steps, rd(0, B), rd(0, B)), lost=0)
@@ -1114,7 +1144,9 @@ class DUR(unittest.TestCase):
         self.assert_fail(self.dur(w(0, A), w(0, B), HKILL, rd(0, A)), 'an older value than the last durable one that no open unknown explains')
         # An unknown write of A AFTER a kill that settled it explains nothing
         # at a later kill either.
-        self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), w(0, B), HKILL, rd(0, A)), 'no open unknown explains')
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, disc(), rd(0, hc.ZERO), w(0, B), HKILL, rd(0, A)), 'no open unknown explains')
+        # Green while its window is open: a kill does not settle it (kb r3).
+        self.assert_pass(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), w(0, B), HKILL, rd(0, A)), lost=0)
 
     # Evidence.
     def test_a_kill_without_any_read_after_it_judges_nothing(self):
@@ -1144,8 +1176,9 @@ class DUR(unittest.TestCase):
         # The unknown A stays open across a master kill: it may still land
         # after a later read of B, so reading A then is no value change.
         self.assert_pass(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), MKILL, rd(0, B), rd(0, A)), lost=0)
-        # A holder kill settles it: the same reads are a change.
-        self.assert_fail(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), rd(0, A)), 'the value changed')
+        # kb r3: a holder kill does not close it either; a disconnect does.
+        self.assert_pass(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), rd(0, A)), lost=0)
+        self.assert_fail(self.dur(w(0, B, flush=False), w(0, A, outcome='unknown'), w(0, B), HKILL, disc(), rd(0, B), rd(0, A)), 'the value changed')
 
     def test_red_a_holder_kill_of_v1_reaches_no_other_volume(self):
         # v2's unflushed B is not lost by a kill of v1's holder.
@@ -1154,8 +1187,28 @@ class DUR(unittest.TestCase):
         v = self.dur(w(0, A, outcome='unknown', vol='v2'), w(0, B, vol='v2'), w(0, C), HKILL,
                      rd(0, B, vol='v2'), rd(0, A, vol='v2'), rd(0, C))
         self.assert_pass(v, lost=0)
-        # The same on v1 itself is settled by the kill: a change.
-        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, rd(0, B), rd(0, A)), 'the value changed')
+        # On v1 a disconnect of v1's device closes it: a change. One of v2's
+        # device closes nothing on v1.
+        self.assert_fail(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, disc(), rd(0, B), rd(0, A)), 'the value changed')
+        self.assert_pass(self.dur(w(0, A, outcome='unknown'), w(0, B), HKILL, disc('v2'), rd(0, B), rd(0, A)), lost=0)
+
+    def test_an_unknown_closed_by_a_child_exit(self):
+        # Steps: write A (seq 1-2), unknown U (seq 3-4), kill (5-6), exit (7).
+        def exit_(outcome):
+            return ('observe', 'child_exit', '', {'op_seq': 3, 'pid': 9, 'start': 's9', 'exit': 0 if outcome == 'ok' else 1, 'outcome': outcome})
+        # Exited failed: U never lands; after the read of A, U is a change.
+        self.assert_fail(self.dur(w(0, A), w(0, U, outcome='unknown'), HKILL, exit_('failed'), rd(0, A), rd(0, U)), 'the value changed')
+        # Exited ok: U landed by the exit, unflushed: after the kill A or U.
+        self.assert_pass(self.dur(w(0, A), w(0, U, outcome='unknown'), exit_('ok'), HKILL, rd(0, U)), lost=0)
+        self.assert_pass(self.dur(w(0, A), w(0, U, outcome='unknown'), exit_('ok'), HKILL, rd(0, A)), lost=0)
+        # Exited ok after a later durable write B: U may have landed after B,
+        # so after a kill U is still allowed (and B).
+        steps = (w(0, A), w(0, U, outcome='unknown'), w(0, B), exit_('ok'), HKILL)
+        self.assert_pass(self.dur(*steps, rd(0, U)), lost=0)
+        self.assert_pass(self.dur(*steps, rd(0, B)), lost=0)
+        self.assert_fail(self.dur(*steps, rd(0, A)), 'older value')
+        # Open (no exit): U may land after the read of A.
+        self.assert_pass(self.dur(w(0, A), w(0, U, outcome='unknown'), HKILL, rd(0, A), rd(0, U)), lost=0)
 
     def test_a_kill_naming_no_volume_reaches_every_volume_and_says_so(self):
         v = self.dur(w(0, A, vol='v2'), w(0, B, flush=False, vol='v2'), AKILL, rd(0, A, vol='v2'))
@@ -1767,7 +1820,14 @@ class Judged(unittest.TestCase):
             'DUR kill': synth(w(0, A), w(0, B, flush=False), HKILL, rd(0, A)),
             'DUR no kill': synth(w(0, A, flush=False), rd(0, A)),
             'MO outage': mo_history(MO.GOOD),
+            **self.m3_corpus(),
         }
+
+    def m3_corpus(self):
+        """The M3 checkers' own green histories (C4 a hand-over), imported
+        late: test_c4 imports this module."""
+        import test_c4 as t4
+        return {'C4 hand-over': t4.history(t4.ACK, *t4.HANDOVER, ('r', 'v1', 'b-v1', 'r2', 2, 2, 'ok'))}
 
     def test_no_checker_passes_on_nothing(self):
         passed = {name: [] for name in hc.CHECKERS}
@@ -1922,6 +1982,22 @@ class Attempts(unittest.TestCase):
         self.assertIn('limit %s: 1 of 1 refusal(s) judged' % lim, v['C5']['findings'])
         self.assertTrue(any('replaced: 3' in x for x in v['C5']['findings']), v['C5'])
         self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])
+
+    def test_a_write_request_rerun_is_one_write_for_the_data_checkers(self):
+        # Unflushed (so DUR judges it), attempt 1 unknown, attempt 2 ok: every attempt of a request carries
+        # the same value, so the earlier attempt adds no other value. A read
+        # of it passes C1, DUR and LIN; a read of anything else fails each.
+        def run(got):
+            w1 = ('write', 'v1', {'lba': 0, 'sha256': A, 'flush': False, 'request': 'w-1', 'attempt': 1}, 'unknown', {})
+            w2 = ('write', 'v1', {'lba': 0, 'sha256': A, 'flush': False, 'request': 'w-1', 'attempt': 2}, 'ok', {})
+            return hc.check(dump(synth(w1, w2, ('read', 'v1', {'lba': 0}, 'ok', {'sha256': got}))))
+        v = run(A)
+        for name in [n for n in ('C1', 'DUR', 'LIN') if n in hc.CHECKERS]:
+            self.assertEqual(v[name]['verdict'], 'PASS', (name, v[name]))
+        self.assertEqual(v['C0']['verdict'], 'PASS', v['C0'])   # the request answered ok
+        v = run(B)
+        for name in [n for n in ('C1', 'DUR', 'LIN') if n in hc.CHECKERS]:
+            self.assertEqual(v[name]['verdict'], 'FAIL', (name, v[name]))
 
     def test_an_unknown_resolves_per_request_by_its_last_attempt(self):
         # An unknown first attempt rerun to a refused second: C6 has no

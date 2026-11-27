@@ -253,8 +253,8 @@ func TestGenRunRecordsTheCheckerSetInTheHeader(t *testing.T) {
 // what v3_gen_run records and what its judge passes to --checkers.
 func TestRandomScenariosPassOneCheckerSet(t *testing.T) {
 	for file, want := range map[string]string{
-		"../../scenarios/v3block/m1-random.yaml": "C0,C1,C2,C3,C5,C7",
-		"../../scenarios/v3block/m2-faults.yaml": "C0,C1,C2,C3,C5,C6,C7,DUR,MO",
+		"../../scenarios/v3block/m1-random.yaml": "C0,C1,C2,C3,C5,C7,LIN",
+		"../../scenarios/v3block/m2-faults.yaml": "C0,C1,C2,C3,C5,C6,C7,DUR,MO,LIN",
 	} {
 		s, err := tr.ParseFile(file)
 		if err != nil {

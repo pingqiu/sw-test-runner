@@ -27,6 +27,9 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   intended_states(recs, seq)    {volume: held | not_held | unsettled} before a record
   third_state(healthy_obs)      [(volume, why)] of volumes in neither consistent state
   settled(obs)                  (volume, state, evidence) of a settled record, else None
+  holder_sample(inv, comp)      C4: the holder an operation went through, its epochs and identities before and after
+  ack_modes(recs)               C4: {volume: acknowledging | best_effort} from the run's header
+  master_lines(obs)             C4: {volume: (replica, epoch)} the master's line an observation shows
 """
 import re
 
@@ -442,6 +445,153 @@ def settled(obs):
     if res.get('state') not in SETTLED_STATES or not res.get('volume'):
         return None
     return res['volume'], res['state'], res.get('evidence')
+
+
+# --- C4 (epoch fencing) ----------------------------------------------------
+#
+# The record shape C4 reads (the runner writes it from M3 on):
+#   a write's (or read's) invoke: args.holder = {"server": "a-v1", "replica": "r1",
+#       "epoch_before": 3, "pid": 4242, "start": "636310"}: the holder the
+#       operation goes through, its status epoch and its process identity
+#       (pid and start time), sampled BEFORE the invoke;
+#   its complete: result.holder = {"epoch_after": 3, "pid": 4242, "start": "636310"}:
+#       the same holder's status epoch and process identity sampled AFTER the
+#       completion;
+#   an observe record: result.line = {"replica": "r1", "epoch": 3}: the
+#       master's line for the record's volume; a healthy record may carry
+#       result.lines = {volume: {"replica", "epoch"}} for every volume;
+#   the run's header (observe record of verb gen_header):
+#       result.ack_modes = {volume: "acknowledging" | "best_effort"}.
+# Without result.line, an observe record of verb observe whose workspace
+# answer exited 0 gives the line from its "replica:" and "epoch:" facts, so
+# today's observations already carry it.
+
+ACK_MODES = ('acknowledging', 'best_effort')
+
+
+def _epoch(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _ident(h):
+    """(pid, start) of a holder sample, or None when it records neither."""
+    if h.get('pid') is None and h.get('start') is None:
+        return None
+    return (h.get('pid'), h.get('start'))
+
+
+def holder_sample(inv, comp):
+    """The holder an operation went through, its status epochs and process
+    identities: None when the invoke carries no args.holder; ('bad', why)
+    when the sample is there but unreadable; else ('ok', (server, replica),
+    epoch_before, epoch_after, ident_before, ident_after), epoch_after and
+    ident_after None when the completion carries no result.holder (an
+    operation that never completed, or a runner that did not sample), an
+    identity None when the sample records no pid and start."""
+    h = (inv.get('args') or {}).get('holder')
+    if h is None:
+        return None
+    if not isinstance(h, dict) or not h.get('server') or not h.get('replica') or _epoch(h.get('epoch_before')) is None:
+        return 'bad', 'args.holder %r is not {server, replica, epoch_before, pid, start}' % (h,)
+    after = ident_after = None
+    if comp is not None:
+        ch = (comp.get('result') or {}).get('holder')
+        if ch is not None:
+            if not isinstance(ch, dict) or _epoch(ch.get('epoch_after')) is None:
+                return 'bad', 'result.holder %r is not {epoch_after, pid, start}' % (ch,)
+            after, ident_after = ch['epoch_after'], _ident(ch)
+    return 'ok', (str(h['server']), str(h['replica'])), h['epoch_before'], after, _ident(h), ident_after
+
+
+def ack_modes(recs):
+    """({volume: mode}, [notes]): each volume's acknowledgement mode from the
+    run's header (the first gen_header record's result.ack_modes); a value
+    other than ACK_MODES is noted and left out (judged as acknowledging)."""
+    for r in recs:
+        if r['kind'] == 'observe' and r.get('verb') == 'gen_header':
+            modes = (r.get('result') or {}).get('ack_modes')
+            if modes is None:
+                return {}, []
+            if not isinstance(modes, dict):
+                return {}, ['header ack_modes %r is not {volume: mode}' % (modes,)]
+            out, notes = {}, []
+            for vol, m in sorted(modes.items()):
+                if m in ACK_MODES:
+                    out[str(vol)] = m
+                else:
+                    notes.append('header ack_modes: %s has mode %r, not one of %s' % (vol, m, ', '.join(ACK_MODES)))
+            return out, notes
+    return {}, []
+
+
+def _line(row):
+    if isinstance(row, dict) and row.get('replica') and _epoch(row.get('epoch')) is not None:
+        return str(row['replica']), row['epoch']
+    return None
+
+
+def child_exit(obs):
+    """(op_seq, 'ok' | 'failed' | 'unknown') of an observe record of verb
+    child_exit: the abandoned child of the unknown operation invoked at
+    op_seq exited. ok: it finished on its own and the write landed at or
+    before this record; failed: it finished on its own and the write never
+    landed; unknown (the runner killed it, killed true and exit 137, or its
+    exit is not known, exit null): a process blocked in kernel I/O exits
+    only once that I/O has returned, so the write landed at or before this
+    record or never, and cannot land after it. None for any other record,
+    for a child still running at the run's end (alive true: nothing
+    closes), and for a child of no operation (op_seq null: an
+    observation's child)."""
+    if obs.get('kind') != 'observe' or obs.get('verb') != 'child_exit':
+        return None
+    res = obs.get('result') or {}
+    op, out = res.get('op_seq'), res.get('outcome')
+    if not isinstance(op, int) or isinstance(op, bool) or res.get('alive') is True:
+        return None
+    if out not in ('ok', 'failed', 'unknown'):
+        return None
+    return op, out
+
+
+def disconnect(obs):
+    """The volume whose guest device an observe record of verb disconnect
+    shows disconnected (result.volume, else the record's volume); None for
+    any other record."""
+    if obs.get('kind') != 'observe' or obs.get('verb') != 'disconnect':
+        return None
+    vol = (obs.get('result') or {}).get('volume') or obs.get('volume')
+    return str(vol) if vol else None
+
+
+def master_lines(obs):
+    """{volume: (replica, epoch)}: the master's line for each volume an
+    observe record shows; empty for a record that shows none (a generator
+    record, a failed workspace answer, a volume without a lease)."""
+    if obs.get('kind') != 'observe' or str(obs.get('verb', '')).startswith('gen_'):
+        return {}
+    res = obs.get('result') or {}
+    out = {}
+    if isinstance(res.get('lines'), dict):
+        for vol, row in res['lines'].items():
+            got = _line(row)
+            if got:
+                out[str(vol)] = got
+    vol = obs.get('volume')
+    if not vol:
+        return out
+    got = _line(res.get('line'))
+    if got:
+        out[vol] = got
+        return out
+    ws = res.get('workspace')
+    if obs.get('verb') == 'observe' and isinstance(ws, dict) and ws.get('exit') == 0:
+        facts = workspace_facts(ws.get('text'))
+        if facts:
+            d = dict(facts)
+            rep, ep = d.get('replica'), d.get('epoch', '')
+            if rep and rep != 'none' and ep.isdigit():
+                out[vol] = (rep, int(ep))
+    return out
 
 
 def kill_scope(inv):
