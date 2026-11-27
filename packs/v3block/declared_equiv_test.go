@@ -269,7 +269,10 @@ func TestDeclaredSnapshotEquivalent(t *testing.T) {
 		{name: "on the second host", params: p, vols: moved, rules: on(eqAnswer{})},
 	}
 	cases = append(cases, commonErrorCases(p, on(eqAnswer{}))...)
-	checkEquivalent(t, "v3_op_snapshot", v3OpSnapshotFrozen, cases)
+	// The deliberate change since the frozen handler: the snapshot is a
+	// retried action (docs/operator-guide.md:220-225), so its invocation
+	// names its request and its attempt, and its log line the attempt.
+	checkEquivalentAs(t, "v3_op_snapshot", v3OpSnapshotFrozen, cases, asSnapshotAttempt)
 }
 
 func TestDeclaredRestoreEquivalent(t *testing.T) {
@@ -335,6 +338,7 @@ func TestEquivalenceRedControl(t *testing.T) {
 			t.Error("a changed recorded arg was not caught")
 		}
 	}
+	asSnapshotAttempt(c, &frozen) // the snapshot's one deliberate change
 	if got := runEq(t, blockActions.Handler("v3_op_snapshot"), c, true); !reflect.DeepEqual(frozen, got) {
 		t.Errorf("green twin differs: %+v vs %+v", frozen, got)
 	}
@@ -388,6 +392,44 @@ func TestDeclaredSnapshotDeleteEquivalent(t *testing.T) {
 	}
 }
 
+// asOneAttempt is the deliberate change from the frozen delete's single
+// call to the declared delete's one attempt: its invoke carries attempt 1,
+// its complete no attempts list, its log line names the attempt.
+// asSnapshotAttempt is asOneAttempt for the snapshot, whose record also
+// names its request (<volume>-<name>, as its --request-id).
+func asSnapshotAttempt(c eqCase, r *eqRun) {
+	for i := range r.records {
+		if r.records[i].Kind == tr.HistoryInvoke {
+			r.records[i].Args["request"] = r.records[i].Volume + "-" + fmt.Sprint(r.records[i].Args["name"])
+		}
+	}
+	asOneAttempt(c, r)
+	for i, l := range r.logs {
+		if strings.HasPrefix(l, "  v3_op_snapshot(") {
+			r.logs[i] = strings.Replace(l, "): ", ") attempt 1: ", 1)
+		}
+	}
+}
+
+func asOneAttempt(_ eqCase, r *eqRun) {
+	for i := range r.records {
+		switch r.records[i].Kind {
+		case tr.HistoryInvoke:
+			r.records[i].Args["attempt"] = float64(1)
+		case tr.HistoryComplete:
+			delete(r.records[i].Result, "attempts")
+			if len(r.records[i].Result) == 0 {
+				r.records[i].Result = nil
+			}
+		}
+	}
+	for i, l := range r.logs {
+		if strings.HasPrefix(l, "  v3_op_delete(") {
+			r.logs[i] = strings.Replace(l, "): ", ") attempt 1: ", 1)
+		}
+	}
+}
+
 func TestDeclaredDeleteEquivalent(t *testing.T) {
 	defer func(d time.Duration, p func(time.Duration) time.Duration) {
 		deleteRetryEveryFrozen, blockActions.Pause = d, p
@@ -401,26 +443,76 @@ func TestDeclaredDeleteEquivalent(t *testing.T) {
 	on := func(as ...eqAnswer) []eqRule { return []eqRule{{"volume-delete", as}} }
 	p := map[string]string{"volume": "v1"}
 	neg := map[string]string{"volume": "v1", "expect": "refused"}
+	// The cases where both make one call: the same record, as one attempt.
 	cases := []eqCase{
 		{name: "ok", params: p, rules: on(deleted)},
-		{name: "refused then ok", params: p, rules: on(live, deleted)},
-		{name: "not admitted twice then ok", params: p, rules: on(horizon, live, horizon, deleted)},
-		{name: "not admitted then a kept-unknown code", params: p, rules: on(horizon, chunkErr("conflict", "lost"))},
-		{name: "not admitted then no body", params: p, rules: on(horizon, eqAnswer{out: "x", code: 1})},
 		{name: "not run at once", params: p, rules: on(eqAnswer{err: broken})},
-		{name: "not run after a not admitted", params: p, rules: on(horizon, eqAnswer{err: broken})},
+		{name: "a kept-unknown code", params: p, rules: on(chunkErr("conflict", "lost"))},
+		{name: "no body", params: p, rules: on(eqAnswer{out: "x", code: 1})},
 		{name: "negative refused is one call", params: neg, rules: on(live, deleted)},
 		{name: "negative unknown is one call", params: neg, rules: on(horizon, deleted)},
 		{name: "negative ok", params: neg, rules: on(deleted)},
-		{name: "admit seconds not a number", params: map[string]string{"volume": "v1", "admit_seconds": "soon"}, rules: on(horizon, deleted)},
-		{name: "admit seconds given", params: map[string]string{"volume": "v1", "admit_seconds": "30"}, rules: on(horizon, deleted)},
 		{name: "a volume without a layout id", params: map[string]string{"volume": "tgt"}, rules: on(deleted)},
 	}
 	cases = append(cases, commonErrorCases(p, on(deleted))...)
-	checkEquivalent(t, "v3_op_delete", v3OpDeleteFrozen, cases)
-	// The retry is exercised: three reruns, then ok.
-	if r := runEq(t, blockActions.Handler("v3_op_delete"), cases[2], true); len(r.calls) != 4 || r.ret["value"] != tr.OutcomeOK {
-		t.Errorf("%s: %d calls, %v", cases[2].name, len(r.calls), r.ret)
+	checkEquivalentAs(t, "v3_op_delete", v3OpDeleteFrozen, cases, asOneAttempt)
+}
+
+// The declared delete reruns ONLY for the answer the page tells the
+// operator to run again for (not_admitted with the sentinel, before
+// persistence), each attempt its own invoke and complete with the request
+// and the attempt number; at most max_attempts; the last attempt stands.
+func TestDeclaredDeleteAttempts(t *testing.T) {
+	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
+	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
+	live := chunkErr("not_admitted", "layout: delete reservation: workspace: deletion refused before persistence: live until T")
+	after := chunkErr("not_admitted", "layout: a holder is acting on the volume: live until T")
+	deleted := eqAnswer{out: `{"volume":"v1","state":"deleted"}`}
+	on := func(as ...eqAnswer) []eqRule { return []eqRule{{"volume-delete", as}} }
+	maxAttempts := blockActions.File.Actions[5].Retry.MaxAttempts
+	if blockActions.File.Actions[5].Action != "v3_op_delete" || maxAttempts < 2 {
+		t.Fatalf("the delete's retry: %+v", blockActions.File.Actions[5].Retry)
+	}
+	for name, c := range map[string]struct {
+		params   map[string]string
+		answers  []eqAnswer
+		outcomes []string
+	}{
+		"refused twice, then deleted":              {map[string]string{"volume": "v1"}, []eqAnswer{live, live, deleted}, []string{"refused", "refused", "ok"}},
+		"a not_admitted after the reservation":     {map[string]string{"volume": "v1"}, []eqAnswer{after, deleted}, []string{"unknown"}},
+		"refused, then a kept-unknown code":        {map[string]string{"volume": "v1"}, []eqAnswer{live, chunkErr("conflict", "lost")}, []string{"refused", "unknown"}},
+		"refused, then not run":                    {map[string]string{"volume": "v1"}, []eqAnswer{live, {err: broken}}, []string{"refused", "unknown"}},
+		"refused until the bound":                  {map[string]string{"volume": "v1", "admit_seconds": "600"}, []eqAnswer{live}, nil},
+		"a negative with retry_horizon reruns too": {map[string]string{"volume": "v1", "expect": "refused", "retry_horizon": "true"}, []eqAnswer{live, live, chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}, []string{"refused", "refused", "refused_effect"}},
+	} {
+		if c.outcomes == nil {
+			for n := 0; n < maxAttempts; n++ {
+				c.outcomes = append(c.outcomes, "refused")
+			}
+		}
+		r := runEq(t, blockActions.Handler("v3_op_delete"), eqCase{params: c.params, rules: on(c.answers...)}, true)
+		if r.err != nil || len(r.calls) != len(c.outcomes) || r.ret["value"] != c.outcomes[len(c.outcomes)-1] {
+			t.Fatalf("%s: %v, %d calls, %v", name, r.err, len(r.calls), r.ret)
+		}
+		var got []string
+		n := 0
+		for _, rec := range r.records {
+			switch rec.Kind {
+			case tr.HistoryInvoke:
+				n++
+				if rec.Args["request"] != "delete-v1" || rec.Args["attempt"] != float64(n) {
+					t.Fatalf("%s: attempt %d args %v", name, n, rec.Args)
+				}
+			case tr.HistoryComplete:
+				got = append(got, rec.Outcome)
+				if _, folded := rec.Result["attempts"]; folded {
+					t.Fatalf("%s: attempts folded into a record", name)
+				}
+			}
+		}
+		if strings.Join(got, " ") != strings.Join(c.outcomes, " ") {
+			t.Fatalf("%s: outcomes %v, want %v", name, got, c.outcomes)
+		}
 	}
 }
 
@@ -499,10 +591,9 @@ func toAny(ss []string) []any {
 }
 
 // The delete of a source whose snapshot has a restore target is refused
-// with a documented effect. The deliberate change since the frozen handler:
-// it completes refused_effect, and the completion carries the effect
-// exactly as outcomes.json states it. Everything else is the frozen
-// handler's.
+// with a documented effect. The deliberate changes since the frozen
+// handler: one attempt, and it completes refused_effect with the effect
+// exactly as outcomes.json states it.
 func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 	_, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", "")
 	if eff == nil {
@@ -517,13 +608,12 @@ func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 		{name: "a negative", params: map[string]string{"volume": "v1", "expect": "refused"}, rules: refusal},
 	}
 	checkEquivalentAs(t, "v3_op_delete", v3OpDeleteFrozen, cases, func(c eqCase, r *eqRun) {
+		asOneAttempt(c, r)
 		r.ret["value"] = tr.OutcomeRefusedEffect
 		for i := range r.records {
 			if r.records[i].Kind == tr.HistoryComplete {
 				r.records[i].Outcome = tr.OutcomeRefusedEffect
 				r.records[i].Result["effect"] = asRead
-				attempts := r.records[i].Result["attempts"].([]any)
-				attempts[len(attempts)-1] = strings.Replace(attempts[len(attempts)-1].(string), tr.OutcomeUnknown+" ", tr.OutcomeRefusedEffect+" ", 1)
 			}
 		}
 		for i, l := range r.logs {
@@ -532,7 +622,7 @@ func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 	})
 	r := runEq(t, blockActions.Handler("v3_op_delete"), cases[0], true)
 	to, _ := asRead["to"].(map[string]any)
-	if r.ret["value"] != tr.OutcomeRefusedEffect || to["exit"] != float64(1) || to["stderr_contains"] != "workspace: volume is being deleted" {
+	if r.ret["value"] != tr.OutcomeRefusedEffect || to["exit"] != float64(1) || to["stderr_contains"] != "volume is being deleted" {
 		t.Fatalf("%v effect %v", r.ret, asRead)
 	}
 }
@@ -553,24 +643,39 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 		}
 		return p
 	}
-	attempts := func(r eqRun) []any {
-		a, _ := r.records[1].Result["attempts"].([]any)
-		return a
+	// The outcome of each attempt, in order (each its own record pair).
+	attempts := func(r eqRun) []string {
+		var out []string
+		for _, rec := range r.records {
+			if rec.Kind == tr.HistoryComplete {
+				out = append(out, rec.Outcome+" "+fmt.Sprint(rec.Result["detail"]))
+			}
+		}
+		return out
+	}
+	last := func(r eqRun) tr.HistoryRecord {
+		var l tr.HistoryRecord
+		for _, rec := range r.records {
+			if rec.Kind == tr.HistoryComplete {
+				l = rec
+			}
+		}
+		return l
 	}
 	h := blockActions.Handler("v3_op_delete")
 
 	r := runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true"}), rules: []eqRule{{"volume-delete", []eqAnswer{horizon, horizon, deps}}}}, true)
-	if len(r.records) != 3 || len(r.calls) != 3 || len(attempts(r)) != 3 || r.records[1].Outcome != tr.OutcomeRefusedEffect ||
-		!strings.HasPrefix(attempts(r)[0].(string), "refused not_admitted:") || !strings.HasPrefix(attempts(r)[2].(string), "refused_effect snapshot_has_dependents:") {
+	if len(r.calls) != 3 || len(attempts(r)) != 3 || last(r).Outcome != tr.OutcomeRefusedEffect ||
+		!strings.HasPrefix(attempts(r)[0], "refused not_admitted:") || !strings.HasPrefix(attempts(r)[2], "refused_effect snapshot_has_dependents:") {
 		t.Fatalf("horizon twice then dependents: %d calls, records %+v", len(r.calls), r.records)
 	}
 
 	start := time.Now()
 	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true", "admit_seconds": "1"}), rules: []eqRule{{"volume-delete", []eqAnswer{horizon}}}}, true)
-	if len(r.calls) < 2 || r.records[1].Outcome != tr.OutcomeRefused || len(attempts(r)) != len(r.calls) || time.Since(start) > 10*time.Second {
+	if len(r.calls) < 2 || last(r).Outcome != tr.OutcomeRefused || len(attempts(r)) != len(r.calls) || time.Since(start) > 10*time.Second {
 		t.Fatalf("horizon until admit_seconds: %d calls, records %+v", len(r.calls), r.records)
 	}
-	if d, _ := r.records[1].Result["detail"].(string); !strings.Contains(d, "workspace: deletion refused before persistence") {
+	if d, _ := last(r).Result["detail"].(string); !strings.Contains(d, "workspace: deletion refused before persistence") {
 		t.Fatalf("the horizon refusal is not the one recorded: %q", d)
 	}
 
@@ -591,5 +696,44 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "maybe"}), rules: []eqRule{{"volume-delete", []eqAnswer{deps}}}}, true)
 	if r.err == nil || len(r.calls) != 0 {
 		t.Fatalf("retry_horizon=maybe: %v, %d calls", r.err, len(r.calls))
+	}
+}
+
+// The snapshot reruns ONLY the answers the operator page names
+// (docs/operator-guide.md:220-225): head_conflict, then an internal "is not
+// in HEAD after its commit"; at most three attempts, each its own operation
+// with the request and the attempt; every attempt is counted.
+func TestDeclaredSnapshotReruns(t *testing.T) {
+	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
+	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
+	conflict := chunkErr("head_conflict", "storage: capture CAS not applied: storage: chunk HEAD precondition failed")
+	notInHead := chunkErr("internal", `durable: snapshot "s1" of v1 is not in HEAD after its commit`)
+	for name, c := range map[string]struct {
+		answers  []eqAnswer
+		outcomes []string
+	}{
+		"a conflict, then ok":                   {[]eqAnswer{conflict, {}}, []string{"unknown", "ok"}},
+		"a conflict, the known defect, then ok": {[]eqAnswer{conflict, notInHead, {}}, []string{"unknown", "unknown", "ok"}},
+		"conflicts to the bound":                {[]eqAnswer{conflict}, []string{"unknown", "unknown", "unknown"}},
+		"another internal is not rerun":         {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
+		"a layout refusal is not rerun":         {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
+	} {
+		r := runEq(t, blockActions.Handler("v3_op_snapshot"), eqCase{params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", c.answers}}}, true)
+		var got []string
+		n := 0
+		for _, rec := range r.records {
+			switch rec.Kind {
+			case tr.HistoryInvoke:
+				n++
+				if rec.Args["request"] != "v1-s1" || rec.Args["attempt"] != float64(n) {
+					t.Fatalf("%s: attempt %d args %v", name, n, rec.Args)
+				}
+			case tr.HistoryComplete:
+				got = append(got, rec.Outcome)
+			}
+		}
+		if r.err != nil || strings.Join(got, " ") != strings.Join(c.outcomes, " ") || r.ret["value"] != c.outcomes[len(c.outcomes)-1] {
+			t.Fatalf("%s: %v %v, outcomes %v", name, r.err, r.ret, got)
+		}
 	}
 }

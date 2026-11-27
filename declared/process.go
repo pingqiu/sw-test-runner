@@ -100,6 +100,11 @@ type Ready struct {
 //     a scan finds no controller of the subsystem.
 //   - "device": the one namespace of Subsystem within WithinSeconds,
 //     {{device}} and the result field Into.
+//   - "nvme_readback": the controller's effective connect values read back
+//     from the kernel (Files: option -> sysfs file) into Into, compared with
+//     Expect (the connect's options); a mismatch ends the step, and with
+//     FailRun fails the run (readback.go). RecordVerb names the run's one
+//     record of its first read-back, with RecordFields.
 type Probe struct {
 	Name          string                     `json:"name"`
 	Kind          string                     `json:"kind"`
@@ -119,6 +124,11 @@ type Probe struct {
 	UnlessPresent bool                       `json:"unless_present,omitempty"`
 	WithinSeconds int                        `json:"within_seconds,omitempty"`
 	Into          string                     `json:"into,omitempty"`
+	Expect        string                     `json:"expect,omitempty"`
+	Files         map[string]string          `json:"files,omitempty"`
+	FailRun       bool                       `json:"fail_run,omitempty"`
+	RecordVerb    string                     `json:"record_verb,omitempty"`
+	RecordFields  map[string]string          `json:"record_fields,omitempty"`
 	Cite          string                     `json:"cite"`
 }
 
@@ -486,6 +496,20 @@ func (pr *Probe) check(defined func(string) error, subjects map[string]bool, rea
 			return errors.New("device: subsystem, into and within_seconds, not a ready probe")
 		}
 		return defined(pr.Subsystem)
+	case "nvme_readback":
+		if ready || pr.Subsystem == "" || pr.Into == "" || len(pr.Files) == 0 {
+			return errors.New("nvme_readback: subsystem, into and files, not a ready probe")
+		}
+		for o, f := range pr.Files {
+			if o == "" || f == "" || strings.ContainsAny(f, "/ ") {
+				return fmt.Errorf("nvme_readback: file %q of %q is not a sysfs file name", f, o)
+			}
+		}
+		for _, t := range append([]string{pr.Subsystem, pr.Expect}, mapValues(pr.RecordFields)...) {
+			if err := defined(t); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("probe kind %q", pr.Kind)
 	}
@@ -539,6 +563,9 @@ func (x *Executor) processStep(s *scope, actx *tr.ActionContext, act tr.Action, 
 	})
 	if err != nil {
 		return nil, err
+	}
+	if s.fatal != "" {
+		return nil, fmt.Errorf("%s: %s: the run stops before any other operation", a.Action, s.fatal)
 	}
 	if sets, ok := a.OnOutcomeSet[out["value"]]; ok {
 		for _, k := range sortedKeys(sets) {
@@ -924,6 +951,8 @@ func (x *Executor) probe(s *scope, ctx context.Context, pr *Probe, res map[strin
 			return tr.OutcomeUnknown, why, false
 		}
 		return "", "", true
+	case "nvme_readback":
+		return x.readback(s, ctx, pr, res)
 	case "device":
 		nqn, err := s.expand(pr.Subsystem)
 		if err != nil {

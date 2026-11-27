@@ -193,38 +193,44 @@ func TestEveryTypedOperationHasARunnerDeadline(t *testing.T) {
 // The guest connect: empty is the product's plain connect, today's exact
 // string; a declared variant's options are appended under the kernel's
 // option names in the declared order and named as a variant in the header
-// and in every attach; an undeclared name is refused.
+// The guest connect: empty is the documented connect (release evidence),
+// with the page's options; csi_plain is today's plain string; a declared
+// variant appends its options in the declared order and is named as a
+// variant in the header; an undeclared name is refused.
 func TestGuestConnect(t *testing.T) {
 	const plainCmd = "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1 > /dev/nvme-fabrics"
-	plain, err := selectConnect("")
-	if err != nil || plain.Options != "" || !strings.HasPrefix(plain.Label, "plain") {
-		t.Fatalf("default: %+v %v", plain, err)
+	doc, err := selectConnect("")
+	if err != nil || !doc.Evidence || doc.Name != "documented" || doc.Options != ",ctrl_loss_tmo=180,reconnect_delay=2" ||
+		doc.Declared["ctrl_loss_tmo"] != 180 || doc.Declared["reconnect_delay"] != 2 || len(doc.Declared) != 2 {
+		t.Fatalf("default: %+v %v", doc, err)
 	}
 	f := (&fakeNode{}).on("nvme-fabrics", ok(""))
-	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", plain.Options); why != "" || len(f.calls) != 1 || f.calls[0] != plainCmd {
-		t.Fatalf("plain connect: %q %q", why, f.calls)
+	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", doc.Options); why != "" ||
+		f.calls[0] != "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1,ctrl_loss_tmo=180,reconnect_delay=2 > /dev/nvme-fabrics" {
+		t.Fatalf("documented connect: %q %q", why, f.calls)
 	}
-	v, err := selectConnect("host_connect_settings")
-	if err != nil || v.Options != ",ctrl_loss_tmo=180,reconnect_delay=2" || v.Label != "guest connect variant: ctrl_loss_tmo=180,reconnect_delay=2" {
-		t.Fatalf("variant: %+v %v", v, err)
+	plain, err := selectConnect("csi_plain")
+	if err != nil || plain.Evidence || plain.Options != "" || plain.Label != "guest connect variant: plain" {
+		t.Fatalf("csi_plain: %+v %v", plain, err)
 	}
 	f = (&fakeNode{}).on("nvme-fabrics", ok(""))
-	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", v.Options); why != "" ||
-		f.calls[0] != "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1,ctrl_loss_tmo=180,reconnect_delay=2 > /dev/nvme-fabrics" {
-		t.Fatalf("variant connect: %q %q", why, f.calls)
+	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", plain.Options); why != "" || f.calls[0] != plainCmd {
+		t.Fatalf("plain connect: %q %q", why, f.calls)
 	}
-	if ff, err := selectConnect("fast_faults"); err != nil || ff.Options != ",fast_io_fail_tmo=5,ctrl_loss_tmo=60" {
+	if ff, err := selectConnect("fast_faults"); err != nil || ff.Evidence || ff.Options != ",fast_io_fail_tmo=5,ctrl_loss_tmo=60" {
 		t.Fatalf("fast_faults: %+v %v", ff, err)
 	}
-	if _, err := selectConnect("ctrl-loss-tmo=180"); err == nil {
-		t.Fatal("a free-form value was accepted: a variant is declared")
+	for _, bad := range []string{"ctrl-loss-tmo=180", "host_connect_settings", "plain"} {
+		if _, err := selectConnect(bad); err == nil {
+			t.Errorf("%q was accepted: a connect is declared", bad)
+		}
 	}
-	h, err := guestHeader(func(k string) string { return map[string]string{guest.Connect.SelectVar: "host_connect_settings"}[k] })
-	if err != nil || h["guest_connect"] != v.Label {
+	h, err := guestHeader(func(k string) string { return map[string]string{guest.Connect.SelectVar: "csi_plain"}[k] })
+	if err != nil || h["guest_connect"] != plain.Label {
 		t.Fatalf("variant header: %v %v", h, err)
 	}
 	if h, err := guestHeader(func(string) string { return "" }); err != nil || len(h) != 0 {
-		t.Fatalf("plain header: %v %v", h, err)
+		t.Fatalf("documented header: %v %v", h, err)
 	}
 	if why := nvmeConnect(context.Background(), &fakeNode{}, "127.0.0.1", "4420", "nqn.x:v1", ",x=1;reboot"); why == "" {
 		t.Fatal("malformed options were accepted")
@@ -252,24 +258,96 @@ func TestVariantOptionsAtLoad(t *testing.T) {
 
 // The attach's history record names the connect in effect, from the run's
 // declared variant; an undeclared name refuses the step before anything
-// runs.
-func TestAttachRecordsTheGuestConnect(t *testing.T) {
+// sysfsAnswer is the read-back of one controller with these values.
+func sysfsAnswer(loss, delay string) fakeAnswer {
+	return ok("ctrl nvme3\nctrl_loss_tmo " + loss + "\nreconnect_delay " + delay + "\nfast_io_fail_tmo off\nkato 5\nend\n")
+}
+
+// attachNode answers a whole attach of v1: free endpoints, the child, its
+// own listeners, serving, the connect, one device, and the read-back.
+func attachNode(readback fakeAnswer) *fakeNode {
+	own := "LISTEN 0 4096 127.0.0.1:20012 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=9))\nLISTEN 0 4096 127.0.0.1:20013 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=10))"
+	return (&fakeNode{}).
+		on("fast_io_fail_tmo kato", readback).
+		on("ss -Hltnp", ok(""), ok(own)).
+		on("mkdir -p", ok("")).
+		on("setsid", ok("4242\n")).
+		on("/proc/4242", ok("start 100\n")).
+		on("/status?volume=v1", ok(`{"VolumeID":"v1","Epoch":1,"Healthy":true,"AuthorityRole":"primary","FrontendPrimaryReady":true}`)).
+		on("nvme-fabrics", ok("")).
+		on("subsysnqn", ok(oneDevice))
+}
+
+// The attach records the connect in effect and the kernel's read-back. A
+// read-back equal to the declared values is recorded (attach ok, one
+// guest_connect record); one that differs fails the run at that attach,
+// before any other operation; a variant without declared values only
+// records; an undeclared name refuses the step before anything runs.
+func TestAttachReadsTheConnectBack(t *testing.T) {
 	defer func(d time.Duration) { exceptionDeadlineOverride = d }(exceptionDeadlineOverride)
-	exceptionDeadlineOverride = 300 * time.Millisecond
-	actx, p := deadlineCtx(t, &fakeNode{})
-	actx.Vars["guest_connect_variant"] = "host_connect_settings"
-	if _, err := blockActions.Handler("v3_op_attach")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
-		t.Fatal(err)
+	exceptionDeadlineOverride = 5 * time.Second
+	attach := func(variant string, readback fakeAnswer) (error, []tr.HistoryRecord) {
+		actx, p := deadlineCtx(t, attachNode(readback))
+		vs := eqVolumes()
+		vs[0].PID, vs[0].PIDStart = "", ""
+		saveVolume(actx, vs[0])
+		if variant != "" {
+			actx.Vars["guest_connect_variant"] = variant
+		}
+		_, err := blockActions.Handler("v3_op_attach")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+		_ = actx.History.Close()
+		return err, historyRecords(t, p)
 	}
-	_ = actx.History.Close()
-	rs := historyRecords(t, p)
-	if len(rs) < 2 || rs[0].Args["guest_connect"] != "guest connect variant: ctrl_loss_tmo=180,reconnect_delay=2" {
-		t.Fatalf("records %+v", rs)
+	byVerb := func(rs []tr.HistoryRecord, kind, verb string) []tr.HistoryRecord {
+		var out []tr.HistoryRecord
+		for _, r := range rs {
+			if r.Kind == kind && r.Verb == verb {
+				out = append(out, r)
+			}
+		}
+		return out
 	}
-	actx, _ = deadlineCtx(t, &fakeNode{})
+
+	err, rs := attach("", sysfsAnswer("180", "2"))
+	done := byVerb(rs, tr.HistoryComplete, "attach")
+	gc := byVerb(rs, tr.HistoryObserve, "guest_connect")
+	if err != nil || len(done) != 1 || done[0].Outcome != tr.OutcomeOK || len(gc) != 1 || gc[0].Result["match"] != true || gc[0].Result["evidence"] != "true" {
+		t.Fatalf("a match: %v, records %+v", err, rs)
+	}
+	eff, _ := done[0].Result["guest_connect_effective"].(map[string]any)
+	vals, _ := eff["values"].(map[string]any)
+	if eff["ctrl"] != "nvme3" || vals["ctrl_loss_tmo"] != "180" || vals["reconnect_delay"] != "2" || vals["fast_io_fail_tmo"] != "off" || vals["keep_alive_tmo"] != "5" {
+		t.Fatalf("the read-back recorded: %v", eff)
+	}
+	if a := byVerb(rs, tr.HistoryInvoke, "attach"); a[0].Args["guest_connect"] != "documented connect (standalone, evidence): ctrl_loss_tmo=180,reconnect_delay=2" {
+		t.Fatalf("the attach names %v", a[0].Args["guest_connect"])
+	}
+
+	// Red controls: the kernel holds another value, or cannot show one.
+	for name, rb := range map[string]fakeAnswer{
+		"the kernel's default loss timeout": sysfsAnswer("600", "2"),
+		"another reconnect delay":           sysfsAnswer("180", "10"),
+		"no readback file":                  ok("ctrl nvme3\nctrl_loss_tmo -\nreconnect_delay 2\nfast_io_fail_tmo -\nkato -\nend\n"),
+		"the read-back fails":               {errOut: "cat: permission denied", code: 3},
+	} {
+		err, rs := attach("", rb)
+		done := byVerb(rs, tr.HistoryComplete, "attach")
+		gc := byVerb(rs, tr.HistoryObserve, "guest_connect")
+		if err == nil || !strings.Contains(err.Error(), "the run stops before any other operation") || len(done) != 1 || done[0].Outcome != tr.OutcomeUnknown ||
+			len(gc) != 1 || gc[0].Result["match"] != false {
+			t.Errorf("%s: %v, records %+v", name, err, rs)
+		}
+	}
+
+	// csi_plain declares nothing: the read-back is recorded, not compared.
+	if err, rs := attach("csi_plain", sysfsAnswer("600", "10")); err != nil || byVerb(rs, tr.HistoryComplete, "attach")[0].Outcome != tr.OutcomeOK {
+		t.Fatalf("csi_plain: %v %+v", err, rs)
+	}
+	// An undeclared name refuses the step before anything runs.
+	actx, _ := deadlineCtx(t, &fakeNode{})
 	actx.Vars["guest_connect_variant"] = "ctrl-loss-tmo=1"
 	if _, err := blockActions.Handler("v3_op_attach")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err == nil || actx.History.Open() != 0 {
-		t.Fatalf("an unknown option was not refused: %v", err)
+		t.Fatalf("an undeclared connect was not refused: %v", err)
 	}
 	_ = actx.History.Close()
 }

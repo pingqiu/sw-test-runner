@@ -1711,7 +1711,11 @@ class MO(unittest.TestCase):
             ('look', [], HOLDERS), ('look', [], HOLDERS)]
 
     def test_the_bound_is_the_pages_number_from_the_data(self):
-        self.assertEqual(hc.MASTER_OUTAGE, (10, 'docs/standalone-deployment.md:670'))
+        # The page line moves with the product pin; the data names it, and the
+        # checker takes the number and the cite from there.
+        data = json.loads((Path(__file__).resolve().parent.parent / 'packs' / 'v3block' / 'product' / 'checks.json').read_text(encoding='utf-8'))
+        self.assertEqual(hc.MASTER_OUTAGE, (10, data['master_outage']['cite']))
+        self.assertRegex(data['master_outage']['cite'], r'^docs/standalone-deployment\.md:\d+$')
 
     def test_a_short_outage_with_writes_ok_and_volumes_serving_passes(self):
         v = self.assert_mo('PASS', self.GOOD)

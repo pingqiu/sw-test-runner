@@ -65,7 +65,9 @@ func closeRecords(t *testing.T, actx *tr.ActionContext, p string) []tr.HistoryRe
 	}
 	var out []tr.HistoryRecord
 	for _, r := range records(t, p) {
-		if r.Kind != tr.HistoryEnd {
+		// The end record, and the run's guest_connect record (the connect
+		// read-back, tested on its own), are set aside.
+		if r.Kind != tr.HistoryEnd && r.Verb != "guest_connect" {
 			out = append(out, r)
 		}
 	}

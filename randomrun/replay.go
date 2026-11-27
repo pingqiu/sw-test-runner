@@ -97,6 +97,13 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	var kills []KillDecision
 	faulty, needSchedule := false, false
 	cur := -1 // the index of the step whose records are being read; -1 for none
+	// A step's outcome is the worst of its operations', where the attempts
+	// of one request (its invokes carry "attempt") count once, as their
+	// last attempt: a rerun's earlier answers are history, not the
+	// operation's outcome.
+	parts := map[int][]string{}
+	slotOf := map[int]map[string]int{}
+	attemptOf := map[uint64]string{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 16<<20)
 	line := 0
@@ -179,9 +186,27 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
 				cur = -1
 			}
+			if _, ok := r.Args["attempt"]; ok {
+				attemptOf[r.Seq] = fmt.Sprintf("%s|%s|%v", r.Verb, r.Volume, r.Args["request"])
+			}
 		case tr.HistoryComplete:
 			if cur >= 0 {
-				steps[cur].Recorded = worseOutcome(steps[cur].Recorded, r.Outcome)
+				key, retried := attemptOf[r.Of]
+				if slotOf[cur] == nil {
+					slotOf[cur] = map[string]int{}
+				}
+				if i, seen := slotOf[cur][key]; retried && seen {
+					parts[cur][i] = r.Outcome
+				} else {
+					if retried {
+						slotOf[cur][key] = len(parts[cur])
+					}
+					parts[cur] = append(parts[cur], r.Outcome)
+				}
+				steps[cur].Recorded = ""
+				for _, o := range parts[cur] {
+					steps[cur].Recorded = worseOutcome(steps[cur].Recorded, o)
+				}
 			}
 		case tr.HistoryEnd:
 			cur = -1

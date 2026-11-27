@@ -56,7 +56,7 @@ const desc = head + `
      {"name": "slow", "command": ["{{config.bin}}/put", "--key", "{{key}}", "--n", "{{n}}"], "runner_deadline_seconds": 5, "cite": "x.go:2",
       "decode": {"kind": "error_body", "path": "put"}}
    ],
-   "retry": {"while_code": "busy", "within_param": "n", "every_seconds": 1, "attempts": "attempts"}},
+   "retry": {"while_code": "busy", "while_message_contains": "later", "max_attempts": 5, "every_seconds": 1, "within_param": "n", "request_arg": "key", "page_cite": "docs/x.md:1"}},
   {"action": "p_make", "verb": "make", "op": "Store.Make", "runs_on": "step_node", "as_root": true,
    "params": [{"name": "volume", "kind": "subject", "vars": true}],
    "record": {"volume": "{{volume.name}}", "args": {}},
@@ -202,6 +202,7 @@ func TestParseRedControls(t *testing.T) {
 		"exception without why": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "", "declarable_with": "f", "runner_deadline_seconds": 5}]`},
 		"exception without the feature that would declare it": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w", "runner_deadline_seconds": 5}]`},
 		"runner setup without why":                            {`"exceptions": []`, `"exceptions": [], "runner_setup": [{"action": "s", "why": ""}]`},
+		"a rerun without a page line":                         {`"cite": "x.go:1", "decode": {"kind": "error_body", "path": "x"}}]}`, `"cite": "x.go:1", "decode": {"kind": "error_body", "path": "x"}}], "retry": {"while_code": "c", "while_message_contains": "m", "max_attempts": 3, "every_seconds": 1, "request_arg": "r", "page_cite": "x.go:1"}}`},
 		"exception without a runner deadline":                 {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w", "declarable_with": "f"}]`},
 		"other node":                                          {`"runs_on": "step_node"`, `"runs_on": "anywhere"`},
 	} {
@@ -329,5 +330,64 @@ func TestDecoderCopiesTheEffect(t *testing.T) {
 		if hasEffect != (want == tr.OutcomeRefusedEffect) {
 			t.Fatalf("%s: history %s", code, b)
 		}
+	}
+}
+
+// Each attempt of a rerun is its own invoke and complete, with the request
+// and the attempt number; the bound ends it; the last attempt's outcome
+// stands; a rerun answer the page does not name is not rerun.
+func TestRerunAttemptsAreOperations(t *testing.T) {
+	busy := answer{out: `{"code":"busy","message":"later"}`, code: 1}
+	other := answer{out: `{"code":"busy","message":"never"}`, code: 1}
+	for name, c := range map[string]struct {
+		answers []answer
+		calls   int
+		last    string
+	}{
+		"twice busy then ok":     {[]answer{busy, busy, {code: 0}}, 3, tr.OutcomeOK},
+		"busy to the bound":      {[]answer{busy}, 5, tr.OutcomeUnknown},
+		"the page's answer only": {[]answer{other, {code: 0}}, 1, tr.OutcomeUnknown},
+	} {
+		n := &node{answers: c.answers}
+		x, actx := setup(t, n, &subject{f: map[string]string{}})
+		out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+		if err != nil || out["value"] != c.last || len(n.calls) != c.calls {
+			t.Fatalf("%s: %v %v after %d calls", name, out, err, len(n.calls))
+		}
+		actx.History.Close()
+		var inv, comp int
+		for _, r := range historyOf(t, actx.History.Path()) {
+			switch r.Kind {
+			case tr.HistoryInvoke:
+				inv++
+				if r.Args["key"] != "k" || r.Args["attempt"] != float64(inv) {
+					t.Fatalf("%s: attempt %d args %v", name, inv, r.Args)
+				}
+			case tr.HistoryComplete:
+				comp++
+				if _, folded := r.Result["attempts"]; folded {
+					t.Fatalf("%s: attempts folded into one record: %v", name, r.Result)
+				}
+			}
+		}
+		if inv != c.calls || comp != c.calls {
+			t.Fatalf("%s: %d invokes, %d completes for %d calls", name, inv, comp, c.calls)
+		}
+	}
+}
+
+// The run's answer counts: attempts per verb and answers per code.
+func TestAnswerCounts(t *testing.T) {
+	n := &node{answers: []answer{{out: `{"code":"busy","message":"later"}`, code: 1}, {code: 0}}}
+	x, actx := setup(t, n, &subject{f: map[string]string{}})
+	_, _ = x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	got := Counts(actx.History)
+	put, _ := got["put"].(map[string]any)
+	codes, _ := put["codes"].(map[string]any)
+	if put["attempted"] != 2 || codes["busy"] != 1 {
+		t.Fatalf("%v", got)
+	}
+	if len(Counts(actx.History)) != 0 {
+		t.Fatal("counts kept after they were taken")
 	}
 }

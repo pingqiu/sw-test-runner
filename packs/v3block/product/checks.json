@@ -1,6 +1,6 @@
 {
  "product": "block",
- "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
+ "read_at": "seaweed-block 032eb1971cfddd6622ddeb46d20e17854d12c205",
  "about": "Product facts the history checkers read. A row that states a number carries its cite (a page or source line at read_at). If the pages change a number, this file changes with them, never the checker.",
  "reader": {
   "module": "product_block",
@@ -15,7 +15,7 @@
    "what": "the holder's start wait ends this long after the re-grant or after its start, whichever is later"}
  ],
  "recovery_note": "A holder is healthy again by max(kill completion + regrant, restart completion) + start_wait. The pages state no restart bound for the master: its restart is not judged.",
- "master_outage": {"max_seconds": 10, "cite": "docs/standalone-deployment.md:670",
+ "master_outage": {"max_seconds": 10, "cite": "docs/standalone-deployment.md:726",
    "what": "volumes already serving keep serving through a master restart this short: each holder renews every 10 s or less and may serve until 20 s after its last renewal, so a master that answers again within 10 s interrupts nothing. A longer outage is not judged by MO (it is fail-closed, with its own recovery bound)."},
  "holder_unit": {"file": "deploy/systemd/sw-blockvolume.service",
    "what": "the product's shipped unit for blockvolume. The runner plays it for every holder it launched and reads its policy (Restart, RestartPreventExitStatus, RestartSec, TimeoutStopSec) from this file at the product commit the run built, never from a copy here; if the file cannot be read or parsed, it refuses to emulate. A holder the runner killed itself is left to the fault schedule's restart."},

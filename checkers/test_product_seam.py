@@ -92,7 +92,11 @@ class Data(unittest.TestCase):
 
     def test_header(self):
         self.assertEqual(self.checks['product'], 'block')
-        self.assertEqual(self.checks['read_at'], 'seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947')
+        # The pin moves with the product; every description file names the same one.
+        self.assertRegex(self.checks['read_at'], r'^seaweed-block [0-9a-f]{40}$')
+        for name in ('operations.json', 'outcomes.json', 'actions.json'):
+            other = json.loads((PRODUCT / name).read_text(encoding='utf-8'))
+            self.assertEqual(other['read_at'], self.checks['read_at'], name)
 
     def test_every_number_has_a_cite(self):
         self.assertEqual(numbers_without_cite(self.checks), [])
