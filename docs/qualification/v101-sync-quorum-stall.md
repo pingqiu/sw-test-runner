@@ -1,141 +1,131 @@
 # Draft v1.0.1 RF2/RF3 sync-quorum write-stall gate
 
-Status: DRAFT, not executed on product binaries. Merge only after v1.0.0.
-Keep runner #189 as the separate primary-loss/co-located-guest row. This row
-faults only a replica while the primary and its local guest remain running.
-No cloud launch, prior launch token, qualification result or cost approval is
-created by this packet.
+Status: DRAFT. Merge only after v1.0.0. No real-product gate has run for this
+scenario. Keep #189 as the independent primary-loss/co-located-guest row.
+This packet authorizes no cloud run, seal, prior launch token or spending.
 
-## Contract and pending owner decision
+## Approved bar
 
-The v1.0.1 contract supports RF2 and RF3 with sync-quorum. RF3 continues ACKing
-with one replica absent. RF2 must not ACK a new write while its other replica
-is absent; after that replica returns, automatic catch-up must restore writes.
-This packet observes those existing contracts and changes no product state
-machine, authority rule, lease, HEAD writer or estimator.
+The gate-owner ruling is recorded in message `6b0a1756d82cd3d6137887b9`.
+All profiles use sync-quorum and read back EVERY ACKed write.
 
-Ruling received: the worst-case guest stall is **strictly less than 5 s per
-fault**, measured as the longest gap between ACKed writes across the fault
-window; **zero guest I/O errors**, and every ACKed write read back. The host
-NVMe I/O timeout is 30 s; it is not the permitted stall. A 5,000 ms gap is a
-FAIL, not an inclusive limit. No separate write-latency or recovery bound was
-specified; report those observations without inventing another gate.
+| Row | Pass line |
+| --- | --- |
+| RF3 one replica faulted | Longest ACK gap strictly < 5 s across the full fault window; zero guest I/O errors; faulted peer automatically Healthy within 120 s of process up |
+| RF2 only peer absent | No ACK during the PRIMARY'S observed peer-down to peer-Healthy interval; any ACK = FAIL; guest errors in that interval expected and reported |
+| RF2 outside that interval | Zero guest errors and < 5 s ACK gaps; the separately ruled first-ACK allowance is <= 10 s after Healthy, then the < 5 s progress rule applies |
+| Both | Unchanged primary identity, automatic rejoin, every ACK read back, negative data control catches a dropped write, writer stopped and cleanup complete |
 
-The gate definition still needs the designated gate owner's read. In
-particular, RF2 cannot ACK while its only peer is absent, and the draft's
-10 s replica-off dwell already exceeds the 5 s ACK-gap bar before reboot and
-catch-up. This is a contract conflict to resolve, not a sample to exclude.
-The draft's RF2 outage exclusion and allowance for guest refusal are NOT an
-approved gate. Do not warm the fixture, shorten the fault, acknowledge on one
-copy, or hide the absent-peer interval to manufacture PASS.
+The host NVMe I/O timeout is 30 s, not the allowed stall. Exactly 5,000 ms is
+FAIL. Write-operation latency, p50/p99/max and the full RF2 outage ACK gap are
+reported; no extra operation-latency gate is invented. The RF2 10 s first-ACK
+allowance is explicit and does not permit I/O errors after Healthy.
 
-Current implementation remains a non-executable-by-default draft with empty
-`write_budget_ms`, `resume_budget_ms`, and `budget_ref`. Its proposed judge
-has not yet been adapted to this ruling: it allows provisional RF2 outage
-exclusion/refusals and additional timing inputs. It must not be used for a
-counted result. Next change, after the gate owner's RF2 disposition: enforce
-the approved strict full-window ACK-gap predicate and zero guest errors;
-remove unapproved exclusions and timing gates. Test literals such as 500 ms
-are controls, not release limits.
+`write_budget_ms=5000`, `resume_budget_ms=10000`, and `budget_ref` are pinned
+in the scenario. The policy CLI rejects different values, missing source,
+non-finite numbers and test I/O overrides. They cannot loosen the gate at run
+time. No product state machine, authority fact, HEAD writer or lease changes.
 
-## Sequence and roles
+## Roles and sequence
 
 ```text
-shared #189 preflight/build/start (sync-quorum throughout)
-  -> RF3: primary r1 + guest node-2; r2 node-1; fault r3 node-3
-  -> restore replica; primary peer view Healthy; keep writing
-  -> stop writer; read every ACK; dropped-write control; judge timing
-  -> restore on every exit; collect before cleanup
-repeat with a fresh RF2 root: primary r1 node-2; fault r2 node-3
+shared #189 preflight/build/start, sync-quorum throughout
+ -> RF3: r1 + local loopback guest on node-2; r2 node-1; fault r3 node-3
+ -> replica restored, process started, automatic rejoin while guest writes
+ -> stop writer -> read every ACK -> dropped-write control -> timing judge
+ -> restore on every exit -> collect before cleanup
+repeat with fresh RF2 root: r1 + local guest node-2; fault r2 node-3
 ```
 
-Use `scenarios/v3block/quorum-stall.yaml`. The three-node profile, inventory
-SSH users, host-key pins, exact documented standalone argv, loopback NVMe
-settings, sync-quorum flags and cleanup come from the shared R4 includes.
-No cross-host guest or external NVMe bind is introduced. Product source and
-runner source require full 40-hex pins; pin the eventual v1.0.1 candidate,
-not an earlier preview run. Baseline and post-return observation are 10 s
-each, after at least 20 ACKs. Replica-off dwell is 10 s by default; VM
-power API/boot time is also measured. One RF3 and one RF2 cell per invocation;
-repeat count is not yet a release policy.
+Use `scenarios/v3block/quorum-stall.yaml`. Setup and evidence collection are
+shared YAML includes with #189, preserving one owner of documented standalone
+argv, loopback NVMe connect settings, sync-quorum, inventory user/key pins and
+cleanup. No external NVMe bind or cross-host guest. Full product/runner source
+pins are required; use the eventual v1.0.1 candidate, not an old preview result.
 
-The existing cloud pack transports approved inventory and executes RF3 then
-RF2, stopping at the first failure. The new entry is
-`python3 quorum-stall-pack.py ASSET_ROOT`. In addition to the existing R4
-assets, the manifest must hash `cloud-pack.py`, `quorum-stall.py`, and
-`quorum-stall-policy.json` (exactly the three required policy keys above).
-The controller separately pins the entry digest. This draft does not provision
-or authorize a paid run. Each scenario is bounded to 60 min plus 10 min cleanup.
+Before the writer starts, the primary's peer view must show its peer Healthy.
+Observe baseline for 10 s after at least 20 ACKs. Then power off node-3, dwell
+10 s, restore it, start its holder, and require automatic Healthy plus at least
+20 later ACKs and another 10 s of writes. One fresh RF3 and one fresh RF2 cell
+per invocation; repetition count is not yet a release policy. The controller
+stops on the first failed cell. Resource ceilings are 60 min per scenario plus
+10 min cleanup; RF2's 180 s peer-wait ceiling is a harness limit, not an added
+120 s product-recovery bar (that bar belongs to RF3).
 
-## Writer and observation
+## Measurement, with primary-owned RF2 boundaries
 
-The guest on node-2 issues sequential unique 4 KiB writes using
-`dd oflag=direct,dsync`, with one operation in flight and 10 ms pacing. Each
-attempt gets a durable intent before I/O, then an ACK only on successful I/O
-completion; failures retain their intent and measured result. It never
-overwrites an ACKed block. A timed-out or unfinished operation cannot be
-removed from the denominator or yield PASS. This is an observed offered load,
-not a claim to saturate throughput. Unexpected primary/guest failure fails
-the row; this local ledger does not replace #189's off-host primary-loss ledger.
+The guest writes unique sequential 4 KiB blocks using `dd oflag=direct,dsync`,
+with one operation in flight and 10 ms pacing. A durable intent precedes I/O;
+an ACK is journaled only after successful completion. An I/O failure keeps its
+intent and measured error. Never overwrite an ACKed offset. A pending or
+timed-out write cannot disappear from the denominator. One blocked request
+may span the whole RF2 outage and complete after Healthy; no completion is
+required while the peer is down. This is measured offered load, not saturation.
 
-All write/phase timestamps use the primary guest's monotonic clock and boot
-identity. `fault-pending` precedes cloud dispatch; `fault` follows confirmed
-power-off and records the runner's node-3 fault key. RF2 refusal is allowed
-from fault-pending until peer recovery, since power-off can precede the API
-return. RF2's no-new-ACK assertion uses attempts begun after confirmed off
-and before return. `recover` is immediately before restarting the holder,
-after the VM boots; `after` requires the returning peer Healthy at epoch 1
-in the unchanged primary's `/status/peers`. The full off/boot gap is retained.
-The scenario never restarts a failed guest writer to manufacture progress.
+A concurrent observer samples the PRIMARY'S `/status` and `/status/peers`
+every 50 ms while writes run. It records raw responses, same-host monotonic
+time and boot id. The selected peer's initial Healthy -> non-Healthy -> Healthy
+transition defines the RF2 interval; `degraded`, `catching_up`, `needs_rebuild`
+and `unknown` all mean non-Healthy. Never use cloud dispatch, boot, a sleep,
+or test-set phase markers as the RF2 interval. Every ACK is classified by its
+COMPLETION time, including requests started before the down observation.
+An observer error, missing peer/epoch/primary, a gap > 250 ms, missing coverage,
+or a second down transition refuses the measurement rather than granting an
+unknown interval. This is sampled diagnostic evidence at 50 ms resolution,
+not a claim of an atomic status/I/O clock. Raw rows remain reviewable.
 
-Before any data readback, the writer cooperatively stops and both its stopped
-receipt and actual PID exit are required. The existing `r4.sh verify` reads
-EVERY ACKed offset/SHA, followed by its existing dropped-write negative
-control. Only then does the timing judge run with a real-block-device guard.
-Regular-file controls and injected dd commands cannot count as qualification.
+`fault` separately binds the actual node-3 cloud fault key. `recover` is marked
+on the guest BEFORE dispatching the remote holder start; the scenario also
+captures its actual positive systemd MainPID and `/proc/PID/stat`. Since host
+monotonic clocks cannot be subtracted, RF3 uses this EARLIER start-request
+mark to establish a conservative upper bound on process-up-to-Healthy time.
+Passing <= 120 s from this mark implies <= 120 s from process up; it cannot
+add grace. RF2 resume is measured directly from primary-observed Healthy to
+first ACK, on the guest's same monotonic clock. The complete off/boot ACK gap
+is reported even when RF2's approved interval is excluded from the 5 s bar.
 
-## Pass/fail and evidence
+Before readback, cooperative stop requires both the stopped receipt and the
+actual writer PID exit. A final primary peer receipt closes sampling coverage.
+The existing `r4.sh verify` reads EVERY ACK offset/SHA, then its existing
+`drop-control` must reject an injected dropped ACKed block. Only then can the
+real-block-device timing judge run. File-control devices and injected dd
+commands are forbidden for qualification. The local ACK ledger is adequate
+only because the primary/guest host stays up; primary/guest loss fails this
+row and does not replace #189's off-host ledger proof.
 
-| Cell | Required outcome |
-| --- | --- |
-| RF3 one replica off | Zero guest I/O errors; full fault-window ACK gap strictly < 5 s |
-| RF2 one replica off | No single-copy ACK; no outage exemption approved; gate owner must resolve the 10 s fault vs < 5 s bar |
-| Either replica returns | Primary unchanged; peer Healthy at epoch 1; automatic return and continued ACK flow; report recovery time |
-| Any cell | Every ACK read back, no unmatched attempt, actual writer ended, no lost data |
-| Any exit | Replica restored, journals/argv/timing/ledger collected before cleanup, no owned leftovers |
+## Entry, results and cleanup
 
-Report attempts/ACKs/refusals, p50/p99/max write latency, global max ACK gap,
-bounded ACK gap, recovery-to-first-ACK, policy value/source, RF, mode, exact
-product/runner pins and binary SHA256s. A timing PASS alone is not the gate:
-data verification, negative control and cleanup must also pass. Preserve
-raw JSONL, stopped receipt, primary/peer snapshots and unit journals on failure.
-A preview-code rejoin or durability failure remains a product finding;
-never lengthen a deadline or remove an assertion to relabel it PASS.
+Entry: `python3 quorum-stall-pack.py ASSET_ROOT`. Reuse the existing reviewed
+cloud inventory/controller and three-node profile. Besides existing R4 assets,
+manifest hashes must include `pins.json`, `swblock`, `cloud-pack.py`,
+`quorum-stall.py`, `quorum-stall-policy.json`; that policy has exactly the three
+pinned keys above. The controller separately pins the entry digest. The
+existing pack runs RF3 then RF2 and returns the first failing exit.
 
-## Preflight and validation status
+Report RF/mode, policy source, attempted/ACKed/failed operations, expected RF2
+interval errors, p50/p99/max operation latency, full max ACK gap, bounded ACK
+gap, peer down/Healthy timestamps, RF3 conservative recovery upper bound,
+RF2 Healthy-to-first-ACK, product/runner pins and binary SHA256s. Timing PASS
+alone is not the gate: data verification, negative control and cleanup must
+also pass. Always restore node-3 before collecting its journals. Preserve raw
+peer/primary rows, phase markers, I/O records, intents/ACKs, PID receipts and
+unit journals before cleanup; no TLS private keys are exported. Unexpected
+primary identity or peer flaps fail. Never extend a deadline or discard a
+product failure to obtain PASS.
 
-Public seams: runner scenario parsing/action dispatch; the CLI writer and
-judge over actual completion records; the existing kernel-NVMe readback;
-primary status/peer HTTP receipts. No alternate authority or data oracle.
-Windows controls cover measured slow writes, long ACK gaps, unfinished writes,
-RF2 single-copy ACK refusal, recovery delay, finite sourced budgets, actual
-file-control write failure without an ACK, all executed asset pins, optimized
-Python refusal and policy forwarding through both RF cells. Scenario tests pin
-the shared lifecycle and replica-only fault. These controls do not qualify a
-Linux block device, actual RF2/RF3 rejoin, or a cloud fault.
+## Validation and remaining work
 
-Still required: gate-owner RF2 disposition and judge alignment to the strict
-5 s / zero-error ruling, reviewed merged runner pin after v1.0.0,
-exact v1.0.1 product pin, no-resource preflight, then the WHOLE local rehearsal
-(both cells, same product pin, replica process kill instead of VM power-off)
-with the documented standalone settings. Record approved local namespace
-adaptations and all ACK readbacks. Only after a passing rehearsal may a new
-seal/budget/window/LAUNCH be requested. A cloud attempt needs fresh empty-RG
-proof, explicit budget and abort thresholds; none are inferred here.
+Public seams: scenario/action execution, writer/judge CLI completion records,
+primary status HTTP, and existing kernel-NVMe data oracle. Workstation controls
+exercise strict 5 s boundary, RF3 errors, RF2 errors/ACK completion classification,
+primary-owned interval unaffected by test markers, foreign peer view, 120 s
+RF3 recovery, 10 s RF2 resume, pending writes, sample gaps, fixed policy, queued
+RF2 writes, actual local HTTP observation during file I/O, manifest coverage,
+and existing #189 regressions. File I/O is scaffolding, not kernel qualification.
 
-Current workstation verification: 12 new Python controls PASS; 51 existing R4
-Python controls PASS with six Linux-only skips; affected R4/quorum Go tests
-PASS; five removal mutations are caught. Full Windows `go test ./...` is NOT
-green: untouched NVMe JSON golden comparisons see CRLF working-tree bytes,
-and an existing seaweed CLI test cannot find `python3` on Windows. These are
-recorded limitations, not a full Linux-suite verdict.
+Still required: two reader reviews, Linux controls and the WHOLE exact-head
+local rehearsal (both RF cells, same product pin, replica process kill instead
+of VM power-off), then a separately approved seal/budget/window/LAUNCH. Record
+local namespace adaptations and all data readbacks. Current preview-code
+failures remain product findings. Merge is held until v1.0.0; no resources or
+cloud costs are authorized by this draft.

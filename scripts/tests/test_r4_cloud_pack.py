@@ -203,7 +203,7 @@ class R4CloudPack(unittest.TestCase):
 
 
     def test_quorum_rows_forward_the_explicit_policy_to_both_rf_rounds(self):
-        policy=dict(write_budget_ms=500,resume_budget_ms=700,budget_ref='test-only-policy')
+        policy=dict(write_budget_ms=5000,resume_budget_ms=10000,budget_ref='test-only-policy')
         self.assertEqual(self.run_pack(scenario='scenarios/v3block/quorum-stall.yaml',extra_env=policy),0)
         calls=[a for a in self.calls if a[0]==str(self.root/'swblock')]
         self.assertEqual(len(calls),2)

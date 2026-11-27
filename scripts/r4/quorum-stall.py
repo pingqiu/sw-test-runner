@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """V1.0.1 sync-quorum guest measurements; never changes product authority."""
-import argparse,json,math,os,signal,subprocess,sys,time,stat,hashlib,urllib.request,importlib.util
+import argparse,json,math,os,signal,subprocess,sys,time,stat,hashlib,urllib.request,threading
 from pathlib import Path
 
 def require(ok,message):
@@ -16,11 +16,56 @@ def load(path,live=False):
     return [json.loads(line) for line in raw.splitlines()]
 
 def budgets(a):
-    require(all(math.isfinite(v) and v>0 for v in (a.write_budget_ms,a.resume_budget_ms))
-            and a.budget_ref.strip(),'owner finite budget and source required')
+    require(a.write_budget_ms == 5000 and a.resume_budget_ms == 10000
+            and a.budget_ref.strip(), 'approved policy requires 5000 ms ACK gap and 10000 ms RF2 resume')
+
+
+def peer_state(payload, replica):
+    require(payload.get('VolumeID') == 'v1' and payload.get('ReplicaID') == 'r1', 'foreign primary peer view')
+    matches = [p for p in payload.get('Peers', []) if p.get('ReplicaID') == replica]
+    require(len(matches) == 1 and matches[0].get('Epoch') == 1, 'missing or foreign epoch in peer view')
+    state = matches[0].get('State')
+    require(state in ('healthy', 'degraded', 'catching_up', 'needs_rebuild', 'unknown'), 'unknown peer view state')
+    return state
+
+
+def peer_window(a, phases, meta=None):
+    rows = load(a.work/'peers.jsonl')
+    require(len(rows) >= 2, 'missing primary peer observations')
+    replica = 'r3' if a.rf == '3' else 'r2'
+    down = healthy = None
+    previous = None
+    for row in rows:
+        require('error' not in row, 'primary peer observation failed')
+        primary(row['primary'])
+        if meta is not None:
+            require(row['boot'] == meta['boot'], 'peer observation boot differs from writer')
+        at = row['at_ns']
+        if previous is not None:
+            require(0 < at-previous <= 250000000, 'primary peer observation gap exceeds 250 ms')
+        previous = at
+        state = peer_state(row['peers'], replica)
+        if down is None and state != 'healthy':
+            require(row is not rows[0], 'peer was not Healthy at baseline')
+            down = at
+        elif down is not None and healthy is None and state == 'healthy':
+            healthy = at
+        elif healthy is not None:
+            require(state == 'healthy', 'peer went down again after return')
+    require(rows[0]['at_ns'] <= phases['baseline'] and rows[-1]['at_ns'] >= phases['stop'], 'peer observations do not cover the measured window')
+    require(down is not None and healthy is not None, 'no primary-observed down-to-Healthy interval')
+    require(phases['baseline'] < down < healthy < phases['stop'], 'peer interval outside measurement')
+    require(healthy >= phases['recover'], 'peer Healthy before process start request')
+    # recover is recorded on the guest BEFORE the remote process start. This
+    # conservative upper bound can fail late but cannot grant extra time.
+    if a.rf == '3':
+        require((healthy-phases['recover'])/1e9 <= 120, 'peer did not become Healthy within 120 s of process start request')
+    return down, healthy
+
 
 def judge(a):
     budgets(a)
+    meta = None
     if a.require_block_device:
         meta=json.loads((a.work/'writer-meta.json').read_text())
         require(meta['block_device'] and not meta['file_control'] and not meta['dd_override'],'file/mock device cannot count as qualification')
@@ -57,29 +102,40 @@ def judge(a):
     require(ends and durations,'no attempts')
     acks=sorted(row['at_ns'] for row in ends if row['ok'])
     require(any(t<phases['fault'] for t in acks) and any(t>=phases['after'] for t in acks),'missing baseline or recovered ACK')
-    fault_ops=[r for r in ends if phases['fault']<=r['start_ns']<phases['recover']]
-    require(fault_ops,'writer did not attempt through replica fault')
-    if a.rf=='2':require(not any(r['ok'] for r in fault_ops),'RF2 ACKed a new write with one replica absent')
-    else:require(all(r['ok'] for r in ends),'RF3 refused a write through one replica fault')
-    require(not any(not r['ok'] and (r['start_ns']<phases['fault-pending'] or r['start_ns']>=phases['after']) for r in ends),'refused outside expected quorum-loss window')
-    max_write=max(durations);require(max_write<=a.write_budget_ms,'write budget exceeded')
-    def gap(lo,hi):
-        points=[lo]+[t for t in acks if lo<t<hi]+[hi]
-        return max((b-a)/1e6 for a,b in zip(points,points[1:]))
-    global_gap=gap(phases['baseline'],phases['stop'])
-    bounded_gap=global_gap if a.rf=='3' else max(gap(phases['baseline'],phases['fault-pending']),gap(phases['after'],phases['stop']))
-    require(bounded_gap<=a.write_budget_ms,'ACK-gap write budget exceeded')
-    recovered=[t for t in acks if t>=phases['recover']]
-    require(recovered,'no ACK after replica return')
-    resume=(recovered[0]-phases['recover'])/1e6
-    require(resume<=a.resume_budget_ms,'resume budget exceeded')
+    down, healthy = peer_window(a, phases, meta)
+    fault_ops = [r for r in ends if down <= r['at_ns'] < healthy]
+    require(any(r['start_ns'] < healthy and r['at_ns'] >= down for r in ends),
+            'writer made no attempt through primary-observed peer outage')
+    errors = [r for r in ends if not r['ok']]
+    if a.rf == '2':
+        require(not any(r['ok'] for r in fault_ops), 'RF2 ACKed while the primary reports its only peer down')
+        require(not any(not down <= r['at_ns'] < healthy for r in errors), 'guest I/O errors outside primary-observed outage')
+    else:
+        require(not errors, 'RF3 guest I/O errors')
+    max_write = max(durations)  # observation only; the ruled stall metric is ACK gap
+    def gap(lo, hi):
+        points = [lo] + [t for t in acks if lo < t < hi] + [hi]
+        return max((b-a)/1e6 for a,b in zip(points, points[1:]))
+    global_gap = gap(phases['baseline'], phases['stop'])
+    recovered = [t for t in acks if t >= healthy]
+    require(recovered, 'no ACK after peer Healthy')
+    resume = (recovered[0]-healthy)/1e6
+    if a.rf == '2':
+        require(resume <= 10000, 'RF2 resume exceeds 10 s after Healthy')
+        # The separately ruled ten-second first-ACK allowance is explicit;
+        # subsequent progress and all pre-down progress keep the five-second bar.
+        bounded_gap = max(gap(phases['baseline'], down), gap(recovered[0], phases['stop']))
+    else:
+        bounded_gap = global_gap
+    require(bounded_gap < 5000, 'ACK-gap must be strictly less than 5 s')
     ordered=sorted(durations)
     return dict(timing_result='PASS',rf=a.rf,ack_mode='sync-quorum',attempts=len(ends),acks=len(acks),
         refused=sum(not r['ok'] for r in ends),max_write_ms=max_write,p50_write_ms=ordered[(len(ordered)-1)//2],
         p99_write_ms=ordered[math.ceil(.99*len(ordered))-1],max_ack_gap_ms=global_gap,
         bounded_ack_gap_ms=bounded_gap,resume_ms=resume,write_budget_ms=a.write_budget_ms,
         resume_budget_ms=a.resume_budget_ms,budget_ref=a.budget_ref,
-        rf2_outage_excluded_from_ack_gap_budget=(a.rf=='2'),data_readback='separate mandatory scenario step')
+        peer_down_ns=down,peer_healthy_ns=healthy,peer_recovery_upper_ms=(healthy-phases['recover'])/1e6,
+        expected_outage_errors=len(errors) if a.rf=='2' else 0,rf2_outage_excluded_from_ack_gap_budget=(a.rf=='2'),data_readback='separate mandatory scenario step')
 
 def boot():
     path=Path('/proc/sys/kernel/random/boot_id')
@@ -114,6 +170,10 @@ def mark(a):
     if a.phase=='fault':
         require(a.fault_key and a.fault_key.startswith('node-3/'),'missing actual replica fault binding')
         row['fault_key']=a.fault_key
+    if a.phase == 'stop':
+        require(a.peers, 'final primary peer receipt required')
+        peers = status(a.peers)
+        append(a.work/'peers.jsonl', dict(at_ns=time.monotonic_ns(), boot=boot(), primary=observed, peers=peers))
     append(a.work/'phases.jsonl',row)
     return row
 
@@ -132,19 +192,52 @@ def wait_acks(a):
         time.sleep(.1)
     raise ValueError('no bounded ACK progress')
 
+def ready_peer(a):
+    end = time.monotonic()+a.seconds
+    while time.monotonic() < end:
+        own = status(a.status)
+        primary(own)
+        peers = status(a.peers)
+        if peer_state(peers, a.replica) == 'healthy':
+            return dict(primary=own, peers=peers)
+        time.sleep(.1)
+    raise ValueError('peer was not Healthy before the baseline writer')
+
+
 def wait_peer(a):
-    spec=importlib.util.spec_from_file_location('r4_peers',Path(__file__).with_name('auto-p2.py'))
-    peer=importlib.util.module_from_spec(spec);spec.loader.exec_module(peer)
-    end=time.monotonic()+a.seconds;last={}
-    while time.monotonic()<end:
+    # Same primary-view journal as the judge: no second state predicate or
+    # independently chosen fault interval. The writer owns ongoing sampling.
+    end = time.monotonic()+a.seconds
+    while time.monotonic() < end:
+        require(writer_live(a.work), 'writer ended before peer recovery')
+        if (a.work/'peers.jsonl').exists():
+            rows = load(a.work/'peers.jsonl', live=True)
+            if rows:
+                last = rows[-1]
+                require('error' not in last, 'primary peer observation failed')
+                state = peer_state(last['peers'], a.replica)
+                seen_down = any('error' not in r and peer_state(r['peers'], a.replica) != 'healthy' for r in rows)
+                if seen_down and state == 'healthy':
+                    publish(a.output, last)
+                    return last
+        time.sleep(.1)
+    raise ValueError('returning replica never became Healthy on the primary')
+
+
+def observe_peers(a, stopping):
+    while not stopping.is_set():
+        row = dict(at_ns=time.monotonic_ns(), boot=boot())
         try:
-            own=status(a.status);primary(own)
-            last=status(a.peers)
-            if own.get('Healthy') is True and own.get('FrontendPrimaryReady') is True and peer.peer_healthy(last,'r1',a.replica,1):
-                publish(a.output,dict(primary=own,peers=last));return last
-        except (OSError,TimeoutError):pass
-        time.sleep(.2)
-    publish(a.output,dict(last=last));raise ValueError('returning replica never became Healthy on the primary')
+            row['primary'] = status(a.status)
+            primary(row['primary'])
+            row['peers'] = status(a.peers)
+            peer_state(row['peers'], a.replica)
+            row['at_ns'] = time.monotonic_ns()
+        except Exception as error:
+            row['error'] = str(error)
+        append(a.work/'peers.jsonl', row)
+        stopping.wait(.05)
+
 
 def stop_writer(a):
     require(writer_live(a.work),'writer was not active at stop request')
@@ -176,6 +269,12 @@ def writer(a):
         nonlocal stopping
         stopping=True
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
+    require(a.file_control or (a.status and a.peers and a.replica), 'primary status and peer sampling required')
+    observer_stop = threading.Event()
+    observer = None
+    if a.peers:
+        observer = threading.Thread(target=observe_peers, args=(a, observer_stop), daemon=True)
+        observer.start()
     attempts=0;payload=a.work/'payload';ledger=a.work/'ledger'
     with ledger.open('x') as journal:
         while not stopping and not (a.work/'stop-request.json').exists() and (a.max_ops==0 or attempts<a.max_ops):
@@ -196,6 +295,10 @@ def writer(a):
             attempts+=1
             if ok and not (a.work/'ready.json').exists():publish(a.work/'ready.json',dict(at_ns=ended))
             time.sleep(a.pace_ms/1000)
+    observer_stop.set()
+    if observer is not None:
+        observer.join(timeout=3)
+        require(not observer.is_alive(), 'peer observer did not stop')
     publish(a.work/'writer-stopped.json',dict(attempts=attempts,at_ns=time.monotonic_ns()))
     return dict(attempts=attempts)
 
@@ -206,16 +309,17 @@ def main():
         parser.add_argument('--write-budget-ms',type=float,required=True);parser.add_argument('--resume-budget-ms',type=float,required=True);parser.add_argument('--budget-ref',required=True)
         if cmd=='judge':parser.add_argument('--work',type=Path,required=True);parser.add_argument('--require-block-device',action='store_true');parser.add_argument('--output',type=Path)
     w=sub.add_parser('writer');w.add_argument('--work',type=Path,required=True);w.add_argument('--device',type=Path,required=True)
-    w.add_argument('--max-ops',type=int,default=0);w.add_argument('--pace-ms',type=float,default=10);w.add_argument('--file-control',action='store_true')
+    w.add_argument('--max-ops',type=int,default=0);w.add_argument('--pace-ms',type=float,default=10);w.add_argument('--file-control',action='store_true');w.add_argument('--status');w.add_argument('--peers');w.add_argument('--replica',choices=('r2','r3'))
     m=sub.add_parser('mark');m.add_argument('--work',type=Path,required=True);m.add_argument('--phase',choices=('baseline','fault-pending','fault','recover','after','stop'),required=True)
-    m.add_argument('--status',required=True);m.add_argument('--fault-key')
+    m.add_argument('--status',required=True);m.add_argument('--fault-key');m.add_argument('--peers')
     q=sub.add_parser('wait-acks');q.add_argument('--work',type=Path,required=True);q.add_argument('--minimum',type=int,required=True);q.add_argument('--since');q.add_argument('--seconds',type=float,default=30)
-    r=sub.add_parser('wait-peer');r.add_argument('--status',required=True);r.add_argument('--peers',required=True);r.add_argument('--replica',choices=('r2','r3'),required=True);r.add_argument('--output',type=Path,required=True);r.add_argument('--seconds',type=float,default=180)
+    r=sub.add_parser('wait-peer');r.add_argument('--work',type=Path,required=True);r.add_argument('--replica',choices=('r2','r3'),required=True);r.add_argument('--output',type=Path,required=True);r.add_argument('--seconds',type=float,default=120)
+    ready=sub.add_parser('ready-peer');ready.add_argument('--status',required=True);ready.add_argument('--peers',required=True);ready.add_argument('--replica',choices=('r2','r3'),required=True);ready.add_argument('--seconds',type=float,default=30)
     stop=sub.add_parser('stop');stop.add_argument('--work',type=Path,required=True);stop.add_argument('--seconds',type=float,default=35)
     a=p.parse_args()
     if a.command=='policy':
         budgets(a);require(not os.environ.get('R4_STALL_DD'),'test IO command is not allowed for a gate');result=dict(policy='READY',write_budget_ms=a.write_budget_ms,resume_budget_ms=a.resume_budget_ms,budget_ref=a.budget_ref)
-    else:result={'judge':judge,'writer':writer,'mark':mark,'wait-acks':wait_acks,'wait-peer':wait_peer,'stop':stop_writer}[a.command](a)
+    else:result={'judge':judge,'writer':writer,'mark':mark,'wait-acks':wait_acks,'wait-peer':wait_peer,'ready-peer':ready_peer,'stop':stop_writer}[a.command](a)
     if a.command=='judge' and a.output:publish(a.output,result)
     print(json.dumps(result,sort_keys=True))
 if __name__=='__main__':

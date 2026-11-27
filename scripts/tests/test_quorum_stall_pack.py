@@ -5,7 +5,7 @@ ROOT=Path(__file__).resolve().parents[1]/'r4'
 class QuorumPackCLI(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
-        self.policy=dict(write_budget_ms=500,resume_budget_ms=500,budget_ref='test-only-bound')
+        self.policy=dict(write_budget_ms=5000,resume_budget_ms=10000,budget_ref='test-only-bound')
         (self.root/'quorum-stall.py').write_bytes((ROOT/'quorum-stall.py').read_bytes())
         (self.root/'pins.json').write_text('{}');(self.root/'swblock').write_bytes(b'control')
         (self.root/'cloud-pack.py').write_text('import json\nfrom pathlib import Path\ndef main(root,**kw):\n (Path(root)/"delegated.json").write_text(json.dumps(kw));return 0\n')

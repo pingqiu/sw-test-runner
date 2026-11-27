@@ -34,8 +34,8 @@ func TestQuorumStallUsesTheSameStandaloneStartAndFaultsOnlyAReplica(t *testing.T
 			t.Fatalf("%s is not the shared R4 lifecycle", name)
 		}
 	}
-	if gate.Env["write_budget_ms"] != "" || gate.Env["resume_budget_ms"] != "" || gate.Env["budget_ref"] != "" {
-		t.Fatal("an unruled timing budget was assumed")
+	if gate.Env["write_budget_ms"] != "5000" || gate.Env["resume_budget_ms"] != "10000" || gate.Env["budget_ref"] != "ruling-6b0a1756d82cd3d6137887b9" {
+		t.Fatal("approved gate policy drifted")
 	}
 	off, on := 0, 0
 	for _, phase := range gate.Phases {

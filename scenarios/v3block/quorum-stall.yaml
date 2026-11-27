@@ -1,4 +1,4 @@
-# Draft v1.0.1 only; no execution before owner budget and approved launch.
+# Draft v1.0.1 only; merge after v1.0.0, counted execution needs its own launch.
 name: v3block-sync-quorum-stall
 timeout: 60m
 always_timeout: 10m
@@ -28,9 +28,9 @@ env:
   ctrl_port: "19602"
   status_port: "19603"
   nvme_port: "4420"
-  write_budget_ms: "" # required owner bound; no assumed floor/timeout
-  resume_budget_ms: ""
-  budget_ref: ""
+  write_budget_ms: "5000" # strict longest ACK gap, not an inclusive bound
+  resume_budget_ms: "10000" # RF2 first ACK after primary observes peer Healthy
+  budget_ref: "ruling-6b0a1756d82cd3d6137887b9"
   fault_seconds: "10"
 
 topology:
@@ -81,8 +81,11 @@ phases:
         timeout: 2m
         cmd: >-
           T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo python3 $W/quorum-stall.py ready-peer --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+          --peers http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 --replica $([ {{ rf }} = 3 ] && echo r3 || echo r2) &&
           DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T 127.0.0.1 {{ nvme_port }} 30) &&
-          sudo bash $W/r4.sh unit $T writer -- /usr/bin/python3 $W/quorum-stall.py writer --work $W/stall --device $DEV --pace-ms 10 &&
+          sudo bash $W/r4.sh unit $T writer -- /usr/bin/python3 $W/quorum-stall.py writer --work $W/stall --device $DEV --pace-ms 10 --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+          --peers http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 --replica $([ {{ rf }} = 3 ] && echo r3 || echo r2) &&
           sudo bash $W/r4.sh start $T writer &&
           sudo python3 $W/quorum-stall.py wait-acks --work $W/stall --minimum 20 --seconds 30 &&
           sudo python3 $W/quorum-stall.py mark --work $W/stall --phase baseline --status http://127.0.0.1:{{ status_port }}/status?volume=v1
@@ -97,7 +100,16 @@ phases:
       # The VM boot interval remains in the RF2 outage report. Recovery timing
       # starts just before the documented holder service is started again.
       - {action: exec, node: node-2, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/quorum-stall.py mark --work $W/stall --phase recover --status http://127.0.0.1:{{ status_port }}/status?volume=v1"}
-      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; sudo bash /var/lib/r4/$T/r4.sh start $T volume"}
+      - action: exec
+        node: node-3
+        cmd: |
+          set -eu
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T
+          sudo bash $W/r4.sh start $T volume
+          P=$(sudo systemctl show r4-$T-volume -p MainPID --value)
+          [ "$P" -gt 0 ]
+          sudo mkdir -p $W/evidence
+          sudo sh -c "cat /proc/$P/stat > $W/evidence/replica-process-up.txt"
   - name: automatic-rejoin-under-writes
     actions:
       - action: exec
@@ -105,8 +117,8 @@ phases:
         timeout: 4m
         cmd: >-
           W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2);
-          sudo python3 $W/quorum-stall.py wait-peer --status http://127.0.0.1:{{ status_port }}/status?volume=v1
-          --peers http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 --replica $R --seconds 180 --output $W/stall/rejoin.json &&
+          sudo python3 $W/quorum-stall.py wait-peer --work $W/stall --replica $R
+          --seconds $([ {{ rf }} = 3 ] && echo 120 || echo 180) --output $W/stall/rejoin.json &&
           sudo python3 $W/quorum-stall.py mark --work $W/stall --phase after --status http://127.0.0.1:{{ status_port }}/status?volume=v1 &&
           sudo python3 $W/quorum-stall.py wait-acks --work $W/stall --minimum 20 --since after --seconds 30
       - {action: sleep, duration: "10s"}
@@ -122,7 +134,7 @@ phases:
           set -eu
           T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T
           sudo python3 $W/quorum-stall.py stop --work $W/stall --seconds 35
-          sudo python3 $W/quorum-stall.py mark --work $W/stall --phase stop --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+          sudo python3 $W/quorum-stall.py mark --work $W/stall --phase stop --status http://127.0.0.1:{{ status_port }}/status?volume=v1 --peers http://127.0.0.1:{{ status_port }}/status/peers?volume=v1
           DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T 127.0.0.1 10)
           sudo bash $W/r4.sh verify "$DEV" "$W/stall/ledger" quorum-stall
           sudo bash $W/r4.sh drop-control "$DEV" "$W/stall/ledger"
