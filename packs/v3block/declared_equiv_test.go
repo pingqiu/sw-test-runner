@@ -498,17 +498,41 @@ func toAny(ss []string) []any {
 	return out
 }
 
-// The delete of a source whose snapshot has a restore target: its row is
-// refused_effect pending a product pin of its phrase, so today it decodes
-// unknown, with no effect, exactly as the frozen handler did.
-func TestDeclaredDeletePendingPin(t *testing.T) {
-	cases := []eqCase{
-		{name: "dependents after the reservation", params: map[string]string{"volume": "v1"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
-		{name: "a negative", params: map[string]string{"volume": "v1", "expect": "refused"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
+// The delete of a source whose snapshot has a restore target is refused
+// with a documented effect. The deliberate change since the frozen handler:
+// it completes refused_effect, and the completion carries the effect
+// exactly as outcomes.json states it. Everything else is the frozen
+// handler's.
+func TestDeclaredDeleteRefusedEffect(t *testing.T) {
+	_, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", "")
+	if eff == nil {
+		t.Fatal("the row decides no effect")
 	}
-	checkEquivalent(t, "v3_op_delete", v3OpDeleteFrozen, cases)
+	b, _ := json.Marshal(eff.record())
+	var asRead map[string]any
+	_ = json.Unmarshal(b, &asRead)
+	refusal := []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}
+	cases := []eqCase{
+		{name: "dependents after the reservation", params: map[string]string{"volume": "v1"}, rules: refusal},
+		{name: "a negative", params: map[string]string{"volume": "v1", "expect": "refused"}, rules: refusal},
+	}
+	checkEquivalentAs(t, "v3_op_delete", v3OpDeleteFrozen, cases, func(c eqCase, r *eqRun) {
+		r.ret["value"] = tr.OutcomeRefusedEffect
+		for i := range r.records {
+			if r.records[i].Kind == tr.HistoryComplete {
+				r.records[i].Outcome = tr.OutcomeRefusedEffect
+				r.records[i].Result["effect"] = asRead
+				attempts := r.records[i].Result["attempts"].([]any)
+				attempts[len(attempts)-1] = strings.Replace(attempts[len(attempts)-1].(string), tr.OutcomeUnknown+" ", tr.OutcomeRefusedEffect+" ", 1)
+			}
+		}
+		for i, l := range r.logs {
+			r.logs[i] = strings.Replace(l, ": "+tr.OutcomeUnknown, ": "+tr.OutcomeRefusedEffect, 1)
+		}
+	})
 	r := runEq(t, blockActions.Handler("v3_op_delete"), cases[0], true)
-	if r.ret["value"] != tr.OutcomeUnknown || r.records[1].Result["effect"] != nil {
-		t.Fatalf("%v %+v", r.ret, r.records)
+	to, _ := asRead["to"].(map[string]any)
+	if r.ret["value"] != tr.OutcomeRefusedEffect || to["exit"] != float64(1) || to["stderr_contains"] != "workspace: volume is being deleted" {
+		t.Fatalf("%v effect %v", r.ret, asRead)
 	}
 }

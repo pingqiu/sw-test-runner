@@ -128,7 +128,15 @@ type phrase struct {
 	Phrase   string  `json:"phrase"`
 	Source   string  `json:"source"`
 	PinnedBy *string `json:"pinned_by"`
-	Note     string  `json:"note,omitempty"`
+	// Pin is "direct" (the test runs the command whose answer is matched;
+	// the default) or "indirect" (the test reaches the phrase through
+	// another call, Through). An indirect pin counts only when the phrase
+	// is produced by code both paths share, SharedSource; a phrase the
+	// command itself composes needs a direct test of that command.
+	Pin          string `json:"pin,omitempty"`
+	Through      string `json:"through,omitempty"`
+	SharedSource string `json:"shared_source,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 // pageLine is a citation of a product page line: docs/<page>.md:<line>.
@@ -198,6 +206,14 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 			return t, fmt.Errorf("%s: the phrase and its source line are required", at)
 		case ph.PinnedBy != nil && !strings.Contains(*ph.PinnedBy, "_test.go:"):
 			return t, fmt.Errorf("%s: pinned_by %q is not a product test line (or null)", at, *ph.PinnedBy)
+		case ph.Pin != "" && ph.Pin != "direct" && ph.Pin != "indirect":
+			return t, fmt.Errorf("%s: pin %q is not direct or indirect", at, ph.Pin)
+		case ph.Pin != "" && ph.PinnedBy == nil:
+			return t, fmt.Errorf("%s: a pin kind without pinned_by", at)
+		case ph.Pin == "indirect" && (strings.TrimSpace(ph.Through) == "" || !strings.Contains(ph.SharedSource, ".go:")):
+			return t, fmt.Errorf("%s: an indirect pin counts only through code both paths share: through and shared_source (<file:line>) are required", at)
+		case ph.Pin != "indirect" && (ph.Through != "" || ph.SharedSource != ""):
+			return t, fmt.Errorf("%s: through and shared_source describe an indirect pin only", at)
 		}
 		if _, dup := phrases[ph.Phrase]; dup {
 			return t, fmt.Errorf("%s: listed twice", at)
