@@ -1,6 +1,13 @@
 """Checkers of a run's history file (runner spec S4), judging the history alone.
 
-python3 -I history_check.py HISTORY.jsonl [--json OUT]
+python3 -I history_check.py HISTORY.jsonl [--json OUT] [--product DIR]
+
+The checkers are generic: product facts (bounds, recovery terms, fault
+targets, observation parts) come from DIR/checks.json, and the product's
+reading code (observation parts, placement of an unknown, the shape a delete
+leaves, a kill's scope) from the reader module it names. DIR defaults to the
+block product (packs/v3block/product); the rules below name block's facts as
+the example.
 
 Each checker returns PASS, FAIL or UNKNOWN with its findings. A history that
 does not parse, or breaks the writer's own rules, is UNKNOWN for every
@@ -125,16 +132,70 @@ can no longer land). A restore target starts as its snapshot's sets.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
+import os
 import sys
 
-ZERO = hashlib.sha256(bytes(4096)).hexdigest()
+ZERO = None       # sha256 of one block of zeros, the product's block_bytes: set by load_product
 KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
-# The master's answer to a create of a deleted name (v1: the name's deletion
-# reservation). C7 requires this reason, not any FailedPrecondition.
-RESERVED_NAME = 'is being deleted or was deleted'
 OUTCOMES = {'ok', 'refused', 'unknown'}
-TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
+
+# The product description: a directory holding checks.json (see the runner's
+# packs/<product>/product/). Its facts fill the tables below, and its reader
+# module (checks.json reader.module) reads observations and places operations.
+# The default is the block product, so a call without --product is unchanged.
+DEFAULT_PRODUCT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, 'packs', 'v3block', 'product')
+CHECKS = {}        # checks.json as read
+PRODUCT = None     # the product's reader module
+BOUNDS = {}        # C6 latency bounds: verb -> (seconds, cite); filled in place by load_product
+RECOVERY = {}      # C6 recovery terms: term -> (seconds, cite); filled in place by load_product
+STATE_PARTS = ()   # the observation parts compared, in checks.json's order
+REQUIRED_PARTS = ()   # of those, the parts C5 requires in both observations of a judged refusal
+MASTER = None      # the fault target whose role is master
+HOLDER_PREFIX = None   # a process whose name starts with this is a holder
+PLACED_BY_OBSERVATION = ('write',)   # extended by the product's PLACED_BY_STATUS
+
+
+def _load_module(name, product_dir):
+    """The reader module, by file: <product_dir>/<name>.py, else the file of
+    that name beside this one. By file, not by import: the checkers run under
+    python -I, which puts no script directory on the path."""
+    for d in (product_dir, os.path.dirname(os.path.abspath(__file__))):
+        path = os.path.join(d, name + '.py')
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise FileNotFoundError('reader module %r: not in %s nor beside the checker' % (name, product_dir))
+
+
+def load_product(product_dir):
+    """Read checks.json from `product_dir` and load its reader module. The
+    tables BOUNDS and RECOVERY are filled in place (a test may patch them)."""
+    global CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS, MASTER, HOLDER_PREFIX, PLACED_BY_OBSERVATION, ZERO
+    with open(os.path.join(product_dir, 'checks.json'), encoding='utf-8') as fh:
+        checks = json.load(fh)
+    mod = _load_module(checks['reader']['module'], product_dir)
+    mod.bind(checks)
+    parts = tuple(checks['observation']['compared'])
+    mod.observed_state({'result': {}}, parts)   # a part the reader cannot read fails here, not mid-run
+    required = tuple(checks['observation'].get('required', ()))
+    if set(required) - set(parts):
+        raise ValueError('required parts %s are not compared parts' % ', '.join(sorted(set(required) - set(parts))))
+    CHECKS, PRODUCT, STATE_PARTS, REQUIRED_PARTS = checks, mod, parts, required
+    ZERO = hashlib.sha256(bytes(checks['block_bytes']['bytes'])).hexdigest()
+    BOUNDS.clear()
+    BOUNDS.update({r['verb']: (r['seconds'], r['cite']) for r in checks.get('bounds', [])})
+    RECOVERY.clear()
+    RECOVERY.update({r['term']: (r['seconds'], r['cite']) for r in checks.get('recovery', [])})
+    roles = {}
+    for t in checks.get('fault_targets', []):
+        roles.setdefault(t.get('role'), t)
+    MASTER = roles['master']['name'] if 'master' in roles else None
+    HOLDER_PREFIX = roles['holder'].get('prefix') if 'holder' in roles else None
+    PLACED_BY_OBSERVATION = ('write',) + tuple(mod.PLACED_BY_STATUS)
 
 
 class Malformed(ValueError):
@@ -525,32 +586,18 @@ def c7(recs):
         if r['kind'] != 'observe' or vol not in deleted or vol in seen or r['seq'] < deleted[vol]:
             continue
         seen.add(vol)
-        res = r.get('result') or {}
-        head = res.get('head')
-        if not isinstance(head, dict) or head.get('state') != 'deleted':
-            f.append('%s after delete: ops chunk show answered %r, not HEAD in state deleted' % (vol, head or res.get('show_error')))
-        files = res.get('files')
-        if files is None:
-            f.append('%s after delete: no listing (%s)' % (vol, res.get('listing_error', 'none recorded')))
-            continue
-        extra = sorted(set(files) - TOMBSTONE)
-        if extra:
-            f.append('%s after delete: objects left: %s' % (vol, ', '.join(extra[:8])))
-        missing = sorted(TOMBSTONE - set(files))
-        if missing:
-            f.append('%s after delete: %s missing from its directory (the tombstone keeps the name out of it)' % (vol, ', '.join(missing)))
+        # The product's shape of a deleted volume (its tombstone).
+        f += PRODUCT.after_delete_findings(vol, r)
     # In v1 the master keeps a deleted name's reservation: a create of that
-    # name after its ok delete is REFUSED (FailedPrecondition). If a build lets
-    # it through, this goes red so that someone decides it.
+    # name after its ok delete is REFUSED; the product reader judges the answer.
     recreated = set()
     for vol, at, comp in creates:
         if vol not in deleted or at < deleted[vol]:
             continue
         recreated.add(vol)
-        detail = (comp.get('result') or {}).get('detail', '') if comp else ''
-        if comp is None or comp['outcome'] != 'refused' or 'FailedPrecondition' not in detail or RESERVED_NAME not in detail:
-            f.append('%s created again after its delete: %s, not refused for the name''s reservation (FailedPrecondition, %r): %s'
-                     % (vol, comp['outcome'] if comp else 'no completion', RESERVED_NAME, detail or (comp.get('result') if comp else '')))
+        bad = PRODUCT.recreate_finding(vol, comp)
+        if bad:
+            f.append(bad)
     if not recreated:
         f.append('no create of a deleted name was attempted: the reservation rule was not exercised')
     never = sorted(set(deleted) - seen)
@@ -568,41 +615,11 @@ def touches(inv, vol):
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
-STATE_PARTS = ('head', 'snapshots', 'workspace', 'dirs', 'files')
-# Parts C5 requires in both observations of a judged refusal: a pair lacking
-# one of them leaves the refusal not judged (no PASS on what was not seen).
-REQUIRED_PARTS = ('head', 'workspace')
-
-
 def observed_state(obs):
     """The comparable state of an observation: {part: value} for each part it
-    records, and {part: why} for each part it records but cannot compare."""
-    res = obs.get('result') or {}
-    state, bad = {}, {}
-    head = res.get('head')
-    if isinstance(head, dict) and isinstance(head.get('gen'), int) and not isinstance(head.get('gen'), bool):
-        state['head'] = ('head', head.get('gen'), head.get('epoch'), head.get('holder'), head.get('state'))
-    elif isinstance(res.get('show_error'), dict):
-        state['head'] = ('show_error', res['show_error'].get('code'))
-    elif head is not None:
-        bad['head'] = 'HEAD %r' % (head,)
-    # HEAD's snapshot names; a volume whose show answered an error code has no
-    # HEAD and so no snapshots, a state like any other.
-    if isinstance(res.get('snapshots'), list):
-        state['snapshots'] = tuple(sorted(res['snapshots']))
-    elif isinstance(res.get('show_error'), dict) and 'snapshots_error' in res:
-        state['snapshots'] = ('no HEAD',)
-    elif 'snapshots_error' in res:
-        bad['snapshots'] = res['snapshots_error']
-    ws = res.get('workspace')
-    if isinstance(ws, dict):
-        state['workspace'] = (ws.get('exit'), ws.get('text'))
-    for part in ('dirs', 'files'):
-        if isinstance(res.get(part), list):
-            state[part] = tuple(sorted(res[part]))
-        elif (part + '_error' if part == 'dirs' else 'listing_error') in res:
-            bad[part] = res.get(part + '_error' if part == 'dirs' else 'listing_error')
-    return state, bad
+    records, and {part: why} for each part it records but cannot compare. The
+    parts are checks.json's observation.compared; the product reader reads them."""
+    return PRODUCT.observed_state(obs, STATE_PARTS)
 
 
 def state_diff(a, b):
@@ -619,10 +636,7 @@ def state_diff(a, b):
 
 
 def show_part(state, part):
-    v = state[0].get(part)
-    if part in ('dirs', 'files'):
-        return '%d entries' % len(v)
-    return repr(v)[:120]
+    return PRODUCT.show_part(state, part)
 
 
 def limits_of(recs):
@@ -751,17 +765,10 @@ def killed(inv, comp):
 
 
 def kill_scope(inv):
-    """The volumes a kill reaches on the data path: a holder kill names its
-    volume in args.volume (the record's own volume stays ""), and reaches
-    that volume only; a kill of the master (process blockmaster) reaches no
-    holder, so no volume; a kill naming no volume (an older history, or a
-    process the runner could not map) reaches every volume, None."""
-    args = inv.get('args') or {}
-    if args.get('volume'):
-        return {args['volume']}
-    if args.get('process') == 'blockmaster':
-        return set()
-    return None
+    """The volumes a kill reaches on the data path: a set (empty: none), or
+    None for every volume. The product reader reads the kill's arguments
+    (for block: a holder kill reaches its volume, a master kill none)."""
+    return PRODUCT.kill_scope(inv)
 
 
 @unknown_on_overlap
@@ -894,9 +901,10 @@ def dur(recs):
                 apply_kill(r['seq'], scope)
             continue
         if r['kind'] == 'observe' and r.get('verb') == 'healthy':
-            seen = ((r.get('result') or {}).get('holders') or {})
-            for hv, h in sorted(seen.items()):
-                ident = (h.get('pid'), h.get('start'))
+            # The product reader names each volume's holder identity in the
+            # healthy record; a changed identity is a restarted holder.
+            seen = PRODUCT.holder_identity(r)
+            for hv, ident in sorted(seen.items()):
                 if hv in holders and holders[hv] != ident and hv not in covered and None not in covered:
                     restarted.append('holder of %s restarted with no recorded kill (healthy seq %d -> %d)' % (hv, holder_seq[hv], r['seq']))
                     kinds[r['seq']] = ' (holder of %s restarted with no recorded kill)' % hv
@@ -1007,27 +1015,14 @@ def dur(recs):
 
 
 
-# C6 latency bounds: verb -> (seconds, the operator page and line stating it).
-# Only a bound a page states goes here, never an invented number. The pages
-# state no bound on the duration of any operation, so the table is empty and
-# every verb is listed as not judged.
-BOUNDS = {}
-# C6 recovery bounds: term -> (seconds, the page lines stating it), product
-# docs at commit 14dff69. A bound on REACHING a healthy point, not the
-# latency of an operation. A holder (blockvolume) that crashed is re-granted
-# at most 65 s after it stopped, and its start wait ends 30 s after the
-# re-grant or after its start, whichever is later, so it is healthy again by
+# C6 latency bounds (BOUNDS) and recovery terms (RECOVERY) come from the
+# product's checks.json, each with its cite: only a bound a page states, never
+# an invented number. Recovery is a bound on REACHING a healthy point, not the
+# latency of an operation: a holder is healthy again by
 #   max(kill completion + regrant, restart completion) + start_wait.
-# If the pages change the numbers, this table changes with them, never the
-# checker. The pages state no restart bound for blockmaster: its restart is
-# not judged.
-RECOVERY = {'regrant': (65, 'docs/volume-lifecycle.md:352-356'),
-            'start_wait': (30, 'docs/volume-lifecycle.md:368-370')}
-HOLDER_PREFIX = 'blockvolume'
-MASTER = 'blockmaster'
+# (For block: no stated operation bound, regrant 65 s, start wait 30 s, no
+# restart bound for the master.)
 RUNNER_VERBS = FAULT_VERBS + ('kill', 'restart')   # the environment's operations, not the product's
-PLACED_BY_OBSERVATION = ('write', 'snapshot', 'delete', 'move', 'restore')
-LIVE = {'HEAD', 'VOLUME'}   # a live volume's directory holds at least these
 
 
 def healthy_points(recs):
@@ -1101,74 +1096,6 @@ def _baseline(recs, vol, before):
     return best
 
 
-def _place_by_status(inv, obs, base):
-    """Placement of a snapshot, delete, move or restore from the observation
-    after it (and, for a snapshot, the one before it)."""
-    verb, args = inv['verb'], inv.get('args') or {}
-    res = obs.get('result') or {}
-    head, files = res.get('head'), res.get('files')
-    err = (res.get('show_error') or {}).get('code') if isinstance(res.get('show_error'), dict) else None
-    if verb == 'snapshot':
-        # By HEAD's snapshot names when both observations record them; by the
-        # root/ objects only when neither does.
-        bres = base.get('result') or {}
-        bnames, names = bres.get('snapshots'), res.get('snapshots')
-        if isinstance(bnames, list) and isinstance(names, list):
-            name = args.get('name')
-            if name in bnames:
-                return None, 'by snapshot names: %r already present before it (observation seq %d)' % (name, base['seq'])
-            lost = sorted(set(bnames) - set(names))
-            if lost:
-                return 'third', 'by snapshot names: other snapshots lost: %s' % ', '.join(lost[:4])
-            return ('took effect' if name in names else 'did not'), 'by snapshot names: %r %s' % (name, 'present' if name in names else 'absent')
-        if isinstance(bnames, list) or isinstance(names, list):
-            return None, 'snapshot names recorded by one observation only (seq %d, %d)' % (base['seq'], obs['seq'])
-        bfiles = bres.get('files')
-        if not isinstance(files, list) or not isinstance(bfiles, list):
-            return None, 'no listing before and after (observations seq %d, %d)' % (base['seq'], obs['seq'])
-        before = {f for f in bfiles if f.startswith('root/')}
-        now = {f for f in files if f.startswith('root/')}
-        if before - now:
-            return 'third', 'by root objects: root objects lost: %s' % ', '.join(sorted(before - now)[:4])
-        return ('took effect' if now - before else 'did not'), 'by root objects (no snapshot names recorded): roots %d -> %d' % (len(before), len(now))
-    if verb == 'restore':
-        if isinstance(head, dict):
-            if not isinstance(files, list):
-                return None, 'no listing (%s)' % res.get('listing_error', 'none recorded')
-            missing = sorted(LIVE - set(files))
-            return ('third', 'HEAD answers but %s missing' % ', '.join(missing)) if missing else ('took effect', 'HEAD and VOLUME present')
-        if err == 'volume_not_found':
-            if res.get('listing_error'):
-                return None, 'no listing (%s)' % res['listing_error']
-            return ('third', 'no HEAD but objects present: %s' % ', '.join(sorted(files)[:4])) if files else ('did not', 'no such volume')
-        return None, 'no status (%r)' % (head if head is not None else res.get('show_error'))
-    if not isinstance(head, dict):
-        if verb == 'delete' and err == 'volume_not_found':
-            return 'third', 'the volume is absent instead of its tombstone'
-        return None, 'no status (%r)' % (head if head is not None else res.get('show_error'))
-    if not isinstance(files, list):
-        return None, 'no listing (%s)' % res.get('listing_error', 'none recorded')
-    state = head.get('state')
-    if verb == 'delete':
-        if state == 'deleted':
-            if set(files) == TOMBSTONE:
-                return 'took effect', 'HEAD deleted, tombstone only'
-            return 'third', 'HEAD deleted but the directory holds %s' % ', '.join(sorted(set(files) ^ TOMBSTONE)[:4])
-        if state in ('deleting', 'purging'):
-            return 'third', 'HEAD in state %s' % state
-    if LIVE - set(files):
-        return 'third', 'HEAD in state %r but %s missing' % (state, ', '.join(sorted(LIVE - set(files))))
-    if verb == 'delete':
-        return 'did not', 'HEAD in state %r' % state
-    # move: the holder's server and the epoch tell the two outcomes apart
-    server, epoch = str(head.get('holder', '')).split('/')[0], head.get('epoch')
-    if server == args.get('to') and isinstance(epoch, int) and epoch > args.get('epoch'):
-        return 'took effect', 'holder %s at epoch %d' % (head.get('holder'), epoch)
-    if server == args.get('from') and epoch == args.get('epoch'):
-        return 'did not', 'holder %s at epoch %d' % (head.get('holder'), epoch)
-    return 'third', 'holder %r at epoch %r: neither %s at a new epoch nor %s at %r' % (head.get('holder'), epoch, args.get('to'), args.get('from'), args.get('epoch'))
-
-
 def recovery_findings(recs, ops_, healthy):
     """Recovery on the history's one clock, as the pages read: the holder is
     healthy again (the first healthy observation with healthy true after its
@@ -1184,12 +1111,12 @@ def recovery_findings(recs, ops_, healthy):
     for inv, comp in ops_:
         if inv['verb'] != 'restart':
             continue
-        proc = str((inv.get('args') or {}).get('process', ''))
+        proc = PRODUCT.process_of(inv)
         name = 'restart seq %d %s' % (inv['seq'], proc)
         if proc == MASTER:
             notes.append('recovery not judged: %s (no restart bound stated for the master)' % name)
             continue
-        if not proc.startswith(HOLDER_PREFIX):
+        if HOLDER_PREFIX is None or not proc.startswith(HOLDER_PREFIX):
             notes.append('recovery not judged: %s (not a holder)' % name)
             continue
         if comp is None or comp['outcome'] != 'ok':
@@ -1201,12 +1128,12 @@ def recovery_findings(recs, ops_, healthy):
             continue
         # The holder's stop: its latest kill before this restart.
         kills = [(i2, c2) for i2, c2 in ops_ if i2['verb'] == 'kill' and i2['seq'] < inv['seq']
-                 and str((i2.get('args') or {}).get('process', '')) == proc]
+                 and PRODUCT.process_of(i2) == proc]
         start = kills[-1][0]['seq'] if kills else inv['seq']
         master = next((i2 for i2, _ in ops_ if i2['verb'] in ('kill', 'restart') and start < i2['seq'] < h['seq']
-                       and str((i2.get('args') or {}).get('process', '')) == MASTER), None)
+                       and PRODUCT.process_of(i2) == MASTER), None)
         if master is not None:
-            notes.append('recovery not judged: %s (blockmaster %s seq %d before its healthy point)' % (name, master['verb'], master['seq']))
+            notes.append('recovery not judged: %s (%s %s seq %d before its healthy point)' % (name, MASTER, master['verb'], master['seq']))
             continue
         if not kills or kills[-1][1] is None or kills[-1][1]['outcome'] != 'ok':
             notes.append('recovery not judged: %s (no kill of %s completed ok before it: the stop is not known)' % (name, proc))
@@ -1278,23 +1205,23 @@ def c6(recs):
             how, why = _place_write(recs, inv, done, after)
         else:
             obs = _observation(recs, inv['volume'], after)
-            base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] == 'snapshot' else None
+            base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] in PRODUCT.NEEDS_BASELINE else None
             if obs is None:
                 how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
-            elif inv['verb'] == 'snapshot' and base is None:
+            elif inv['verb'] in PRODUCT.NEEDS_BASELINE and base is None:
                 how, why = None, 'no clean observation of %s before it' % inv['volume']
             elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
                 ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
                 how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
             else:
-                how, why = _place_by_status(inv, obs, base)
+                how, why = PRODUCT.place_by_status(inv, obs, base)
         if how is None:
             f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
         elif how == 'third':
             f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
         else:
             resolved += 1
-            if inv['verb'] == 'snapshot':
+            if inv['verb'] in PRODUCT.NOTED:
                 notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
     # Always reported, in this exact form, so a night can require n > 0 in
     # at least one run; a single run with n = 0 and its healthy points PASSes.
@@ -1307,6 +1234,8 @@ def c6(recs):
 
 
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur}
+
+load_product(DEFAULT_PRODUCT)   # the default; main() loads --product over it
 
 
 def check(lines):
@@ -1334,7 +1263,10 @@ def main(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('history')
     p.add_argument('--json')
+    p.add_argument('--product', default=DEFAULT_PRODUCT,
+                   help='the product description directory (holds checks.json); default: the block product')
     a = p.parse_args(argv)
+    load_product(a.product)
     with open(a.history, encoding='utf-8') as fh:
         result = check(fh.read().splitlines())
     text = json.dumps(result, indent=1, sort_keys=True)

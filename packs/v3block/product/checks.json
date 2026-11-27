@@ -1,0 +1,43 @@
+{
+ "product": "block",
+ "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
+ "about": "Product facts the history checkers read. A row that states a number carries its cite (a page or source line at read_at). If the pages change a number, this file changes with them, never the checker.",
+ "reader": {
+  "module": "product_block",
+  "about": "The product's code for reading an observation and placing an operation from it: checkers/product_block.py, loaded by file (the checkers run under python -I)."
+ },
+ "bounds": [],
+ "bounds_note": "C6 latency bounds, rows of {verb, seconds, cite}. The operator pages state no bound on the duration of any operation, so there is no row and every verb is listed as not judged. Only a bound a page states goes here, never an invented number.",
+ "recovery": [
+  {"term": "regrant", "seconds": 65, "cite": "docs/volume-lifecycle.md:352-356",
+   "what": "a holder that crashed is re-granted at most this long after it stopped"},
+  {"term": "start_wait", "seconds": 30, "cite": "docs/volume-lifecycle.md:368-370",
+   "what": "the holder's start wait ends this long after the re-grant or after its start, whichever is later"}
+ ],
+ "recovery_note": "A holder is healthy again by max(kill completion + regrant, restart completion) + start_wait. The pages state no restart bound for the master: its restart is not judged.",
+ "fault_targets": [
+  {"name": "blockmaster", "role": "master", "unit": "process", "cite": "cmd/blockmaster/main.go:1-2",
+   "what": "the block master daemon; a kill of it reaches no holder, so no volume's data path"},
+  {"name": "blockvolume:<i>", "role": "holder", "unit": "process", "prefix": "blockvolume", "cite": "cmd/blockvolume/main.go:1-3",
+   "what": "the block volume daemon holding volume i (from 0); a process whose name starts with the prefix is a holder"}
+ ],
+ "block_bytes": {"bytes": 4096, "cite": "cmd/blockvolume/main.go:239",
+   "what": "the block size in bytes on first create (the daemon's --durable-blocksize default; the runner also passes 4096); the checkers' ZERO is the sha256 of one block of zeros"},
+ "observation": {
+  "compared": ["head", "snapshots", "workspace", "dirs", "files"],
+  "required": ["head", "workspace"],
+  "required_note": "C5 requires these parts in both observations of a judged refusal: a pair lacking one leaves the refusal not judged (no PASS on what was not seen).",
+  "ignored": [
+   {"field": "head: VolumeID, ClaimID, Activity, Current, Position",
+    "why": "not recorded by the observation: it keeps HEAD's generation, epoch, holder and state, the volume's identity, ownership and life state"},
+   {"field": "head.Snapshots: each snapshot's root and position",
+    "why": "only the snapshot names are compared; the volume's root objects appear in the file listing (files)"},
+   {"field": "show_error.exit",
+    "why": "only the error code is compared: the exit status of a failed show says no more than its code"},
+   {"field": "snapshots_error, dirs_error, listing_error, an unreadable head",
+    "why": "not values: a part recorded with an error cannot be compared, and a refusal judged on it is left not judged"},
+   {"field": "workspace.text beyond its first 12 lines",
+    "why": "not recorded by the observation"}
+  ]
+ }
+}
