@@ -123,19 +123,204 @@
       }],
       "retry": {"while_code": "not_admitted", "within_param": "admit_seconds", "every_seconds": 3, "attempts": "attempts"},
       "note": "after a stop the master admits the delete only once the holder's lease horizon has passed, answering not_admitted until then; the CLI's procedure is to rerun with the same request id. A step that declares expect=refused is one call."
+    },
+    {
+      "action": "v3_op_observe",
+      "verb": "observe",
+      "kind": "observe",
+      "runs_on": "step_node",
+      "params": [
+        {
+          "name": "volume",
+          "kind": "subject",
+          "vars": true
+        }
+      ],
+      "record": {
+        "volume": "{{volume.name}}"
+      },
+      "derived": {
+        "filer_http": {
+          "kind": "port_offset",
+          "from": "{{config.filer}}",
+          "offset": -10000,
+          "min_port": 10001,
+          "error": "filer has no SeaweedFS gRPC port"
+        },
+        "chunk_path": {
+          "kind": "trim_right",
+          "from": "{{config.chunk_path}}",
+          "chars": "/"
+        },
+        "layout8": {
+          "kind": "prefix",
+          "from": "{{volume.layout_id}}",
+          "length": 8
+        }
+      },
+      "steps": [
+        {
+          "name": "head",
+          "command": [
+            "{{config.bin_dir}}/sw-block",
+            "ops",
+            "chunk",
+            "show",
+            "--volume",
+            "{{volume.name}}",
+            "--master",
+            "{{config.master}}",
+            "--chunk-filer",
+            "{{config.filer}}",
+            "--chunk-path",
+            "{{config.chunk_path}}"
+          ],
+          "runner_deadline_seconds": 60,
+          "cite": "cmd/sw-block/chunk.go:89-90 (dispatch); cmd/sw-block/chunk_b.go:209-212 (--volume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master); it prints the decoded HEAD, whose snapshots map is the volume's snapshot list",
+          "read": {
+            "kind": "json_object",
+            "schema": {
+              "head": {
+                "Gen": "uint",
+                "Epoch": "uint",
+                "Holder": "string",
+                "State": "string",
+                "Snapshots": "object"
+              }
+            },
+            "require": "head",
+            "fields": {
+              "head": {
+                "object": {
+                  "gen": {
+                    "value": "head.Gen"
+                  },
+                  "epoch": {
+                    "value": "head.Epoch"
+                  },
+                  "holder": {
+                    "value": "head.Holder"
+                  },
+                  "state": {
+                    "value": "head.State"
+                  }
+                }
+              },
+              "snapshots": {
+                "sorted_keys": "head.Snapshots"
+              }
+            },
+            "on_unreadable": {
+              "head": "unreadable",
+              "snapshots_error": "chunk show: HEAD unreadable"
+            },
+            "failure_body": {
+              "code": "string"
+            },
+            "on_failure": {
+              "show_error": {
+                "object": {
+                  "exit": {
+                    "int": "{{exit}}"
+                  },
+                  "code": "{{body.code}}"
+                }
+              },
+              "snapshots_error": "chunk show: exit {{exit}} code {{body.code|q}}"
+            },
+            "on_not_run": {
+              "show_error": {
+                "object": {
+                  "exit": {
+                    "int": "{{exit}}"
+                  },
+                  "code": "{{body.code}}"
+                }
+              },
+              "snapshots_error": "chunk show: {{error}}"
+            }
+          }
+        },
+        {
+          "name": "workspace",
+          "command": [
+            "{{config.bin_dir}}/sw-block",
+            "ops",
+            "workspace",
+            "show",
+            "--master",
+            "{{config.master}}",
+            "--volume",
+            "{{volume.name}}"
+          ],
+          "runner_deadline_seconds": 60,
+          "cite": "cmd/sw-block/workspace.go:87-88 (dispatch), :23 (--timeout 30s); cmd/sw-block/workspace_show.go:21-23 (--master, --volume)",
+          "read": {
+            "kind": "lines",
+            "into": "workspace",
+            "lines": 12
+          }
+        },
+        {
+          "name": "dirs",
+          "command": [
+            "python3",
+            "-I",
+            "-c",
+            "import json,sys,urllib.request,urllib.parse,urllib.error\nd,pre=sys.argv[1],sys.argv[2]; out=[]; last=\"\"\nwhile True:\n    q=urllib.parse.urlencode({\"limit\":1000,\"lastFileName\":last,\"namePattern\":pre+\"*\"})\n    try:\n        r=json.load(urllib.request.urlopen(urllib.request.Request(d+\"/?\"+q,headers={\"Accept\":\"application/json\"}),timeout=10))\n    except urllib.error.HTTPError as e:\n        if e.code==404 and not last: break\n        raise\n    es=r.get(\"Entries\") or []\n    out+=[e[\"FullPath\"].rsplit(\"/\",1)[1] for e in es]\n    if not r.get(\"ShouldDisplayLoadMore\") or not es: break\n    last=es[-1][\"FullPath\"].rsplit(\"/\",1)[1]\nprint(json.dumps(sorted(n for n in out if n.startswith(pre))))",
+            "http://{{derived.filer_http}}{{derived.chunk_path}}",
+            "{{volume.name}}-"
+          ],
+          "runner_deadline_seconds": 120,
+          "cite": "the volume's directories are <name>-<first 8 hex of its id> under the chunk path: core/frontend/chunkstore/layout/volume.go:55-61; listed through the SeaweedFS filer's HTTP listing, whose port is the gRPC port minus 10000 (SeaweedFS's convention); a name that never existed has none",
+          "read": {
+            "kind": "json_strings",
+            "into": "dirs",
+            "error_into": "dirs_error",
+            "error": "listing: {{stderr_first_line}}"
+          }
+        },
+        {
+          "name": "files",
+          "when": {
+            "field": "volume.layout_id",
+            "not_equals": ""
+          },
+          "command": [
+            "python3",
+            "-I",
+            "-c",
+            "import json,sys,urllib.request,urllib.parse,urllib.error\nroot=sys.argv[1]; out=[]\ndef ls(d,rel):\n    last=\"\"\n    while True:\n        q=urllib.parse.urlencode({\"limit\":1000,\"lastFileName\":last})\n        try:\n            r=json.load(urllib.request.urlopen(urllib.request.Request(d+\"/?\"+q,headers={\"Accept\":\"application/json\"}),timeout=10))\n        except urllib.error.HTTPError as e:\n            if e.code==404 and not last: return\n            raise\n        es=r.get(\"Entries\") or []\n        for e in es:\n            name=e[\"FullPath\"].rsplit(\"/\",1)[1]\n            if e.get(\"Mode\",0)&0o20000000000: ls(d+\"/\"+urllib.parse.quote(name),rel+name+\"/\")\n            else: out.append(rel+name)\n        if not r.get(\"ShouldDisplayLoadMore\") or not es: return\n        last=es[-1][\"FullPath\"].rsplit(\"/\",1)[1]\nls(root,\"\")\nprint(json.dumps(sorted(out)))",
+            "http://{{derived.filer_http}}{{derived.chunk_path}}/{{volume.name}}-{{derived.layout8}}"
+          ],
+          "runner_deadline_seconds": 120,
+          "cite": "every file below the volume's directory (core/frontend/chunkstore/layout/volume.go:55-61), through the SeaweedFS filer's HTTP listing; a missing directory is an empty list",
+          "read": {
+            "kind": "json_strings",
+            "into": "files",
+            "error_into": "listing_error",
+            "error": "listing: {{stderr_first_line}}"
+          }
+        }
+      ],
+      "note": "an observation, not an operation: one observe record of the fields below, no outcome; checkers/product_block.py reads this shape"
     }
   ],
+  "runner_setup": [
+    {"action": "v3_op_spec", "why": "writes the cluster spec file the blockmaster reads and the runner's own record of each volume (hosts, ports, NQN); it calls no product command or API and records nothing in the history"},
+    {"action": "v3_run_plan", "why": "computes one run's ports, work directory and NQN prefix from port_base and the run's tag and sets them as vars; no command runs and nothing is recorded"},
+    {"action": "v3_history_end", "why": "closes the run's history file (its end record) so a later phase judges a whole history; a runner bookkeeping step with no product call"}
+  ],
   "exceptions": [
-    {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
-    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
-    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
-    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "runner_deadline_seconds": 150},
-    {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "runner_deadline_seconds": 300},
-    {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "runner_deadline_seconds": 360},
-    {"action": "v3_op_observe", "why": "an observation, not an operation: it writes an observe record with no outcome, and reading the answers into comparable values (HEAD and its snapshot names, the authority lines, the filer listings) is code by the platform ruling; its listings also depend on the runner's record (the layout id)", "runner_deadline_seconds": 120},
-    {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit", "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20}},
-    {"action": "v3_op_restart", "why": "a fault's repair: restarts the killed process with the command line it ran, recorded in the ledger, and waits for readiness as attach does", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
-    {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
+    {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup", "declarable_with": "a long-lived process step: launch detached, record its identity as owned, and a readiness probe polled until a declared condition holds (status JSON serving above the recorded epoch, listeners held by that pid), then dependent steps (connect, device lookup) run only after it", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
+    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step: resolve the guest device from the subject (NQN to /dev path) as a declared lookup, plus a runner-side generated input whose hash is recorded before the invocation; then one invocation per element of a list param", "runner_deadline_seconds": 150},
+    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step (the declared NQN-to-device lookup) and one invocation per element of a list param, with a result field read from stdout by a pattern (the sha256)", "runner_deadline_seconds": 150},
+    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step (the declared NQN-to-device lookup); with it the fsync is one declared command", "runner_deadline_seconds": 150},
+    {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "declarable_with": "a step sequence with data passed between steps (the sealed generation parsed from detach feeds revoke), waits for a process's exit by its recorded identity and a poll for an answer line, and an outcome rule other than the worst step's (any failure after the first change is unknown)", "runner_deadline_seconds": 300},
+    {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "declarable_with": "the stop's step sequence (see v3_op_stop), then a command whose answer must match the operation's own args before a subject field (the current host) is updated", "runner_deadline_seconds": 360},
+    {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit", "declarable_with": "process identity from the run's ownership ledger as a subject, a kill command bound to that identity, and a wait for the exit certified by a successful check", "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20}},
+    {"action": "v3_op_restart", "why": "a fault's repair: restarts the killed process with the command line it ran, recorded in the ledger, and waits for readiness as attach does", "declarable_with": "the ledger subject (see v3_op_kill) plus the long-lived process step of v3_op_attach, relaunching the recorded command line", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
+    {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],
   "guest": {
     "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default.",

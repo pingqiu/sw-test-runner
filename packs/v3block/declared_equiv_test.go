@@ -412,3 +412,52 @@ func TestDeclaredDeleteEquivalent(t *testing.T) {
 		t.Errorf("%s: %d calls, %v", cases[2].name, len(r.calls), r.ret)
 	}
 }
+
+func TestDeclaredObserveEquivalent(t *testing.T) {
+	head := `{"head":{"Gen":5,"Epoch":2,"Holder":"r1","State":"serving","Snapshots":{"b":{},"a":1}}}`
+	ws := eqAnswer{out: strings.Repeat("key: value\n", 15)}
+	obs := func(show, wsA, dirs, files eqAnswer) []eqRule {
+		return []eqRule{{"ops chunk show", []eqAnswer{show}}, {"ops workspace show", []eqAnswer{wsA}},
+			{"namePattern", []eqAnswer{dirs}}, {"python3", []eqAnswer{files}}}
+	}
+	okDirs, okFiles := eqAnswer{out: `["v1-01234567"]` + "\n"}, eqAnswer{out: `["root/x","pool/1"]`}
+	with := func(show eqAnswer) []eqRule { return obs(show, ws, okDirs, okFiles) }
+	p := map[string]string{"volume": "v1"}
+	cases := []eqCase{
+		{name: "all answered", params: p, rules: with(eqAnswer{out: head})},
+		{name: "null snapshots", params: p, rules: with(eqAnswer{out: `{"head":{"Gen":1,"Snapshots":null}}`})},
+		{name: "no snapshots key, lower-case keys", params: p, rules: with(eqAnswer{out: `{"head":{"gen":1,"epoch":3,"holder":"h","state":"s"}}`})},
+		{name: "the largest generation", params: p, rules: with(eqAnswer{out: `{"head":{"Gen":18446744073709551615}}`})},
+		{name: "no head", params: p, rules: with(eqAnswer{out: `{"other":1}`})},
+		{name: "null head", params: p, rules: with(eqAnswer{out: `{"head":null}`})},
+		{name: "garbage", params: p, rules: with(eqAnswer{out: `nope`})},
+		{name: "a generation of the wrong type", params: p, rules: with(eqAnswer{out: `{"head":{"Gen":"5"}}`})},
+		{name: "snapshots not an object", params: p, rules: with(eqAnswer{out: `{"head":{"Gen":5,"Snapshots":[1]}}`})},
+		{name: "an error body", params: p, rules: with(chunkErr("not_found", "no volume"))},
+		{name: "a code to quote", params: p, rules: with(eqAnswer{out: `{"code":"a\"b\c"}`, code: 2})},
+		{name: "no error body", params: p, rules: with(eqAnswer{out: "boom", code: 1})},
+		{name: "show not run", params: p, rules: with(eqAnswer{err: broken})},
+		{name: "workspace not run", params: p, rules: obs(eqAnswer{out: head}, eqAnswer{err: broken}, okDirs, okFiles)},
+		{name: "workspace refused, empty", params: p, rules: obs(eqAnswer{out: head}, eqAnswer{code: 1}, okDirs, okFiles)},
+		{name: "listings fail", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{errOut: "Traceback\nURLError", code: 1}, eqAnswer{out: "x", errOut: "e"})},
+		{name: "listings null and empty", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{out: "null"}, eqAnswer{out: "[]"})},
+		{name: "listings not run", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{err: broken}, eqAnswer{err: broken})},
+		{name: "no layout id: no file listing", params: map[string]string{"volume": "tgt"}, rules: with(eqAnswer{out: head})},
+		{name: "chunk path with trailing slashes", params: p, vars: map[string]string{"chunk_path": "/chunks//"}, rules: with(eqAnswer{out: head})},
+		{name: "filer without a port", params: p, vars: map[string]string{"filer": "filer"}, rules: with(eqAnswer{out: head})},
+		{name: "filer on a low port", params: p, vars: map[string]string{"filer": "127.0.0.1:9000"}, rules: with(eqAnswer{out: head})},
+		{name: "filer port not a number", params: p, vars: map[string]string{"filer": "127.0.0.1:x"}, rules: with(eqAnswer{out: head})},
+	}
+	cases = append(cases, commonErrorCases(p, with(eqAnswer{out: head}))...)
+	checkEquivalent(t, "v3_op_observe", v3OpObserveFrozen, cases)
+	// The cases reach every field: a full observation has them all.
+	r := runEq(t, blockActions.Handler("v3_op_observe"), cases[0], true)
+	if len(r.records) != 2 {
+		t.Fatalf("records %v", r.records)
+	}
+	for _, k := range []string{"head", "snapshots", "workspace", "dirs", "files"} {
+		if _, ok := r.records[0].Result[k]; !ok {
+			t.Errorf("no %s in %v", k, r.records[0].Result)
+		}
+	}
+}

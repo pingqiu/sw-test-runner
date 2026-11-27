@@ -58,6 +58,9 @@ type File struct {
 	RunnerIODir string      `json:"runner_io_dir"`
 	Actions     []Action    `json:"actions"`
 	Exceptions  []Exception `json:"exceptions"`
+	// RunnerSetup names the registered actions that are runner setup, not
+	// product actions, and why.
+	RunnerSetup []Setup `json:"runner_setup,omitempty"`
 	// Guest is the product's guest configuration, read by the product's
 	// own code; the executor does not interpret it.
 	Guest json.RawMessage `json:"guest,omitempty"`
@@ -85,10 +88,19 @@ type ConfigKey struct {
 // PlusParam the deadline grows by that int param's seconds (a wait the step
 // may set).
 type Exception struct {
-	Action                string     `json:"action"`
-	Why                   string     `json:"why"`
+	Action string `json:"action"`
+	Why    string `json:"why"`
+	// DeclarableWith names the generic executor feature that would let the
+	// action be declared.
+	DeclarableWith        string     `json:"declarable_with"`
 	RunnerDeadlineSeconds int        `json:"runner_deadline_seconds"`
 	PlusParam             *PlusParam `json:"plus_param,omitempty"`
+}
+
+// Setup is a runner setup action and why it is not a product action.
+type Setup struct {
+	Action string `json:"action"`
+	Why    string `json:"why"`
 }
 
 // PlusParam is an int step param added to a deadline (Default when absent
@@ -136,7 +148,13 @@ type Action struct {
 	// OnOKSet updates a subject's field after an ok answer:
 	// "<subject param>.<field>" -> template.
 	OnOKSet map[string]string `json:"on_ok_set,omitempty"`
-	Note    string            `json:"note,omitempty"`
+	// Kind "observe": an observation of Steps (observe.go), not an
+	// operation; it has no op and no outcome.
+	Kind  string `json:"kind,omitempty"`
+	Steps []Step `json:"steps,omitempty"`
+	// Derived values, {{derived.<name>}} (observe.go).
+	Derived map[string]Derived `json:"derived,omitempty"`
+	Note    string             `json:"note,omitempty"`
 }
 
 // Param is one parameter of the step. Kind "subject" loads the subject it
@@ -208,6 +226,8 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 type Cond struct {
 	Field  string `json:"field"`
 	Equals string `json:"equals"`
+	// NotEquals, when set, holds when the field's value differs from it.
+	NotEquals *string `json:"not_equals,omitempty"`
 }
 
 // Variant is one way to run the action: its command and its decoding.
@@ -274,12 +294,14 @@ func strict(b []byte, v any) error {
 	return d.Decode(v)
 }
 
-var ref = regexp.MustCompile(`\{\{\s*([A-Za-z_][\w.]*)\s*\}\}`)
+// ref is a template reference: {{name}}, or {{name|q}} for the value
+// quoted as Go's %q quotes a string.
+var ref = regexp.MustCompile(`\{\{\s*([A-Za-z_][\w.]*(?:\|q)?)\s*\}\}`)
 
 func names(t string) []string {
 	var out []string
 	for _, m := range ref.FindAllStringSubmatch(t, -1) {
-		out = append(out, m[1])
+		out = append(out, strings.TrimSuffix(m[1], "|q"))
 	}
 	return out
 }
@@ -331,6 +353,9 @@ func Parse(b []byte) (*File, error) {
 		if x.RunnerDeadlineSeconds <= 0 {
 			return nil, fmt.Errorf("actions: exception %s has no runner_deadline_seconds", x.Action)
 		}
+		if strings.TrimSpace(x.DeclarableWith) == "" {
+			return nil, fmt.Errorf("actions: exception %s does not name the executor feature that would declare it", x.Action)
+		}
 		if x.PlusParam != nil && x.PlusParam.Name == "" {
 			return nil, fmt.Errorf("actions: exception %s: plus_param needs a name", x.Action)
 		}
@@ -339,22 +364,37 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[x.Action] = true
 	}
+	for _, x := range f.RunnerSetup {
+		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
+			return nil, fmt.Errorf("actions: runner setup %q needs its action and why", x.Action)
+		}
+		if seen[x.Action] {
+			return nil, fmt.Errorf("actions: %s is listed twice", x.Action)
+		}
+		seen[x.Action] = true
+	}
 	return &f, nil
 }
 
 func (a *Action) check(keys map[string]bool) error {
-	if a.Action == "" || a.Verb == "" || a.Op == "" {
-		return errors.New("action, verb and op are required")
+	if a.Action == "" || a.Verb == "" || (a.Op == "") != (a.Kind == "observe") {
+		return errors.New("action and verb are required, and an op exactly when it is not an observation")
 	}
 	if a.RunsOn != "step_node" {
 		return fmt.Errorf("runs_on %q (want step_node)", a.RunsOn)
 	}
-	if len(a.Variants) == 0 {
+	if a.Kind != "" && a.Kind != "observe" {
+		return fmt.Errorf("kind %q", a.Kind)
+	}
+	if len(a.Variants) == 0 && a.Kind != "observe" {
 		return errors.New("no variant")
 	}
 	plain, subjects, ints := map[string]bool{"variant": true}, map[string]bool{}, map[string]bool{}
 	for k := range keys {
 		plain["config."+k] = true
+	}
+	for k := range a.Derived {
+		plain["derived."+k] = true
 	}
 	for _, p := range a.Params {
 		switch p.Kind {
@@ -390,6 +430,12 @@ func (a *Action) check(keys map[string]bool) error {
 	base := defined(nil)
 	if err := base(a.Record.Volume); err != nil {
 		return err
+	}
+	if a.Kind == "observe" {
+		return a.checkObserve(defined)
+	}
+	if len(a.Derived) != 0 {
+		return errors.New("derived values serve observations only")
 	}
 	for _, v := range a.Record.Args {
 		if err := base(v.Template); err != nil {
@@ -552,11 +598,25 @@ type scope struct {
 	node     Runner
 	vals     map[string]string
 	subjects map[string]Subject
+	derived  map[string]Derived
 }
 
 func (s *scope) get(n string) (string, error) {
+	if q, ok := strings.CutSuffix(n, "|q"); ok {
+		v, err := s.get(q)
+		return strconv.Quote(v), err
+	}
 	if v, ok := s.vals[n]; ok {
 		return v, nil
+	}
+	if d, ok := strings.CutPrefix(n, "derived."); ok && s.derived != nil {
+		if spec, ok := s.derived[d]; ok {
+			v, err := spec.compute(s)
+			if err != nil {
+				return "", derivedError{err.Error()}
+			}
+			return v, nil
+		}
 	}
 	if i := strings.IndexByte(n, '.'); i > 0 {
 		if sub, ok := s.subjects[n[:i]]; ok {
@@ -700,6 +760,14 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 				s.subjects[p.Name] = sub
 			}
 		}
+	}
+	if a.Kind == "observe" {
+		s.derived = a.Derived
+		vol, err := s.expand(a.Record.Volume)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return x.observe(s, actx, a, vol)
 	}
 	var v *Variant
 	for i := range a.Variants {

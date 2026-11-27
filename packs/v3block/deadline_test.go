@@ -121,7 +121,7 @@ func TestExceptionEndsAtItsRunnerDeadline(t *testing.T) {
 func missingDeadlines(names []string) []string {
 	var out []string
 	for _, n := range names {
-		if !strings.HasPrefix(n, "v3_op_") || n == "v3_op_spec" {
+		if !strings.HasPrefix(n, "v3_op_") || n == "v3_op_spec" { // v3_op_spec: runner setup
 			continue
 		}
 		if _, err := runnerDeadline(n, nil); err != nil {
@@ -152,6 +152,11 @@ func TestEveryTypedOperationHasARunnerDeadline(t *testing.T) {
 		for _, v := range a.Variants {
 			if v.RunnerDeadlineSeconds <= 0 {
 				t.Errorf("%s: a variant without a runner deadline", a.Action)
+			}
+		}
+		for _, st := range a.Steps {
+			if st.RunnerDeadlineSeconds <= 0 {
+				t.Errorf("%s: a step without a runner deadline", a.Action)
 			}
 		}
 	}

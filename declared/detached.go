@@ -101,7 +101,8 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 		q(d), base64.StdEncoding.EncodeToString([]byte(cmd)), q(d), q(inner), procStartShell("launched", "$p"))
 	out, errOut, code, err := short(launch)
 	if err != nil {
-		return "", "", -1, err
+		// The command did not run: the launch's own answer.
+		return out, errOut, code, err
 	}
 	f := strings.Fields(strings.TrimSpace(out))
 	if code != 0 || len(f) < 2 || f[0] != "launched" {
