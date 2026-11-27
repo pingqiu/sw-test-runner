@@ -1361,8 +1361,17 @@ def main(argv):
     p.add_argument('--json')
     p.add_argument('--product', default=DEFAULT_PRODUCT,
                    help='the product description directory (holds checks.json); default: the block product')
+    p.add_argument('--checkers',
+                   help='comma-separated checkers whose verdicts decide the exit code (default: all); '
+                        'every checker is still run and written to --json')
     a = p.parse_args(argv)
     load_product(a.product)
+    required = sorted(CHECKERS)
+    if a.checkers:
+        required = [c.strip() for c in a.checkers.split(',') if c.strip()]
+        bad = [c for c in required if c not in CHECKERS]
+        if bad or not required:
+            p.error('unknown checker(s) %s; known: %s' % (', '.join(bad) or '(none given)', ', '.join(sorted(CHECKERS))))
     with open(a.history, encoding='utf-8') as fh:
         result = check(fh.read().splitlines())
     text = json.dumps(result, indent=1, sort_keys=True)
@@ -1370,8 +1379,9 @@ def main(argv):
         with open(a.json, 'w', encoding='utf-8') as fh:
             fh.write(text + '\n')
     for name, v in sorted(result.items()):
-        print('%s %s%s' % (name, v['verdict'], (': ' + '; '.join(v['findings'][:3])) if v['findings'] else ''))
-    return 0 if all(v['verdict'] == 'PASS' for v in result.values()) else 1
+        print('%s %s%s%s' % (name, v['verdict'], '' if name in required else ' (not required)',
+                             (': ' + '; '.join(v['findings'][:3])) if v['findings'] else ''))
+    return 0 if all(result[name]['verdict'] == 'PASS' for name in required) else 1
 
 
 if __name__ == '__main__':
