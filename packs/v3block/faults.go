@@ -19,7 +19,6 @@ package v3block
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -174,94 +173,24 @@ func (p *faultProc) save(actx *tr.ActionContext) {
 	saveVolume(actx, v)
 }
 
-// killCmd checks that pid still runs with the recorded start time, reads its
-// command line, and sends SIGKILL, in one shell: it prints "gone" (no such
-// pid, or another process now holds it: nothing sent), "sent <base64 of
-// /proc/PID/cmdline>", or exits 3 (its identity could not be read: nothing
-// sent) or 4 (the kill call failed).
-func killCmd(proc, pid, start string) string {
-	return fmt.Sprintf(`if [ -e %[1]s/%[2]s ]; then s=$(cat %[1]s/%[2]s/stat) || exit 3; s=${s##*) }; set -- $s; [ -n "${20}" ] || exit 3; [ "${20}" = %[3]s ] || { echo gone; exit 0; }; a=$(base64 -w0 < %[1]s/%[2]s/cmdline) || exit 3; kill -KILL %[2]s || exit 4; echo "sent $a"; else echo gone; fi`, proc, pid, start)
-}
+// killCmd: the identity-checked SIGKILL (declared.KillCmd).
+func killCmd(proc, pid, start string) string { return declared.KillCmd(proc, pid, start) }
 
-func decodeArgv(b64 string) ([]string, error) {
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, err
-	}
-	s := strings.TrimRight(string(raw), "\x00")
-	if s == "" {
-		return nil, fmt.Errorf("empty command line")
-	}
-	return strings.Split(s, "\x00"), nil
-}
+func decodeArgv(b64 string) ([]string, error) { return declared.DecodeArgv(b64) }
 
-// kill sends SIGKILL to the process by its recorded identity. ok when a check
-// then finds it gone within bound; unknown otherwise.
-func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
-	p, why := resolveProc(ctx, actx, node, e, process)
-	args := p.args(process)
-	args["signal"] = "KILL"
-	if p != nil && digits.MatchString(p.PID) {
-		n, _ := strconv.Atoi(p.PID)
-		args["pid"] = n
-	}
-	return recordBounded(ctx, actx, e, "kill", "", args, func(ctx context.Context) (string, map[string]any) {
-		switch {
-		case why != "":
-			return tr.OutcomeRefused, map[string]any{"detail": why}
-		case p.PID == "":
-			return tr.OutcomeRefused, map[string]any{"detail": process + " is not running (no process recorded)"}
-		case !digits.MatchString(p.PID) || !digits.MatchString(p.Start):
-			return tr.OutcomeRefused, map[string]any{"detail": "no identity recorded for " + process + ": nothing sent"}
-		}
-		stdout, stderr, code, err := node.Run(ctx, killCmd("/proc", p.PID, p.Start))
-		out := strings.TrimSpace(stdout)
-		res := map[string]any{"pid": p.PID, "pid_start": p.Start}
-		switch {
-		case err != nil:
-			return fail(err.Error())
-		case code == 0 && out == "gone":
-			res["detail"] = process + " is not running: nothing sent"
-			return tr.OutcomeRefused, res
-		case code == 3:
-			res["detail"] = "identity unreadable: nothing sent"
-			return tr.OutcomeRefused, res
-		case code != 0 || (out != "sent" && !strings.HasPrefix(out, "sent ")):
-			res["detail"] = fmt.Sprintf("kill exit %d: %s %s", code, firstLine(out), firstLine(stderr))
-			return tr.OutcomeUnknown, res
-		}
-		// The signal went out: the process is the killed one from now on,
-		// whatever the wait below finds.
-		argv, aerr := decodeArgv(strings.TrimSpace(strings.TrimPrefix(out, "sent")))
-		p.KilledPID, p.Argv = p.PID, argv
-		if aerr != nil {
-			p.Argv = nil
-			res["argv_error"] = aerr.Error()
-		}
-		p.save(actx)
-		if p.vol != nil { // a kill reaching the volume: the recovery deadline counts from it
-			p.vol.Extra["killed_at"] = strconv.FormatInt(nowFn().UnixNano(), 10)
-			defer saveVolume(actx, p.vol)
-		}
-		if why := waitGone(ctx, node, p.PID, p.Start, bound); why != "" {
-			res["detail"] = why
-			return tr.OutcomeUnknown, res
-		}
-		return tr.OutcomeOK, res
-	})
-}
-
-// restart starts a process the runner killed with the command line it ran
-// with (same ports, same data directory): a holder through launchHolder
-// (ready when it serves from its own listeners), the blockmaster through the
-// ownership script's spawn (ready when it holds its port) and then a master
-// call that answers.
-func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
+// restartMasterOp starts the blockmaster the runner killed with the command
+// line it ran with, through the ownership script's spawn (ready when it
+// holds its port) and then a master call that answers; then the unit:
+// holders that fenced while it was down. A holder's restart is the declared
+// v3_op_restart, which hands the blockmaster here.
+func (e opEnv) restartMasterOp(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
 	out, err := recordBounded(ctx, actx, e, "restart", "", p.args(process), func(ctx context.Context) (string, map[string]any) {
 		switch {
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}
+		case p.vol != nil:
+			return tr.OutcomeRefused, map[string]any{"detail": process + " is a holder: v3_op_restart restarts it, nothing started"}
 		case p.PID == "" || p.KilledPID != p.PID:
 			return tr.OutcomeRefused, map[string]any{"detail": process + " was not killed by the runner: nothing started"}
 		case len(p.Argv) == 0:
@@ -273,26 +202,12 @@ func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner,
 		case procUnreadable:
 			return tr.OutcomeRefused, map[string]any{"detail": "state of the killed process unreadable: nothing started"}
 		}
-		if p.vol != nil {
-			return e.restartHolder(ctx, actx, node, p, bound)
-		}
 		return e.restartMaster(ctx, actx, node, p, bound)
 	})
-	// After a master restart, the unit: holders that fenced while it was down.
 	if err == nil && p != nil && p.vol == nil {
 		err = e.supervise(ctx, actx, node)
 	}
 	return out, err
-}
-
-func (e opEnv) restartHolder(ctx context.Context, actx *tr.ActionContext, node runner, p *faultProc, bound time.Duration) (string, map[string]any) {
-	v := p.vol
-	out, res := e.launchHolder(ctx, node, v, v.Hosts[v.Cur], p.Argv, bound, true)
-	if v.PID != p.PID { // a new process was recorded: the killed one is history
-		p.PID, p.Start, p.KilledPID, p.Argv = v.PID, v.PIDStart, "", nil
-	}
-	p.save(actx)
-	return out, res
 }
 
 func (e opEnv) restartMaster(ctx context.Context, actx *tr.ActionContext, node runner, p *faultProc, bound time.Duration) (string, map[string]any) {
@@ -511,12 +426,9 @@ func (e opEnv) healthy(ctx context.Context, actx *tr.ActionContext, node runner,
 // logPath, writes its pid to logPath.pid, waits for it and writes
 // "<wait status> <unix ns>" to logPath.exit (each file written whole, by a
 // rename). A wait status above 128 is a signal (128+n), as the shell reports it.
+// (declared.WrapperLaunch, the launcher of every declared process.)
 func holderLaunchCmd(argv []string, logPath string) string {
-	pidf, exitf := logPath+".pid", logPath+".exit"
-	wrap := fmt.Sprintf(`"$@" >%[1]s 2>&1 </dev/null & p=$!; echo "$p" >%[2]s.tmp && mv %[2]s.tmp %[2]s; wait "$p"; s=$?; echo "$s $(date +%%s%%N)" >%[3]s.tmp && mv %[3]s.tmp %[3]s`,
-		shellQuote(logPath), shellQuote(pidf), shellQuote(exitf))
-	return fmt.Sprintf(`setsid sh -c %s sh %s >/dev/null 2>&1 </dev/null & for i in $(seq 1 100); do [ -s %[3]s ] && exec cat %[3]s; sleep 0.05; done; echo "no pid file %[3]s" >&2; exit 1`,
-		shellQuote(wrap), strings.Join(quoteAll(argv), " "), shellQuote(pidf))
+	return declared.WrapperLaunch(argv, logPath)
 }
 
 // setLaunch records the running holder's command line and exit-status file.
@@ -758,24 +670,15 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 	return nil
 }
 
-// v3OpKill kills one daemon by its recorded identity. Params: process
-// ("blockmaster" or "blockvolume:<i>"), kill_seconds (20: how long it may
-// take to be gone).
-func v3OpKill(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, err := opConfig(actx, act, "v3_op_kill")
+// v3OpRestartMaster starts the killed blockmaster again (the declared
+// v3_op_restart hands it here; product/actions.json exceptions). Params:
+// process, ready_seconds (60).
+func v3OpRestartMaster(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+	node, e, err := opConfig(actx, act, "v3_op_restart_master")
 	if err != nil {
 		return nil, err
 	}
-	return e.kill(ctx, actx, node, optionalParam(act, "process"), time.Duration(actions.ParseInt(optionalParam(act, "kill_seconds"), 20))*time.Second)
-}
-
-// v3OpRestart starts a killed daemon again. Params: process, ready_seconds (60).
-func v3OpRestart(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, err := opConfig(actx, act, "v3_op_restart")
-	if err != nil {
-		return nil, err
-	}
-	return e.restart(ctx, actx, node, optionalParam(act, "process"), time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60))*time.Second)
+	return e.restartMasterOp(ctx, actx, node, optionalParam(act, "process"), time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60))*time.Second)
 }
 
 // singleLook writes one healthy observation of exactly one look, with no

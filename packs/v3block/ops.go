@@ -53,12 +53,10 @@ type opEnv struct {
 	// Per step, never per verb: any other refusal still fails the run.
 	expect   string
 	lockDirs bool
-	// The action's runner deadline (actions.json), the device I/O runner
-	// deadline and where detached commands keep their files (guest
-	// configuration); the guest's NVMe connect options.
-	deadline, deviceDeadline time.Duration
-	ioDir                    string
-	connect                  guestConnect
+	// The action's runner deadline (actions.json) and the guest's NVMe
+	// connect options.
+	deadline time.Duration
+	connect  guestConnect
 	// node is the bounded node, for the abandoned-child watcher.
 	node runner
 }
@@ -182,7 +180,7 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
 		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
 	}
-	e.deadline, e.deviceDeadline, e.ioDir, e.connect, e.node = deadline, deviceDeadline(), e.root+"/.runner-io", conn, node
+	e.deadline, e.connect, e.node = deadline, conn, node
 	return node, e, nil
 }
 
@@ -237,26 +235,6 @@ func pause(ctx context.Context, d time.Duration) bool {
 		return ctx.Err() == nil
 	}
 }
-
-// runDevice runs one I/O command on the volume's kernel block device,
-// detached, under the device I/O runner deadline: a child stuck in
-// uninterruptible sleep on a dead device never holds the runner. At the
-// deadline the answer is unknown ("timeout after <n>s") and whatever
-// survived the kill is named under "abandoned". A non-nil result is the
-// operation's (unknown) result.
-func (e opEnv) runDevice(ctx context.Context, node runner, cmd string) (string, string, int, map[string]any) {
-	stdout, stderr, code, err := declared.RunDetached(ctx, node, true, e.ioDir, cmd, e.deviceDeadline, devicePoll)
-	if t, ok := declared.AsDetached(err); ok {
-		return "", "", -1, declared.Abandon(ctx, t)
-	}
-	if err != nil {
-		return "", "", -1, map[string]any{"detail": err.Error()}
-	}
-	return stdout, stderr, code, nil
-}
-
-// devicePoll is how often a detached device command is polled.
-var devicePoll = 200 * time.Millisecond
 
 func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
@@ -365,78 +343,18 @@ func dirOf(p string) string {
 	return "/"
 }
 
-// blockvolume's command line for v on host h, as the product's own
-// real-process tests run it, with the layout id from the master.
-func (e opEnv) volumeArgs(v *opVolume, h vsHost, blocks uint64) []string {
-	args := []string{"--master", e.master, "--server-id", h.Server, "--volume-id", v.Name, "--replica-id", "r1",
-		"--layout-id", v.LayoutID, "--data-addr", h.Data, "--ctrl-addr", h.Ctrl, "--status-addr", h.Status,
-		"--durable-root", e.root + "/" + h.Server, "--durable-impl", "walstore-chunk",
-		"--durable-blocks", strconv.FormatUint(blocks, 10), "--durable-blocksize", "4096",
-		"--chunk-filer", e.filer, "--chunk-path", e.chunkPath, "--chunk-control-endpoint", "--workspace-lease",
-		"--nvme-listen", h.NVMe, "--nvme-subsysnqn", v.NQN, "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
-	if e.lockDirs {
-		args = append([]string{"--volume-lock-dir-test-only", e.root + "/" + h.Server + ".locks"}, args...)
-	}
-	return args
-}
+func portOf(addr string) string { return declared.PortOf(addr) }
 
-// v3OpAttach starts the holder on the volume's host (param host: 0 first, 1
-// the move target; default the current one), waits until it serves above the
-// recorded epoch, and connects the kernel NVMe/TCP host (HolderInterface.Start).
-// The layout id comes from the master when the runner does not know it.
-// Params: blocks (default 4096), ready_seconds (60).
-func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_attach")
-	if err != nil {
-		return nil, err
-	}
-	if h := optionalParam(act, "host"); h != "" {
-		i, perr := strconv.Atoi(h)
-		if perr != nil || i < 0 || i >= len(v.Hosts) {
-			return nil, fmt.Errorf("v3_op_attach: host %q", h)
-		}
-		v.Cur = i
-	}
-	blocks := uint64(actions.ParseInt(optionalParam(act, "blocks"), 4096))
-	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
-	h := v.Hosts[v.Cur]
-	defer saveVolume(actx, v)
-	// The answer sets the volume's intended state (faults.go lifecycle).
-	return lifecycle(v, intentHeld)(recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
-		if v.LayoutID == "" {
-			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
-			if err != nil {
-				return fail(err.Error())
-			}
-			a, r := parseV3ctl(stdout, code, v.Name)
-			if r != tr.OutcomeOK {
-				return r, map[string]any{"detail": "resolve: " + a.Error}
-			}
-			v.LayoutID = a.LayoutID
-		}
-		return e.startHolder(ctx, node, v, h, blocks, bound)
-	}))
-}
-
-func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
-
-// startHolder starts blockvolume for v on host h and credits readiness only
-// to that process:
-//   - every endpoint of h must be free before the launch (a listener already
-//     there, another run's or a leftover, refuses the start: nothing launched);
-//   - the child is identified by its pid and start time and recorded as owned;
-//   - it is ready only while that child runs, its status serves above the
-//     recorded epoch, AND the status and NVMe listeners are held by it;
-//   - only then is the kernel host connected, to this run's NQN.
-func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
-	return e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
-}
-
-// launchHolder is startHolder with the command line given. A restart
-// (faults.go: the command line of a killed holder, as it ran) is ready at the
-// recorded epoch or above, and connects the kernel host only when no
-// controller of the volume's NQN is left: the kernel reconnects the one a
-// killed holder left behind by itself.
+// launchHolder starts blockvolume for v on host h with the command line
+// given and credits readiness only to that process, as the declared
+// v3_op_attach and v3_op_restart do: the unit's relaunch of a holder that
+// exited by itself (faults.go supervise, part of the v3_op_healthy
+// exception). Every endpoint of h must be free before the launch; the child
+// is identified by its pid and start time and recorded as owned; it is ready
+// only while that child runs, its status serves above the recorded epoch (a
+// restart: at it or above), AND the status and NVMe listeners are held by
+// it; a restart connects the kernel host only when no controller of the
+// volume's NQN is left.
 func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsHost, argv []string, bound time.Duration, restart bool) (string, map[string]any) {
 	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
 	held, err := listenerPIDs(ctx, node, ports)
@@ -555,353 +473,10 @@ func contains(set []string, v string) bool {
 	return false
 }
 
-// blockTag is the content of one written block: a repeated tag naming the
-// volume, the round and the block, so a block from another volume, round or
-// offset cannot match.
-func blockTag(vol, round string, lba uint64) string { return fmt.Sprintf("%s|%s|%d|", vol, round, lba) }
-
-// parseLBAs reads "0 2048 4095" or "written" (every lba a write was attempted
-// on, in order).
-func parseLBAs(v *opVolume, s string) ([]uint64, error) {
-	if s == "written" {
-		var out []uint64
-		for k := range v.Written {
-			n, _ := strconv.ParseUint(k, 10, 64)
-			out = append(out, n)
-		}
-		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
-		return out, nil
-	}
-	var out []uint64
-	for _, f := range strings.Fields(s) {
-		n, err := strconv.ParseUint(f, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("lba %q", f)
-		}
-		out = append(out, n)
-	}
-	if len(out) == 0 {
-		return nil, errors.New("lbas are required")
-	}
-	return out, nil
-}
-
-// writeCmd is the device write of one block: O_DIRECT, and with flush also
-// conv=fsync (the kernel sends the device a cache flush before dd exits), so
-// exit 0 is acknowledged and flushed. Without flush exit 0 is acknowledged
-// only: the block reached the device, which may still hold it volatile.
-func writeCmd(blk, dev string, lba uint64, flush bool) string {
-	conv := "notrunc"
-	if flush {
-		conv = "fsync,notrunc"
-	}
-	return fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=%s status=none", shellQuote(blk), dev, lba, conv)
-}
-
-// writeArgs is a write's invocation: a write issued without the fsync says
-// so ("flush": false); a flushed write's record is today's, without the key.
-func writeArgs(lba uint64, sha, round string, flush bool) map[string]any {
-	a := map[string]any{"lba": lba, "sha256": sha, "round": round}
-	if !flush {
-		a["flush"] = false
-	}
-	return a
-}
-
-// writeBlock writes the generated block blk at lba of v's device: ok on dd's
-// exit 0, unknown otherwise.
-func (e opEnv) writeBlock(ctx context.Context, node runner, v *opVolume, blk string, lba uint64, flush bool) (string, map[string]any) {
-	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-	if why != "" {
-		return fail(why)
-	}
-	_, stderr, code, res := e.runDevice(ctx, node, writeCmd(blk, dev, lba, flush))
-	if res != nil {
-		return tr.OutcomeUnknown, res
-	}
-	if code != 0 {
-		return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
-	}
-	return tr.OutcomeOK, nil
-}
-
-// v3OpWrite writes one block per lba through the kernel block device (O_DIRECT
-// + fsync: exit 0 is acknowledged and flushed), each its own operation
-// (HolderInterface.Write). The record carries the sha256 of the attempted
-// block; the outcome is ok or unknown. Params: lbas, round, flush ("true",
-// the default; "false" issues the write without the fsync and records
-// "flush": false, so it is durable only after a later acknowledged flush).
-func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_write")
-	if err != nil {
-		return nil, err
-	}
-	round := requireParam(act, actx, "round")
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`).MatchString(round) {
-		return nil, errors.New("v3_op_write: round (1-16 of [A-Za-z0-9_-]) is required")
-	}
-	flush := true
-	switch f := optionalParam(act, "flush"); f {
-	case "", "true":
-	case "false":
-		flush = false
-	default:
-		return nil, fmt.Errorf("v3_op_write: flush %q; want true or false", f)
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_write: %w", err)
-	}
-	if v.Written == nil {
-		v.Written = map[string]bool{}
-	}
-	defer saveVolume(actx, v)
-	var last map[string]string
-	for _, lba := range lbas {
-		tag := blockTag(v.Name, round, lba)
-		want := blockSHA(tag)
-		// The block is generated and checked BEFORE the invocation: a block
-		// whose hash is not the one recorded would put a content on the device
-		// that the history names nowhere, and the checker would blame the
-		// product. A mismatch is the runner's failure: the run fails, nothing
-		// is written.
-		blk := fmt.Sprintf("%s/.block-%s-%d", e.root, v.Name, lba)
-		gen := fmt.Sprintf(`mkdir -p %s && python3 -c 'import sys;t=sys.argv[1].encode();open(sys.argv[2],"wb").write((t*(4096//len(t)+1))[:4096])' %s %s && sha256sum < %s | cut -c1-64`,
-			shellQuote(e.root), shellQuote(tag), shellQuote(blk), shellQuote(blk))
-		stdout, stderr, code, err := node.Run(ctx, gen)
-		if err != nil || code != 0 || strings.TrimSpace(stdout) != want {
-			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
-		}
-		v.Written[strconv.FormatUint(lba, 10)] = true
-		last, err = recordBounded(ctx, actx, e, "write", v.Name, writeArgs(lba, want, round, flush), func(ctx context.Context) (string, map[string]any) {
-			return e.writeBlock(ctx, node, v, blk, lba, flush)
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// flushCmd is fsync(2) of the device: on a block device the kernel sends the
-// device a cache flush and returns only once it is acknowledged. python3 is
-// on the host already (the block generator); exit 0 only after fsync returns.
-func flushCmd(dev string) string {
-	return fmt.Sprintf(`python3 -I -c 'import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)' %s`, dev)
-}
-
-// flushDevice fsyncs v's device: ok on exit 0, unknown otherwise (a failed
-// or unanswered fsync may or may not have flushed; the product has no
-// refusal for it).
-func (e opEnv) flushDevice(ctx context.Context, node runner, v *opVolume) (string, map[string]any) {
-	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-	if why != "" {
-		return fail(why)
-	}
-	_, stderr, code, res := e.runDevice(ctx, node, flushCmd(dev))
-	if res != nil {
-		res["device"] = dev
-		return tr.OutcomeUnknown, res
-	}
-	if code != 0 {
-		return fail(fmt.Sprintf("fsync exit %d: %s", code, firstLine(stderr)))
-	}
-	return tr.OutcomeOK, map[string]any{"device": dev}
-}
-
-// v3OpFlush flushes the volume through the kernel block device (fsync of the
-// device), its own operation: an acknowledged flush makes every earlier write
-// of the volume durable. No params beyond the volume.
-func v3OpFlush(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_flush")
-	if err != nil {
-		return nil, err
-	}
-	return recordBounded(ctx, actx, e, "flush", v.Name, map[string]any{}, func(ctx context.Context) (string, map[string]any) {
-		return e.flushDevice(ctx, node, v)
-	})
-}
-
-// v3OpRead reads one block per lba through the kernel block device and
-// records the sha256 it read; it compares nothing. Params: lbas ("written":
-// every lba a write was attempted on).
-func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_read")
-	if err != nil {
-		return nil, err
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_read: %w", err)
-	}
-	if len(lbas) == 0 {
-		// Nothing to read records no operation and has no outcome: a runner
-		// error, never a silent empty answer.
-		return nil, fmt.Errorf("v3_op_read: no lba to read on %s (lbas %q)", v.Name, requireParam(act, actx, "lbas"))
-	}
-	var last map[string]string
-	for _, lba := range lbas {
-		last, err = recordBounded(ctx, actx, e, "read", v.Name, map[string]any{"lba": lba}, func(ctx context.Context) (string, map[string]any) {
-			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-			if why != "" {
-				return fail(why)
-			}
-			stdout, stderr, code, res := e.runDevice(ctx, node, readCmd(dev, lba))
-			if res != nil {
-				return tr.OutcomeUnknown, res
-			}
-			sum := strings.TrimSpace(stdout)
-			if code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
-				return fail(fmt.Sprintf("read exit %d: %s", code, firstLine(stderr)))
-			}
-			return tr.OutcomeOK, map[string]any{"sha256": sum}
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// readCmd reads one block of the device and prints its sha256.
-func readCmd(dev string, lba uint64) string {
-	return fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba)))
-}
-
-// disconnect disconnects the guest from v and records it (observe
-// "disconnect": nqn, controllers deleted, ok) in the history of the
-// operation ctx carries: the checkers close an unknown write's window on a
-// recorded disconnect of the device it went through.
-func (e opEnv) disconnect(ctx context.Context, node runner, v *opVolume) string {
-	n, why := nvmeDisconnectCount(ctx, node, v.NQN)
-	if ref, ok := declared.OpOf(ctx); ok {
-		var controllers any
-		if n >= 0 {
-			controllers = n
-		}
-		res := map[string]any{"nqn": v.NQN, "controllers": controllers, "ok": why == ""}
-		if why != "" {
-			res["detail"] = why
-		}
-		_ = ref.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "disconnect", Volume: v.Name, Result: res})
-	}
-	return why
-}
-
-// handOver runs the planned stop of the holder: disconnect the guest, detach
-// --plain, revoke with the sealed generation, wait for the holder to exit by
-// itself, and wait for the master's recorded ACK of (replica, epoch). It
-// returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
-	res := map[string]any{"epoch": v.Epoch}
-	if why := e.disconnect(ctx, node, v); why != "" {
-		return res, why
-	}
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk detach --plain --volume %s --status-addr %s --timeout 120s", shellQuote(e.cli()), shellQuote(v.Name), shellQuote(v.Hosts[v.Cur].Status)))
-	if err != nil {
-		return res, err.Error()
-	}
-	if r, d := chunkOutcome(chunkDetach, stdout, code); r != tr.OutcomeOK {
-		res["detach"] = r
-		return res, "detach: " + d
-	}
-	gen, perr := parseDetach(stdout, stderr, v.Name, v.Epoch)
-	if perr != nil {
-		return res, perr.Error()
-	}
-	res["sealed_gen"] = gen
-	out, errOut, code, err := e.workspace(ctx, node, v.Name, "revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-	if err != nil || wsOutcome(op, wsRevoke, code) != tr.OutcomeOK {
-		res["revoke_exit"] = code
-		return res, "revoke: " + firstLine(out+" "+errOut)
-	}
-	if why := waitGone(ctx, node, v.PID, v.PIDStart, 40*time.Second); why != "" {
-		return res, "the holder did not exit by itself after the revoke: " + why
-	}
-	v.PID, v.PIDStart = "", ""
-	ack := regexp.MustCompile(fmt.Sprintf(`(?m)^recorded ACK: r1@%d HEAD generation (\d+)\r?$`, v.Epoch))
-	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); {
-		out, _, c, e2 := e.workspace(ctx, node, v.Name, "show")
-		if m := ack.FindStringSubmatch(out); e2 == nil && c == 0 && m != nil {
-			res["ack_gen"] = m[1] // recorded, not compared
-			return res, ""
-		}
-		if !pause(ctx, 500*time.Millisecond) {
-			break
-		}
-	}
-	return res, fmt.Sprintf("no recorded ACK of r1@%d", v.Epoch)
-}
-
+// workspace runs one `sw-block ops workspace` command of vol (the master's
+// workspace view: the settle step of faults.go reads its show).
 func (e opEnv) workspace(ctx context.Context, node runner, vol string, args ...string) (string, string, int, error) {
 	return node.Run(ctx, shellQuote(e.cli())+" ops workspace "+strings.Join(quoteAll(append(args, "--master", e.master, "--volume", vol)), " "))
-}
-
-// v3OpStop stops the holder with the planned hand-over and no move
-// (HolderInterface.StopCommit): the volume is then held by no one, as a
-// volume delete requires.
-func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_stop")
-	if err != nil {
-		return nil, err
-	}
-	defer saveVolume(actx, v)
-	return lifecycle(v, intentNotHeld)(recordBounded(ctx, actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v, wsStop)
-		if why != "" {
-			res["detail"] = why
-			return tr.OutcomeUnknown, res
-		}
-		return tr.OutcomeOK, res
-	}))
-}
-
-var reMovedTo = regexp.MustCompile(`^clean move issued: volume (\S+) request (\S+): r1@(\d+) -> r1@(\d+) on (\S+) \(sealed HEAD gen (\d+), remote LSN (\d+)\)\r?$`)
-
-// v3OpMove is the planned move to the volume's second host
-// (MoveAdmission.IssueClean): the planned stop, then `ops workspace move
-// --clean`. Its outcome is the master's exit code; the answer's new epoch,
-// generation and LSN are recorded. Starting the volume on the target is the
-// next operation (v3_op_attach host=1).
-func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_move")
-	if err != nil {
-		return nil, err
-	}
-	to := 1 - v.Cur
-	dst := v.Hosts[to]
-	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
-	defer saveVolume(actx, v)
-	// A move that answered ok leaves the volume held by no one until the
-	// attach on its target (the model's "moved").
-	return lifecycle(v, intentNotHeld)(recordBounded(ctx, actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func(ctx context.Context) (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v, wsMove)
-		if why != "" {
-			res["detail"] = "stop: " + why
-			return tr.OutcomeUnknown, res
-		}
-		out, errOut, code, err := e.workspace(ctx, node, v.Name, "move", "--clean", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10),
-			"--target-host", dst.Server, "--target-data", dst.Data, "--target-ctrl", dst.Ctrl, "--request-id", req)
-		if err != nil {
-			return fail(err.Error())
-		}
-		res["exit"] = code
-		// Never refused: the hand-over above already sealed and revoked
-		// (product/outcomes.json). The exit is recorded for the reader.
-		if r := wsOutcome(wsMove, wsMoveClean, code); r != tr.OutcomeOK {
-			res["detail"] = firstLine(out + " " + errOut)
-			return r, res
-		}
-		first, _, _ := strings.Cut(out, "\n")
-		m := reMovedTo.FindStringSubmatch(first)
-		if m == nil || m[1] != v.Name || m[2] != req || m[3] != strconv.FormatUint(v.Epoch, 10) || m[5] != dst.Server {
-			res["detail"] = "the move answer does not name this move: " + firstLine(out)
-			return tr.OutcomeUnknown, res
-		}
-		res["new_epoch"], res["head_gen"], res["remote_lsn"] = m[4], m[6], m[7]
-		v.Cur = to
-		return tr.OutcomeOK, res
-	}))
 }
 
 // observeChunkShow records the answer of `ops chunk show`: HEAD's generation,
