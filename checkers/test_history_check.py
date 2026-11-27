@@ -874,9 +874,30 @@ class DUR(unittest.TestCase):
         # An unknown invoked after the durable point, settled as not taken
         # effect (read ZERO), does not come back at a second kill.
         self.assert_fail(self.dur(w(0, A, outcome='unknown'), HKILL, rd(0, hc.ZERO), HKILL, rd(0, A)), 'no open unknown explains')
-        # An acknowledged unflushed write not read stays allowed (a kill of
-        # another process may have left it in a live holder).
-        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), w(0, C, outcome='unknown'), HKILL, rd(0, A), HKILL, rd(0, B)), lost=1)
+
+    # Review r1, change 1: the first read after a kill fixes what the next
+    # kill may leave (the durable set before the kill plus the value read).
+    def test_red_a_write_lost_at_one_kill_does_not_come_back_at_the_next(self):
+        # A flushed, B acknowledged unflushed; kill, read A (B lost); kill,
+        # read B: B was lost and comes back.
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A), HKILL, rd(0, B)), 'no open unknown explains')
+        self.assert_fail(self.dur(w(0, A), w(0, B, flush=False), w(0, C, outcome='unknown'), HKILL, rd(0, A), HKILL, rd(0, B)), 'no open unknown explains')
+        # Green: what the first read showed, or the durable value, may stay.
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A), HKILL, rd(0, A)), lost=1)
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, B), HKILL, rd(0, B)), lost=0)
+        self.assert_pass(self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, B), HKILL, rd(0, A)), lost=0)
+
+    def test_red_a_durable_value_read_after_a_kill_does_not_vanish_at_the_next(self):
+        # An unknown unflushed U, then an acknowledged flush: durable is ZERO
+        # or U. The read after the kill shows U, so U is the durable value;
+        # ZERO at the next kill is a durable value vanishing.
+        steps = [w(0, C, outcome='unknown', flush=False), fl(), HKILL, rd(0, C), HKILL]
+        self.assert_fail(self.dur(*steps, rd(0, hc.ZERO)), 'ZERO although a durable write exists')
+        self.assert_pass(self.dur(*steps, rd(0, C)), lost=0)
+        # Unless a later write explains it: B written after the first read.
+        self.assert_pass(self.dur(*steps[:4], w(0, B, flush=False), HKILL, rd(0, B)), lost=0)
+        # A flushed A read after kill 1 does not vanish to ZERO at kill 2.
+        self.assert_fail(self.dur(w(0, A), HKILL, rd(0, A), HKILL, rd(0, hc.ZERO)), 'ZERO although a durable write exists')
 
     def test_red_a_value_that_changes_between_two_reads_after_a_kill(self):
         # Both A and B are allowed after the kill; the first read fixes B, a
@@ -947,6 +968,64 @@ class DUR(unittest.TestCase):
     def test_only_master_kills_is_a_run_without_a_kill(self):
         v = self.dur(w(0, A), MKILL, rd(0, A))
         self.assert_fail(v, 'not exercised')
+
+    # Review r1, change 2: a holder restarted with no recorded kill.
+    def durh(self, *steps):
+        """Like dur(); ('healthy', {volume: (pid, start)}) is a healthy
+        observation carrying the holders' identities."""
+        plain = [st for st in steps if st[0] != 'healthy']
+        recs = synth(*plain)
+        out, k = [], 0
+        for st in steps:
+            if st[0] == 'healthy':
+                out.append({'seq': 0, 'kind': 'observe', 'client': 'runner', 'verb': 'healthy', 'volume': '', 'mono_ns': 0,
+                            'result': {'healthy': True, 'down': [], 'not_serving': [],
+                                       'holders': {v: {'pid': p, 'start': t} for v, (p, t) in st[1].items()}}})
+            else:
+                out += recs[k:k + 2]
+                k += 2
+        out.append(recs[-1])
+        for i, r in enumerate(out, 1):
+            r['mono_ns'] = i
+        return hc.check(dump(renumber(out)))['DUR']
+
+    def test_red_a_holder_restarted_with_no_recorded_kill_is_a_kill(self):
+        h1, h2 = ('healthy', {'v1': (100, 's100')}), ('healthy', {'v1': (200, 's200')})
+        # B unflushed; the holder's pid changes between two healthy records
+        # with no kill: B may be lost (a PASS), and the finding says so.
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), h2, rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertIn('holder of v1 restarted with no recorded kill (healthy seq 3 -> 6)', v['findings'])
+        # Its settling applies too: A then B with no write between is a change.
+        self.assert_fail(self.durh(w(0, A), h1, w(0, B, flush=False), h2, rd(0, A), rd(0, B)), 'restarted with no recorded kill')
+        # The same start time with another pid, or the same pid with another
+        # start time (a recycled pid), is a restart as well.
+        for h in (('healthy', {'v1': (200, 's100')}), ('healthy', {'v1': (100, 's999')})):
+            v = self.durh(w(0, A), h1, w(0, B, flush=False), h, rd(0, A))
+            self.assertTrue(any('restarted with no recorded kill' in x for x in v['findings']), v)
+
+    def test_red_the_same_holder_or_a_recorded_kill_is_no_silent_restart(self):
+        h1 = ('healthy', {'v1': (100, 's100')})
+        # Same holder: nothing restarted, B must read back.
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), h1, rd(0, A))
+        self.assert_fail(v, 'not one of')
+        self.assertFalse(any('restarted' in x for x in v['findings']), v)
+        # A recorded kill and restart of v1 explain the new pid: no finding.
+        restart = ('restart', '', {'process': 'blockvolume:0', 'volume': 'v1'}, 'ok', {})
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), HKILL, restart, ('healthy', {'v1': (200, 's200')}), rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertFalse(any('restarted with no recorded kill' in x for x in v['findings']), v)
+        # A kill of v2 does not explain a new holder of v1.
+        k2 = ('kill', '', {'process': 'blockvolume:1', 'volume': 'v2', 'pid': 7, 'signal': 'KILL'}, 'ok', {})
+        v = self.durh(w(0, A), h1, w(0, B, flush=False), k2, ('healthy', {'v1': (200, 's200')}), rd(0, A))
+        self.assertTrue(any('holder of v1 restarted with no recorded kill' in x for x in v['findings']), v)
+
+    # Review r1, change 3: the scope is stated.
+    def test_the_scope_is_stated_on_pass(self):
+        v = self.dur(w(0, A), w(0, B, flush=False), HKILL, rd(0, A))
+        self.assert_pass(v, lost=1)
+        self.assertIn("scope: same holder, same store, one replica (M2); replicated volumes are M3's and not judged here", v['findings'])
+        self.assertIn('one replica', hc.dur.__doc__)
 
 def m2(*steps):
     """A one-at-a-time history with healthy points: ('healthy', bool) is a
