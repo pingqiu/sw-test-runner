@@ -48,16 +48,18 @@ import (
 // lease horizon learnt from observations, and a coverage tail before the
 // sweep; a negative is observed on every volume it names.
 //
-// m1-gen/6: the source-delete negative carries retry_horizon.
-const GenVersion = "m1-gen/6"
+// m1-gen/6: the source-delete negative carries retry_horizon. m1-gen/7
+// (host runs 5 and M2-2): the pair window writes across, and a volume whose
+// holder the runner killed is offered nothing until it serves again.
+const GenVersion = "m1-gen/7"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
 // m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6. m2-gen/6: a master outage
-// with nothing serving is skipped.
-const GenVersionFaults = "m2-gen/6"
+// with nothing serving is skipped. m2-gen/7: as m1-gen/7.
+const GenVersionFaults = "m2-gen/7"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -673,6 +675,13 @@ func (m *blockModel) readsOf(v *genVol, lbas []int, reason string) []GenOp {
 	return out
 }
 
+// pairWrite is the pair window's forced write of one lba on v.
+func (m *blockModel) pairWrite(v *genVol, lba int, round string) GenOp {
+	o := op("v3_op_write", v.name, "lbas", strconv.Itoa(lba), "round", "p-"+strings.ReplaceAll(round, "|", "-"))
+	o.Forced = "pair"
+	return o
+}
+
 // sameOp says two proposals are the same operation (number aside).
 func sameOp(a, b GenOp) bool {
 	return a.Action == b.Action && a.Volume == b.Volume && a.Forced == b.Forced && maps.Equal(a.Params, b.Params)
@@ -698,6 +707,27 @@ func (m *blockModel) Before(o GenOp) []GenOp {
 			return
 		}
 		src.pairDone[key] = true
+		// C3 needs, in each direction, a write on one side after the restore
+		// to a block the other side also holds, then a read of that block on
+		// the other side (which must still show its own value): an inherited
+		// lba written on the source and read on the target, another (the
+		// same, if it inherited one) written on the target and read on the
+		// source. A target that inherited nothing uses a block both hold.
+		in := tgt.inheritedLBAs
+		if len(in) == 0 { // inherited nothing: a block both hold now
+			for _, b := range sortedLBAs(src.lbas) {
+				if tgt.lbas[b] {
+					in = append(in, b)
+				}
+			}
+		}
+		if len(in) > 0 {
+			a, b := in[0], in[len(in)-1]
+			out = append(out, m.pairWrite(src, a, key+"-1"))
+			out = append(out, m.readsOf(tgt, []int{a}, "pair")...)
+			out = append(out, m.pairWrite(tgt, b, key+"-2"))
+			out = append(out, m.readsOf(src, []int{b}, "pair")...)
+		}
 		u := maps.Clone(src.lbas)
 		maps.Copy(u, tgt.lbas)
 		lbas := sortedLBAs(u)

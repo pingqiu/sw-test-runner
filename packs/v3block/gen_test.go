@@ -1103,6 +1103,10 @@ func pairGaps(ops []GenOp) []string {
 	attached := map[string]bool{}
 	read := map[string]map[string]bool{}  // "src|tgt|vol" -> lbas read on vol since the restore
 	snapc := map[string]map[string]bool{} // "vol|snapshot" -> its content
+	// crossW: "src|tgt|side" -> lbas written on side since the restore that
+	// the other side also holds; crossed: "src|tgt|side" -> such a write was
+	// then read on the other side.
+	crossW, crossed := map[string]map[string]bool{}, map[string]bool{}
 	var bad []string
 	set := func(v string) map[string]bool {
 		if content[v] == nil {
@@ -1122,10 +1126,25 @@ func pairGaps(ops []GenOp) []string {
 		switch o.Action {
 		case "v3_op_write":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for t, s := range source {
+					other := map[string]string{s: t, t: s}[v]
+					if other != "" && content[other][b] {
+						k := s + "|" + t + "|" + v
+						if crossW[k] == nil {
+							crossW[k] = map[string]bool{}
+						}
+						crossW[k][b] = true
+					}
+				}
 				set(v)[b] = true
 			}
 		case "v3_op_read":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for t, s := range source {
+					if other := map[string]string{s: t, t: s}[v]; other != "" && crossW[s+"|"+t+"|"+other][b] {
+						crossed[s+"|"+t+"|"+other] = true
+					}
+				}
 				inherit[v] = slices.DeleteFunc(inherit[v], func(x string) bool { return x == b })
 				for t, s := range source {
 					if v == t || v == s {
@@ -1153,6 +1172,13 @@ func pairGaps(ops []GenOp) []string {
 			for t, s := range source {
 				if (v == s || v == t) && serving[s] && serving[t] {
 					for _, side := range []string{s, t} {
+						common := false
+						for b := range content[t] {
+							common = common || content[s][b]
+						}
+						if common && !crossed[s+"|"+t+"|"+side] {
+							bad = append(bad, fmt.Sprintf("op %d %s %s: no write on %s read back across", o.No, o.Action, v, side))
+						}
 						for b := range content[s] {
 							if !read[s+"|"+t+"|"+side][b] {
 								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, s, b, side))
@@ -1214,11 +1240,13 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 	b := g.m.Before(op("v3_op_stop", "g1"))
 	var got []string
 	for _, o := range b {
-		got = append(got, o.Forced+" "+o.Volume+" "+o.Params["lbas"])
+		got = append(got, o.Forced+" "+strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Volume+" "+o.Params["lbas"])
 	}
-	want := []string{"pair g1 2 5 6", "pair g2 2 5 6", "readback g1 "}
-	if len(got) < 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("before a stop of the source: %q", got)
+	// Across first (an inherited lba written on one side, read on the other,
+	// both ways), then the same lbas read on both.
+	want := []string{"pair write g1 2", "pair read g2 2", "pair write g2 6", "pair read g1 6", "pair read g1 2 5 6", "pair read g2 2 5 6"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("before a stop of the source:\n%q\nwant\n%q", got, want)
 	}
 	drive(g, b...)
 	drive(g, op("v3_op_write", "g2", "lbas", "7", "round", "r3"))
@@ -1238,8 +1266,13 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 			green: append(slices.Clone(pairBase), r("g2", "1"), w("g2", "1")),
 		},
 		"a source stopped before the pair read": {
-			red:   append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), op("v3_op_stop", "g1")),
-			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), r("g2", "1 3"), op("v3_op_stop", "g1")),
+			red: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "1"), r("g2", "1"), w("g2", "1"), r("g1", "1"),
+				w("g1", "3"), r("g1", "1 3"), r("g2", "1 3"), op("v3_op_stop", "g1")),
+		},
+		"a pair split with no write read across": {
+			red:   append(slices.Clone(pairBase), r("g2", "1"), r("g1", "1"), r("g2", "1"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "1"), r("g2", "1"), w("g2", "1"), r("g1", "1"), op("v3_op_stop", "g1")),
 		},
 	} {
 		if bad := pairGaps(seq(c.green...)); len(bad) != 0 {
