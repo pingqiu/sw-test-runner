@@ -293,7 +293,7 @@ phases:
       # The unit file survived the power loss (written and synced at start);
       # it is not enabled, so the blockvolume starts here, not at boot.
       - {action: exec, node: node-2, timeout: 2m, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh start {{ run_id }}-rf{{ rf }} volume"}
-      - {action: exec, node: node-2, timeout: 5m, cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240"}
+      - {action: exec, node: node-2, timeout: 5m, cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; bash $W/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' replica 2 240 && sudo curl -sf --max-time 5 'http://127.0.0.1:{{ status_port }}/status?volume=v1' -o $W/old-rejoin-status.json"}
       - action: exec
         node: node-1
         timeout: 5m

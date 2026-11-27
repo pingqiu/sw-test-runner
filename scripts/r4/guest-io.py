@@ -10,6 +10,14 @@ def require(value, message):
         raise ValueError(message)
 
 
+def publish(path, value):
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    with temporary.open('w') as f:
+        json.dump(value, f); f.write('\n'); f.flush(); os.fsync(f.fileno())
+    os.replace(temporary, path)
+
+
 class DurableLedger:
     def __init__(self, path):
         self.path = Path(path)
@@ -102,8 +110,8 @@ def relay(cfg, host, round_, count, stream=False):
                         # Record is already synced; the dying host may miss its
                         # receipt. Still verify that ACK after the power loss.
                         break
-                    if stream and record.startswith(b'ack '):
-                        (root/'stream-ready.json').write_text(json.dumps({'acks':len(ledger.acks)})+'\n')
+                    if stream and record.startswith(b'ack ') and not (root/'stream-ready.json').exists():
+                        publish(root/'stream-ready.json', {'acks':len(ledger.acks)})
                 else:
                     err.write(line)
             return p.wait(timeout=30)
@@ -177,7 +185,7 @@ def main():
             hosts[name]=dict(management=management,data=data,known_hosts=str(known))
         cfg=dict(root=str(root),tag=a.tag,rf=a.rf,nqn='nqn.2026-11.io.seaweedfs:r4-'+a.tag,
                  user=a.user,key=a.key,hosts=hosts,data_port=a.data_port,nvme_port=a.nvme_port,writes=a.writes)
-        a.config.write_text(json.dumps(cfg,indent=2)+'\n');(root/'ledger').touch()
+        publish(a.config,cfg);(root/'ledger').touch()
         return
     cfg=json.loads(a.config.read_text())
     if a.command == 'before':
@@ -186,18 +194,18 @@ def main():
         status={'started':time.monotonic()}
         try: status['remote_exit']=relay(cfg,'node-2','during-loss',0,True)
         except Exception as error: status['error']=str(error)
-        status['ended']=time.monotonic();(root/'stream-ended.json').write_text(json.dumps(status)+'\n')
+        status['ended']=time.monotonic();publish(root/'stream-ended.json',status)
     elif a.command == 'stream-start':
         require(not (root/'stream-pid.json').exists(),'stream already started')
         with (root/'stream-controller.log').open('wb') as log:
             proc=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'--config',str(a.config),'_stream'],start_new_session=True,stdout=log,stderr=log)
         identity=process_identity(proc.pid);require(identity is not None,'stream process vanished')
-        (root/'stream-pid.json').write_text(json.dumps(dict(pid=proc.pid,start=identity))+'\n')
+        publish(root/'stream-pid.json',dict(pid=proc.pid,start=identity))
         end=time.monotonic()+60
         while not (root/'stream-ready.json').exists():
             require(active(root) and time.monotonic()<end,'guest did not ACK before power-off');time.sleep(.1)
         require(active(root),'guest ended before power-off')
-        (root/'fault-ready.json').write_text(json.dumps(dict(at=time.monotonic()))+'\n')
+        publish(root/'fault-ready.json',dict(at=time.monotonic()))
     elif a.command == 'stream-ended':
         fault=json.loads((root/'fault-ready.json').read_text());end=time.monotonic()+60
         while not (root/'stream-ended.json').exists():

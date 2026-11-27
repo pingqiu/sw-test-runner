@@ -98,5 +98,67 @@ class GuestLedger(unittest.TestCase):
             self.assertIn(b'off-host ledger receipt',result.stderr)
             self.assertEqual(dev.read_bytes(),bytes(32*4096))
 
+    @unittest.skipUnless(sys.platform=='linux','Full CLI control with inert SSH and regular files')
+    def test_cli_loses_old_guest_and_reads_every_off_host_ack_on_new_guest(self):
+        helper=Path(guest.__file__);r4=helper.parents[1]/'../scenarios/v3block/r4.sh'
+        r4=r4.resolve();tools=self.root/'tools';tools.mkdir()
+        dev=self.root/'device';dev.write_bytes(bytes(64*4096))
+        hosts=self.root/'hosts';hosts.mkdir()
+        for name in ('node-1','node-2','node-3'):
+            w=hosts/name;w.mkdir()
+            (w/'r4.sh').write_text('#!/bin/sh\ncase "$1" in connect|dev) echo "$FAKE_DEVICE";; *) exec bash "$REAL_R4" "$@";; esac\n')
+            (w/'auto-p2.py').write_bytes(helper.with_name('auto-p2.py').read_bytes())
+        ssh=tools/'ssh'
+        ssh.write_text(r'''#!/usr/bin/env python3
+import json,os,pathlib,shlex,subprocess,sys
+args=sys.argv[1:]
+assert 'StrictHostKeyChecking=yes' in args and any(a.startswith('UserKnownHostsFile=') for a in args)
+peer=next(a for a in args if a.startswith('swtest@'))
+node={'192.0.2.1':'node-1','192.0.2.2':'node-2','192.0.2.3':'node-3'}[peer.split('@')[1]]
+root=pathlib.Path(os.environ['FAKE_HOSTS']);w=root/node
+command=args[-1].replace('/var/lib/r4/test-rf3',str(w))
+parts=shlex.split(command);assert parts[:3]==['sudo','-n','bash']
+p=subprocess.Popen(parts[2:],start_new_session=True)
+(w/'pid').write_text(str(p.pid))
+with (root/'ssh.jsonl').open('a') as f:f.write(json.dumps(dict(node=node,command=command))+'\n')
+rc=p.wait();sys.exit(128-rc if rc<0 else rc)
+''');ssh.chmod(0o755)
+        cfg=self.root/'observer/config.json'
+        env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],FAKE_HOSTS=str(hosts),
+                 FAKE_DEVICE=str(dev),REAL_R4=str(r4),R4_ALLOW_FILE='1',R4_DD_OFLAG='sync',R4_DD_IFLAG='fullblock')
+        def cli(command,*args,token=None):
+            e=dict(env)
+            if token:e['PROMOTION']=token
+            result=subprocess.run([sys.executable,str(helper),'--config',str(cfg),command,*args],env=e,capture_output=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr+b"\n"+b"\n".join(p.read_bytes()[-3000:] for p in cfg.parent.glob("*.log")))
+            return result.stdout
+        args=['--tag','test-rf3','--rf','3','--user','swtest','--key','unused','--data-port','19601','--nvme-port','4420','--writes','4']
+        for i in (1,2,3):args+=['--node',f'node-{i}',f'192.0.2.{i}',f'10.84.1.{10+i}','ssh-ed25519 TEST']
+        cli('init',*args)
+        try:
+            cli('before');cli('stream-start')
+            pid=int((hosts/'node-2/pid').read_text());os.killpg(pid,9)
+            cli('stream-ended')
+            (hosts/'node-2/guest-ledger').unlink() # the authoritative ACK ledger stays off-host
+            value=dict(authority={'body':dict(VolumeID='v1',ReplicaID='r2',Epoch=2,DataAddr='10.84.1.11:19601',
+                       Primary=dict(Kind=2,FencedEpoch=2,Basis=1,DurableLSN=1))},mode='automatic',operator_calls=0)
+            token=base64.b64encode(json.dumps(value).encode()).decode()
+            self.assertIn(b'"P2": "PASS"',cli('verify',token=token))
+            self.assertIn(b'mismatches=0',cli('after-rejoin',token=token))
+            rows=(cfg.parent/'ledger').read_text().splitlines()
+            self.assertEqual(sum(line.startswith('ack ') and ' before ' in line for line in rows),4)
+            self.assertEqual(sum(line.startswith('ack ') and ' after-rejoin ' in line for line in rows),4)
+            self.assertGreaterEqual(sum(line.startswith('ack ') and ' during-loss ' in line for line in rows),1)
+            calls=[json.loads(line) for line in (hosts/'ssh.jsonl').read_text().splitlines()]
+            self.assertEqual([call['node'] for call in calls[:2]],['node-2','node-2'])
+            self.assertTrue(all(call['node']=='node-1' for call in calls[2:]))
+        finally:
+            cli('cleanup')
+            for p in hosts.glob('*/pid'):
+                pid=int(p.read_text())
+                try:
+                    cmd=Path('/proc/'+str(pid)+'/cmdline').read_bytes()
+                    if str(hosts).encode() in cmd:os.killpg(pid,9)
+                except (FileNotFoundError,ProcessLookupError):pass
 
 if __name__=='__main__':unittest.main()
