@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import history_check as hc
-from test_history_check import A, B, C, JUNK, HKILL, dump, fl, load, ops, rd, synth, w
+from test_history_check import A, B, C, JUNK, HKILL, dump, fl, load, ops, rd, synth, w, ws_text
 
 U = 'e' * 64   # the value of an unknown write
 
@@ -51,6 +51,17 @@ def ok(key, sha=None):
 
 
 def epoch(e, vol='v1'):
+    """An observation recording the master's line (result.line)."""
+    return ('o', vol, {'line': {'replica': 'r1', 'epoch': e}})
+
+
+def ws_epoch(e, vol='v1'):
+    """An observation whose line is only in the workspace answer."""
+    return ('o', vol, {'workspace': {'exit': 0, 'text': ws_text(volume=vol, epoch=e)}})
+
+
+def head_epoch(e, vol='v1'):
+    """An observation with HEAD's epoch and no line."""
     return ('o', vol, {'head': {'epoch': e, 'gen': 1, 'holder': 'x/r1', 'state': ''}})
 
 
@@ -145,6 +156,17 @@ class Red(Base):
         self.assert_pass(lin(hist(*base, epoch(1), *late)))
         # And U landing before the advance is allowed.
         self.assert_pass(lin(hist(*base, ri('r'), ok('r', U), epoch(2), ri('s'), ok('s', U))))
+
+    def test_red_a_line_advance_seen_only_in_a_workspace_answer_closes_the_window(self):
+        base = [ws_epoch(1), wi('a', A), ok('a'), wi('u', U), ('c', 'u', 'unknown', {})]
+        late = [ri('r'), ok('r', A), ri('s'), ok('s', U)]
+        v = lin(hist(*base, ws_epoch(2), *late))
+        self.assert_fail(v)
+        self.assertIn('unknown writes whose window an epoch advance closed: 1', v['findings'])
+        self.assert_pass(lin(hist(*base, ws_epoch(1), *late)))
+        # The window is the LINE's (as C4 reads it): HEAD's epoch alone closes nothing.
+        self.assert_pass(lin(hist(head_epoch(1), wi('a', A), ok('a'), wi('u', U), ('c', 'u', 'unknown', {}),
+                                  head_epoch(2), *late)))
 
     def test_red_an_older_value_after_a_later_write_completed_before_the_read(self):
         # A acknowledged; B overlaps the first read, which sees B; B completes;
