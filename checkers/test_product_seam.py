@@ -317,5 +317,43 @@ class ProductFlag(unittest.TestCase):
         self.assertIn('checks.json', err)
 
 
+
+class PlacementRow(unittest.TestCase):
+    """The placement table in checks.json is a closed vocabulary: one way to
+    place (by list_member), four cases, each mapped to one of four fixed
+    outcomes. product_block reads the names branch of C6's snapshot rule from
+    it; a row outside the vocabulary does not load (red controls)."""
+
+    def rows(self):
+        return json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
+
+    def test_the_row_loads_and_places_the_names_branch(self):
+        import product_block as pb
+        rows = pb.placement_rows(self.rows())
+        self.assertEqual(set(rows), {'snapshot'})
+        row = rows['snapshot']
+        base = {'seq': 1}
+        self.assertEqual(pb.place_by_names(row, 's1', [], ['s1'], base)[0], 'took effect')
+        self.assertEqual(pb.place_by_names(row, 's1', [], [], base)[0], 'did not')
+        self.assertEqual(pb.place_by_names(row, 's1', ['s0'], ['s1'], base)[0], 'third')
+        self.assertIsNone(pb.place_by_names(row, 's1', ['s1'], ['s1'], base)[0])
+
+    def test_red_a_row_outside_the_vocabulary_does_not_load(self):
+        import copy
+        import product_block as pb
+        good = self.rows()
+        for name, seed in {
+            'another by': lambda r: r.update(by='snapshot_names'),
+            'another outcome': lambda r: r['outcomes'].update(absent='maybe'),
+            'a case missing': lambda r: r['outcomes'].pop('present'),
+            'a case added': lambda r: r['outcomes'].update(gone='third'),
+            'another key': lambda r: r.update(when='always'),
+        }.items():
+            checks = copy.deepcopy(good)
+            seed(checks['placement'][0])
+            with self.assertRaises(ValueError, msg=name):
+                pb.placement_rows(checks)
+
+
 if __name__ == '__main__':
     unittest.main()

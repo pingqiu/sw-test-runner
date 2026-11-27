@@ -400,18 +400,21 @@ type Decode struct {
 	Detail           string            `json:"detail,omitempty"`
 }
 
-// Retry reruns the same command, as the documented operator does, ONLY
-// where an operator page tells the operator to run it again for that
-// answer: PageCite is that page line (docs/<page>.md:<line>), and an answer
-// in the product marked "retryable" is not one. The rerun is for the answer
-// whose error code is WhileCode and whose message contains
-// WhileMessageContains (the page's answer). At most MaxAttempts attempts,
-// EverySeconds apart, and within the int param WithinParam (seconds) when
-// it is set. Every attempt is its OWN operation in the history: an invoke
+// Retry declares the rerun of the same command, as the documented operator
+// does, ONLY where an operator page tells the operator to run it again for
+// that answer: PageCite is that page line (docs/<page>.md:<line>), and an
+// answer in the product marked "retryable" is not one. The rerun is for the
+// answer whose error code is WhileCode and whose message contains
+// WhileMessageContains (the page's answer), and only when that answer
+// decodes refused: an unknown is never re-issued. The executor runs ONE attempt
+// per call and never loops: the DRIVER re-issues the action (Rerun says
+// when), so every attempt is its OWN operation in the history: an invoke
 // and a complete, its args carrying the request id (RequestArg, one of the
-// record's args) and "attempt": n. The last attempt's outcome stands. A
-// step that declares expect=refused is one attempt, unless ExpectedRefusal
-// names a bool param it sets true.
+// record's args) and "attempt": n (the step param AttemptParam). The COUNT
+// is the bound: at most MaxAttempts attempts, EverySeconds apart; the int
+// param WithinParam (seconds), when set, is only a wall-clock guard. The
+// last attempt's outcome stands. A step that declares expect=refused is one
+// attempt, unless ExpectedRefusal names a bool param it sets true.
 type Retry struct {
 	WhileCode            string `json:"while_code,omitempty"`
 	WhileMessageContains string `json:"while_message_contains,omitempty"`
@@ -936,6 +939,9 @@ type Executor struct {
 	Subject func(actx *tr.ActionContext, name string) (Subject, error)
 	// Lookup is the product's outcome table.
 	Lookup LookupFunc
+	// Placements are the product's placement rows by verb (ParsePlacements):
+	// how an unknown of the verb is placed, for a rerun (Rerun, Place).
+	Placements map[string]*Placement
 	// Pause, when set, replaces a retry's declared pause (tests).
 	Pause func(declared time.Duration) time.Duration
 	// Deadline, when set, replaces a variant's declared runner deadline
@@ -1210,6 +1216,9 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if expect != "" && expect != tr.OutcomeRefused {
 		return nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, expect, tr.OutcomeRefused)
 	}
+	if a.Retry == nil && act.Params[AttemptParam] != "" {
+		return nil, fmt.Errorf("%s: %s is the driver's, for an action with a declared rerun only", name, AttemptParam)
+	}
 	var required []string
 	missing := false
 	var computed []string
@@ -1401,8 +1410,20 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if err := Check(s.ctx, node, actx.History, false); err != nil {
 		return nil, err
 	}
+	attempt, driven := 0, false
 	if a.Retry != nil {
-		return x.attempts(s, actx, a, v, cmd, expect, node, vol, args)
+		// One attempt of a declared rerun: the driver re-issues it
+		// (Executor.Rerun), and each attempt is its own operation.
+		attempt = 1
+		if t := act.Params[AttemptParam]; t != "" {
+			driven = true
+			n, err := strconv.Atoi(t)
+			if err != nil || n < 1 {
+				return nil, fmt.Errorf("%s: %s %q is not an attempt number", name, AttemptParam, t)
+			}
+			attempt = n
+		}
+		args[AttemptParam] = attempt
 	}
 	opCtx := s.ctx
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Op: a.Op, Verb: a.Verb, Volume: vol, Args: args})
@@ -1410,70 +1431,161 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		return nil, err
 	}
 	s.ctx = WithOp(opCtx, OpRef{History: actx.History, Seq: seq, Volume: vol})
-	outcome, result, _ := x.once(s, a, v, cmd)
+	outcome, result, transport := x.once(s, a, v, cmd)
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
 	}
 	tally(actx.History, a.Verb, result)
-	actx.Log("  %s(%s): %s", name, vol, outcome)
-	return map[string]string{"value": outcome}, nil
+	if a.Retry == nil {
+		actx.Log("  %s(%s): %s", name, vol, outcome)
+		return map[string]string{"value": outcome}, nil
+	}
+	actx.Log("  %s(%s) attempt %d: %s", name, vol, attempt, outcome)
+	out := map[string]string{"value": outcome}
+	if driven {
+		// What the driver matches against the declared rerun answers
+		// (Rerun), so it never reads the history to decide.
+		out["detail"], _ = result["detail"].(string)
+		if transport {
+			out["transport"] = "true"
+		}
+	}
+	return out, nil
 }
 
-// attempts runs a retried action: each attempt is its own operation, with
-// the request id and "attempt": n in its args; the last attempt's outcome
-// stands.
-func (x *Executor) attempts(s *scope, actx *tr.ActionContext, a *Action, v *Variant, cmd, expect string, node Runner, vol string, args map[string]any) (map[string]string, error) {
+// AttemptParam is the step param that carries the attempt number of an
+// action with a declared rerun; the driver sets it (absent: attempt 1, a
+// call from no driver). A call that carries it answers, besides its value,
+// the answer's detail and "transport" (the command could not be run or did
+// not answer): what Rerun reads.
+const AttemptParam = "attempt"
+
+// RequestArg names the record arg that carries the request id every
+// attempt of action name repeats; "" when name declares no rerun.
+func (x *Executor) RequestArg(name string) string {
+	if a := x.action(name); a != nil && a.Retry != nil {
+		return a.Retry.RequestArg
+	}
+	return ""
+}
+
+// Rerun is action name's declared rerun, read by the DRIVER, which
+// re-issues the action: whether attempt n+1 follows attempt n, which
+// answered out (the handler's value, detail and transport) since the
+// first attempt began, and after what pause. An attempt that answered
+// refused, with an answer the operator page names (Retry.matches), is
+// re-issued (again). An UNKNOWN is never re-issued as it stands: one with a
+// page-named answer, of a verb with a placement row (Placements), answers
+// why "place": the driver observes the subject, places the attempt
+// (Place), and re-issues only when it did not take effect (did_not), with
+// that observation as the next attempt's "before". Any other unknown, a
+// refused_effect, an ok or a transport failure ends the attempts. A step
+// that declares expect=refused only when its expected_refusal param is
+// true. The COUNT is the bound: at most max_attempts attempts. within_param
+// (seconds) is only a guard, a wall clock past which no attempt follows
+// (why "guard"). It reads nothing but the declaration and the step's
+// params, and writes nothing.
+func (x *Executor) Rerun(name string, params map[string]string, n int, since time.Duration, out map[string]string) (bool, time.Duration, string) {
+	a := x.action(name)
+	if a == nil || a.Retry == nil {
+		return false, 0, ""
+	}
 	r := a.Retry
-	var end time.Time
-	if r.WithinParam != "" {
-		within, _ := strconv.Atoi(s.vals[r.WithinParam])
-		end = time.Now().Add(time.Duration(within) * time.Second)
+	place := out["value"] == tr.OutcomeUnknown && x.Placements[a.Verb] != nil
+	if out["transport"] != "" || (out["value"] != tr.OutcomeRefused && !place) || !r.matches(out["detail"]) {
+		return false, 0, ""
+	}
+	if params["expect"] == tr.OutcomeRefused {
+		if er := r.ExpectedRefusal; er == nil || !a.boolParam(er.Param, params) {
+			return false, 0, ""
+		}
+	}
+	if n >= r.MaxAttempts {
+		return false, 0, "max_attempts"
+	}
+	if r.WithinParam != "" && since > time.Duration(a.intParam(r.WithinParam, params))*time.Second {
+		return false, 0, "guard"
 	}
 	pause := time.Duration(r.EverySeconds) * time.Second
 	if x.Pause != nil {
 		pause = x.Pause(pause)
 	}
-	opCtx := s.ctx
-	outcome := ""
-	for n := 1; ; n++ {
-		if n > 1 {
-			select {
-			case <-opCtx.Done():
-				return map[string]string{"value": outcome}, nil
-			case <-time.After(pause):
-			}
-			// Each attempt is an operation boundary.
-			if err := Check(opCtx, node, actx.History, false); err != nil {
-				return nil, err
-			}
-		}
-		at := make(map[string]any, len(args)+1)
-		for k, val := range args {
-			at[k] = val
-		}
-		at["attempt"] = n
-		seq, err := actx.History.Invoke(tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Op: a.Op, Verb: a.Verb, Volume: vol, Args: at})
-		if err != nil {
-			return nil, err
-		}
-		s.ctx = WithOp(opCtx, OpRef{History: actx.History, Seq: seq, Volume: vol})
-		out, res, transport := x.once(s, a, v, cmd)
-		if err := actx.History.Complete(seq, out, res); err != nil {
-			return nil, err
-		}
-		tally(actx.History, a.Verb, res)
-		actx.Log("  %s(%s) attempt %d: %s", a.Action, vol, n, out)
-		outcome = out
-		d, _ := res["detail"].(string)
-		again := !transport && out != tr.OutcomeOK && r.matches(d)
-		if expect == tr.OutcomeRefused {
-			er := r.ExpectedRefusal
-			again = again && er != nil && s.vals[er.Param] == "true"
-		}
-		if !again || n >= r.MaxAttempts || (!end.IsZero() && time.Now().After(end)) {
-			return map[string]string{"value": outcome}, nil
+	if place {
+		return false, pause, "place"
+	}
+	return true, pause, ""
+}
+
+// Placeable says whether an unknown of action name can be placed by an
+// observation: its verb has a placement row (the driver then observes the
+// subject before the first attempt, the "before" a placement needs).
+func (x *Executor) Placeable(name string) bool {
+	a := x.action(name)
+	return a != nil && a.Retry != nil && x.Placements[a.Verb] != nil
+}
+
+// Place places an unknown attempt of action name (with params) from the
+// results of the observation before it and the one after it, by its verb's
+// placement row: the outcome (PlacementOutcomes) and why; ok false when the
+// row cannot place it (no row, the request's name not a param, the names not
+// recorded by both observations).
+func (x *Executor) Place(name string, params map[string]string, before, after map[string]any) (string, string, bool) {
+	a := x.action(name)
+	if a == nil || x.Placements[a.Verb] == nil {
+		return PlacedNotPlaced, "no placement row", false
+	}
+	p := x.Placements[a.Verb]
+	t := a.Record.Args[p.Arg].Template
+	if !strings.HasPrefix(t, "{{") || !strings.HasSuffix(t, "}}") || strings.Count(t, "{{") != 1 {
+		return PlacedNotPlaced, fmt.Sprintf("record arg %s is not one param (%q)", p.Arg, t), false
+	}
+	v, ok := params[strings.TrimSpace(t[2:len(t)-2])]
+	if !ok || v == "" {
+		return PlacedNotPlaced, fmt.Sprintf("record arg %s: no param %s", p.Arg, t), false
+	}
+	return p.Place(v, before, after)
+}
+
+// action is the declared action name, nil when there is none.
+func (x *Executor) action(name string) *Action {
+	for i := range x.File.Actions {
+		if x.File.Actions[i].Action == name {
+			return &x.File.Actions[i]
 		}
 	}
+	return nil
+}
+
+// intParam is an int param's value as exec reads it: the step's, else its
+// default.
+func (a *Action) intParam(name string, params map[string]string) int {
+	for _, p := range a.Params {
+		if p.Name == name {
+			def, _ := strconv.Atoi(p.Default)
+			n, err := strconv.Atoi(params[name])
+			if err != nil {
+				return def
+			}
+			return n
+		}
+	}
+	return 0
+}
+
+// boolParam is a bool param's value as exec reads it (exec refuses one
+// that is not true or false before any attempt).
+func (a *Action) boolParam(name string, params map[string]string) bool {
+	for _, p := range a.Params {
+		if p.Name == name {
+			v := params[name]
+			if v == "" {
+				v = p.Default
+			}
+			b, _ := strconv.ParseBool(v)
+			return b
+		}
+	}
+	return false
 }
 
 // once runs the command and decodes its answer; transport is true when the

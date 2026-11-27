@@ -9,7 +9,18 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
+
+// driven is action name as the driver runs it: re-issued by
+// randomrun.Attempts under the executor's declared rerun.
+func driven(x *Executor, name string) tr.ActionHandlerFunc {
+	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		act.Action = name
+		out, _, err := randomrun.Attempts(ctx, actx, x.Handler(name), act, x, act.Params["volume"], nil)
+		return out, err
+	}
+}
 
 // node answers every command with the next scripted answer (the last
 // repeats) and records the commands.
@@ -70,7 +81,7 @@ const desc = head + `
  "exceptions": [{"action": "p_attach", "why": "a process start", "declarable_with": "a process step", "runner_deadline_seconds": 30}]}`
 
 func lookup(action, path, code, message string) (string, map[string]any) {
-	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) {
+	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) || (code == "busy" && message == "later") {
 		return tr.OutcomeRefused, nil
 	}
 	if code == "reserved" {
@@ -126,16 +137,30 @@ func TestRetryWhileCode(t *testing.T) {
 	busy := answer{out: `{"code":"busy","message":"later"}`, code: 1}
 	n := &node{answers: []answer{busy, busy, {code: 0}}}
 	x, actx := setup(t, n, &subject{f: map[string]string{}})
-	out, _ := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	out, _ := driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
 	if out["value"] != tr.OutcomeOK || len(n.calls) != 3 {
 		t.Fatalf("%v after %d calls", out, len(n.calls))
 	}
 	// Red control: an expected refusal is one call.
 	n = &node{answers: []answer{busy, {code: 0}}}
 	x, actx = setup(t, n, &subject{f: map[string]string{}})
-	out, _ = x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}})
-	if out["value"] != tr.OutcomeUnknown || len(n.calls) != 1 {
+	out, _ = driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}})
+	if out["value"] != tr.OutcomeRefused || len(n.calls) != 1 {
 		t.Fatalf("expected refusal: %v after %d calls", out, len(n.calls))
+	}
+}
+
+// Red control: an UNKNOWN is never re-issued, even when its detail is the
+// page's answer (an unknown may have changed the subject, and the next
+// attempt would have no "before"): exactly one call, and the request ends
+// unknown.
+func TestAnUnknownIsNeverReissued(t *testing.T) {
+	n := &node{answers: []answer{{out: `{"code":"busy","message":"later"}`, code: 1}, {code: 0}}}
+	x, actx := setup(t, n, &subject{f: map[string]string{}})
+	x.Lookup = func(string, string, string, string) (string, map[string]any) { return tr.OutcomeUnknown, nil }
+	out, err := driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	if err != nil || out["value"] != tr.OutcomeUnknown || out["detail"] != "busy: later" || len(n.calls) != 1 {
+		t.Fatalf("%v %v after %d calls", out, err, len(n.calls))
 	}
 }
 
@@ -348,12 +373,12 @@ func TestRerunAttemptsAreOperations(t *testing.T) {
 		last    string
 	}{
 		"twice busy then ok":     {[]answer{busy, busy, {code: 0}}, 3, tr.OutcomeOK},
-		"busy to the bound":      {[]answer{busy}, 5, tr.OutcomeUnknown},
+		"busy to the bound":      {[]answer{busy}, 5, tr.OutcomeRefused},
 		"the page's answer only": {[]answer{other, {code: 0}}, 1, tr.OutcomeUnknown},
 	} {
 		n := &node{answers: c.answers}
 		x, actx := setup(t, n, &subject{f: map[string]string{}})
-		out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+		out, err := driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
 		if err != nil || out["value"] != c.last || len(n.calls) != c.calls {
 			t.Fatalf("%s: %v %v after %d calls", name, out, err, len(n.calls))
 		}
@@ -383,7 +408,7 @@ func TestRerunAttemptsAreOperations(t *testing.T) {
 func TestAnswerCounts(t *testing.T) {
 	n := &node{answers: []answer{{out: `{"code":"busy","message":"later"}`, code: 1}, {code: 0}}}
 	x, actx := setup(t, n, &subject{f: map[string]string{}})
-	_, _ = x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	_, _ = driven(x, "p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
 	got := Counts(actx.History)
 	put, _ := got["put"].(map[string]any)
 	codes, _ := put["codes"].(map[string]any)
@@ -451,5 +476,91 @@ func TestComputedConfiguration(t *testing.T) {
 	}
 	if _, err := Parse([]byte(strings.Replace(ch, `"computed": "the bin's listing"`, `"computed": "the bin's listing", "default": "d"`, 1) + good)); err == nil {
 		t.Error("red control: a computed key with a default loaded")
+	}
+}
+
+// Red control: the executor never loops. One call of an action with a
+// declared rerun is ONE attempt (attempt 1, one invoke and one complete),
+// whatever it answers; the attempt number is the driver's param.
+func TestExecutorRunsOneAttempt(t *testing.T) {
+	busy := answer{out: `{"code":"busy","message":"later"}`, code: 1}
+	n := &node{answers: []answer{busy, busy, {code: 0}}}
+	x, actx := setup(t, n, &subject{f: map[string]string{}})
+	out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60"}})
+	if err != nil || len(out) != 1 || out["value"] != tr.OutcomeRefused || len(n.calls) != 1 {
+		t.Fatalf("%v %v after %d calls", out, err, len(n.calls))
+	}
+	out, err = x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k", "n": "60", "attempt": "2"}})
+	if err != nil || out["value"] != tr.OutcomeRefused || out["detail"] != "busy: later" || len(n.calls) != 2 {
+		t.Fatalf("attempt 2: %v %v after %d calls", out, err, len(n.calls))
+	}
+	actx.History.Close()
+	var attempts []any
+	for _, r := range historyOf(t, actx.History.Path()) {
+		if r.Kind == tr.HistoryInvoke {
+			attempts = append(attempts, r.Args["attempt"])
+		}
+	}
+	if len(attempts) != 2 || attempts[0] != float64(1) || attempts[1] != float64(2) {
+		t.Fatalf("attempts %v", attempts)
+	}
+	// A bad attempt number, or one on an action with no declared rerun, is a
+	// runner error that records nothing.
+	for name, act := range map[string]tr.Action{
+		"attempt 0":         {Params: map[string]string{"volume": "v1", "key": "k", "attempt": "0"}},
+		"attempt x":         {Params: map[string]string{"volume": "v1", "key": "k", "attempt": "x"}},
+		"attempt, no rerun": {Action: "p_make", Params: map[string]string{"volume": "v1", "attempt": "1"}},
+	} {
+		n := &node{answers: []answer{{code: 0}}}
+		x, actx := setup(t, n, &subject{f: map[string]string{}})
+		h := x.Handler("p_put")
+		if act.Action != "" {
+			h = x.Handler(act.Action)
+		}
+		if _, err := h(context.Background(), actx, act); err == nil || len(n.calls) != 0 {
+			t.Fatalf("%s: %v, %d calls", name, err, len(n.calls))
+		}
+	}
+}
+
+// Rerun is the declaration read by the driver: only the page's answer, never
+// after ok or a transport failure, at most max_attempts (the count is the
+// bound), within_param only a guard, an expected refusal only with its
+// param, and no rerun for an action that declares none.
+func TestRerunIsTheDeclaration(t *testing.T) {
+	x, _ := setup(t, &node{}, &subject{f: map[string]string{}})
+	p := map[string]string{"volume": "v1", "key": "k", "n": "60"}
+	busy := map[string]string{"value": tr.OutcomeRefused, "detail": "busy: later"}
+	for name, c := range map[string]struct {
+		action string
+		params map[string]string
+		n      int
+		since  time.Duration
+		out    map[string]string
+		again  bool
+		why    string
+	}{
+		"the page's answer":                       {"p_put", p, 1, 0, busy, true, ""},
+		"the last attempt":                        {"p_put", p, 4, 0, busy, true, ""},
+		"past max_attempts":                       {"p_put", p, 5, 0, busy, false, "max_attempts"},
+		"an answer the page does not name":        {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: never"}, false, ""},
+		"another code":                            {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "nope: later"}, false, ""},
+		"ok":                                      {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeOK, "detail": "busy: later"}, false, ""},
+		"an unknown with the page's answer":       {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later"}, false, ""},
+		"a refused_effect with the page's answer": {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeRefusedEffect, "detail": "busy: later"}, false, ""},
+		"a transport failure":                     {"p_put", p, 1, 0, map[string]string{"value": tr.OutcomeUnknown, "detail": "busy: later", "transport": "true"}, false, ""},
+		"past the guard":                          {"p_put", p, 1, 61 * time.Second, busy, false, "guard"},
+		"the guard's default":                     {"p_put", map[string]string{"volume": "v1", "key": "k"}, 1, 8 * time.Second, busy, false, "guard"},
+		"an expected refusal":                     {"p_put", map[string]string{"volume": "v1", "key": "k", "n": "60", "expect": "refused"}, 1, 0, busy, false, ""},
+		"an action with no rerun":                 {"p_make", map[string]string{"volume": "v1"}, 1, 0, busy, false, ""},
+		"an action not declared":                  {"p_none", p, 1, 0, busy, false, ""},
+	} {
+		again, pause, why := x.Rerun(c.action, c.params, c.n, c.since, c.out)
+		if again != c.again || why != c.why || (again && pause != time.Millisecond) {
+			t.Errorf("%s: again %v pause %v why %q", name, again, pause, why)
+		}
+	}
+	if x.RequestArg("p_put") != "key" || x.RequestArg("p_make") != "" {
+		t.Fatalf("request args %q %q", x.RequestArg("p_put"), x.RequestArg("p_make"))
 	}
 }

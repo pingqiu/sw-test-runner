@@ -183,7 +183,7 @@
       "retry": {"answers": [{"code": "head_conflict"}, {"code": "internal", "message_contains": "is not in HEAD after its commit"}],
         "max_attempts": 3, "every_seconds": 1, "request_arg": "request",
         "page_cite": "docs/operator-guide.md:220-225 (a snapshot can answer head_conflict: retry it with the same name; if that retry answers internal ... is not in HEAD after its commit, retry once more; the name exists only after a request for it succeeds)",
-        "note": "each attempt is its own operation (request, attempt), counted in answer_counts: the head_conflict ratio counts every attempt, a rerun never hides a conflict"}
+        "note": "the COUNT is the bound, from the page: the first request, its retry after head_conflict, and one more retry after internal ... is not in HEAD after its commit (docs/operator-guide.md:221-222): 3 attempts. The page gives no period: every_seconds 1 is the runner's, and no wall-clock guard is declared (3 attempts each under the variant's runner deadline). ONLY a refused attempt is re-issued, never an unknown (it may have changed the volume, and the next attempt would have no before): both page answers decode unknown today (outcomes.json, the page does not say what they leave), so no snapshot attempt is re-issued until one decodes refused. The driver re-issues each attempt as its own operation (request, attempt), counted in answer_counts: the head_conflict ratio counts every attempt, a rerun never hides a conflict"}
     },
     {
       "action": "v3_op_snapshot_delete", "verb": "snapshot_delete", "op": "SnapshotRemoval.DeleteSnap", "runs_on": "step_node",
@@ -243,7 +243,7 @@
       "action": "v3_op_delete", "verb": "delete", "op": "MoveAdmission.DelMark", "runs_on": "step_node",
       "params": [
         {"name": "volume", "kind": "subject", "vars": true},
-        {"name": "admit_seconds", "kind": "int", "default": "120"},
+        {"name": "admit_seconds", "kind": "int", "default": "3813"},
         {"name": "retry_horizon", "kind": "bool", "default": "false"}
       ],
       "record": {"volume": "{{volume.name}}", "args": {"layout_id": "{{volume.layout_id}}", "request": "delete-{{volume.name}}"}},
@@ -255,6 +255,7 @@
       }],
       "retry": {"while_code": "not_admitted", "while_message_contains": "workspace: deletion refused before persistence",
         "max_attempts": 41, "every_seconds": 3, "within_param": "admit_seconds", "request_arg": "request",
+        "note": "the COUNT is the bound, from the page's horizon and the period: the horizon is about 60 seconds with default flags (docs/volume-lifecycle.md:411, :492); every 3 seconds that is 20 periods; the page states it as approximate, so twice that, 40 periods after the first attempt: 41 attempts, the last about 120 seconds after the first. ONLY a refused attempt is re-issued, never an unknown (it may have changed the volume, and the next attempt would have no before): the sentinel answer decodes refused (outcomes.json); a not_admitted without it decodes unknown and is not re-issued. admit_seconds is only a wall-clock guard, as for the linearizability budget, derived as count x (period + the action's runner deadline) = 41 x (3 + 90) = 3813 seconds: every attempt the count allows fits under it even when each runs to its deadline, so the COUNT ends a normal run; the guard ends the reruns only when the clock passes it, and the driver records that",
         "page_cite": "docs/volume-lifecycle.md:526 (volume-delete answers not_admitted ... workspace: deletion refused before persistence: workspace delete: live until <time>: run it again after the horizon), docs/volume-lifecycle.md:489-492 (run the same command, the same --request-id, after <time>)",
         "expected_refusal": {"param": "retry_horizon",
           "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes"}},

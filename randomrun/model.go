@@ -17,6 +17,7 @@ package randomrun
 
 import (
 	"math/rand/v2"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 )
@@ -76,6 +77,36 @@ type Driver interface {
 // refusal is shown to have changed neither.
 type SubjectNamer interface {
 	ObserveSubjects(o Op) []string
+}
+
+// AttemptParam is the step param that carries the attempt number to the
+// handler of an action with a declared rerun; the handler writes it into
+// its record's args. Only the driver sets it.
+const AttemptParam = "attempt"
+
+// Rerunner is an optional part of a Driver: the declared rerun of an
+// action, where an operator page tells the operator to run the same command
+// again for an answer. The driver, not the action, re-issues it: each
+// attempt is its own handler call and its own operation (Attempts).
+type Rerunner interface {
+	// RequestArg names the record arg that carries the request id every
+	// attempt of action repeats; "" when action declares no rerun.
+	RequestArg(action string) string
+	// Rerun says whether the driver issues attempt n+1 after attempt n of
+	// action (with params) answered out (the handler's output: value, detail,
+	// transport), since the first attempt began, and after what pause. When
+	// it does not, why says what ended the attempts ("" for an answer that is
+	// not rerun).
+	Rerun(action string, params map[string]string, n int, since time.Duration, out map[string]string) (again bool, pause time.Duration, why string)
+	// Placeable says whether an unknown of action can be placed by an
+	// observation (the product's placement row for its verb): the driver
+	// then observes the subject before the first attempt.
+	Placeable(action string) bool
+	// Place places an unknown attempt of action from the results of the
+	// observation before it and the one after it: one of PlacedTookEffect,
+	// PlacedDidNot, PlacedThird, PlacedNotPlaced, and why; ok false when it
+	// cannot be placed (the names not recorded by both).
+	Place(action string, params map[string]string, before, after map[string]any) (outcome, why string, ok bool)
 }
 
 // Model is the product's side of proposing: its state, preconditions and

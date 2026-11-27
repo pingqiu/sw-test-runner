@@ -41,17 +41,48 @@ NEEDS_BASELINE = ('snapshot',)
 NOTED = ('snapshot',)   # the note names which rule (names or roots) judged it
 
 _master = None
+# checks.json placement: {verb: row}, how an unknown of the verb is placed by
+# a list of names (the one definition the driver's rerun reads too).
+_placement = {}
+PLACEMENT_BY = ('list_member',)
+PLACEMENT_CASES = ('present_before', 'others_lost', 'present', 'absent')
+PLACEMENT_OUTCOMES = {'took_effect': 'took effect', 'did_not': 'did not', 'third': 'third', 'not_placed': None}
+PLACEMENT_KEYS = {'verb', 'by', 'field', 'arg', 'outcomes', 'cite', 'what'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
 # later) values time alone may step it through.
 _time_derived = {}
 
 
+def placement_rows(checks):
+    """{verb: row} of checks.json placement, refusing a row outside the
+    closed vocabulary: another key, another by, a case missing or added, an
+    outcome outside the enumeration, a second row of a verb."""
+    out = {}
+    for row in checks.get('placement', []):
+        extra = set(row) - PLACEMENT_KEYS
+        if extra:
+            raise ValueError('placement row %r: keys %s outside the vocabulary' % (row.get('verb'), ', '.join(sorted(extra))))
+        if row.get('by') not in PLACEMENT_BY:
+            raise ValueError('placement row %r: by %r; the one way to place is %s' % (row.get('verb'), row.get('by'), PLACEMENT_BY[0]))
+        outcomes = row.get('outcomes') or {}
+        if set(outcomes) != set(PLACEMENT_CASES):
+            raise ValueError('placement row %r: cases %s, want %s' % (row.get('verb'), sorted(outcomes), list(PLACEMENT_CASES)))
+        bad = [o for o in outcomes.values() if o not in PLACEMENT_OUTCOMES]
+        if bad:
+            raise ValueError('placement row %r: outcomes %s outside %s' % (row.get('verb'), bad, sorted(PLACEMENT_OUTCOMES)))
+        if not row.get('field') or not row.get('arg') or row.get('verb') in out:
+            raise ValueError('placement row %r: its field and arg, one row per verb' % row.get('verb'))
+        out[row['verb']] = row
+    return out
+
+
 def bind(checks):
     """Take the product facts this module reads from checks.json."""
-    global _master, _time_derived
+    global _master, _time_derived, _placement
     masters = [t['name'] for t in checks.get('fault_targets', []) if t.get('role') == 'master']
     _master = masters[0] if masters else None
+    _placement = placement_rows(checks)
     rows = (checks.get('observation') or {}).get('time_derived') or []
     _time_derived = {r['field']: (r['fact'], r['validity'], frozenset(tuple(x) for x in r['steps'])) for r in rows}
 
@@ -298,6 +329,21 @@ def effect_state(part, to, after):
 
 # --- C6 placement ----------------------------------------------------------
 
+def place_by_names(row, name, bnames, names, base):
+    """C6's placement by a placement row (by list_member): the case the
+    two lists of names show, mapped by the row to its outcome."""
+    lost = sorted(set(bnames) - set(names))
+    if name in bnames:
+        case, why = 'present_before', 'by snapshot names: %r already present before it (observation seq %d)' % (name, base['seq'])
+    elif lost:
+        case, why = 'others_lost', 'by snapshot names: other snapshots lost: %s' % ', '.join(lost[:4])
+    elif name in names:
+        case, why = 'present', 'by snapshot names: %r present' % name
+    else:
+        case, why = 'absent', 'by snapshot names: %r absent' % name
+    return PLACEMENT_OUTCOMES[row['outcomes'][case]], why
+
+
 def place_by_status(inv, obs, base):
     """Placement of a snapshot, delete, move or restore from the observation
     after it (and, for a snapshot, the one before it): (outcome, why), the
@@ -307,18 +353,15 @@ def place_by_status(inv, obs, base):
     head, files = res.get('head'), res.get('files')
     err = (res.get('show_error') or {}).get('code') if isinstance(res.get('show_error'), dict) else None
     if verb == 'snapshot':
-        # By HEAD's snapshot names when both observations record them; by the
-        # root/ objects only when neither does.
+        # By HEAD's snapshot names when both observations record them (the
+        # checks.json placement row: the one definition); by the root/
+        # objects only when neither does (code, here alone).
         bres = base.get('result') or {}
-        bnames, names = bres.get('snapshots'), res.get('snapshots')
-        if isinstance(bnames, list) and isinstance(names, list):
-            name = args.get('name')
-            if name in bnames:
-                return None, 'by snapshot names: %r already present before it (observation seq %d)' % (name, base['seq'])
-            lost = sorted(set(bnames) - set(names))
-            if lost:
-                return 'third', 'by snapshot names: other snapshots lost: %s' % ', '.join(lost[:4])
-            return ('took effect' if name in names else 'did not'), 'by snapshot names: %r %s' % (name, 'present' if name in names else 'absent')
+        row = _placement.get(verb)
+        part = row['field'] if row else 'snapshots'
+        bnames, names = bres.get(part), res.get(part)
+        if row and isinstance(bnames, list) and isinstance(names, list):
+            return place_by_names(row, args.get(row['arg']), bnames, names, base)
         if isinstance(bnames, list) or isinstance(names, list):
             return None, 'snapshot names recorded by one observation only (seq %d, %d)' % (base['seq'], obs['seq'])
         bfiles = bres.get('files')

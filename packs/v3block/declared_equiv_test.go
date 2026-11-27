@@ -20,6 +20,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/declared"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 type eqAnswer struct {
@@ -490,7 +491,7 @@ func TestDeclaredDeleteAttempts(t *testing.T) {
 				c.outcomes = append(c.outcomes, "refused")
 			}
 		}
-		r := runEq(t, blockActions.Handler("v3_op_delete"), eqCase{params: c.params, rules: on(c.answers...)}, true)
+		r := runEq(t, reissued("v3_op_delete"), eqCase{params: c.params, rules: on(c.answers...)}, true)
 		if r.err != nil || len(r.calls) != len(c.outcomes) || r.ret["value"] != c.outcomes[len(c.outcomes)-1] {
 			t.Fatalf("%s: %v, %d calls, %v", name, r.err, len(r.calls), r.ret)
 		}
@@ -662,7 +663,7 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 		}
 		return l
 	}
-	h := blockActions.Handler("v3_op_delete")
+	h := reissued("v3_op_delete")
 
 	r := runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true"}), rules: []eqRule{{"volume-delete", []eqAnswer{horizon, horizon, deps}}}}, true)
 	if len(r.calls) != 3 || len(attempts(r)) != 3 || last(r).Outcome != tr.OutcomeRefusedEffect ||
@@ -699,11 +700,13 @@ func TestDeclaredDeleteRetryHorizon(t *testing.T) {
 	}
 }
 
-// The snapshot reruns ONLY the answers the operator page names
-// (docs/operator-guide.md:220-225): head_conflict, then an internal "is not
-// in HEAD after its commit"; at most three attempts, each its own operation
-// with the request and the attempt; every attempt is counted.
-func TestDeclaredSnapshotReruns(t *testing.T) {
+// The snapshot's page-named answers (docs/operator-guide.md:220-225):
+// head_conflict, then an internal "is not in HEAD after its commit". Both
+// decode UNKNOWN (outcomes.json: the page does not say what they leave), and
+// an unknown is never re-issued: one attempt, recorded with the request and
+// attempt 1, and the request ends unknown. Red control of the condition
+// that only a refused attempt is re-issued.
+func TestDeclaredSnapshotUnknownsAreNotReissued(t *testing.T) {
 	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
 	blockActions.Pause = func(time.Duration) time.Duration { return time.Millisecond }
 	conflict := chunkErr("head_conflict", "storage: capture CAS not applied: storage: chunk HEAD precondition failed")
@@ -712,13 +715,13 @@ func TestDeclaredSnapshotReruns(t *testing.T) {
 		answers  []eqAnswer
 		outcomes []string
 	}{
-		"a conflict, then ok":                   {[]eqAnswer{conflict, {}}, []string{"unknown", "ok"}},
-		"a conflict, the known defect, then ok": {[]eqAnswer{conflict, notInHead, {}}, []string{"unknown", "unknown", "ok"}},
-		"conflicts to the bound":                {[]eqAnswer{conflict}, []string{"unknown", "unknown", "unknown"}},
-		"another internal is not rerun":         {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
-		"a layout refusal is not rerun":         {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
+		"a conflict, then ok":           {[]eqAnswer{conflict, {}}, []string{"unknown"}},
+		"the known defect, then ok":     {[]eqAnswer{notInHead, {}}, []string{"unknown"}},
+		"conflicts to the bound":        {[]eqAnswer{conflict}, []string{"unknown"}},
+		"another internal is not rerun": {[]eqAnswer{chunkErr("internal", "boom"), {}}, []string{"unknown"}},
+		"a layout refusal is not rerun": {[]eqAnswer{chunkErr("layout_refused", "x"), {}}, []string{"unknown"}},
 	} {
-		r := runEq(t, blockActions.Handler("v3_op_snapshot"), eqCase{params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", c.answers}}}, true)
+		r := runEq(t, reissued("v3_op_snapshot"), eqCase{params: map[string]string{"volume": "v1", "name": "s1"}, rules: []eqRule{{"ops chunk snapshot", c.answers}}}, true)
 		var got []string
 		n := 0
 		for _, rec := range r.records {
@@ -735,5 +738,17 @@ func TestDeclaredSnapshotReruns(t *testing.T) {
 		if r.err != nil || strings.Join(got, " ") != strings.Join(c.outcomes, " ") || r.ret["value"] != c.outcomes[len(c.outcomes)-1] {
 			t.Fatalf("%s: %v %v, outcomes %v", name, r.err, r.ret, got)
 		}
+	}
+}
+
+// reissued is action name as the driver re-issues it (randomrun.Attempts
+// under the declared rerun), with no observation between attempts: the
+// attempts alone, as these tests judge them. The observation after a
+// refused attempt is TestDriverObservesAfterEachRefusedAttempt's.
+func reissued(name string) tr.ActionHandlerFunc {
+	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		act.Action = name
+		out, _, err := randomrun.Attempts(ctx, actx, blockActions.Handler(name), act, &blockModel{}, act.Params["volume"], nil)
+		return out, err
 	}
 }

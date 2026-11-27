@@ -15,7 +15,7 @@ import (
 // strings), comments aside. A product's words belong in its description.
 var productWords = []string{
 	"nvme", "subsysnqn", "/sys/class/nvme", "guest connect", "blockvolume", "blockmaster", "seaweed", "weed",
-	"kernel", "sysfs",
+	"kernel", "sysfs", "snapshot",
 }
 
 // codeWords lists the product words in Go source src outside its comments.

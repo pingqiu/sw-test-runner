@@ -18,6 +18,11 @@ package randomrun
 //     first pair is the baseline: equal, with nothing between them) and one
 //     after every negative operation and every refusal, so "a refused
 //     operation changed nothing" is judged from the observations around it;
+//     an action with a declared rerun is re-issued by the driver, each
+//     attempt its own operation; a refused attempt that is re-issued is
+//     observed right after it (its "after") and again after the pause,
+//     right before the next attempt (that one's "before"), a baseline pair
+//     across the pause (attempts.go);
 //   - after the last operation (in a fault run, after the final healthy
 //     point), the model's coverage tail (Model.Tail: gen_steps forced
 //     "tail"), then the end-of-run sweep: an observe record "gen_sweep" listing the
@@ -66,31 +71,86 @@ func worseOutcome(a, b string) string {
 
 // Exec runs one proposal through its handler, one call per part the Driver
 // splits it into, so that every part's outcome counts: the worst is
-// returned. An observation answers no outcome ("").
+// returned. An observation answers no outcome (""). A part of an action
+// with a declared rerun (Rerunner) is re-issued by the driver (Attempts):
+// its outcome is its last attempt's, and the subjects are observed right
+// after each refused attempt that is re-issued and right before the next.
 func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
+	got, _, err := r.exec(ctx, actx, o)
+	return got, err
+}
+
+// exec is Exec, also answering the attempts made (Attempts' count, summed
+// over the parts).
+func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op) (string, int, error) {
 	h, ok := r.Handlers[o.Action]
 	if !ok {
-		return "", fmt.Errorf("%s: no handler for %s", r.Name, o.Action)
+		return "", 0, fmt.Errorf("%s: no handler for %s", r.Name, o.Action)
 	}
 	observation := o.Action == r.Driver.Observe(o.Volume).Action
-	worst := ""
+	worst, attempts := "", 0
+	rr := rerunnerOf(r.Driver)
 	for _, p := range r.Driver.Calls(o) {
-		out, err := h(ctx, actx, tr.Action{Action: o.Action, Node: r.Node, Params: p})
+		out, n, err := Attempts(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, o.Volume, func() (map[string]any, error) {
+			if err := r.observeSubjects(ctx, actx, o); err != nil {
+				return nil, err
+			}
+			return LastObservation(actx.History, o.Volume)
+		})
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
+		attempts += n
 		if observation {
 			continue // an observation has no outcome (its handler answers "observed")
 		}
 		got := out["value"]
 		if _, known := outcomeRank[got]; !known {
-			return "", fmt.Errorf("%s: %s returned outcome %q", r.Name, o.Action, got)
+			return "", 0, fmt.Errorf("%s: %s returned outcome %q", r.Name, o.Action, got)
 		}
 		if worst == "" || outcomeRank[got] > outcomeRank[worst] {
 			worst = got
 		}
 	}
-	return worst, nil
+	return worst, attempts, nil
+}
+
+// subjects are the subjects an operation names (SubjectNamer; default its
+// Volume), each once.
+func (r Runner) subjects(o Op) []string {
+	sn, ok := r.Driver.(SubjectNamer)
+	if !ok {
+		return []string{o.Volume}
+	}
+	var out []string
+	for _, s := range sn.ObserveSubjects(o) {
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// observeOne records one observation of subject s.
+func (r Runner) observeOne(ctx context.Context, actx *tr.ActionContext, s string) error {
+	obs := r.Driver.Observe(s)
+	h, ok := r.Handlers[obs.Action]
+	if !ok {
+		return fmt.Errorf("%s: no handler for %s", r.Name, obs.Action)
+	}
+	_, err := h(ctx, actx, tr.Action{Action: obs.Action, Node: r.Node, Params: obs.Params})
+	return err
+}
+
+// observeSubjects records one observation of each subject o names: the
+// observation after a refusal.
+func (r Runner) observeSubjects(ctx context.Context, actx *tr.ActionContext, o Op) error {
+	for _, s := range r.subjects(o) {
+		if err := r.observeOne(ctx, actx, s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Step records one proposal and executes it: the gen_step record, two
@@ -99,32 +159,13 @@ func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 // a replay both run every step through here, so a replayed history has the
 // same shape as a recorded one.
 func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
-	subjects := []string{o.Volume}
-	if sn, ok := r.Driver.(SubjectNamer); ok {
-		subjects = nil
-		for _, s := range sn.ObserveSubjects(o) {
-			if s != "" && !slices.Contains(subjects, s) {
-				subjects = append(subjects, s)
-			}
-		}
-	}
-	observeOne := func(s string) error {
-		obs := r.Driver.Observe(s)
-		h, ok := r.Handlers[obs.Action]
-		if !ok {
-			return fmt.Errorf("%s: no handler for %s", r.Name, obs.Action)
-		}
-		_, err := h(ctx, actx, tr.Action{Action: obs.Action, Node: r.Node, Params: obs.Params})
-		return err
-	}
-	observe := func() error {
-		for _, s := range subjects {
-			if err := observeOne(s); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+	got, _, err := r.step(ctx, actx, o)
+	return got, err
+}
+
+// step is Step, also answering the attempts made (exec).
+func (r Runner) step(ctx context.Context, actx *tr.ActionContext, o Op) (string, int, error) {
+	subjects := r.subjects(o)
 	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
 	if o.Negative != "" {
 		step["negative"] = o.Negative
@@ -133,7 +174,7 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 		step["forced"] = o.Forced
 	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	// Two observations of each subject before a negative operation: with
 	// nothing between them they must be equal (the product's background work
@@ -143,24 +184,25 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 	if o.Negative != "" {
 		for _, s := range subjects {
 			for i := 0; i < 2; i++ {
-				if err := observeOne(s); err != nil {
-					return "", err
+				if err := r.observeOne(ctx, actx, s); err != nil {
+					return "", 0, err
 				}
 			}
 		}
 	}
-	outcome, err := r.Exec(ctx, actx, o)
+	outcome, attempts, err := r.exec(ctx, actx, o)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	// After a refusal (with or without a documented effect) or a negative:
-	// one observation of each subject.
+	// one observation of each subject. (A rerun's earlier refused attempts
+	// were each observed after by exec.)
 	if outcome == tr.OutcomeRefused || outcome == tr.OutcomeRefusedEffect || o.Negative != "" {
-		if err := observe(); err != nil {
-			return "", err
+		if err := r.observeSubjects(ctx, actx, o); err != nil {
+			return "", 0, err
 		}
 	}
-	return outcome, nil
+	return outcome, attempts, nil
 }
 
 // ParseConfig reads a run's generic parameters through get: seed, ops, pool,

@@ -32,7 +32,9 @@ package randomrun
 // gen_step record, observations and handlers as a run), so a replayed history
 // is itself replayable and judged by the same rule. It goes through every
 // step, and writes last an observe record "gen_replay":
-// {steps, differences: [{opno, action, volume, recorded, replayed}]}.
+// {steps, differences: [{opno, action, volume, recorded, replayed}]}, and
+// notes [{opno, action, volume, note}] when a step's rerun made another
+// number of attempts than recorded (a note, not a difference).
 
 import (
 	"bufio"
@@ -65,6 +67,7 @@ type Script struct {
 type ReplayStep struct {
 	Op       Op
 	Recorded string // "" until a complete record is seen
+	Attempts int    // the step's invokes that carry an attempt number
 }
 
 // replayDiff is one step whose replayed outcome differs from the recorded one.
@@ -100,9 +103,8 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	// A step's outcome is the worst of its operations', where the attempts
 	// of one request (its invokes carry "attempt") count once, as their
 	// last attempt: a rerun's earlier answers are history, not the
-	// operation's outcome.
-	parts := map[int][]string{}
-	slotOf := map[int]map[string]int{}
+	// operation's outcome (stepFold).
+	folds := map[int]*stepFold{}
 	attemptOf := map[uint64]string{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 16<<20)
@@ -186,27 +188,19 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
 				cur = -1
 			}
-			if _, ok := r.Args["attempt"]; ok {
-				attemptOf[r.Seq] = fmt.Sprintf("%s|%s|%v", r.Verb, r.Volume, r.Args["request"])
+			if cur >= 0 {
+				if key, ok := requestKey(rerunnerOf(d), steps[cur].Op.Action, r); ok {
+					attemptOf[r.Seq] = key
+					steps[cur].Attempts++
+				}
 			}
 		case tr.HistoryComplete:
 			if cur >= 0 {
+				if folds[cur] == nil {
+					folds[cur] = &stepFold{}
+				}
 				key, retried := attemptOf[r.Of]
-				if slotOf[cur] == nil {
-					slotOf[cur] = map[string]int{}
-				}
-				if i, seen := slotOf[cur][key]; retried && seen {
-					parts[cur][i] = r.Outcome
-				} else {
-					if retried {
-						slotOf[cur][key] = len(parts[cur])
-					}
-					parts[cur] = append(parts[cur], r.Outcome)
-				}
-				steps[cur].Recorded = ""
-				for _, o := range parts[cur] {
-					steps[cur].Recorded = worseOutcome(steps[cur].Recorded, o)
-				}
+				steps[cur].Recorded = folds[cur].complete(key, retried, r.Outcome)
 			}
 		case tr.HistoryEnd:
 			cur = -1
@@ -236,6 +230,79 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 		}
 	}
 	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills}, nil
+}
+
+// requestKey is the request an attempt record belongs to: its verb, volume
+// and the value of the arg the action declares as its request id
+// (Rerunner.RequestArg); without a Rerunner it is keyed by every arg
+// but "attempt" (the checkers' rule). ok is false for an invoke that carries
+// no attempt.
+func requestKey(rr Rerunner, action string, r tr.HistoryRecord) (string, bool) {
+	if _, ok := r.Args[AttemptParam]; !ok {
+		return "", false
+	}
+	arg := ""
+	if rr != nil {
+		arg = rr.RequestArg(action)
+	}
+	if arg != "" {
+		return fmt.Sprintf("%s|%s|%v", r.Verb, r.Volume, r.Args[arg]), true
+	}
+	rest := map[string]any{}
+	for k, v := range r.Args {
+		if k != AttemptParam {
+			rest[k] = v
+		}
+	}
+	b, _ := json.Marshal(rest) // map keys marshal sorted
+	return fmt.Sprintf("%s|%s|%s", r.Verb, r.Volume, b), true
+}
+
+// rerunnerOf is d's Rerunner, nil when it declares no rerun.
+func rerunnerOf(d Driver) Rerunner {
+	rr, _ := d.(Rerunner)
+	return rr
+}
+
+// stepFold folds a step's complete records into its recorded outcome: the
+// worst over its operations, where the attempts of one request count once,
+// as their LAST attempt.
+type stepFold struct {
+	parts []string
+	slot  map[string]int
+}
+
+// complete takes one complete record (key: its request when retried) and
+// returns the step's recorded outcome so far.
+func (f *stepFold) complete(key string, retried bool, outcome string) string {
+	if f.slot == nil {
+		f.slot = map[string]int{}
+	}
+	if i, seen := f.slot[key]; retried && seen {
+		f.parts[i] = outcome
+	} else {
+		if retried {
+			f.slot[key] = len(f.parts)
+		}
+		f.parts = append(f.parts, outcome)
+	}
+	got := ""
+	for _, o := range f.parts {
+		got = worseOutcome(got, o)
+	}
+	return got
+}
+
+// attemptNote adds to notes the step whose replay made another number of
+// attempts than its record (n): the count rests on the product's answers,
+// so it is a note, never a difference; the step is compared on its
+// requests' last outcomes.
+func attemptNote(notes []any, st ReplayStep, n int) []any {
+	if n == st.Attempts {
+		return notes
+	}
+	return append(notes, map[string]any{"opno": st.Op.No, "action": st.Op.Action, "volume": st.Op.Volume,
+		"note": fmt.Sprintf("attempts: recorded %d, replayed %d", st.Attempts, n)})
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.
@@ -339,15 +406,17 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		steps = steps[:len(steps)-1]
 	}
 	diffs := []replayDiff{}
+	var notes []any // a rerun's attempt count that differs: a note, not a difference
 	for i, st := range steps {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
 		o := st.Op
-		replayed, err := r.Step(ctx, actx, o)
+		replayed, n, err := r.step(ctx, actx, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
+		notes = attemptNote(notes, st, n)
 		if replayed != st.Recorded {
 			rec := st.Recorded
 			if rec == "" {
@@ -378,10 +447,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	}
 	for _, st := range tail {
 		o := st.Op
-		replayed, err := r.Step(ctx, actx, o)
+		replayed, n, err := r.step(ctx, actx, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: tail operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
+		notes = attemptNote(notes, st, n)
 		if replayed != st.Recorded {
 			rec := st.Recorded
 			if rec == "" {
@@ -400,7 +470,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	for _, d := range diffs {
 		dl = append(dl, map[string]any{"opno": d.OpNo, "action": d.Action, "volume": d.Volume, "recorded": d.Recorded, "replayed": d.Replayed})
 	}
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_replay", Result: map[string]any{"steps": len(steps), "differences": dl}}); err != nil {
+	res := map[string]any{"steps": len(steps), "differences": dl}
+	if notes != nil {
+		res["notes"] = notes
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_replay", Result: res}); err != nil {
 		return nil, err
 	}
 	if len(diffs) > 0 {

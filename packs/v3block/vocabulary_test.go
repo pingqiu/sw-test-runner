@@ -22,8 +22,10 @@ package v3block
 // AT STAGE S, what is written into the history record's result at that
 // stage (package declared states the stages), never a decision.
 //
-// Pending, and kept as it is until it moves: the "retry" of the delete and
-// of the snapshot (to the driver, in a separate change).
+// Done: the "retry" of the delete and of the snapshot moved to the driver.
+// Its declaration stays here (which answer, how many, how often, the page
+// line), read by the driver (randomrun.Attempts); the executor runs one
+// attempt per call and never loops.
 
 import (
 	"encoding/json"
@@ -72,7 +74,7 @@ var vocabulary = map[string][]string{
 	".actions[].record.args.*": typed,
 	".actions[].plus_param":    {"name", "default"},
 	".actions[].derived.*":     {"kind", "from", "error", "map"},
-	// Pending: moves to the driver after the rc.2 pin.
+	// Done: the driver re-issues (randomrun.Attempts) and reads this.
 	".actions[].retry": {"while_code", "while_message_contains", "answers", "max_attempts", "every_seconds", "within_param",
 		"request_arg", "page_cite", "expected_refusal", "note"},
 	".actions[].retry.answers[]":        {"code", "message_contains"},
@@ -273,4 +275,64 @@ func mustJSON(t *testing.T, s string) any {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// placementVocabulary is the closed vocabulary of checks.json's placement
+// rows (declared.Placement): the key "placement", each row's keys, the one
+// "by", the four cases and the four outcomes.
+var placementVocabulary = map[string][]string{
+	".placement[]":          {"verb", "by", "field", "arg", "outcomes", "cite", "what"},
+	".placement[].by":       {declared.PlaceByListMember},
+	".placement[].outcomes": {"present_before", "others_lost", "present", "absent"},
+	".placement[].outcome":  declared.PlacementOutcomes,
+}
+
+// The placement table loads (one row: the snapshot, by list_member), its
+// keys are the vocabulary's, and a row outside it does not load (red
+// controls: another by, another outcome, a case missing or added, another
+// key).
+func TestPlacementVocabulary(t *testing.T) {
+	rows, err := declared.ParsePlacements(checksJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows["snapshot"] == nil || rows["snapshot"].By != declared.PlaceByListMember {
+		t.Fatalf("placement rows %+v", rows)
+	}
+	var d struct {
+		Placement []map[string]any `json:"placement"`
+	}
+	if err := json.Unmarshal(checksJSON, &d); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range d.Placement {
+		for k := range row {
+			if !contains(placementVocabulary[".placement[]"], k) {
+				t.Errorf("placement key %q is not in the vocabulary", k)
+			}
+		}
+		if !contains(placementVocabulary[".placement[].by"], fmt.Sprint(row["by"])) {
+			t.Errorf("placement by %v", row["by"])
+		}
+		for c, o := range row["outcomes"].(map[string]any) {
+			if !contains(placementVocabulary[".placement[].outcomes"], c) || !contains(placementVocabulary[".placement[].outcome"], fmt.Sprint(o)) {
+				t.Errorf("placement case %q -> %v", c, o)
+			}
+		}
+	}
+	for name, c := range map[string][2]string{
+		"another by":      {`"by": "list_member"`, `"by": "snapshot_names"`},
+		"another outcome": {`"absent": "did_not"`, `"absent": "maybe"`},
+		"a case missing":  {`, "absent": "did_not"`, ``},
+		"a case added":    {`"absent": "did_not"`, `"absent": "did_not", "gone": "third"`},
+		"another key":     {`"arg": "name",`, `"arg": "name", "when": "always",`},
+	} {
+		seeded := strings.Replace(string(checksJSON), c[0], c[1], 1)
+		if seeded == string(checksJSON) {
+			t.Fatalf("%s: the seed did not apply", name)
+		}
+		if _, err := declared.ParsePlacements([]byte(seeded)); err == nil {
+			t.Errorf("red control %s: loaded", name)
+		}
+	}
 }

@@ -279,6 +279,13 @@ var blockActions = func() *declared.Executor {
 }()
 
 func init() {
+	// The placement rows (product/checks.json placement): how the driver
+	// places a rerun's unknown, the same rows C6 reads.
+	p, err := declared.ParsePlacements(checksJSON)
+	if err != nil {
+		panic(err)
+	}
+	blockActions.Placements = p
 	// The run values: the guest connect the run selected (its label and its
 	// kernel options), from the description's guest section (set here: the
 	// guest configuration is read from the executor's description).

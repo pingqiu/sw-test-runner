@@ -135,6 +135,8 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 	// Every operation record follows its gen_step; a negative is preceded by two
 	// observations of each volume it names (C5's baseline pair; a restore or a
 	// release names its source and its target) and followed by one of each.
+	// An action whose unknown the driver can place (a snapshot) is preceded by
+	// one more observation of its volume: the "before" of its first attempt.
 	steps, refusals, pairs := 0, 0, 0
 	for i, r := range recs {
 		if r.Verb != "gen_step" {
@@ -144,6 +146,13 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 			steps++
 		}
 		next := recs[i+1]
+		placeable := blockActions.Placeable(fmt.Sprint(r.Result["action"]))
+		if placeable && r.Result["negative"] == nil {
+			if next.Verb != "observe" || next.Volume != r.Volume {
+				t.Fatalf("step %v: not observed before its first attempt: %+v", r.Result, next)
+			}
+			next = recs[i+2]
+		}
 		if r.Result["negative"] != nil {
 			subjects := []string{r.Volume}
 			if a := r.Result["action"]; a == "v3_op_restore" || a == "v3_op_release" {
@@ -160,6 +169,12 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 				}
 			}
 			refusals++
+			if placeable { // the driver's "before" of the first attempt
+				if o := recs[j]; o.Verb != "observe" || o.Volume != r.Volume {
+					t.Fatalf("negative step %v: not observed before its first attempt: %+v", r.Result, o)
+				}
+				j++
+			}
 			// invoke, complete(refused), then the observations after it
 			if recs[j].Kind != tr.HistoryInvoke || recs[j+1].Outcome != tr.OutcomeRefused {
 				t.Fatalf("negative step %v: %+v %+v", r.Result, recs[j], recs[j+1])

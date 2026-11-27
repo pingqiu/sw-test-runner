@@ -11,9 +11,15 @@ the example.
 
 A rerun is never folded: each attempt is its own invoke and complete, its
 args carrying the request and "attempt": n, and a request's outcome is its
-LAST attempt's (superseded()). C0, C5, C6 and C7 judge a request by its last
-attempt; an earlier refused attempt counts under no C5 limit (it is still
-judged by the whole-state rule when a clean observation pair allows).
+LAST attempt's (superseded()). C0 and C7 judge a request by its last
+attempt. C6 places EVERY unknown attempt, a replaced one too: the driver
+re-issues an unknown only after observing the subject and placing the
+attempt (it did not take effect), and that observation, right after the
+attempt, places it here. C5 judges EVERY refused attempt under its limit, like any refusal:
+the driver observes the subject after each refused attempt it re-issues, so
+that observation is the "after" of attempt n and the "before" of attempt
+n+1, and a refused attempt that changed the observed state fails C5 even
+when the request's last attempt is ok.
 
 Each checker returns PASS, FAIL or UNKNOWN with its findings, and "judged":
 the number of items it actually judged (C0 operations with a known outcome,
@@ -27,7 +33,12 @@ does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
 
-  C0  every invoke has its complete; no outcome is unknown; a refusal
+  C0  every invoke has its complete; no outcome stays UNRESOLVED: an
+      unknown completion passes only when C6's resolution of it (one
+      function, resolve_unknown, through the product's placement: for a
+      snapshot the checks.json placement row) places it (took effect or did
+      not) or a settled record resolves it; an unknown left unresolved, in a
+      third state, unsettled, or of a verb with no rule fails; a refusal
       (refused or refused_effect) only
       where its own step declared it (args.expect = refused), never by verb;
       a declared refusal answered ok is a finding (half of the spec's C6);
@@ -70,6 +81,12 @@ code is 0 only when every checker passes.
       with refusals but no such pair.
       Each refusal belongs to a LIMIT: the generator's gen_step names the
       limit a negative operation probes; other refusals are "ordinary <verb>".
+      Every refused attempt of a rerun request is a refusal of its limit
+      (a refusal a later attempt replaced is still judged and counted).
+      RERUN_GUARD: an observe record "rerun_guard" {action, attempt,
+      elapsed_ms} says the wall-clock guard, not the declared count, ended a
+      request's attempts; the limit that request probed (its latest invoke on
+      the volume before the record) is then UNKNOWN, whatever was judged.
       The findings report judged / refusals per limit. FAIL if a judged
       refusal shows a different state; UNKNOWN if a limit that occurred has
       no judged refusal; PASS only if every limit that occurred was judged at
@@ -388,12 +405,21 @@ def verdict(findings, unknown=False, judged=0):
 
 def c0(recs):
     """A refusal is expected only where its own invocation declares it
-    (args.expect == "refused", one step of the scenario), never by verb."""
-    f, judged = [], 0   # judged: operations (requests, by their last attempt) with a known outcome checked
-    if not operations(recs):
+    (args.expect == "refused", one step of the scenario), never by verb.
+    No outcome stays UNRESOLVED: an unknown completion that C6's resolution
+    resolves (resolve_unknown, the same function: placed took effect or
+    did not, or settled) passes; one unresolved, in a third state,
+    unsettled, or of a verb with no rule fails."""
+    f, judged = [], 0   # judged: operations (requests, by their last attempt) with a known or resolved outcome checked
+    ops_ = operations(recs)
+    if not ops_:
         return verdict(['no operation in the history: nothing was exercised'])
     earlier = superseded(recs)
-    for inv, comp in operations(recs):
+    points = healthy_points(recs)
+    # C6 places nothing where it does not judge (an unknown environment, or
+    # overlapping operations): there no unknown is resolved for C0 either.
+    placing = unknown_environment(recs) is None and not overlaps(recs)
+    for inv, comp in ops_:
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
         if inv['seq'] in earlier:
             # An attempt a later attempt of its request replaced: the
@@ -415,7 +441,12 @@ def c0(recs):
         if comp is None:
             f.append('no completion: ' + name)
         elif comp['outcome'] == 'unknown':
-            f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
+            state = resolve_unknown(recs, ops_, inv, comp, points, earlier)[1] if placing else 'not placed: C6 does not judge this history'
+            if state == 'resolved':
+                judged += 1   # placed (took effect or did not) or settled: resolved, not unknown
+            else:
+                f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', ''))
+                         + ('' if state == 'unresolved' else ' (%s)' % state))
         elif comp['outcome'] in REFUSALS and not expected:
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'ok' and expected:
@@ -791,6 +822,24 @@ def baseline(recs):
     return checked, f
 
 
+def guard_trips(recs, limit):
+    """{limit: finding} for each rerun_guard record: the wall-clock guard
+    ended a request's attempts before its declared count, so the limit its
+    request probed (the latest invoke on the record's volume before it) is
+    not judged."""
+    out, last = {}, {}
+    for r in recs:
+        if r['kind'] == 'invoke':
+            last[r.get('volume')] = r
+        elif r['kind'] == 'observe' and r.get('verb') == 'rerun_guard':
+            res = r.get('result') or {}
+            inv = last.get(r.get('volume'))
+            lim = limit[inv['seq']] if inv is not None else 'rerun of %s' % res.get('action')
+            out.setdefault(lim, 'limit %s: the rerun guard ended %s on %s at attempt %s after %s ms (seq %d), before its declared count: not judged'
+                           % (lim, res.get('action'), r.get('volume'), res.get('attempt'), res.get('elapsed_ms'), r['seq']))
+    return out
+
+
 @unknown_on_overlap
 def c5(recs):
     """A refused operation changed nothing; a refused_effect changed exactly
@@ -799,18 +848,19 @@ def c5(recs):
     could move HEAD between the two observations, and the observations could
     no longer be laid to the refusal alone."""
     ops_ = operations(recs)
-    # A request's refusal is its LAST attempt's: an earlier attempt (a rerun
-    # through, say, the lease horizon) is no refusal of the request's limit.
+    # Every refused attempt is judged under its limit: an earlier attempt (a
+    # rerun through, say, the lease horizon) is a refusal like any other,
+    # between the driver's observation before it and after it. Only the
+    # "negative not refused" rule reads a request's LAST attempt.
     earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
-    if not [1 for inv, _ in refusals if inv['seq'] not in earlier]:
-        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']
-                + (['%d refused attempt(s) a later attempt of the same request replaced: no refusal of any limit' % len(refusals)] if refusals else [])}
+    if not refusals:
+        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
-    per = {}   # limit -> [refusals, judged], last attempts only
-    attempts_judged = 0   # earlier attempts judged by the whole-state rule, under no limit
+    per = {}   # limit -> [refusals, judged], every refused attempt
+    attempts_judged = 0   # of those, attempts a later attempt of the same request replaced
     for inv, comp in ops_:
         if inv['seq'] in earlier:
             continue   # the request's answer is its last attempt's
@@ -822,11 +872,11 @@ def c5(recs):
     for inv, comp in refusals:
         vol = inv.get('volume')
         last = inv['seq'] not in earlier
-        lim = limit[inv['seq']] if last else '%s, attempt %s replaced by a later attempt (counted under no limit)' % (
-            limit[inv['seq']], (inv.get('args') or {}).get('attempt'))
-        if last:
-            per.setdefault(lim, [0, 0])[0] += 1
+        lim = limit[inv['seq']]
+        per.setdefault(lim, [0, 0])[0] += 1
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], vol or '(no volume)')
+        if not last:
+            name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
         if not vol:
             notes.append('not judged: %s: an operation on no volume' % name)
             continue
@@ -882,9 +932,8 @@ def c5(recs):
                 notes.append('not judged: %s: observation seq %d cannot show its effect: %s' % (name, after['seq'], '; '.join(cannot)))
                 continue
         gaps.update(missing)
-        if last:
-            per[lim][1] += 1
-        else:
+        per[lim][1] += 1
+        if not last:
             attempts_judged += 1
         f += found
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
@@ -892,17 +941,21 @@ def c5(recs):
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
     replaced = sum(1 for inv, _ in refusals if inv['seq'] in earlier)
     if replaced:
-        notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged by the whole-state rule), counted under no limit'
+        notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged), each counted under its limit'
                      % (replaced, attempts_judged))
-    judged = sum(j for _, j in per.values()) + attempts_judged   # judged: refusals judged (last attempts, and earlier ones a pair allowed)
+    judged = sum(j for _, j in per.values())   # judged: refused attempts judged
+    guarded = guard_trips(recs, limit)
+    report += [guarded[lim] for lim in sorted(guarded)]
     checked, bf = baseline(recs)
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:
         return {'verdict': 'FAIL', 'judged': judged, 'findings': f + report + notes}
     unjudged = [lim for lim, (n, j) in sorted(per.items()) if not j]
-    if unjudged:
-        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] + report + notes}
+    if unjudged or guarded:
+        first = ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] if unjudged else []
+        first += ['limit(s) a rerun guard left not judged: %s' % ', '.join(sorted(guarded))] if guarded else []
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': first + report + notes}
     return {'verdict': 'PASS', 'judged': judged, 'findings': report + notes}
 
 
@@ -1352,17 +1405,82 @@ def _settle(recs, ops_, inv, comp):
     return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
 
 
+def resolve_unknown(recs, ops_, inv, comp, points, earlier):
+    """The resolution of one unknown operation: the ONE function C6 and C0
+    both call, so they cannot disagree. A lifecycle verb (NEEDS_SETTLED) by
+    its settled record; a write by reading its block; a verb the product
+    places by status (PLACED_BY_OBSERVATION) by the observation after it
+    (the one right after it for an attempt a later attempt replaced; else
+    the first after the next healthy point, or after it at the end) against
+    the one before it where the verb needs one, through the product
+    reader's place_by_status (for a snapshot, the checks.json placement row
+    it reads). Returns (name, state, findings, notes, resolved): state is
+    'resolved' (it took effect or it did not, or it settled), 'third',
+    'unresolved', 'unsettled' or 'unruled' (no rule for its verb); resolved
+    the count of resolutions (0 or 1)."""
+    name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+    replaced = inv['seq'] in earlier
+    if replaced:
+        name += ' (attempt %s, replaced by a later attempt)' % (inv.get('args') or {}).get('attempt')
+    notes = []
+    settled_ok = False
+    if inv['verb'] in PRODUCT.NEEDS_SETTLED:
+        # An unknown lifecycle operation is resolved by the settled record;
+        # a verb with its own placement rule is still checked by it below
+        # for a third state.
+        how, why = _settle(recs, ops_, inv, comp)
+        if how == 'fail':
+            return name, 'unsettled', ['unsettled: %s: %s' % (name, why)], notes, 0
+        if how == 'resolved':
+            settled_ok = True
+            if inv['verb'] not in PLACED_BY_OBSERVATION:
+                return name, 'resolved', [], notes, 1
+        else:
+            notes.append('not settled: %s: %s; placed by its own rule' % (name, why))
+    if inv['verb'] not in PLACED_BY_OBSERVATION:
+        return name, 'unruled', [], notes, 0
+    done = inv['seq'] if comp is None else comp['seq']
+    due = None if replaced else next((p for p in points if p > done), None)   # a replaced attempt: the observation right after it
+    after = done if due is None else due
+    at = ('its re-issue' if replaced else 'the end') if due is None else 'healthy point seq %d' % due
+    if inv['verb'] == 'write':
+        how, why = _place_write(recs, inv, done, after)
+    else:
+        obs = _observation(recs, inv['volume'], after)
+        base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] in PRODUCT.NEEDS_BASELINE else None
+        if obs is None:
+            how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
+        elif inv['verb'] in PRODUCT.NEEDS_BASELINE and base is None:
+            how, why = None, 'no clean observation of %s before it' % inv['volume']
+        elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
+            ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
+            how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
+        else:
+            how, why = PRODUCT.place_by_status(inv, obs, base)
+    if how is None:
+        if settled_ok:   # the settled record already resolved it
+            return name, 'resolved', [], notes, 1
+        return name, 'unresolved', ['unknown not resolved: %s (due at %s): %s' % (name, at, why)], notes, 0
+    if how == 'third':
+        return name, 'third', ['unknown in a third state: %s (due at %s): %s' % (name, at, why)], notes, (1 if settled_ok else 0)
+    if not settled_ok and inv['verb'] in PRODUCT.NOTED:
+        notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
+    return name, 'resolved', [], notes, 1
+
+
 @unknown_on_overlap
 def c6(recs):
     """Bounds and "none stays unknown" (see the module docstring)."""
     f, notes, unruled, resolved = [], [], [], 0
     ops_ = operations(recs)
     healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
-    # An unknown resolves per request, by its last attempt: an earlier attempt
-    # a later one replaced is not an unknown of its own.
+    # Every unknown attempt is placed, an earlier one a later attempt of its
+    # request replaced too: the driver re-issues an unknown only after it
+    # observed the subject and placed the attempt (did not take effect), so
+    # that observation, right after it, places it here by the same rule.
     earlier = superseded(recs)
     unknowns = [(inv, comp) for inv, comp in ops_ if inv['verb'] not in RUNNER_VERBS and inv['verb'] != 'read'
-                and inv['seq'] not in earlier and (comp is None or comp['outcome'] == 'unknown')]
+                and (comp is None or comp['outcome'] == 'unknown')]
     if not unknowns and not healthy:
         return {'verdict': 'FAIL', 'findings': ['no unknown outcome and no healthy point in the history: C6 not exercised']}
     # Latency, only against a stated bound and never under a fault.
@@ -1403,53 +1521,12 @@ def c6(recs):
             f.append('third state: %s at healthy seq %d: %s' % (vol, r['seq'], why))
     # None stays unknown.
     for inv, comp in unknowns:
-        name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
-        settled_ok = False
-        if inv['verb'] in PRODUCT.NEEDS_SETTLED:
-            # An unknown lifecycle operation is resolved by the settled record;
-            # a verb with its own placement rule is still checked by it below
-            # for a third state.
-            how, why = _settle(recs, ops_, inv, comp)
-            if how == 'fail':
-                f.append('unsettled: %s: %s' % (name, why))
-                continue
-            if how == 'resolved':
-                resolved += 1
-                settled_ok = True
-                if inv['verb'] not in PLACED_BY_OBSERVATION:
-                    continue
-            else:
-                notes.append('not settled: %s: %s; placed by its own rule' % (name, why))
-        if inv['verb'] not in PLACED_BY_OBSERVATION:
+        name, state, ff, nn, r = resolve_unknown(recs, ops_, inv, comp, points, earlier)
+        f += ff
+        notes += nn
+        resolved += r
+        if state == 'unruled':
             unruled.append(name)
-            continue
-        done = inv['seq'] if comp is None else comp['seq']
-        due = next((p for p in points if p > done), None)
-        after = done if due is None else due
-        at = 'the end' if due is None else 'healthy point seq %d' % due
-        if inv['verb'] == 'write':
-            how, why = _place_write(recs, inv, done, after)
-        else:
-            obs = _observation(recs, inv['volume'], after)
-            base = _baseline(recs, inv['volume'], inv['seq']) if inv['verb'] in PRODUCT.NEEDS_BASELINE else None
-            if obs is None:
-                how, why = None, 'no observation of %s after %s' % (inv['volume'], at)
-            elif inv['verb'] in PRODUCT.NEEDS_BASELINE and base is None:
-                how, why = None, 'no clean observation of %s before it' % inv['volume']
-            elif _volume_changed(recs, inv['volume'], done, obs['seq']) is not None:
-                ch = _volume_changed(recs, inv['volume'], done, obs['seq'])
-                how, why = None, 'seq %d %s changed %s before the observation seq %d' % (ch['seq'], ch['verb'], inv['volume'], obs['seq'])
-            else:
-                how, why = PRODUCT.place_by_status(inv, obs, base)
-        if how is None:
-            if not settled_ok:   # the settled record already resolved it
-                f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
-        elif how == 'third':
-            f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
-        elif not settled_ok:
-            resolved += 1
-            if inv['verb'] in PRODUCT.NOTED:
-                notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
     # Always reported, in this exact form, so a night can require n > 0 in
     # at least one run; a single run with n = 0 and its healthy points PASSes.
     count = 'unknowns resolved: %d' % resolved
