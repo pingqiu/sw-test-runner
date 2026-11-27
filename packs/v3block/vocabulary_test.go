@@ -146,7 +146,7 @@ var vocabulary = map[string][]string{
 		"confirm_every_ms", "not_confirmed", "remains", "remains_by_deadline"},
 	".device_resolvers.*.disconnect.command[]": word,
 	".device_resolvers.*.readback": {"command", "as_root", "unit_line", "value_line", "not_shown", "text_values",
-		"unreadable", "not_one"},
+		"unreadable", "not_one", "unit_key", "mismatch", "mismatch_item"},
 	".device_resolvers.*.readback.command[]": word,
 }
 

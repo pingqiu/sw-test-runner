@@ -23,7 +23,8 @@ const loopResolver = `{"loop": {"cite": "x.go:1",
    "confirm_within_seconds": 1, "confirm_every_ms": 10, "not_confirmed": "unconfirmed: {{why}}",
    "remains": "{{subsystem}} remains", "remains_by_deadline": "{{subsystem}} remains at the deadline"},
  "readback": {"command": ["looprb", "{{subsystem}}", "{{files}}"], "unit_line": "^unit (\\S+)$", "value_line": "^val (\\S+) (\\S+)$",
-   "not_shown": "none", "text_values": {"never": -1}, "unreadable": "looprb exit {{exit}}", "not_one": "{{count}} units of {{subsystem}}"}}}`
+   "not_shown": "none", "text_values": {"never": -1}, "unreadable": "looprb exit {{exit}}", "not_one": "{{count}} units of {{subsystem}}",
+   "unit_key": "unit", "mismatch": "loop: {{mismatches}}", "mismatch_item": "{{option}} is {{shown|q}}, not {{declared}}"}}}`
 
 func loopExecutor(t *testing.T) *Executor {
 	t.Helper()
@@ -154,15 +155,15 @@ func TestReadbackIsTheResolvers(t *testing.T) {
 	if v != tr.OutcomeOK || !strings.Contains(strings.Join(n.calls, "\n"), "looprb s1 'o_file p_file'") {
 		t.Fatalf("green: %v %v, calls %q", v, res, n.calls)
 	}
-	if eff, _ := res["eff"].(map[string]any); eff == nil || eff["ctrl"] != "u7" {
+	if eff, _ := res["eff"].(map[string]any); eff == nil || eff["unit"] != "u7" {
 		t.Fatalf("green: the read is not recorded: %v", res)
 	}
 	for name, c := range map[string]struct {
 		a    answer
 		want string
 	}{
-		"another value":     {answer{out: "unit u7\nval o_file 2\nval p_file never\n"}, `o declared 1, the kernel shows "2"`},
-		"a value not shown": {answer{out: "unit u7\nval o_file 1\nval p_file none\n"}, `p declared -1, the kernel shows ""`},
+		"another value":     {answer{out: "unit u7\nval o_file 2\nval p_file never\n"}, `loop: o is "2", not 1`},
+		"a value not shown": {answer{out: "unit u7\nval o_file 1\nval p_file none\n"}, `loop: p is "", not -1`},
 		"the command fails": {answer{code: 4}, "looprb exit 4"},
 	} {
 		v, res, _ := start(c.a)

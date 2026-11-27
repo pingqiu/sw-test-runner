@@ -3,10 +3,11 @@ package declared
 // The "device_readback" probe: after a connect, the unit's EFFECTIVE
 // values read back by the step's device resolver (its readback, resolver.go;
 // the probe's Files: option -> the resolver's file name), recorded in the
-// result field Into,
-// and compared with the options the connect was given (Expect, a template
-// of ",key=value..." as the connect's options). A declared option the
-// kernel does not hold, or cannot show, ends the step unknown; with FailRun
+// result field Into (the unit under the resolver's UnitKey), and compared
+// with the options the connect was given (Expect, a template of
+// ",key=value..." as the connect's options). A declared option the unit
+// does not hold, or cannot show, ends the step unknown with the resolver's
+// Mismatch text (one MismatchItem per option); with FailRun
 // the action also fails the run (a runner error after its record), so no
 // operation after it counts. The run's first read-back also writes one
 // observe record RecordVerb: RecordFields (templates), the declared and the
@@ -48,10 +49,15 @@ func parseOptions(s string) (map[string]int, error) {
 }
 
 func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[string]any) (string, string, bool) {
-	nqn, err := s.expand(pr.Subsystem)
+	subsystem, err := s.expand(pr.Subsystem)
 	if err != nil {
 		return tr.OutcomeUnknown, err.Error(), false
 	}
+	r, err := x.resolver(pr.Resolver)
+	if err != nil || r.Readback == nil {
+		return tr.OutcomeUnknown, fmt.Sprintf("device resolver %q declares no readback", pr.Resolver), false
+	}
+	rb := r.Readback
 	expectS, err := s.expand(pr.Expect)
 	if err != nil {
 		return tr.OutcomeUnknown, err.Error(), false
@@ -69,18 +75,14 @@ func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[st
 	for _, o := range opts {
 		files = append(files, pr.Files[o])
 	}
-	var textValues map[string]int
-	if r, err := x.resolver(pr.Resolver); err == nil && r.Readback != nil {
-		textValues = r.Readback.TextValues
-	}
-	ctrl, byFile, why := x.DeviceReadback(ctx, s.node, pr.Resolver, nqn, files)
+	unit, byFile, why := x.DeviceReadback(ctx, s.node, pr.Resolver, subsystem, files)
 	eff := map[string]string{}
 	for _, o := range opts {
 		if v, ok := byFile[pr.Files[o]]; ok {
 			eff[o] = v
 		}
 	}
-	read := map[string]any{"ctrl": ctrl, "values": eff}
+	read := map[string]any{rb.UnitKey: unit, "values": eff}
 	if why != "" {
 		read["error"] = why
 	}
@@ -91,11 +93,13 @@ func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[st
 	for _, o := range sortedKeysInt(declared) {
 		got, shown := eff[o]
 		n, err := strconv.Atoi(got)
-		if t, ok := textValues[got]; ok {
+		if t, ok := rb.TextValues[got]; ok {
 			n, err = t, nil
 		}
 		if !shown || err != nil || n != declared[o] {
-			bad = append(bad, fmt.Sprintf("%s declared %d, the kernel shows %q", o, declared[o], got))
+			is := resolverScope(ctx, s.node, map[string]string{"option": o, "declared": strconv.Itoa(declared[o]), "shown": got})
+			item, _ := is.expand(rb.MismatchItem)
+			bad = append(bad, item)
 		}
 	}
 	match := len(bad) == 0
@@ -114,7 +118,8 @@ func (x *Executor) readback(s *scope, ctx context.Context, pr *Probe, res map[st
 	if match {
 		return "", "", true
 	}
-	msg := "guest connect: " + strings.Join(bad, "; ")
+	ms := resolverScope(ctx, s.node, map[string]string{"mismatches": strings.Join(bad, "; "), "subsystem": subsystem})
+	msg, _ := ms.expand(rb.Mismatch)
 	if why != "" {
 		msg += " (" + why + ")"
 	}

@@ -32,7 +32,11 @@ package declared
 //     (two groups) gives a name's value, NotShown when the unit has none.
 //     Other lines are ignored. A failing command is Unreadable; a count of
 //     units other than one is NotOne ({{count}}), the values read kept.
-//     TextValues gives the integer some value texts stand for.
+//     TextValues gives the integer some value texts stand for. UnitKey is
+//     the key of the unit in the read recorded; a value other than the
+//     one declared is MismatchItem ({{option}}, {{declared}}, {{shown}}),
+//     and the step's failure Mismatch ({{mismatches}}: the items, "; "
+//     between them; {{subsystem}}).
 //
 // Every failure text is the resolver's ({{exit}}, {{stderr_first_line}},
 // {{line}}, {{why}}, {{count.<kind>}}, {{count}}, {{subsystem}}, {{options}}).
@@ -66,14 +70,17 @@ type Resolver struct {
 
 // ResolverReadback is a resolver's read of a unit's named values.
 type ResolverReadback struct {
-	Command    []Word         `json:"command"`
-	AsRoot     bool           `json:"as_root,omitempty"`
-	UnitLine   string         `json:"unit_line"`
-	ValueLine  string         `json:"value_line"`
-	NotShown   string         `json:"not_shown"`
-	TextValues map[string]int `json:"text_values,omitempty"`
-	Unreadable string         `json:"unreadable"`
-	NotOne     string         `json:"not_one"`
+	Command      []Word         `json:"command"`
+	AsRoot       bool           `json:"as_root,omitempty"`
+	UnitLine     string         `json:"unit_line"`
+	ValueLine    string         `json:"value_line"`
+	NotShown     string         `json:"not_shown"`
+	TextValues   map[string]int `json:"text_values,omitempty"`
+	Unreadable   string         `json:"unreadable"`
+	NotOne       string         `json:"not_one"`
+	UnitKey      string         `json:"unit_key"`
+	Mismatch     string         `json:"mismatch"`
+	MismatchItem string         `json:"mismatch_item"`
 }
 
 // ResolverScan is a resolver's look at a subsystem.
@@ -174,8 +181,8 @@ func (r *Resolver) check() error {
 	if rb := r.Readback; rb != nil {
 		u, eu := regexp.Compile(rb.UnitLine)
 		v, ev := regexp.Compile(rb.ValueLine)
-		if len(rb.Command) == 0 || eu != nil || ev != nil || u.NumSubexp() != 1 || v.NumSubexp() != 2 || rb.NotShown == "" || rb.Unreadable == "" || rb.NotOne == "" {
-			return errors.New("readback: command, unit_line (one group), value_line (two groups), not_shown and its texts")
+		if len(rb.Command) == 0 || eu != nil || ev != nil || u.NumSubexp() != 1 || v.NumSubexp() != 2 || rb.NotShown == "" || rb.Unreadable == "" || rb.NotOne == "" || rb.UnitKey == "" || rb.Mismatch == "" || rb.MismatchItem == "" {
+			return errors.New("readback: command, unit_line (one group), value_line (two groups), not_shown, unit_key and its texts")
 		}
 	}
 	return nil
