@@ -536,3 +536,60 @@ func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 		t.Fatalf("%v effect %v", r.ret, asRead)
 	}
 }
+
+// retry_horizon: a negative delete reruns through the lease-horizon refusal
+// before persistence (the sentinel) and records the first other answer;
+// every attempt is listed; it stops at admit_seconds; without the param a
+// negative is one call.
+func TestDeclaredDeleteRetryHorizon(t *testing.T) {
+	defer func(p func(time.Duration) time.Duration) { blockActions.Pause = p }(blockActions.Pause)
+	blockActions.Pause = func(time.Duration) time.Duration { return 5 * time.Millisecond }
+	horizon := chunkErr("not_admitted", "layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: workspace: deletion refused before persistence: workspace delete: live until T")
+	deps := chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")
+	neg := func(extra map[string]string) map[string]string {
+		p := map[string]string{"volume": "v1", "expect": "refused"}
+		for k, v := range extra {
+			p[k] = v
+		}
+		return p
+	}
+	attempts := func(r eqRun) []any {
+		a, _ := r.records[1].Result["attempts"].([]any)
+		return a
+	}
+	h := blockActions.Handler("v3_op_delete")
+
+	r := runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true"}), rules: []eqRule{{"volume-delete", []eqAnswer{horizon, horizon, deps}}}}, true)
+	if len(r.records) != 3 || len(r.calls) != 3 || len(attempts(r)) != 3 || r.records[1].Outcome != tr.OutcomeRefusedEffect ||
+		!strings.HasPrefix(attempts(r)[0].(string), "refused not_admitted:") || !strings.HasPrefix(attempts(r)[2].(string), "refused_effect snapshot_has_dependents:") {
+		t.Fatalf("horizon twice then dependents: %d calls, records %+v", len(r.calls), r.records)
+	}
+
+	start := time.Now()
+	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true", "admit_seconds": "1"}), rules: []eqRule{{"volume-delete", []eqAnswer{horizon}}}}, true)
+	if len(r.calls) < 2 || r.records[1].Outcome != tr.OutcomeRefused || len(attempts(r)) != len(r.calls) || time.Since(start) > 10*time.Second {
+		t.Fatalf("horizon until admit_seconds: %d calls, records %+v", len(r.calls), r.records)
+	}
+	if d, _ := r.records[1].Result["detail"].(string); !strings.Contains(d, "workspace: deletion refused before persistence") {
+		t.Fatalf("the horizon refusal is not the one recorded: %q", d)
+	}
+
+	for _, p := range []map[string]string{neg(nil), neg(map[string]string{"retry_horizon": "false"})} {
+		r = runEq(t, h, eqCase{params: p, rules: []eqRule{{"volume-delete", []eqAnswer{horizon, deps}}}}, true)
+		if len(r.calls) != 1 || r.records[1].Outcome != tr.OutcomeRefused {
+			t.Fatalf("without retry_horizon (%v): %d calls, %+v", p, len(r.calls), r.records)
+		}
+	}
+	// A negative with retry_horizon does not rerun through a not_admitted
+	// that is not the horizon (after the reservation committed).
+	after := chunkErr("not_admitted", "layout: a holder is acting on the volume: live until T")
+	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "true"}), rules: []eqRule{{"volume-delete", []eqAnswer{after, deps}}}}, true)
+	if len(r.calls) != 1 || r.records[1].Outcome != tr.OutcomeUnknown {
+		t.Fatalf("other not_admitted: %d calls, %+v", len(r.calls), r.records)
+	}
+	// A bad value is a runner error, recording nothing.
+	r = runEq(t, h, eqCase{params: neg(map[string]string{"retry_horizon": "maybe"}), rules: []eqRule{{"volume-delete", []eqAnswer{deps}}}}, true)
+	if r.err == nil || len(r.calls) != 0 {
+		t.Fatalf("retry_horizon=maybe: %v, %d calls", r.err, len(r.calls))
+	}
+}
