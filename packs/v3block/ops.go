@@ -191,7 +191,7 @@ func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
 }
 
-func fromChunk(op, stdout string, code int, result map[string]any) (string, map[string]any) {
+func fromChunk(op opPath, stdout string, code int, result map[string]any) (string, map[string]any) {
 	r, d := chunkOutcome(op, stdout, code)
 	if result == nil {
 		result = map[string]any{}
@@ -824,7 +824,7 @@ func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string
 	}
 	res["sealed_gen"] = gen
 	out, errOut, code, err := e.workspace(ctx, node, v.Name, "revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-	if err != nil || wsOutcome(op, code) != tr.OutcomeOK {
+	if err != nil || wsOutcome(op, wsRevoke, code) != tr.OutcomeOK {
 		res["revoke_exit"] = code
 		return res, "revoke: " + firstLine(out+" "+errOut)
 	}
@@ -895,8 +895,8 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		}
 		res["exit"] = code
 		// Never refused: the hand-over above already sealed and revoked
-		// (wsRefusals). The exit is recorded for the reader.
-		if r := wsOutcome(wsMove, code); r != tr.OutcomeOK {
+		// (product/outcomes.json). The exit is recorded for the reader.
+		if r := wsOutcome(wsMove, wsMoveClean, code); r != tr.OutcomeOK {
 			res["detail"] = firstLine(out + " " + errOut)
 			return r, res
 		}
