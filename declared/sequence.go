@@ -58,7 +58,8 @@ import (
 // Sequence is a sequence action's steps and outcome rule.
 type Sequence struct {
 	// StepsOf begins the sequence with another sequence action's steps (a
-	// shared hand-over); their failure details get DetailPrefix.
+	// shared hand-over); their failure details get DetailPrefix. One level
+	// only: the action it names has no StepsOf of its own.
 	StepsOf     *StepsOf  `json:"steps_of,omitempty"`
 	Steps       []SeqStep `json:"steps"`
 	ChangesFrom string    `json:"changes_from"`
@@ -155,8 +156,11 @@ func (f *File) sequenceSteps(a *Action) ([]SeqStep, []string, error) {
 				inc = &f.Actions[i]
 			}
 		}
-		if inc == nil || inc.Sequence == nil || inc.Sequence.StepsOf != nil {
+		if inc == nil || inc.Sequence == nil {
 			return nil, nil, fmt.Errorf("steps_of %q is not a sequence action with steps of its own", so.Action)
+		}
+		if inc.Sequence.StepsOf != nil {
+			return nil, nil, fmt.Errorf("steps_of %q takes the steps of %q: steps_of is one level only", so.Action, inc.Sequence.StepsOf.Action)
 		}
 		for _, st := range inc.Sequence.Steps {
 			steps, prefix = append(steps, st), append(prefix, so.DetailPrefix)
