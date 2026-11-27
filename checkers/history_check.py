@@ -271,6 +271,10 @@ def read_history(lines):
         last_mono = mono
         if recs and recs[-1]['kind'] == 'end':
             raise Malformed('line %d: a record after the end record' % n)
+        # The writer omits an empty volume (a kill, a restart, a healthy
+        # record names none): it is the empty name, not a missing field.
+        if r['kind'] != 'end':
+            r.setdefault('volume', '')
         k = r['kind']
         if k == 'invoke':
             if not r.get('op') or not r.get('verb'):
