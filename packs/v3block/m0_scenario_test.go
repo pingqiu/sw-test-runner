@@ -179,17 +179,19 @@ func TestRecordInvokesBeforeAndCompletesAfter(t *testing.T) {
 	}
 }
 
-func TestParseLBAs(t *testing.T) {
-	v := &opVolume{Written: map[string]bool{"4095": true, "0": true, "2048": true}}
-	if got, _ := parseLBAs(v, "written"); fmt.Sprint(got) != "[0 2048 4095]" {
-		t.Errorf("written: %v", got)
+// "written" is every lba a write was attempted on, in numeric order (the
+// volume subject's field the declared write and read name as an alias); a
+// list is checked by the declared list param (declared/device_test.go).
+func TestWrittenLBAs(t *testing.T) {
+	v := &opVolume{Written: map[string]bool{"4095": true, "0": true, "2048": true, "300": true}}
+	s := &volumeSubject{v: v}
+	if got, err := s.Field(context.Background(), nil, "written"); err != nil || got != "0 300 2048 4095" {
+		t.Errorf("written: %q %v", got, err)
 	}
-	if got, err := parseLBAs(v, "7 9"); err != nil || fmt.Sprint(got) != "[7 9]" {
-		t.Errorf("list: %v %v", got, err)
+	if err := s.Set("written", "7"); err != nil || !v.Written["7"] {
+		t.Errorf("set: %v %v", v.Written, err)
 	}
-	for _, s := range []string{"", "x", "-1"} {
-		if _, err := parseLBAs(v, s); err == nil {
-			t.Errorf("%q accepted", s)
-		}
+	if got, _ := (&volumeSubject{v: &opVolume{}}).Field(context.Background(), nil, "written"); got != "" {
+		t.Errorf("none written: %q", got)
 	}
 }

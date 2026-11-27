@@ -62,6 +62,10 @@ type File struct {
 	// RunnerSetup names the registered actions that are runner setup, not
 	// product actions, and why.
 	RunnerSetup []Setup `json:"runner_setup,omitempty"`
+	// RunValues names the values a product's runner settings give the step
+	// kinds ({{run.<name>}}), each with why; the executor's Values supplies
+	// them, and a step it cannot supply them for does not run.
+	RunValues []RunValue `json:"run_values,omitempty"`
 	// Guest is the product's guest configuration, read by the product's
 	// own code; the executor does not interpret it.
 	Guest json.RawMessage `json:"guest,omitempty"`
@@ -96,6 +100,13 @@ type Exception struct {
 	DeclarableWith        string     `json:"declarable_with"`
 	RunnerDeadlineSeconds int        `json:"runner_deadline_seconds"`
 	PlusParam             *PlusParam `json:"plus_param,omitempty"`
+}
+
+// RunValue is a value of the product's runner settings and why a step
+// reads it.
+type RunValue struct {
+	Name string `json:"name"`
+	Why  string `json:"why"`
 }
 
 // Setup is a runner setup action and why it is not a product action.
@@ -156,17 +167,53 @@ type Action struct {
 	// Derived values, {{derived.<name>}} (observe.go).
 	Derived map[string]Derived `json:"derived,omitempty"`
 	Note    string             `json:"note,omitempty"`
+
+	// The step kinds (device.go, bounded.go): the operation's runner
+	// deadline, plus the int param PlusParam names (a wait the step sets).
+	RunnerDeadlineSeconds int        `json:"runner_deadline_seconds,omitempty"`
+	PlusParam             *PlusParam `json:"plus_param,omitempty"`
+	// Kind "device": Each names a list param (one operation per item),
+	// Input a runner-generated input, Device the lookup, IO the I/O.
+	Each   string        `json:"each,omitempty"`
+	Input  *Input        `json:"input,omitempty"`
+	Device *DeviceLookup `json:"device,omitempty"`
+	IO     *IO           `json:"io,omitempty"`
+	// OnInvokeSet updates a subject's field just before each invoke:
+	// "<subject param>.<field>" -> template.
+	OnInvokeSet map[string]string `json:"on_invoke_set,omitempty"`
+	// Kind "process" (process.go).
+	Process *ProcessStep `json:"process,omitempty"`
+	// OnOutcomeSet updates subjects' fields after the operation completed
+	// with that outcome: outcome -> "<subject param>.<field>" -> template.
+	OnOutcomeSet map[string]map[string]string `json:"on_outcome_set,omitempty"`
+	// Coded hands one case of the action to a Go handler the description
+	// lists as an exception.
+	Coded *Coded `json:"coded,omitempty"`
+	// Kind "sequence" (sequence.go).
+	Sequence *Sequence `json:"sequence,omitempty"`
 }
 
 // Param is one parameter of the step. Kind "subject" loads the subject it
 // names (its fields are then {{<param>.<field>}}); "int" parses an integer
-// (a bad or absent value is the default); otherwise a string.
+// (a bad or absent value is the default); "bool" true or false; "enum" one
+// of Values (absent: the default); "list" whitespace-separated items, each
+// matching ItemPattern, where a value that is a key of Aliases reads that
+// subject field instead (a list of the subject's own); otherwise a string,
+// which must match Pattern when one is declared. A value that breaks its
+// kind's rule is the runner's error: nothing is recorded.
 type Param struct {
 	Name     string `json:"name"`
 	Kind     string `json:"kind,omitempty"`
 	Vars     bool   `json:"vars,omitempty"` // absent from the params, read the run's var of that name
 	Required bool   `json:"required,omitempty"`
 	Default  string `json:"default,omitempty"`
+	Pattern  string `json:"pattern,omitempty"`
+	// enum
+	Values []string `json:"values,omitempty"`
+	// list
+	ItemPattern string            `json:"item_pattern,omitempty"`
+	Aliases     map[string]string `json:"aliases,omitempty"`
+	NonEmpty    bool              `json:"non_empty,omitempty"`
 }
 
 // Record is what the invocation records: the subject's name and the args.
@@ -175,10 +222,13 @@ type Record struct {
 	Args   map[string]Value `json:"args"`
 }
 
-// Value is a template; with Type "int" it is recorded as a number.
+// Value is a template; with Type "int" it is recorded as a number, with
+// "bool" as true or false. An Optional value is left out when it expands
+// to "" (or, for an int, to no int).
 type Value struct {
 	Template string
 	Type     string
+	Optional bool
 }
 
 func (v *Value) UnmarshalJSON(b []byte) error {
@@ -188,22 +238,29 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 	var o struct {
 		Template string `json:"template"`
 		Type     string `json:"type"`
+		Optional bool   `json:"optional"`
 	}
 	if err := strict(b, &o); err != nil {
 		return err
 	}
-	if o.Type != "int" {
-		return fmt.Errorf("value type %q (want int)", o.Type)
+	if o.Type != "int" && o.Type != "bool" && !(o.Type == "" && o.Optional) {
+		return fmt.Errorf("value type %q (want int or bool)", o.Type)
 	}
-	v.Template, v.Type = o.Template, o.Type
+	v.Template, v.Type, v.Optional = o.Template, o.Type, o.Optional
 	return nil
 }
 
 // Word is one word of a command: a template, or {"json": {...}}, an object
-// of templates written as one JSON word. Every word is shell quoted.
+// of templates written as one JSON word; every such word is shell quoted.
+// {"raw": "&&"} is shell text written as it is (an operator or a
+// redirection; it takes no template). {"when": cond, "words": [...]} is a
+// group of words used only when the condition holds.
 type Word struct {
-	Text string
-	JSON map[string]string
+	Text  string
+	JSON  map[string]string
+	Raw   string
+	When  *Cond
+	Words []Word
 }
 
 func (w *Word) UnmarshalJSON(b []byte) error {
@@ -211,15 +268,24 @@ func (w *Word) UnmarshalJSON(b []byte) error {
 		return json.Unmarshal(b, &w.Text)
 	}
 	var o struct {
-		JSON map[string]string `json:"json"`
+		JSON  map[string]string `json:"json"`
+		Raw   string            `json:"raw"`
+		When  *Cond             `json:"when"`
+		Words []Word            `json:"words"`
 	}
 	if err := strict(b, &o); err != nil {
 		return err
 	}
-	if len(o.JSON) == 0 {
-		return errors.New("a command word is a string or {\"json\": {...}}")
+	switch {
+	case len(o.JSON) > 0 && o.Raw == "" && o.When == nil && o.Words == nil:
+		w.JSON = o.JSON
+	case o.Raw != "" && o.JSON == nil && o.When == nil && o.Words == nil:
+		w.Raw = o.Raw
+	case o.When != nil && len(o.Words) > 0 && o.JSON == nil && o.Raw == "":
+		w.When, w.Words = o.When, o.Words
+	default:
+		return errors.New("a command word is a string, {\"json\": {...}}, {\"raw\": text} or {\"when\": cond, \"words\": [...]}")
 	}
-	w.JSON = o.JSON
 	return nil
 }
 
@@ -339,16 +405,26 @@ func Parse(b []byte) (*File, error) {
 	if f.Config.Client != "" && !keys[f.Config.Client] {
 		return nil, fmt.Errorf("actions: client key %q is not a config key", f.Config.Client)
 	}
+	run := map[string]bool{}
+	for _, r := range f.RunValues {
+		if r.Name == "" || strings.TrimSpace(r.Why) == "" {
+			return nil, fmt.Errorf("actions: run value %q needs its name and why", r.Name)
+		}
+		run["run."+r.Name] = true
+	}
 	seen := map[string]bool{}
 	for i := range f.Actions {
 		a := &f.Actions[i]
-		if err := a.check(keys); err != nil {
+		if err := a.check(keys, run); err != nil {
 			return nil, fmt.Errorf("actions: %s: %w", a.Action, err)
 		}
 		if seen[a.Action] {
 			return nil, fmt.Errorf("actions: %s declared twice", a.Action)
 		}
 		seen[a.Action] = true
+	}
+	if err := f.checkSequences(keys, run); err != nil {
+		return nil, err
 	}
 	if len(f.Actions) > 0 {
 		for _, n := range names(f.RunnerIODir) {
@@ -378,6 +454,17 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[x.Action] = true
 	}
+	for _, a := range f.Actions {
+		if c := a.Coded; c != nil {
+			found := false
+			for _, x := range f.Exceptions {
+				found = found || x.Action == c.Handler
+			}
+			if !found {
+				return nil, fmt.Errorf("actions: %s: coded handler %s is not an exception", a.Action, c.Handler)
+			}
+		}
+	}
 	for _, x := range f.RunnerSetup {
 		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
 			return nil, fmt.Errorf("actions: runner setup %q needs its action and why", x.Action)
@@ -390,29 +477,52 @@ func Parse(b []byte) (*File, error) {
 	return &f, nil
 }
 
-func (a *Action) check(keys map[string]bool) error {
+func (a *Action) check(keys, run map[string]bool) error {
 	if a.Action == "" || a.Verb == "" || (a.Op == "") != (a.Kind == "observe") {
 		return errors.New("action and verb are required, and an op exactly when it is not an observation")
 	}
 	if a.RunsOn != "step_node" {
 		return fmt.Errorf("runs_on %q (want step_node)", a.RunsOn)
 	}
-	if a.Kind != "" && a.Kind != "observe" {
+	stepKind := a.Kind == "device" || a.Kind == "process" || a.Kind == "sequence"
+	if a.Kind != "" && a.Kind != "observe" && !stepKind {
 		return fmt.Errorf("kind %q", a.Kind)
 	}
-	if len(a.Variants) == 0 && a.Kind != "observe" {
+	if len(a.Variants) == 0 && a.Kind == "" {
 		return errors.New("no variant")
 	}
-	plain, subjects, ints := map[string]bool{"variant": true}, map[string]bool{}, map[string]bool{}
+	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil ||
+		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil || a.Sequence != nil) {
+		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and coded belong to the step kinds")
+	}
+	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
+		return errors.New("process, on_outcome_set and coded belong to process actions")
+	}
+	for o := range a.OnOutcomeSet {
+		if o != tr.OutcomeOK && o != tr.OutcomeUnknown {
+			return fmt.Errorf("on_outcome_set %q: only ok and unknown change state (a refusal changes nothing)", o)
+		}
+	}
+	plain, subjects, ints, lists := map[string]bool{"variant": true}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for k := range keys {
 		plain["config."+k] = true
 	}
 	for k := range a.Derived {
 		plain["derived."+k] = true
 	}
+	if stepKind {
+		for k := range run {
+			plain[k] = true
+		}
+	}
 	for _, p := range a.Params {
 		switch p.Kind {
 		case "subject":
+			subjects[p.Name] = true
+		case "process":
+			if a.Kind != "process" {
+				return fmt.Errorf("param %s: a process param belongs to a process action", p.Name)
+			}
 			subjects[p.Name] = true
 		case "bool":
 			if p.Default != "" && p.Default != "true" && p.Default != "false" {
@@ -425,9 +535,29 @@ func (a *Action) check(keys map[string]bool) error {
 					return fmt.Errorf("param %s: default %q is not an int", p.Name, p.Default)
 				}
 			}
+		case "enum":
+			if len(p.Values) == 0 || (p.Default != "" && !contains(p.Values, p.Default)) {
+				return fmt.Errorf("param %s: an enum needs values, and its default among them", p.Name)
+			}
+		case "list":
+			lists[p.Name] = true
+			if _, err := regexp.Compile(p.ItemPattern); err != nil || p.ItemPattern == "" {
+				return fmt.Errorf("param %s: a list needs an item_pattern: %v", p.Name, err)
+			}
+			for k, f := range p.Aliases {
+				if i := strings.IndexByte(f, '.'); k == "" || i <= 0 || !subjects[f[:i]] {
+					return fmt.Errorf("param %s: alias %q -> %q is not a field of an earlier subject param", p.Name, k, f)
+				}
+			}
 		case "":
+			if _, err := regexp.Compile(p.Pattern); err != nil {
+				return fmt.Errorf("param %s: pattern: %w", p.Name, err)
+			}
 		default:
 			return fmt.Errorf("param %s: kind %q", p.Name, p.Kind)
+		}
+		if p.Kind != "" && p.Pattern != "" {
+			return fmt.Errorf("param %s: a pattern is for a string param", p.Name)
 		}
 		plain[p.Name] = true
 	}
@@ -452,8 +582,56 @@ func (a *Action) check(keys map[string]bool) error {
 	if a.Kind == "observe" {
 		return a.checkObserve(defined)
 	}
+	if stepKind {
+		if err := checkDerived(a.Derived, base); err != nil {
+			return err
+		}
+		for o, sets := range a.OnOutcomeSet {
+			for k, t := range sets {
+				if i := strings.IndexByte(k, '.'); i <= 0 || !subjects[k[:i]] {
+					return fmt.Errorf("on_outcome_set %s %q: not <subject>.<field>", o, k)
+				}
+				if err := base(t); err != nil {
+					return err
+				}
+			}
+		}
+		if c := a.Coded; c != nil {
+			if !plain[c.Param] || c.Handler == "" || strings.TrimSpace(c.Why) == "" {
+				return errors.New("coded: a param of the action, a handler and why")
+			}
+		}
+		if a.Kind == "sequence" {
+			if len(a.OnInvokeSet) != 0 || a.Coded != nil {
+				return errors.New("a sequence has no on_invoke_set and no coded case")
+			}
+			for _, v := range a.Record.Args {
+				if err := base(v.Template); err != nil {
+					return err
+				}
+			}
+			return nil // its steps are checked once every action is read (steps_of)
+		}
+		if a.Kind == "process" {
+			for k, t := range a.OnInvokeSet {
+				if i := strings.IndexByte(k, '.'); i <= 0 || !subjects[k[:i]] {
+					return fmt.Errorf("on_invoke_set %q: not <subject>.<field>", k)
+				}
+				if err := base(t); err != nil {
+					return err
+				}
+			}
+			for _, v := range a.Record.Args {
+				if err := base(v.Template); err != nil {
+					return err
+				}
+			}
+			return a.checkProcess(defined, subjects, ints)
+		}
+		return a.checkDevice(defined, subjects, lists)
+	}
 	if len(a.Derived) != 0 {
-		return errors.New("derived values serve observations only")
+		return errors.New("derived values serve observations and the step kinds only")
 	}
 	for _, v := range a.Record.Args {
 		if err := base(v.Template); err != nil {
@@ -473,12 +651,8 @@ func (a *Action) check(keys map[string]bool) error {
 		if len(v.Command) == 0 || strings.TrimSpace(v.Cite) == "" || v.RunnerDeadlineSeconds <= 0 {
 			return fmt.Errorf("%s: command, cite and a positive runner_deadline_seconds are required", at)
 		}
-		for _, w := range v.Command {
-			for _, t := range append([]string{w.Text}, mapValues(w.JSON)...) {
-				if err := base(t); err != nil {
-					return fmt.Errorf("%s: %w", at, err)
-				}
-			}
+		if err := checkWords(v.Command, base); err != nil {
+			return fmt.Errorf("%s: %w", at, err)
 		}
 		d := v.Decode
 		switch d.Kind {
@@ -571,6 +745,15 @@ func (a *Action) check(keys map[string]bool) error {
 	return nil
 }
 
+func contains(set []string, v string) bool {
+	for _, x := range set {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func mapValues(m map[string]string) []string {
 	var out []string
 	for _, v := range m {
@@ -595,6 +778,16 @@ type Executor struct {
 	Deadline func(declared time.Duration) time.Duration
 	// Poll is how often a detached command is polled (default 200ms).
 	Poll time.Duration
+	// Values supplies the description's run values (RunValues) for a step
+	// of a step kind; an error stops the step before anything is recorded.
+	Values func(actx *tr.ActionContext, act tr.Action) (map[string]string, error)
+	// OpDeadline, when set, replaces a step kind's runner deadline (tests).
+	OpDeadline func(declared time.Duration) time.Duration
+	// Process resolves a process param: the process's record as a subject,
+	// or why the runner knows no such process (the operation is refused).
+	Process func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node Runner, name string) (Subject, string)
+	// Coded is the product's Go handler an action's Coded names.
+	Coded func(name string) (tr.ActionHandlerFunc, bool)
 }
 
 // Handlers returns one handler per declared action, by its name.
@@ -626,6 +819,10 @@ type scope struct {
 	vals     map[string]string
 	subjects map[string]Subject
 	derived  map[string]Derived
+	params   map[string]string // the step's own params
+	// unresolved: process params the product could not resolve, and why.
+	unresolved map[string]string
+	procName   string
 }
 
 func (s *scope) get(n string) (string, error) {
@@ -673,28 +870,79 @@ func (s *scope) expand(t string) (string, error) {
 
 // command builds the shell command: every word expanded, then shell quoted.
 func (s *scope) command(words []Word) (string, error) {
-	out := make([]string, len(words))
-	for i, w := range words {
-		if w.JSON != nil {
+	out, err := s.words(words)
+	return strings.Join(out, " "), err
+}
+
+func (s *scope) words(words []Word) ([]string, error) {
+	var out []string
+	for _, w := range words {
+		switch {
+		case w.Raw != "":
+			out = append(out, w.Raw)
+		case w.When != nil:
+			hold, err := s.holds(w.When)
+			if err != nil {
+				return nil, err
+			}
+			if hold {
+				sub, err := s.words(w.Words)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, sub...)
+			}
+		case w.JSON != nil:
 			obj := map[string]string{}
 			for k, t := range w.JSON {
 				v, err := s.expand(t)
 				if err != nil {
-					return "", err
+					return nil, err
 				}
 				obj[k] = v
 			}
 			b, _ := json.Marshal(obj)
-			out[i] = ShellQuote(string(b))
-			continue
+			out = append(out, ShellQuote(string(b)))
+		default:
+			v, err := s.expand(w.Text)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ShellQuote(v))
 		}
-		v, err := s.expand(w.Text)
-		if err != nil {
-			return "", err
-		}
-		out[i] = ShellQuote(v)
 	}
-	return strings.Join(out, " "), nil
+	return out, nil
+}
+
+// argv expands words into a command line (each word one argument, not
+// quoted): a process's argv. A raw word has no place in an argv.
+func (s *scope) argv(words []Word) ([]string, error) {
+	var out []string
+	for _, w := range words {
+		switch {
+		case w.Raw != "" || w.JSON != nil:
+			return nil, errors.New("an argv word is a template or a group")
+		case w.When != nil:
+			hold, err := s.holds(w.When)
+			if err != nil {
+				return nil, err
+			}
+			if hold {
+				sub, err := s.argv(w.Words)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, sub...)
+			}
+		default:
+			v, err := s.expand(w.Text)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, v)
+		}
+	}
+	return out, nil
 }
 
 var varRef = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
@@ -733,6 +981,17 @@ func andList(ns []string) string {
 
 func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Action, a *Action) (map[string]string, error) {
 	name := a.Action
+	if c := a.Coded; c != nil && act.Params[c.Param] == c.Equals {
+		var h tr.ActionHandlerFunc
+		ok := false
+		if x.Coded != nil {
+			h, ok = x.Coded(c.Handler)
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: the product has no handler %s", name, c.Handler)
+		}
+		return h(ctx, actx, act)
+	}
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
 	}
@@ -740,7 +999,7 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}}
+	s := &scope{ctx: ctx, node: node, vals: map[string]string{}, subjects: map[string]Subject{}, params: act.Params}
 	expect := act.Params["expect"]
 	if expect != "" && expect != tr.OutcomeRefused {
 		return nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, expect, tr.OutcomeRefused)
@@ -786,10 +1045,61 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 				n = def
 			}
 			s.vals[p.Name] = strconv.Itoa(n)
+		case "process":
+			v := paramValue(act, actx, p)
+			s.vals[p.Name] = v
+			if x.Process == nil {
+				return nil, fmt.Errorf("%s: the product resolves no process", name)
+			}
+			pctx, cancel := context.WithTimeout(ctx, x.opDeadline(s, a))
+			sub, why := x.Process(pctx, actx, act, node, v)
+			cancel()
+			if why != "" {
+				if s.unresolved == nil {
+					s.unresolved = map[string]string{}
+				}
+				s.unresolved[p.Name] = why
+				continue
+			}
+			s.subjects[p.Name] = sub
+		case "enum":
+			v := paramValue(act, actx, p)
+			if v == "" {
+				v = p.Default
+			}
+			if !contains(p.Values, v) {
+				return nil, fmt.Errorf("%s: %s %q; want one of %s", name, p.Name, v, strings.Join(p.Values, ", "))
+			}
+			s.vals[p.Name] = v
+		case "list":
+			v := paramValue(act, actx, p)
+			alias, isAlias := p.Aliases[v]
+			if isAlias {
+				i := strings.IndexByte(alias, '.')
+				got, err := s.subjects[alias[:i]].Field(ctx, node, alias[i+1:])
+				if err != nil {
+					return nil, fmt.Errorf("%s: %s: %w", name, p.Name, err)
+				}
+				v = got
+			}
+			items := strings.Fields(v)
+			re := regexp.MustCompile(p.ItemPattern)
+			for _, it := range items {
+				if !re.MatchString(it) {
+					return nil, fmt.Errorf("%s: %s: item %q", name, p.Name, it)
+				}
+			}
+			if len(items) == 0 && (!isAlias || p.NonEmpty) {
+				return nil, fmt.Errorf("%s: %s are required (none given in %q)", name, p.Name, paramValue(act, actx, p))
+			}
+			s.vals[p.Name] = strings.Join(items, " ")
 		default:
 			v := paramValue(act, actx, p)
 			if v == "" && (p.Required || p.Kind == "subject") {
 				return nil, fmt.Errorf("%s: %s is required", name, p.Name)
+			}
+			if p.Pattern != "" && !regexp.MustCompile(p.Pattern).MatchString(v) {
+				return nil, fmt.Errorf("%s: %s %q does not match %s", name, p.Name, v, p.Pattern)
 			}
 			s.vals[p.Name] = v
 			if p.Kind == "subject" {
@@ -812,6 +1122,20 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		}
 		s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Volume: vol})
 		return x.observe(s, actx, a, vol)
+	}
+	if a.Kind == "device" || a.Kind == "process" || a.Kind == "sequence" {
+		if err := x.runValues(s, actx, act); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		s.derived = a.Derived
+		if a.Kind == "process" {
+			s.procName = a.Process.Name
+			return x.processStep(s, actx, act, a, expect)
+		}
+		if a.Kind == "sequence" {
+			return x.sequence(s, actx, act, a, expect)
+		}
+		return x.device(s, actx, act, a, expect)
 	}
 	var v *Variant
 	for i := range a.Variants {
