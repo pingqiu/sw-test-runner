@@ -10,6 +10,18 @@
 // about an outcome: how to find the node, how to read and update a subject
 // (the runner's own record of one volume, say), and its outcome table.
 // This package imports no product pack (the import guard checks it).
+//
+// Result keys. A key "result" or "result_<S>" is the RESULT AT STAGE S:
+// the fields written into the history record's result when the step
+// reaches that stage, and nothing else. The stages are: result (the stage
+// of its place: a decoded answer, an ok I/O, a sequence's start, a
+// sequence step that holds), result_ok (a decoded ok), result_unanswered (an
+// I/O that gave no answer), result_launched and result_ready (a process
+// launched, then ready), result_failure, result_not_run and
+// result_answered (a sequence step that failed, could not run, or
+// answered at all). No result key decides an outcome; each is read where
+// its stage is reached (Decode, device.go IO, process.go Process,
+// sequence.go SeqStep and Sequence).
 package declared
 
 import (

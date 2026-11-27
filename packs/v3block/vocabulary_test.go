@@ -18,6 +18,10 @@ package v3block
 // vocabulary; their values are walked. The guest section is the product's
 // own settings, read by the pack, not by the executor.
 //
+// The result keys ("result", "result_<S>") are allowed: each is the RESULT
+// AT STAGE S, what is written into the history record's result at that
+// stage (package declared states the stages), never a decision.
+//
 // Pending, and kept as it is until it moves: the "retry" of the delete and
 // of the snapshot (to the driver, in a separate change).
 
