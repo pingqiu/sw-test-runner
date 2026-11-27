@@ -238,6 +238,10 @@ func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, pr
 			res["argv_error"] = aerr.Error()
 		}
 		p.save(actx)
+		if p.vol != nil { // a kill reaching the volume: the recovery deadline counts from it
+			p.vol.Extra["killed_at"] = strconv.FormatInt(nowFn().UnixNano(), 10)
+			defer saveVolume(actx, p.vol)
+		}
 		if why := waitGone(ctx, node, p.PID, p.Start, bound); why != "" {
 			res["detail"] = why
 			return tr.OutcomeUnknown, res
@@ -378,7 +382,7 @@ func masterAnswers(ctx context.Context, node runner, e opEnv, vol string) bool {
 // (third_state: an UNSETTLED volume observation cannot place).
 func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node runner) (map[string]any, bool, error) {
 	down, notServing, holders := []string{}, []string{}, map[string]any{}
-	thirdState, servedNotHeld := []map[string]any{}, []string{}
+	thirdState, pending, servedNotHeld := []map[string]any{}, []map[string]any{}, []string{}
 	names := strings.Fields(actx.Vars[specOrderVar])
 	if p, why := resolveProc(ctx, actx, node, e, "blockmaster"); why != "" || !alive(ctx, node, p.PID, p.Start) {
 		down = append(down, "blockmaster")
@@ -392,7 +396,17 @@ func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node run
 		if v.Extra["intent"] == intentUnsettled {
 			state, ev, why := e.settle(ctx, node, v)
 			if state == "" {
-				thirdState = append(thirdState, map[string]any{"volume": n, "why": why})
+				// Neither consistent state: pending until the recovery
+				// deadline, the third state after it.
+				left, err := settleDeadline(v)
+				if err != nil {
+					return nil, false, err
+				}
+				if left > 0 {
+					pending = append(pending, map[string]any{"volume": n, "why": why, "deadline_in_s": left.Seconds()})
+				} else {
+					thirdState = append(thirdState, map[string]any{"volume": n, "why": why})
+				}
 			} else {
 				setIntent(v, state)
 				if state == intentNotHeld {
@@ -424,9 +438,9 @@ func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node run
 			holders[n] = liveHolder(ctx, node, v.Hosts[v.Cur].Status)
 		}
 	}
-	healthy := len(down) == 0 && answers && len(notServing) == 0 && len(thirdState) == 0 && len(servedNotHeld) == 0
+	healthy := len(down) == 0 && answers && len(notServing) == 0 && len(thirdState) == 0 && len(pending) == 0 && len(servedNotHeld) == 0
 	return map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders,
-		"third_state": thirdState, "served_not_held": servedNotHeld}, healthy, nil
+		"third_state": thirdState, "unsettled_pending": pending, "served_not_held": servedNotHeld}, healthy, nil
 }
 
 // liveHolder is the process that holds the volume's status listener now, read
@@ -569,6 +583,7 @@ func lifecycle(v *opVolume, target string) func(map[string]string, error) (map[s
 				setIntent(v, target)
 			case tr.OutcomeUnknown:
 				setIntent(v, intentUnsettled)
+				v.Extra["unsettled_at"] = strconv.FormatInt(nowFn().UnixNano(), 10) // its completion
 			}
 		}
 		return out, err
@@ -578,6 +593,64 @@ func lifecycle(v *opVolume, target string) func(map[string]string, error) (map[s
 // held: the volume is to be served, so its holder is the unit's to restart
 // and healthy demands that it serve.
 func held(v *opVolume) bool { return v.Extra["intent"] == intentHeld }
+
+// nowFn is the runner's clock for recovery deadlines (a test sets it).
+var nowFn = time.Now
+
+// recoveryTerms are the product's recovery terms (product/checks.json
+// recovery, each with its cite): regrant and start_wait.
+func recoveryTerms() (regrant, startWait time.Duration, err error) {
+	var c struct {
+		Recovery []struct {
+			Term    string  `json:"term"`
+			Seconds float64 `json:"seconds"`
+			Cite    string  `json:"cite"`
+		} `json:"recovery"`
+	}
+	if err := json.Unmarshal(checksJSON, &c); err != nil {
+		return 0, 0, err
+	}
+	for _, r := range c.Recovery {
+		d := time.Duration(r.Seconds * float64(time.Second))
+		if r.Cite == "" || d <= 0 {
+			continue
+		}
+		switch r.Term {
+		case "regrant":
+			regrant = d
+		case "start_wait":
+			startWait = d
+		}
+	}
+	if regrant == 0 || startWait == 0 {
+		return 0, 0, fmt.Errorf("product/checks.json states no cited recovery regrant and start_wait")
+	}
+	return regrant, startWait, nil
+}
+
+// settleDeadline is how long an UNSETTLED volume may stay in neither
+// consistent state: until its lifecycle operation's completion + regrant +
+// start_wait, or, when a kill of its holder completed before that,
+// max(kill completion + regrant, operation completion) + start_wait (the
+// checker's C6 formula). Negative or zero: past the deadline.
+func settleDeadline(v *opVolume) (time.Duration, error) {
+	regrant, startWait, err := recoveryTerms()
+	if err != nil {
+		return 0, err
+	}
+	end, err := strconv.ParseInt(v.Extra["unsettled_at"], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("volume %s is unsettled with no completion time", v.Name)
+	}
+	base := time.Unix(0, end).Add(regrant)
+	if k, kerr := strconv.ParseInt(v.Extra["killed_at"], 10, 64); kerr == nil && k <= end {
+		base = time.Unix(0, k).Add(regrant)
+		if e := time.Unix(0, end); e.After(base) {
+			base = e
+		}
+	}
+	return base.Add(startWait).Sub(nowFn()), nil
+}
 
 // wsLeaseState reads `ops workspace show`: the lease state ("granted",
 // "revoking", "expired", "none") and the recorded ACK ("none" or the ack).

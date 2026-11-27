@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -980,6 +981,8 @@ func unsettledSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {
 	actx, p, e := faultSetup(t)
 	v := vol1(t, actx)
 	v.Extra["intent"] = intentUnsettled
+	// Completed long ago: past its recovery deadline.
+	v.Extra["unsettled_at"] = strconv.FormatInt(time.Now().Add(-time.Hour).UnixNano(), 10)
 	saveVolume(actx, v)
 	return actx, p, e
 }
@@ -1115,5 +1118,71 @@ func TestLoopRunHeaderSaysUnitEmulated(t *testing.T) {
 		if h.Verb != "loop_header" || has != (faults != "") || (has && (u["emulated"] != true || u["note"] != unitNotEvidence)) {
 			t.Errorf("faults %q: header %+v", faults, h.Result)
 		}
+	}
+}
+
+// An UNSETTLED volume in neither consistent state is pending until its
+// recovery deadline (product/checks.json: completion + regrant 65 s +
+// start_wait 30 s; with a kill of its holder before, max(kill + regrant,
+// completion) + start_wait), the third state only after it. Red control: a
+// third state reported before the deadline.
+func TestUnsettledIsPendingUntilTheRecoveryDeadline(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	old := nowFn
+	nowFn = func() time.Time { return now }
+	t.Cleanup(func() { nowFn = old })
+	ago := func(s int) string { return strconv.FormatInt(now.Add(-time.Duration(s)*time.Second).UnixNano(), 10) }
+	for name, c := range map[string]struct {
+		end, kill string
+		pending   bool
+		left      float64
+	}{
+		"gone, lease granted, +10 s: pending":           {ago(10), "", true, 85},
+		"gone, lease granted, +100 s: third state":      {ago(100), "", false, 0},
+		"a kill 100 s before, op at -50 s: third state": {ago(50), ago(100), false, 0},
+		"a kill 20 s before, op at -10 s: pending":      {ago(10), ago(20), true, 75},
+		"a kill after the op does not count":            {ago(10), ago(5), true, 85},
+	} {
+		t.Run(name, func(t *testing.T) {
+			actx, p, e := faultSetup(t)
+			v := vol1(t, actx)
+			v.Extra["intent"], v.Extra["unsettled_at"] = intentUnsettled, c.end
+			if c.kill != "" {
+				v.Extra["killed_at"] = c.kill
+			}
+			saveVolume(actx, v)
+			f := healthNode()
+			f.rules = append([]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+				{match: "ops workspace show", answers: []fakeAnswer{wsShow("granted", "none")}}}, f.rules...)
+			if out, err := e.healthy(context.Background(), actx, f, 0); err != nil || out["healthy"] != "false" {
+				t.Fatalf("%v %v", out, err)
+			}
+			r := healthyRecord(t, actx, p)
+			third, _ := r["third_state"].([]any)
+			pend, _ := r["unsettled_pending"].([]any)
+			if c.pending {
+				if len(third) != 0 || len(pend) != 1 {
+					t.Fatalf("not pending: %v", r)
+				}
+				w := pend[0].(map[string]any)
+				if w["volume"] != "v1" || w["why"] == "" || w["deadline_in_s"] != c.left {
+					t.Errorf("pending %v, want deadline_in_s %v", w, c.left)
+				}
+			} else if len(third) != 1 || len(pend) != 0 {
+				t.Errorf("not third state: %v", r)
+			}
+		})
+	}
+	// A kill of the holder records when it completed.
+	actx, _, e := faultSetup(t)
+	f := (&fakeNode{}).on("kill -KILL", ok("sent "+cmdline(holderArgv))).on("/proc/4242", ok("absent\n"))
+	if out, _ := e.kill(context.Background(), actx, f, "blockvolume:0", time.Second); out["value"] != tr.OutcomeOK || vol1(t, actx).Extra["killed_at"] != strconv.FormatInt(now.UnixNano(), 10) {
+		t.Errorf("kill completion not recorded: %v %+v", out, vol1(t, actx).Extra)
+	}
+	// An unknown lifecycle answer records its completion.
+	v := &opVolume{Extra: map[string]string{}}
+	_, _ = lifecycle(v, intentNotHeld)(map[string]string{"value": tr.OutcomeUnknown}, nil)
+	if v.Extra["unsettled_at"] != strconv.FormatInt(now.UnixNano(), 10) {
+		t.Errorf("completion not recorded: %+v", v.Extra)
 	}
 }
