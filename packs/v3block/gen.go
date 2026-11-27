@@ -118,6 +118,11 @@ var (
 	limReleaseLive     = genLimit("release_live").Name              // SD:696
 )
 
+// placementHost is the holder host every volume of the run's cluster spec is
+// placed on: its first host (the spec's placements name v.Hosts[0]; ops.go,
+// volset.go). A move takes a volume to the other one.
+const placementHost = 0
+
 // burnt says a name can never be created or restored into again.
 func burnt(state string) bool {
 	return state == stDeleted || state == stReserved || state == stBound
@@ -496,7 +501,9 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_restore":
 		// The target's content is the source's at the snapshot.
 		t := m.vols[o.Params["target_volume"]]
-		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], v.host
+		// A restore target serves where its own placement says, as any volume
+		// (SD:664-672), not on its source's current host.
+		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], placementHost
 		for _, b := range v.snapLBAs[o.Params["snapshot"]] {
 			t.lbas[b] = true
 		}

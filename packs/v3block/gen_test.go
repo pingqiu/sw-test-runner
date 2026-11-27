@@ -236,7 +236,7 @@ func (o *oracle) apply(op GenOp) {
 	case "v3_op_restore":
 		t := op.Params["target_volume"]
 		o.init(t)
-		o.state[t], o.target[t], o.fromSn[t], o.host[t] = "created", v, op.Params["snapshot"], o.host[v]
+		o.state[t], o.target[t], o.fromSn[t], o.host[t] = "created", v, op.Params["snapshot"], 0 // its placement host
 		o.targets[v][op.Params["snapshot"]] = true
 		for b := range o.snapCont[v+"|"+op.Params["snapshot"]] {
 			o.content[t][b] = true
@@ -590,6 +590,12 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")},
 			green: row8(),
 		},
+		"a restore target attached on its moved source's host": {
+			red: append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "1")),
+			green: append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0")),
+		},
 		"a read of the written set": {
 			red:   append(base(), op("v3_op_read", "g1", "lbas", "written")),
 			green: append(base(), op("v3_op_read", "g1", "lbas", "3 5")),
@@ -781,6 +787,17 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	if has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget) {
 		t.Error("a restore negative from a snapshot taken after the target wrote")
 	}
+	// A restore target starts on its placement host, not its source's (v16 at
+	// run 3: its source had moved to host 1, the target was started there and
+	// never got an assignment).
+	g = newG()
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+		op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+	if !has(g.ordinary(), "v3_op_attach", "g2", "", "host", "0") || has(g.ordinary(), "v3_op_attach", "g2", "", "host", "1") {
+		t.Error("a restore target of a moved source is not attached on its placement host 0")
+	}
+
 	// An unknown write in a fault run may have persisted: no release negative.
 	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster"}})
 	drive(gf, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
