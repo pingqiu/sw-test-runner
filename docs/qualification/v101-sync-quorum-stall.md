@@ -14,15 +14,29 @@ is absent; after that replica returns, automatic catch-up must restore writes.
 This packet observes those existing contracts and changes no product state
 machine, authority rule, lease, HEAD writer or estimator.
 
-The exact write-blocking bound and its metric need an owner ruling. Required
-inputs `write_budget_ms`, `resume_budget_ms`, and `budget_ref` default empty;
-preflight refuses before starting product processes when any is absent,
-non-finite or non-positive. The proposed conservative metric bounds BOTH max
-completed-write latency and max inter-ACK gap. RF2's intentional quorum-loss
-ACK gap is reported separately, not mislabeled as bounded availability. Its
-write completion/refusal duration and return-to-first-ACK are still bounded.
-These RF2 exclusions and metrics require approval before the draft can run.
-Test literals such as 500 ms are controls, not proposed release limits.
+Ruling received: the worst-case guest stall is **strictly less than 5 s per
+fault**, measured as the longest gap between ACKed writes across the fault
+window; **zero guest I/O errors**, and every ACKed write read back. The host
+NVMe I/O timeout is 30 s; it is not the permitted stall. A 5,000 ms gap is a
+FAIL, not an inclusive limit. No separate write-latency or recovery bound was
+specified; report those observations without inventing another gate.
+
+The gate definition still needs the designated gate owner's read. In
+particular, RF2 cannot ACK while its only peer is absent, and the draft's
+10 s replica-off dwell already exceeds the 5 s ACK-gap bar before reboot and
+catch-up. This is a contract conflict to resolve, not a sample to exclude.
+The draft's RF2 outage exclusion and allowance for guest refusal are NOT an
+approved gate. Do not warm the fixture, shorten the fault, acknowledge on one
+copy, or hide the absent-peer interval to manufacture PASS.
+
+Current implementation remains a non-executable-by-default draft with empty
+`write_budget_ms`, `resume_budget_ms`, and `budget_ref`. Its proposed judge
+has not yet been adapted to this ruling: it allows provisional RF2 outage
+exclusion/refusals and additional timing inputs. It must not be used for a
+counted result. Next change, after the gate owner's RF2 disposition: enforce
+the approved strict full-window ACK-gap predicate and zero guest errors;
+remove unapproved exclusions and timing gates. Test literals such as 500 ms
+are controls, not release limits.
 
 ## Sequence and roles
 
@@ -84,9 +98,9 @@ Regular-file controls and injected dd commands cannot count as qualification.
 
 | Cell | Required outcome |
 | --- | --- |
-| RF3 one replica off | No refused write; max write latency and full ACK gap within approved bound |
-| RF2 one replica off | Attempts continue, no new single-copy ACK; report outage separately |
-| Either replica returns | Primary unchanged; peer Healthy at epoch 1; automatic bounded first ACK and continued ACK flow |
+| RF3 one replica off | Zero guest I/O errors; full fault-window ACK gap strictly < 5 s |
+| RF2 one replica off | No single-copy ACK; no outage exemption approved; gate owner must resolve the 10 s fault vs < 5 s bar |
+| Either replica returns | Primary unchanged; peer Healthy at epoch 1; automatic return and continued ACK flow; report recovery time |
 | Any cell | Every ACK read back, no unmatched attempt, actual writer ended, no lost data |
 | Any exit | Replica restored, journals/argv/timing/ledger collected before cleanup, no owned leftovers |
 
@@ -110,7 +124,8 @@ Python refusal and policy forwarding through both RF cells. Scenario tests pin
 the shared lifecycle and replica-only fault. These controls do not qualify a
 Linux block device, actual RF2/RF3 rejoin, or a cloud fault.
 
-Still required: metric/budget ruling, reviewed merged runner pin after v1.0.0,
+Still required: gate-owner RF2 disposition and judge alignment to the strict
+5 s / zero-error ruling, reviewed merged runner pin after v1.0.0,
 exact v1.0.1 product pin, no-resource preflight, then the WHOLE local rehearsal
 (both cells, same product pin, replica process kill instead of VM power-off)
 with the documented standalone settings. Record approved local namespace
