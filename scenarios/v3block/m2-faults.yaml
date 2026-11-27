@@ -57,6 +57,10 @@ env:
   # re-grant (at most 65 s after it stopped, default flags) plus the start
   # wait (30 s) (docs/volume-lifecycle.md). Not a latency bound.
   fault_healthy_wait: "95"
+  # A short master outage (kill blockmaster, writes and single looks, restart
+  # within the product's stated bound, read from its checks.json): its own
+  # schedule event with this rate, never while another process is down.
+  fault_master_outage: "0.02"
   # The name pool. The product (a standalone deployment) has no online create
   # and never reuses a deleted name, so the cluster spec declares every name
   # the run may use, up front. 300 operations against a product answering ok
@@ -184,6 +188,7 @@ phases:
         fault_processes: "{{ fault_processes }}"
         fault_restart_within: "{{ fault_restart_within }}"
         fault_healthy_wait: "{{ fault_healthy_wait }}"
+        fault_master_outage: "{{ fault_master_outage }}"
 
   # Only what this run acquired: nothing at all if the claim failed.
   - name: teardown

@@ -48,7 +48,7 @@ func TestM2ScenarioIsM1WithTheFaultSchedule(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"faults", "fault_processes", "fault_restart_within", "fault_healthy_wait"} {
+	for _, k := range []string{"faults", "fault_processes", "fault_restart_within", "fault_healthy_wait", "fault_master_outage"} {
 		if gen.Params[k] != "{{ "+k+" }}" {
 			t.Errorf("v3_gen_run param %s = %q", k, gen.Params[k])
 		}
