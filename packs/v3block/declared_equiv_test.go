@@ -151,9 +151,20 @@ func runEq(t *testing.T, h tr.ActionHandlerFunc, c eqCase, detached bool) eqRun 
 // declared action and requires the same run.
 func checkEquivalent(t *testing.T, action string, frozen tr.ActionHandlerFunc, cases []eqCase) {
 	t.Helper()
+	checkEquivalentAs(t, action, frozen, cases, nil)
+}
+
+// checkEquivalentAs is checkEquivalent with a deliberate change: expect
+// turns the frozen handler's run into the run the declared action must
+// give now.
+func checkEquivalentAs(t *testing.T, action string, frozen tr.ActionHandlerFunc, cases []eqCase, expect func(eqCase, *eqRun)) {
+	t.Helper()
 	h := blockActions.Handler(action)
 	for _, c := range cases {
 		want, got := runEq(t, frozen, c, false), runEq(t, h, c, true)
+		if expect != nil {
+			expect(c, &want)
+		}
 		if (want.err == nil) != (got.err == nil) {
 			t.Errorf("%s %s: error %v, frozen %v", action, c.name, got.err, want.err)
 			continue
@@ -439,6 +450,8 @@ func TestDeclaredObserveEquivalent(t *testing.T) {
 		{name: "show not run", params: p, rules: with(eqAnswer{err: broken})},
 		{name: "workspace not run", params: p, rules: obs(eqAnswer{out: head}, eqAnswer{err: broken}, okDirs, okFiles)},
 		{name: "workspace refused, empty", params: p, rules: obs(eqAnswer{out: head}, eqAnswer{code: 1}, okDirs, okFiles)},
+		{name: "workspace refused, stderr says why", params: p, rules: obs(eqAnswer{out: head},
+			eqAnswer{errOut: "ops workspace show: rpc error: code = FailedPrecondition desc = volume v1 is being deleted\nline2\nline3\nline4\nline5\n", code: 1}, okDirs, okFiles)},
 		{name: "listings fail", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{errOut: "Traceback\nURLError", code: 1}, eqAnswer{out: "x", errOut: "e"})},
 		{name: "listings null and empty", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{out: "null"}, eqAnswer{out: "[]"})},
 		{name: "listings not run", params: p, rules: obs(eqAnswer{out: head}, ws, eqAnswer{err: broken}, eqAnswer{err: broken})},
@@ -449,7 +462,21 @@ func TestDeclaredObserveEquivalent(t *testing.T) {
 		{name: "filer port not a number", params: p, vars: map[string]string{"filer": "127.0.0.1:x"}, rules: with(eqAnswer{out: head})},
 	}
 	cases = append(cases, commonErrorCases(p, with(eqAnswer{out: head}))...)
-	checkEquivalent(t, "v3_op_observe", v3OpObserveFrozen, cases)
+	// The one deliberate change since the frozen handler: the workspace
+	// field also keeps the first 4 lines of the show's stderr.
+	checkEquivalentAs(t, "v3_op_observe", v3OpObserveFrozen, cases, func(c eqCase, r *eqRun) {
+		for _, rec := range r.records {
+			ws, ok := rec.Result["workspace"].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, rule := range c.rules {
+				if rule.match == "ops workspace show" {
+					ws["stderr"] = toAny(firstLines(rule.answers[0].errOut, 4))
+				}
+			}
+		}
+	})
 	// The cases reach every field: a full observation has them all.
 	r := runEq(t, blockActions.Handler("v3_op_observe"), cases[0], true)
 	if len(r.records) != 2 {
@@ -459,5 +486,29 @@ func TestDeclaredObserveEquivalent(t *testing.T) {
 		if _, ok := r.records[0].Result[k]; !ok {
 			t.Errorf("no %s in %v", k, r.records[0].Result)
 		}
+	}
+}
+
+// toAny is a []string as a history record read back holds it.
+func toAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, x := range ss {
+		out[i] = x
+	}
+	return out
+}
+
+// The delete of a source whose snapshot has a restore target: its row is
+// refused_effect pending a product pin of its phrase, so today it decodes
+// unknown, with no effect, exactly as the frozen handler did.
+func TestDeclaredDeletePendingPin(t *testing.T) {
+	cases := []eqCase{
+		{name: "dependents after the reservation", params: map[string]string{"volume": "v1"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
+		{name: "a negative", params: map[string]string{"volume": "v1", "expect": "refused"}, rules: []eqRule{{"volume-delete", []eqAnswer{chunkErr("snapshot_has_dependents", "layout: a snapshot has dependents")}}}},
+	}
+	checkEquivalent(t, "v3_op_delete", v3OpDeleteFrozen, cases)
+	r := runEq(t, blockActions.Handler("v3_op_delete"), cases[0], true)
+	if r.ret["value"] != tr.OutcomeUnknown || r.records[1].Result["effect"] != nil {
+		t.Fatalf("%v %+v", r.ret, r.records)
 	}
 }

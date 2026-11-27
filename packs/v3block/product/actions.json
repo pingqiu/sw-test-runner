@@ -256,10 +256,12 @@
           "runner_deadline_seconds": 60,
           "cite": "cmd/sw-block/workspace.go:87-88 (dispatch), :23 (--timeout 30s); cmd/sw-block/workspace_show.go:21-23 (--master, --volume)",
           "read": {
-            "kind": "lines",
-            "into": "workspace",
-            "lines": 12
-          }
+          "kind": "lines",
+          "into": "workspace",
+          "lines": 12,
+          "stderr_lines": 4,
+          "stderr_why": "a failed show answers exit 1 with nothing on stdout; only stderr says why (the master refused a reserved volume, or did not answer), which the checkers need to tell apart. Comparisons ignore it (checkers/product_block.py)"
+        }
         },
         {
           "name": "dirs",

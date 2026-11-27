@@ -110,7 +110,7 @@ func TestChunkOutcomePerOperation(t *testing.T) {
 		out, want string
 	}{
 		{"delete refused after its reservation committed", chunkVolumeDelete, body("not_admitted", afterReservation), tr.OutcomeUnknown},
-		{"delete: dependents found after the reservation", chunkVolumeDelete, body("snapshot_has_dependents", "layout: a snapshot has dependents"), tr.OutcomeUnknown},
+		{"delete: dependents found after the reservation", chunkVolumeDelete, body("snapshot_has_dependents", "layout: a snapshot has dependents"), tr.OutcomeUnknown}, // refused_effect pending a product pin of its phrase
 		{"delete: HEAD update lost after the reservation", chunkVolumeDelete, body("conflict", "layout: HEAD generation moved"), tr.OutcomeUnknown},
 		{"restore not admitted: the target name may stay bound", chunkRestore, body("not_admitted", "restore target: layout: snapshot names another volume's chunks"), tr.OutcomeUnknown},
 		{"release lost its update after the tombstone", chunkRelease, body("conflict", "layout: HEAD generation moved"), tr.OutcomeUnknown},
@@ -284,8 +284,8 @@ func TestOutcomeTableRules(t *testing.T) {
 		t.Fatalf("the embedded table has %d rows, read_at %q", len(outcomes.Rows), outcomes.ReadAt)
 	}
 	for i, r := range outcomes.Rows {
-		if strings.TrimSpace(r.Cite) == "" || (r.Outcome != tr.OutcomeRefused && r.Outcome != tr.OutcomeUnknown) {
-			t.Errorf("row %d %+v: needs a cite and a refused or unknown outcome", i, r)
+		if strings.TrimSpace(r.Cite) == "" || (r.Outcome != tr.OutcomeRefused && r.Outcome != tr.OutcomeRefusedEffect && r.Outcome != tr.OutcomeUnknown) {
+			t.Errorf("row %d %+v: needs a cite and a refused, refused_effect or unknown outcome", i, r)
 		}
 	}
 	row := func(action, path, code, outcome, cite string) outcomeRow {

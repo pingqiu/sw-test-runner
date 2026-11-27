@@ -68,11 +68,14 @@ const desc = head + `
  ],
  "exceptions": [{"action": "p_attach", "why": "a process start", "declarable_with": "a process step", "runner_deadline_seconds": 30}]}`
 
-func lookup(action, path, code, message string) string {
+func lookup(action, path, code, message string) (string, map[string]any) {
 	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) {
-		return tr.OutcomeRefused
+		return tr.OutcomeRefused, nil
 	}
-	return tr.OutcomeUnknown
+	if code == "reserved" {
+		return tr.OutcomeRefusedEffect, map[string]any{"part": "workspace", "to": map[string]any{"exit_nonzero": true}, "cite": "docs/x.md:1"}
+	}
+	return tr.OutcomeUnknown, nil
 }
 
 func setup(t *testing.T, n *node, sub *subject) (*Executor, *tr.ActionContext) {
@@ -306,6 +309,25 @@ func TestParseObserveRedControls(t *testing.T) {
 		}
 		if _, err := Parse([]byte(head + strings.Replace(good, bad[0], bad[1], 1))); err == nil {
 			t.Errorf("%s: not refused", name)
+		}
+	}
+}
+
+// A refused_effect answer completes refused_effect with the table's effect
+// copied into the result; a refused one carries no effect.
+func TestDecoderCopiesTheEffect(t *testing.T) {
+	for code, want := range map[string]string{"reserved": tr.OutcomeRefusedEffect, "nope": tr.OutcomeRefused} {
+		n := &node{answers: []answer{{out: `{"code":"` + code + `","message":"m"}`, code: 1}}}
+		x, actx := setup(t, n, &subject{f: map[string]string{}})
+		out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k"}})
+		if err != nil || out["value"] != want {
+			t.Fatalf("%s: %v %v", code, out, err)
+		}
+		actx.History.Close()
+		b, _ := os.ReadFile(actx.History.Path())
+		hasEffect := strings.Contains(string(b), `"effect":{"cite":"docs/x.md:1","part":"workspace","to":{"exit_nonzero":true}}`)
+		if hasEffect != (want == tr.OutcomeRefusedEffect) {
+			t.Fatalf("%s: history %s", code, b)
 		}
 	}
 }
