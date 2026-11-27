@@ -279,9 +279,17 @@ phases:
       - action: cloud_vm_power                                   # P1
         node: node-1
         vm: node-2                  # the VM to power off
+      # Guest failover procedure: product docs/operator-guide.md, Host connect
+      # settings at 0b9cecf6fb592542c7ec1dfb0c6e22e9e4ecbda6 (#671).
+      # Only the old target is connected here. Disconnect that run's NQN before
+      # stopping its pending writer; do not wait for controller retry exhaustion.
       - action: exec
         node: node-1
-        timeout: 5m # drain old I/O with documented ctrl-loss-tmo=180, fast fail off
+        timeout: 30s
+        cmd: 'NQN=nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }}; sudo nvme disconnect -n "$NQN"'
+      - action: exec
+        node: node-1
+        timeout: 5m # unchanged bound; pending old-controller I/O is disconnected first
         cmd: "T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; sudo bash $W/r4.sh writer-stop $T"
 
   - name: operator-call-count
