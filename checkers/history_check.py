@@ -40,7 +40,9 @@ code is 0 only when every checker passes.
       also its source, and a fault operation every volume (the history does
       not map volumes to VMs). Compared, the whole observed state: HEAD
       (generation, epoch, holder, state) or the show error's code, HEAD's
-      snapshot names (result.snapshots), the control plane's workspace answer (exit and text), the volume's
+      snapshot names (result.snapshots), the control plane's workspace answer (exit, and the stable facts of its
+      text: the lease expiry and the validity at query are dropped, and a
+      text not in its "key: value" shape is not comparable), the volume's
       directories (result.dirs, so a name that never existed is observed as
       having none) and its file listing (result.files). A part recorded in
       neither observation is not compared and is named in a note, except a
