@@ -74,6 +74,10 @@ func r4(t *testing.T, args ...string) (string, error) {
 }
 
 func r4Env(t *testing.T, env []string, args ...string) (string, error) {
+	return r4ScriptEnv(t, "../../scenarios/v3block/r4.sh", env, args...)
+}
+
+func r4ScriptEnv(t *testing.T, script string, env []string, args ...string) (string, error) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux shell/device controls; no host resources")
@@ -84,7 +88,7 @@ func r4Env(t *testing.T, env []string, args ...string) (string, error) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("no python3")
 	}
-	cmd := exec.Command("bash", append([]string{"../../scenarios/v3block/r4.sh"}, args...)...)
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Env = append(os.Environ(), "R4_DD_OFLAG=sync", "R4_DD_IFLAG=fullblock", "R4_POLL=0", "R4_ALLOW_FILE=1")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()

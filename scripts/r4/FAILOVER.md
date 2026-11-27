@@ -36,9 +36,14 @@ may consequently take longer to finish; the writer unit has a 210s stop
 budget and its stop action 240s (scenario action 5m). An unknown stop still
 fails and prevents reconnect/readback. Do not infer that increasing these
 fixture stop budgets changes product failover latency or guarantees a drain.
-Measure fault-to-successor-serving independently of writer stop and record
-the raw observations and sampling overhead before replacing the guide's
-derived estimate. No measured value is supplied by this change.
+The scenario observes the successor only after writer-stop finishes. Its
+serving-status receipt is therefore a post-drain observation, not an independent
+fault-to-serving sample. This change includes no concurrent readiness sampler.
+A separate local rehearsal driver is being prepared outside this PR; its sampler
+has no reviewed pin here and supplies no timing evidence for this scenario.
+Before replacing the guide's derived estimate, review and pin that sampler and
+retain fault, serving, reconnect and complete ACK-readback observations separately,
+including raw samples and sampling overhead. No measured value is supplied here.
 
 The original local rehearsal failed against the former manual-only contract;
 it is not relabeled as a pass. The whole sequence must pass again on the selected
