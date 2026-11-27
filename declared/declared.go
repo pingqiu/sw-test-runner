@@ -287,6 +287,19 @@ type Retry struct {
 	WithinParam  string `json:"within_param"`
 	EverySeconds int    `json:"every_seconds"`
 	Attempts     string `json:"attempts"`
+	// ExpectedRefusal, when set, lets a step that declares expect=refused
+	// rerun too: when its bool param is true, while the answer is WhileCode
+	// AND its message contains WhileMessageContains (a refusal that is not
+	// the one the step probes). The first other answer is the one decoded.
+	ExpectedRefusal *ExpectedRefusalRetry `json:"expected_refusal,omitempty"`
+}
+
+// ExpectedRefusalRetry names the bool param that turns it on and the
+// product text of the refusal it reruns through.
+type ExpectedRefusalRetry struct {
+	Param                string `json:"param"`
+	WhileMessageContains string `json:"while_message_contains"`
+	Why                  string `json:"why,omitempty"`
 }
 
 func strict(b []byte, v any) error {
@@ -401,6 +414,10 @@ func (a *Action) check(keys map[string]bool) error {
 		switch p.Kind {
 		case "subject":
 			subjects[p.Name] = true
+		case "bool":
+			if p.Default != "" && p.Default != "true" && p.Default != "false" {
+				return fmt.Errorf("param %s: default %q is not a bool", p.Name, p.Default)
+			}
 		case "int":
 			ints[p.Name] = true
 			if p.Default != "" {
@@ -535,6 +552,15 @@ func (a *Action) check(keys map[string]bool) error {
 	if r := a.Retry; r != nil {
 		if r.WhileCode == "" || !ints[r.WithinParam] || r.EverySeconds <= 0 || r.Attempts == "" {
 			return errors.New("retry needs while_code, an int within_param, every_seconds and attempts")
+		}
+		if er := r.ExpectedRefusal; er != nil {
+			isBool := false
+			for _, p := range a.Params {
+				isBool = isBool || (p.Name == er.Param && p.Kind == "bool")
+			}
+			if !isBool || er.WhileMessageContains == "" {
+				return errors.New("retry.expected_refusal needs a bool param and while_message_contains")
+			}
 		}
 		for _, v := range a.Variants {
 			if v.Decode.Kind != "error_body" {
@@ -740,6 +766,19 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	}
 	for _, p := range a.Params {
 		switch p.Kind {
+		case "bool":
+			v := paramValue(act, actx, p)
+			if v == "" {
+				v = p.Default
+			}
+			if v == "" {
+				v = "false"
+			}
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s %q is not true or false", name, p.Name, v)
+			}
+			s.vals[p.Name] = strconv.FormatBool(b)
 		case "int":
 			def, _ := strconv.Atoi(p.Default)
 			n, err := strconv.Atoi(paramValue(act, actx, p))
@@ -852,7 +891,12 @@ func (x *Executor) run(s *scope, a *Action, v *Variant, cmd, expect string) (str
 		d, _ := res["detail"].(string)
 		attempts = append(attempts, fmt.Sprintf("%s %s", out, FirstLine(d)))
 		res[r.Attempts] = attempts
-		if out == tr.OutcomeOK || expect == tr.OutcomeRefused || !strings.HasPrefix(d, r.WhileCode+":") || time.Now().After(end) {
+		again := strings.HasPrefix(d, r.WhileCode+":")
+		if expect == tr.OutcomeRefused {
+			er := r.ExpectedRefusal
+			again = again && er != nil && s.vals[er.Param] == "true" && strings.Contains(d, er.WhileMessageContains)
+		}
+		if out == tr.OutcomeOK || !again || time.Now().After(end) {
 			return out, res
 		}
 		select {
