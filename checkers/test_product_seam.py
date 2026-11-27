@@ -139,6 +139,79 @@ class Reader(unittest.TestCase):
         self.assertEqual(hc.PRODUCT.holder_identity({}), {})
 
 
+REAL_WS = ['volume: v01 (query snapshot, not authority to serve)', 'replica: r1', 'epoch: 1', 'lease state: granted',
+           'holder: r1@1 (logical replica)', 'lease expiry_ns: 1795738167151366324; host validity_ns at query: 14849887534',
+           'recorded ACK: none', 'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
+
+
+def ws_obs(lines, exit_=0):
+    return {'result': {'workspace': {'exit': exit_, 'text': lines}}}
+
+
+class Workspace(unittest.TestCase):
+    """The workspace part keeps the stable facts and drops the two that change
+    on their own (from a host run: two queries with nothing between them)."""
+
+    def part(self, lines, exit_=0):
+        state, bad = hc.observed_state(ws_obs(lines, exit_))
+        return state.get('workspace'), bad.get('workspace')
+
+    def test_a_real_pair_compares_equal(self):
+        later = [x.replace('14849887534', '14716527984') for x in REAL_WS]
+        self.assertNotEqual(later, REAL_WS)
+        a, b = self.part(REAL_WS), self.part(later)
+        self.assertIsNone(a[1])
+        self.assertEqual(a, b)
+        # a renewal moves the expiry too: still equal
+        renewed = [x.replace('1795738167151366324', '1795738177151366324') for x in later]
+        self.assertEqual(self.part(renewed), a)
+
+    def test_red_a_change_of_lease_state_epoch_or_holder_compares_unequal(self):
+        base = self.part(REAL_WS)[0]
+        for old, new in (('lease state: granted', 'lease state: revoking'), ('epoch: 1', 'epoch: 2'),
+                         ('holder: r1@1 (logical replica)', 'holder: r2@1 (logical replica)'),
+                         ('recorded ACK: none', 'recorded ACK: r1@1 HEAD generation 4')):
+            changed = [new if x == old else x for x in REAL_WS]
+            got, bad = self.part(changed)
+            self.assertIsNone(bad, old)
+            self.assertNotEqual(got, base, old)
+        # a move line issued since is a fact too
+        moved = REAL_WS + ['move: request=v01-move-1 kind=clean issued=true a/r1@1 -> b/r1@2 HEAD generation 7 remote LSN 9']
+        self.assertNotEqual(self.part(moved)[0], base)
+
+    def test_parsed_by_key_not_by_position(self):
+        shuffled = REAL_WS[:1] + REAL_WS[5:6] + REAL_WS[1:5] + REAL_WS[6:]
+        got, bad = self.part(shuffled)
+        self.assertIsNone(bad)
+        self.assertNotIn('lease expiry_ns', dict(got[1]))
+        self.assertEqual(dict(got[1])['lease state'], 'granted')
+
+    def test_a_garbled_text_is_not_judged(self):
+        for garbled in (['volume v01 granted'],                                          # no key: value
+                        REAL_WS[:3] + ['lease state granted'] + REAL_WS[4:],            # one line without its key
+                        [x.replace('host validity_ns at query: 14849887534', 'validity: soon') for x in REAL_WS],  # dropped line of another shape
+                        REAL_WS[:2] + REAL_WS[3:],                                      # a fact always printed is missing
+                        'not a list of lines at all: {',
+                        None):
+            got, bad = self.part(garbled)
+            self.assertIsNone(got, garbled)
+            self.assertTrue(bad, garbled)
+        # and a pair with one garbled side is not judged, never equal
+        diff, why = hc.state_diff(hc.observed_state(ws_obs(REAL_WS)), hc.observed_state(ws_obs(['garbled'])))
+        self.assertIsNone(diff)
+        self.assertIn('workspace', why)
+
+    def test_a_failed_show_is_compared_as_recorded(self):
+        self.assertEqual(self.part([''], 1), ((1, ('',)), None))
+        self.assertNotEqual(self.part([''], 1)[0], self.part([''], 3)[0])
+
+    def test_the_dropped_fields_are_listed_as_ignored(self):
+        checks = json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
+        ignored = {r['field'] for r in checks['observation']['ignored']}
+        for f in hc.PRODUCT.WORKSPACE_DROPPED_FIELDS:
+            self.assertIn('workspace: ' + f, ignored)
+
+
 class ProductFlag(unittest.TestCase):
     """--product names the description directory; without it, block."""
 

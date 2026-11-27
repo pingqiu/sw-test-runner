@@ -20,6 +20,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   kill_scope(inv)               the volumes a kill reaches on the data path
   holder_identity(healthy_obs)  {volume: (pid, start)} of each holder, from a healthy record
 """
+import re
 
 TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
 LIVE = {'HEAD', 'VOLUME'}        # a live volume's directory holds at least these
@@ -66,11 +67,56 @@ def _snapshots(res):
     return None
 
 
+# `ops workspace show` (cmd/sw-block/workspace_show.go at read_at) prints one
+# "key: value" fact per line. These keys it always prints, in this order of
+# lines; then zero or more "move:" and "binding:" lines.
+WORKSPACE_KEYS = ('volume', 'replica', 'epoch', 'lease state', 'holder', 'recorded ACK', 'host')
+# Dropped: the line keyed "lease expiry_ns" also carries "host validity_ns at
+# query"; the expiry moves at every renewal and the validity counts down at
+# every query, so two queries with nothing between them differ there. Not a
+# state a refusal can change (listed in checks.json observation.ignored). The
+# line must have exactly this shape, or the text is not comparable.
+WORKSPACE_DROPPED = {'lease expiry_ns': re.compile(r'lease expiry_ns: -?\d+; host validity_ns at query: -?\d+')}
+WORKSPACE_DROPPED_FIELDS = ('lease expiry_ns', 'host validity_ns at query')
+
+
+def workspace_facts(text):
+    """The stable facts of a workspace answer printed with exit 0: a tuple of
+    (key, value) per line, in order, without the dropped line; or None when
+    the text is not in that shape (a line with no "key: value", a dropped
+    line of another shape, or a fact the product always prints missing)."""
+    lines = text.splitlines() if isinstance(text, str) else text
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        return None
+    facts = []
+    for line in lines:
+        if not line.strip():
+            continue
+        key, sep, value = line.partition(': ')
+        if not sep or not key.strip():
+            return None
+        if key in WORKSPACE_DROPPED:
+            if not WORKSPACE_DROPPED[key].fullmatch(line):
+                return None
+            continue
+        facts.append((key, value))
+    if not set(WORKSPACE_KEYS) <= {k for k, _ in facts}:
+        return None
+    return tuple(facts)
+
+
 def _workspace(res):
     ws = res.get('workspace')
-    if isinstance(ws, dict):
-        return 'ok', (ws.get('exit'), ws.get('text'))
-    return None
+    if not isinstance(ws, dict):
+        return None
+    if ws.get('exit') != 0:
+        # A failed show prints its error on stderr; what was recorded (stdout)
+        # is compared as it stands, with the exit status.
+        return 'ok', (ws.get('exit'), ws.get('text') if not isinstance(ws.get('text'), list) else tuple(ws['text']))
+    facts = workspace_facts(ws.get('text'))
+    if facts is None:
+        return 'bad', 'workspace text not in its "key: value" shape: %r' % (ws.get('text'),)
+    return 'ok', (0, facts)
 
 
 def _listing(part, err):

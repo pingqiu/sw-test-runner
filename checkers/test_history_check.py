@@ -571,6 +571,20 @@ class C3(unittest.TestCase):
         self.assertTrue(any('not exercised' in x for x in v['C3']['findings']))
 
 
+def ws_text(volume='v1', state='granted', epoch=1, replica='r1', ack='none', validity=14849887534, lease=True):
+    """The lines `ops workspace show` prints (exit 0). The lease expiry and the
+    validity at query change on their own; the checker ignores them."""
+    lines = ['volume: %s (query snapshot, not authority to serve)' % volume]
+    if lease:
+        lines += ['replica: %s' % replica, 'epoch: %d' % epoch, 'lease state: %s' % state,
+                  'holder: %s@%d (logical replica)' % (replica, epoch),
+                  'lease expiry_ns: 1795738167151366324; host validity_ns at query: %d' % validity]
+    else:
+        lines += ['replica: none', 'epoch: none', 'lease state: none', 'holder: none']
+    return lines + ['recorded ACK: %s' % ack,
+                    'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
+
+
 def history(*steps):
     """A one-at-a-time history: ('obs', volume, gen, files) is an observation
     (gen or files None: not recorded), any other step is (verb, volume, args,
@@ -581,7 +595,7 @@ def history(*steps):
         if st[0] == 'obs':
             _, vol, gen, files = st[:4]
             # Without an extra dict, the control plane's answer C5 requires.
-            res = dict(st[4]) if len(st) > 4 else {'workspace': {'exit': 0, 'text': 'serving epoch 1'}}
+            res = dict(st[4]) if len(st) > 4 else {'workspace': {'exit': 0, 'text': ws_text(validity=10**10 - n)}}
             res['head'] = {'gen': gen, 'epoch': 1, 'holder': 'a/r1', 'state': ''} if gen is not None else 'unreadable'
             if files is not None:
                 res['files'] = list(files)
@@ -601,7 +615,7 @@ NEG = {'expect': 'refused'}
 
 
 BASE = (('obs', 'v0', 1, FILES), ('obs', 'v0', 1, FILES))   # a baseline pair on another volume
-WS = {'workspace': {'exit': 0, 'text': 'v1 serving epoch 1'}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
+WS = {'workspace': {'exit': 0, 'text': ws_text()}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
 
 
 class C5(unittest.TestCase):
@@ -634,7 +648,7 @@ class C5(unittest.TestCase):
 
     def test_a_control_plane_change_fails(self):
         # A refused delete that left the control plane changed (e.g. reserved).
-        moved = {'workspace': {'exit': 0, 'text': 'v1 deleting (reserved)'}, 'dirs': WS['dirs'], 'snapshots': []}
+        moved = {'workspace': {'exit': 0, 'text': ws_text(state='revoking', ack='r1@1 HEAD generation 4')}, 'dirs': WS['dirs'], 'snapshots': []}
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('delete', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, moved))
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its workspace changed', v['findings'][0])
@@ -688,6 +702,25 @@ class C5(unittest.TestCase):
         # A refused operation between two observations makes them the refusal's pair, not a baseline pair.
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('obs', 'v1', 4, FILES), base=False)
         self.assertEqual(v['verdict'], 'PASS', v)
+
+    def test_the_workspace_lease_clock_is_no_baseline_change(self):
+        # From a host run: the lease expiry and the validity at query change
+        # between two queries with nothing between them; the baseline holds.
+        tick = lambda n: {'workspace': {'exit': 0, 'text': ws_text(validity=n)}, 'dirs': WS['dirs'], 'snapshots': []}
+        v = self.c5(('obs', 'v0', 1, FILES, tick(14849887534)), ('obs', 'v0', 1, FILES, tick(14716527984)),
+                    ('obs', 'v1', 4, FILES, tick(14600000000)), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, tick(14500000000)), base=False)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        # red control: the lease state moving is a baseline change
+        v = self.c5(('obs', 'v0', 1, FILES, tick(1)), ('obs', 'v0', 1, FILES, dict(tick(2), workspace={'exit': 0, 'text': ws_text(state='revoking')})),
+                    ('obs', 'v1', 4, FILES, tick(3)), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, tick(4)), base=False)
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
+
+    def test_a_garbled_workspace_text_leaves_the_refusal_not_judged(self):
+        bad = dict(WS, workspace={'exit': 0, 'text': ['lease state granted']})
+        v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, bad))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'key: value' in x for x in v['findings']), v)
 
     def test_every_limit_must_be_judged(self):
         # One judged refusal does not carry another limit that was never judged.
@@ -753,9 +786,9 @@ class C5(unittest.TestCase):
         self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
         # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
         for name, ws, state, part in (
-                ('revoked', dict(WS, workspace={'exit': 0, 'text': 'v1 revoking epoch 1'}), '', 'workspace'),
-                ('no live lease', dict(WS, workspace={'exit': 0, 'text': 'v1 no live lease (recorded ACK r1@1)'}), '', 'workspace'),
-                ('workspace show failing', dict(WS, workspace={'exit': 3, 'text': 'v1 serving epoch 1'}), '', 'workspace'),
+                ('revoked', dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')}), '', 'workspace'),
+                ('no live lease', dict(WS, workspace={'exit': 0, 'text': ws_text(lease=False, ack='r1@1 HEAD generation 4')}), '', 'workspace'),
+                ('workspace show failing', dict(WS, workspace={'exit': 3, 'text': ws_text()}), '', 'workspace'),
                 ('HEAD sealed', WS, 'detached', 'head')):
             v = run(ws, state)
             self.assertEqual(v['verdict'], 'FAIL', (name, v))

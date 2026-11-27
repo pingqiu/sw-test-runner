@@ -36,6 +36,10 @@
     "why": "only the error code is compared: the exit status of a failed show says no more than its code"},
    {"field": "snapshots_error, dirs_error, listing_error, an unreadable head",
     "why": "not values: a part recorded with an error cannot be compared, and a refusal judged on it is left not judged"},
+   {"field": "workspace: lease expiry_ns", "cite": "cmd/sw-block/workspace_show.go:60",
+    "why": "changes with every renewal; not a state a refusal can change"},
+   {"field": "workspace: host validity_ns at query", "cite": "cmd/sw-block/workspace_show.go:60",
+    "why": "changes with every query; not a state a refusal can change"},
    {"field": "workspace.text beyond its first 12 lines",
     "why": "not recorded by the observation"}
   ]
