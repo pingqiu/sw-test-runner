@@ -100,6 +100,21 @@ def watch(processes, logs, phases, seconds, addresses=None):
                 'missing '+phase+' in '+str(log))
 
 
+def read_scenario(path):
+    """Expand the two shared phase includes, using the runner's include layout."""
+    def phases(file,depth=0):
+        require(depth<=5,'include depth exceeded')
+        document=yaml.safe_load(file.read_text());result=[]
+        for phase in document['phases']:
+            if 'include' in phase:
+                require(not phase.get('include_params'),'preflight does not support include overrides')
+                result.extend(phases(file.parent/phase['include'],depth+1))
+            else:result.append(phase)
+        return result
+    scenario=yaml.safe_load(path.read_text());scenario['phases']=phases(path)
+    return scenario
+
+
 def smoke(root, seconds=10):
     require(seconds >= 10, 'start observation must be at least 10 seconds')
     pins = json.loads((root/'pins.json').read_text())
@@ -113,7 +128,11 @@ def smoke(root, seconds=10):
     helper = 'scenarios/v3block/r4.sh'
     require((root/'runner'/helper).read_bytes() == subprocess.check_output(
         ['git', '-C', str(root/'runner'), 'show', pins['runner']+':'+helper]), 'scenario helper differs from runner pin')
-    scenario = yaml.safe_load(pinned)
+    for fragment in ('r4-standalone-start.yaml','r4-standalone-collect.yaml'):
+        relative='scenarios/v3block/includes/'+fragment
+        require((root/'runner'/relative).read_bytes()==subprocess.check_output(
+            ['git','-C',str(root/'runner'),'show',pins['runner']+':'+relative]),'include differs from pin: '+relative)
+    scenario = read_scenario(root/'runner'/scenario_path)
     actions = next(p['actions'] for p in scenario['phases'] if p['name'] == 'start')
     out = Path(tempfile.mkdtemp(prefix='start-preflight-', dir=root))
     out.chmod(0o700)  # Contains temporary certificate keys; never publish wholesale.

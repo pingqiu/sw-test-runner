@@ -1,0 +1,20 @@
+# Shared always-evidence and owned cleanup.
+phases:
+  - name: collect
+    always: true
+    actions:
+      - {action: exec, node: controller, cmd: 'L=/tmp/r4-{{ run_id }}-rf{{ rf }}; [ ! -f "$L/guest/config.json" ] || python3 "$L/pkg/guest-io.py" --config "$L/guest/config.json" cleanup'}
+      - {action: collect_path, node: controller, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/guest", name: "off-host-guest-ledger"}
+      # Capture and archive journals BEFORE stopping/removing units, on every exit.
+      # Retain host work if collection fails; the cloud controller owns VM teardown.
+      - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S evidence $T"}
+      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S evidence $T"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S evidence $T"}
+      - {action: collect_path, node: node-1, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-1-evidence"}
+      - {action: collect_path, node: node-2, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-2-evidence"}
+      - {action: collect_path, node: node-3, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/evidence", name: "node-3-evidence"}
+      - {action: collect_path, node: controller, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/provenance.txt"}
+      - {action: exec, node: node-1, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-2, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: node-3, cmd: "timeout 30 sudo nvme disconnect -n nqn.2026-11.io.seaweedfs:r4-{{ run_id }}-rf{{ rf }} >/dev/null 2>&1; T={{ run_id }}-rf{{ rf }}; S=/var/lib/r4/$T/r4.sh; [ -f $S ] || S=/tmp/r4-$T-x/r4.sh; [ -f $S ] || { echo nothing installed; exit 0; }; sudo bash $S cleanup $T"}
+      - {action: exec, node: controller, cmd: "L=/tmp/r4-{{ run_id }}-rf{{ rf }}; rm -rf \"${L:?}\""}

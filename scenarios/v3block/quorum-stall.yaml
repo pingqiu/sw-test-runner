@@ -1,0 +1,139 @@
+# Draft v1.0.1 only; no execution before owner budget and approved launch.
+name: v3block-sync-quorum-stall
+timeout: 60m
+always_timeout: 10m
+
+env:
+  rf: "3"
+  product_src: ""
+  runner_src: ""
+  product_head: ""        # the final release candidate (40 hex)
+  runner_head: ""         # the runner commit this scenario and r4.sh come from (40 hex)
+  n1_ip: ""
+  n2_ip: ""
+  n3_ip: ""
+  n1_data: ""
+  n2_data: ""
+  n3_data: ""
+  n1_host_key: ""
+  n2_host_key: ""
+  n3_host_key: ""
+  ssh_user: "seaweed"
+  ssh_key: ""
+  hold_seconds: "240"
+  failover_mode: "automatic" # operator is explicit, for a round that cannot decide
+  writes: "64"
+  master_port: "19600"
+  data_port: "19601"
+  ctrl_port: "19602"
+  status_port: "19603"
+  nvme_port: "4420"
+  write_budget_ms: "" # required owner bound; no assumed floor/timeout
+  resume_budget_ms: ""
+  budget_ref: ""
+  fault_seconds: "10"
+
+topology:
+  nodes:
+    controller: { is_native: true }
+    node-1: { host: "{{ n1_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n1_host_key }}" }
+    node-2: { host: "{{ n2_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n2_host_key }}" }
+    node-3: { host: "{{ n3_ip }}", user: "{{ ssh_user }}", key: "{{ ssh_key }}", host_key: "{{ n3_host_key }}" }
+
+phases:
+  - name: owner-budget-preflight
+    actions:
+      - action: exec
+        node: controller
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.RF: "{{ rf }}"
+        env.WRITE: "{{ write_budget_ms }}"
+        env.RESUME: "{{ resume_budget_ms }}"
+        env.REF: "{{ budget_ref }}"
+        cmd: |
+          set -eu
+          git -C "$RS" diff --quiet "$RHEAD" -- scripts/r4/quorum-stall.py scenarios/v3block/quorum-stall.yaml
+          python3 "$RS/scripts/r4/quorum-stall.py" policy --rf "$RF" --write-budget-ms "$WRITE" --resume-budget-ms "$RESUME" --budget-ref "$REF"
+  - include: includes/r4-standalone-start.yaml
+  - name: install-timing-observer
+    actions:
+      - action: exec
+        node: controller
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        save_as: observer_sha
+        cmd: >-
+          L=/tmp/r4-{{ run_id }}-rf{{ rf }};
+          git -C "$RS" show "$RHEAD:scripts/r4/quorum-stall.py" > "$L/quorum-stall.py" &&
+          sha256sum "$L/quorum-stall.py" | cut -d' ' -f1
+      - {action: upload_path, node: node-2, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/quorum-stall.py", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}-stall.py"}
+      - action: exec
+        node: node-2
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          echo '{{ observer_sha }}  /tmp/r4-'$T'-stall.py' | sha256sum -c - &&
+          sudo install -m 0755 /tmp/r4-$T-stall.py $W/quorum-stall.py
+  - name: continuous-guest
+    actions:
+      - action: exec
+        node: node-2
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          DEV=$(sudo bash $W/r4.sh connect nqn.2026-11.io.seaweedfs:r4-$T 127.0.0.1 {{ nvme_port }} 30) &&
+          sudo bash $W/r4.sh unit $T writer -- /usr/bin/python3 $W/quorum-stall.py writer --work $W/stall --device $DEV --pace-ms 10 &&
+          sudo bash $W/r4.sh start $T writer &&
+          sudo python3 $W/quorum-stall.py wait-acks --work $W/stall --minimum 20 --seconds 30 &&
+          sudo python3 $W/quorum-stall.py mark --work $W/stall --phase baseline --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+      - {action: sleep, duration: "10s"}
+  - name: replica-fault-under-writes
+    actions:
+      - {action: exec, node: node-2, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/quorum-stall.py mark --work $W/stall --phase fault-pending --status http://127.0.0.1:{{ status_port }}/status?volume=v1"}
+      - {action: cloud_vm_power, node: node-1, vm: node-3}
+      - {action: exec, node: node-2, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/quorum-stall.py mark --work $W/stall --phase fault --fault-key '{{ __fault_key }}' --status http://127.0.0.1:{{ status_port }}/status?volume=v1"}
+      - {action: sleep, duration: "{{ fault_seconds }}s"}
+      - {action: cloud_vm_power_restore, node: node-1, vm: node-3}
+      # The VM boot interval remains in the RF2 outage report. Recovery timing
+      # starts just before the documented holder service is started again.
+      - {action: exec, node: node-2, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; sudo python3 $W/quorum-stall.py mark --work $W/stall --phase recover --status http://127.0.0.1:{{ status_port }}/status?volume=v1"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; sudo bash /var/lib/r4/$T/r4.sh start $T volume"}
+  - name: automatic-rejoin-under-writes
+    actions:
+      - action: exec
+        node: node-2
+        timeout: 4m
+        cmd: >-
+          W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2);
+          sudo python3 $W/quorum-stall.py wait-peer --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+          --peers http://127.0.0.1:{{ status_port }}/status/peers?volume=v1 --replica $R --seconds 180 --output $W/stall/rejoin.json &&
+          sudo python3 $W/quorum-stall.py mark --work $W/stall --phase after --status http://127.0.0.1:{{ status_port }}/status?volume=v1 &&
+          sudo python3 $W/quorum-stall.py wait-acks --work $W/stall --minimum 20 --since after --seconds 30
+      - {action: sleep, duration: "10s"}
+  - name: stop-and-verify-every-ack
+    actions:
+      - action: exec
+        node: node-2
+        timeout: 15m
+        env.WRITE: "{{ write_budget_ms }}"
+        env.RESUME: "{{ resume_budget_ms }}"
+        env.REF: "{{ budget_ref }}"
+        cmd: |
+          set -eu
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T
+          sudo python3 $W/quorum-stall.py stop --work $W/stall --seconds 35
+          sudo python3 $W/quorum-stall.py mark --work $W/stall --phase stop --status http://127.0.0.1:{{ status_port }}/status?volume=v1
+          DEV=$(sudo bash $W/r4.sh dev nqn.2026-11.io.seaweedfs:r4-$T 127.0.0.1 10)
+          sudo bash $W/r4.sh verify "$DEV" "$W/stall/ledger" quorum-stall
+          sudo bash $W/r4.sh drop-control "$DEV" "$W/stall/ledger"
+          sudo python3 $W/quorum-stall.py judge --work $W/stall --rf {{ rf }} --write-budget-ms "$WRITE" --resume-budget-ms "$RESUME" --budget-ref "$REF" --require-block-device --output $W/stall/timing-result.json
+  - name: restore-before-evidence
+    always: true
+    actions:
+      # Scope owns restoration on any exit; the idempotent explicit restore
+      # also makes the returning VM's journals available before collection.
+      - {action: cloud_vm_power_restore, node: node-1, vm: node-3}
+      - {action: exec, node: node-2, timeout: 45s, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; [ ! -d $W/stall ] || sudo python3 $W/quorum-stall.py stop --work $W/stall --seconds 35", ignore_error: true}
+      - {action: exec, node: node-2, cmd: "W=/var/lib/r4/{{ run_id }}-rf{{ rf }}; [ ! -d $W/stall ] || sudo chmod -R a+rX $W/stall"}
+      - {action: collect_path, node: node-2, path: "/var/lib/r4/{{ run_id }}-rf{{ rf }}/stall", name: "quorum-stall-ledger-and-timing"}
+  - include: includes/r4-standalone-collect.yaml

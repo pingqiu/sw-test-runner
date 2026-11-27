@@ -43,9 +43,11 @@ def completed_imds404_warnings(status):
     return list(dict.fromkeys(warnings)) if check(status) else []
 
 
-def main(root):
+def main(root, scenario="scenarios/v3block/r4-node-loss.yaml", extra_env=None):
     if not __debug__:
         raise RuntimeError("R4 launcher refuses Python optimization")
+    require(scenario in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/quorum-stall.yaml'),'unreviewed scenario')
+    require(set(extra_env or {}) <= {'write_budget_ms','resume_budget_ms','budget_ref'},'unreviewed extra inputs')
     root = pathlib.Path(root).resolve()
     manifest = json.loads((root/'manifest.json').read_text())
     require(isinstance(manifest, dict) and {'pins.json', 'swblock'} <= manifest.keys(),
@@ -116,9 +118,10 @@ def main(root):
     args += ['-env', 'ssh_user='+user, '-env', 'ssh_key='+ctx['ssh_key'],
              '-env', 'product_src='+str(root/'product'), '-env', 'runner_src='+str(root/'runner'),
              '-env', 'product_head='+pins['product'], '-env', 'runner_head='+pins['runner']]
+    for key,value in (extra_env or {}).items():args += ['-env',key+'='+str(value)]
     for rf in (3,2):
         cmd = [str(root/'swblock'), 'run', '--allow-mutating', '-results-dir', str(out/f'rf{rf}'),
-               *args, '-env', f'rf={rf}', str(root/'runner/scenarios/v3block/r4-node-loss.yaml')]
+               *args, '-env', f'rf={rf}', str(root/'runner'/scenario)]
         with (out/f'rf{rf}.log').open('wb') as log:
             r = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
         (out/f'rf{rf}.exit').write_text(str(r.returncode)+'\n')

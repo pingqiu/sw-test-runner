@@ -23,7 +23,7 @@ class R4StartPreflight(unittest.TestCase):
             smoke.stop([child])
 
     def test_exact_scenario_master_keeps_auth_and_audit(self):
-        scenario = yaml.safe_load((Path(__file__).resolve().parents[2]/'scenarios/v3block/r4-node-loss.yaml').read_text())
+        scenario = smoke.read_scenario(Path(__file__).resolve().parents[2]/'scenarios/v3block/r4-node-loss.yaml')
         action = next(p for p in scenario['phases'] if p['name'] == 'start')['actions'][0]
         for rf in ('2','3'):
             role, argv = smoke.command(action, dict(scenario['env'],rf=rf,run_id='smoke'), PurePosixPath('/tmp/smoke'))
