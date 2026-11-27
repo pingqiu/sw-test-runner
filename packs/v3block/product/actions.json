@@ -122,10 +122,12 @@
         "cite": "cmd/sw-block/chunk.go:99-100 (dispatch); cmd/sw-block/chunk_volume_delete.go:19-32 (--volume, --request-id; rerun with the same id once the cause is cleared; --timeout 1m), cmd/sw-block/chunk_b.go:117-122 (--chunk-filer, --chunk-path, --master)",
         "decode": {"kind": "error_body", "path": "ops chunk volume-delete"}
       }],
-      "retry": {"while_code": "not_admitted", "within_param": "admit_seconds", "every_seconds": 3, "attempts": "attempts",
-        "expected_refusal": {"param": "retry_horizon", "while_message_contains": "workspace: deletion refused before persistence",
-          "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes; the phrase is the delete sentinel (outcomes.json phrases)"}},
-      "note": "after a stop the master admits the delete only once the holder's lease horizon has passed, answering not_admitted until then; the CLI's procedure is to rerun with the same request id. A step that declares expect=refused is one call, unless it sets retry_horizon: it then reruns through the lease-horizon refusal before persistence."
+      "retry": {"while_code": "not_admitted", "while_message_contains": "workspace: deletion refused before persistence",
+        "max_attempts": 41, "every_seconds": 3, "within_param": "admit_seconds", "request_arg": "request",
+        "page_cite": "docs/volume-lifecycle.md:526 (volume-delete answers not_admitted ... workspace: deletion refused before persistence: workspace delete: live until <time>: run it again after the horizon), docs/volume-lifecycle.md:489-492 (run the same command, the same --request-id, after <time>)",
+        "expected_refusal": {"param": "retry_horizon",
+          "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes"}},
+      "note": "after a stop the master refuses the reservation while the holder's lease may be live (not_admitted, the sentinel), and the page tells the operator to run the same command again after the horizon: each run is its own operation (request, attempt). A not_admitted after the reservation has no such page line and is not rerun (outcomes.json page_gaps). A step that declares expect=refused is one attempt, unless it sets retry_horizon."
     },
     {
       "action": "v3_op_observe",

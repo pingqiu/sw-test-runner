@@ -87,6 +87,10 @@ func (e *rowEffect) record() map[string]any {
 // in code, not on a page: the rows (action, path, codes), the effect as the
 // code shows it, the code line, the page read and why it does not state it.
 type pageGap struct {
+	// Kind is "effect" (the default: an unknown row whose effect only code
+	// states) or "rerun" (no page tells the operator to run the command
+	// again for this answer, so the runner does not).
+	Kind   string   `json:"kind,omitempty"`
 	Action string   `json:"action"`
 	Path   string   `json:"path"`
 	Codes  []string `json:"codes"`
@@ -272,9 +276,16 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 	}
 	for i, g := range t.PageGaps {
 		at := fmt.Sprintf("outcomes page gap %d (%s %q)", i, g.Action, g.Path)
-		if g.Action == "" || g.Path == "" || len(g.Codes) == 0 || g.Effect.Part == "" || len(g.Effect.To) == 0 ||
+		rerun := g.Kind == "rerun"
+		if g.Kind != "" && g.Kind != "effect" && !rerun {
+			return t, fmt.Errorf("%s: kind %q is not effect or rerun", at, g.Kind)
+		}
+		if g.Action == "" || g.Path == "" || len(g.Codes) == 0 || (!rerun && (g.Effect.Part == "" || len(g.Effect.To) == 0)) ||
 			!strings.Contains(g.CodeCite, ".go:") || strings.TrimSpace(g.PageRead) == "" || strings.TrimSpace(g.Why) == "" {
-			return t, fmt.Errorf("%s: action, path, codes, effect, a code line, the page read and why are required", at)
+			return t, fmt.Errorf("%s: action, path, codes, effect (unless a rerun gap), a code line, the page read and why are required", at)
+		}
+		if rerun {
+			continue
 		}
 		for _, c := range g.Codes {
 			if got, _ := t.decide(opPath{g.Action, g.Path}, c, ""); got != "unknown" || !t.hasRow(g.Action, g.Path, c, "unknown") {

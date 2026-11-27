@@ -278,29 +278,39 @@ type Decode struct {
 	Detail           string            `json:"detail,omitempty"`
 }
 
-// Retry reruns the same command while the answer's error code is WhileCode,
-// within the int param WithinParam (seconds), pausing EverySeconds between
-// two attempts. A step that declares expect=refused is one call. Every
-// attempt is listed in the result under Attempts; the outcome is the last.
+// Retry reruns the same command, as the documented operator does, ONLY
+// where an operator page tells the operator to run it again for that
+// answer: PageCite is that page line (docs/<page>.md:<line>), and an answer
+// in the product marked "retryable" is not one. The rerun is for the answer
+// whose error code is WhileCode and whose message contains
+// WhileMessageContains (the page's answer). At most MaxAttempts attempts,
+// EverySeconds apart, and within the int param WithinParam (seconds) when
+// it is set. Every attempt is its OWN operation in the history: an invoke
+// and a complete, its args carrying the request id (RequestArg, one of the
+// record's args) and "attempt": n. The last attempt's outcome stands. A
+// step that declares expect=refused is one attempt, unless ExpectedRefusal
+// names a bool param it sets true.
 type Retry struct {
-	WhileCode    string `json:"while_code"`
-	WithinParam  string `json:"within_param"`
-	EverySeconds int    `json:"every_seconds"`
-	Attempts     string `json:"attempts"`
-	// ExpectedRefusal, when set, lets a step that declares expect=refused
-	// rerun too: when its bool param is true, while the answer is WhileCode
-	// AND its message contains WhileMessageContains (a refusal that is not
-	// the one the step probes). The first other answer is the one decoded.
-	ExpectedRefusal *ExpectedRefusalRetry `json:"expected_refusal,omitempty"`
+	WhileCode            string                `json:"while_code"`
+	WhileMessageContains string                `json:"while_message_contains"`
+	MaxAttempts          int                   `json:"max_attempts"`
+	EverySeconds         int                   `json:"every_seconds"`
+	WithinParam          string                `json:"within_param,omitempty"`
+	RequestArg           string                `json:"request_arg"`
+	PageCite             string                `json:"page_cite"`
+	ExpectedRefusal      *ExpectedRefusalRetry `json:"expected_refusal,omitempty"`
 }
 
-// ExpectedRefusalRetry names the bool param that turns it on and the
-// product text of the refusal it reruns through.
+// ExpectedRefusalRetry names the bool param that lets a step declaring
+// expect=refused rerun through the same answer (a refusal that is not the
+// one the step probes).
 type ExpectedRefusalRetry struct {
-	Param                string `json:"param"`
-	WhileMessageContains string `json:"while_message_contains"`
-	Why                  string `json:"why,omitempty"`
+	Param string `json:"param"`
+	Why   string `json:"why,omitempty"`
 }
+
+// pageCite is a citation of an operator page line.
+var pageCite = regexp.MustCompile(`^docs/[A-Za-z0-9._/-]+\.md:[0-9]+`)
 
 func strict(b []byte, v any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
@@ -550,16 +560,28 @@ func (a *Action) check(keys map[string]bool) error {
 		}
 	}
 	if r := a.Retry; r != nil {
-		if r.WhileCode == "" || !ints[r.WithinParam] || r.EverySeconds <= 0 || r.Attempts == "" {
-			return errors.New("retry needs while_code, an int within_param, every_seconds and attempts")
+		if !pageCite.MatchString(r.PageCite) {
+			return fmt.Errorf("a rerun needs the operator page line that tells the operator to run the command again (page_cite docs/<page>.md:<line>), not %q: without one there is no rerun", r.PageCite)
+		}
+		if r.WhileCode == "" || r.WhileMessageContains == "" || r.MaxAttempts < 2 || r.EverySeconds <= 0 {
+			return errors.New("retry needs while_code, while_message_contains (the page's answer), max_attempts of 2 or more and every_seconds")
+		}
+		if r.WithinParam != "" && !ints[r.WithinParam] {
+			return errors.New("retry.within_param must be an int param")
+		}
+		if _, ok := a.Record.Args[r.RequestArg]; !ok || r.RequestArg == "" {
+			return errors.New("retry.request_arg must name a record arg (the request id every attempt repeats)")
+		}
+		if _, clash := a.Record.Args["attempt"]; clash {
+			return errors.New("a retried action's record has no arg named attempt: the executor writes it")
 		}
 		if er := r.ExpectedRefusal; er != nil {
 			isBool := false
 			for _, p := range a.Params {
 				isBool = isBool || (p.Name == er.Param && p.Kind == "bool")
 			}
-			if !isBool || er.WhileMessageContains == "" {
-				return errors.New("retry.expected_refusal needs a bool param and while_message_contains")
+			if !isBool {
+				return errors.New("retry.expected_refusal needs a bool param")
 			}
 		}
 		for _, v := range a.Variants {
@@ -863,54 +885,77 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if err := Check(s.ctx, node, actx.History, false); err != nil {
 		return nil, err
 	}
+	if a.Retry != nil {
+		return x.attempts(s, actx, a, v, cmd, expect, node, vol, args)
+	}
+	opCtx := s.ctx
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Op: a.Op, Verb: a.Verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err
 	}
-	s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Seq: seq, Volume: vol})
-	outcome, result := x.run(s, a, v, cmd, expect)
+	s.ctx = WithOp(opCtx, OpRef{History: actx.History, Seq: seq, Volume: vol})
+	outcome, result, _ := x.once(s, a, v, cmd)
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
 	}
+	tally(actx.History, a.Verb, result)
 	actx.Log("  %s(%s): %s", name, vol, outcome)
 	return map[string]string{"value": outcome}, nil
 }
 
-// run runs the command once, or again as the retry declares.
-func (x *Executor) run(s *scope, a *Action, v *Variant, cmd, expect string) (string, map[string]any) {
+// attempts runs a retried action: each attempt is its own operation, with
+// the request id and "attempt": n in its args; the last attempt's outcome
+// stands.
+func (x *Executor) attempts(s *scope, actx *tr.ActionContext, a *Action, v *Variant, cmd, expect string, node Runner, vol string, args map[string]any) (map[string]string, error) {
 	r := a.Retry
-	if r == nil {
-		out, res, _ := x.once(s, a, v, cmd)
-		return out, res
+	var end time.Time
+	if r.WithinParam != "" {
+		within, _ := strconv.Atoi(s.vals[r.WithinParam])
+		end = time.Now().Add(time.Duration(within) * time.Second)
 	}
-	within, _ := strconv.Atoi(s.vals[r.WithinParam])
-	end := time.Now().Add(time.Duration(within) * time.Second)
 	pause := time.Duration(r.EverySeconds) * time.Second
 	if x.Pause != nil {
 		pause = x.Pause(pause)
 	}
-	var attempts []string
-	for {
-		out, res, transport := x.once(s, a, v, cmd)
-		if transport {
-			res[r.Attempts] = attempts
-			return out, res
+	opCtx := s.ctx
+	outcome := ""
+	for n := 1; ; n++ {
+		if n > 1 {
+			select {
+			case <-opCtx.Done():
+				return map[string]string{"value": outcome}, nil
+			case <-time.After(pause):
+			}
+			// Each attempt is an operation boundary.
+			if err := Check(opCtx, node, actx.History, false); err != nil {
+				return nil, err
+			}
 		}
+		at := make(map[string]any, len(args)+1)
+		for k, val := range args {
+			at[k] = val
+		}
+		at["attempt"] = n
+		seq, err := actx.History.Invoke(tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Op: a.Op, Verb: a.Verb, Volume: vol, Args: at})
+		if err != nil {
+			return nil, err
+		}
+		s.ctx = WithOp(opCtx, OpRef{History: actx.History, Seq: seq, Volume: vol})
+		out, res, transport := x.once(s, a, v, cmd)
+		if err := actx.History.Complete(seq, out, res); err != nil {
+			return nil, err
+		}
+		tally(actx.History, a.Verb, res)
+		actx.Log("  %s(%s) attempt %d: %s", a.Action, vol, n, out)
+		outcome = out
 		d, _ := res["detail"].(string)
-		attempts = append(attempts, fmt.Sprintf("%s %s", out, FirstLine(d)))
-		res[r.Attempts] = attempts
-		again := strings.HasPrefix(d, r.WhileCode+":")
+		again := !transport && out != tr.OutcomeOK && strings.HasPrefix(d, r.WhileCode+":") && strings.Contains(d, r.WhileMessageContains)
 		if expect == tr.OutcomeRefused {
 			er := r.ExpectedRefusal
-			again = again && er != nil && s.vals[er.Param] == "true" && strings.Contains(d, er.WhileMessageContains)
+			again = again && er != nil && s.vals[er.Param] == "true"
 		}
-		if out == tr.OutcomeOK || !again || time.Now().After(end) {
-			return out, res
-		}
-		select {
-		case <-s.ctx.Done():
-			return out, res
-		case <-time.After(pause):
+		if !again || n >= r.MaxAttempts || (!end.IsZero() && time.Now().After(end)) {
+			return map[string]string{"value": outcome}, nil
 		}
 	}
 }

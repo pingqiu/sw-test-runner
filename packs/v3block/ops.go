@@ -290,6 +290,11 @@ func v3HistoryEnd(ctx context.Context, actx *tr.ActionContext, act tr.Action) (m
 	if err := declared.Check(ctx, node, actx.History, true); err != nil {
 		return nil, fmt.Errorf("v3_history_end: %w", err)
 	}
+	// The run's answer counts per verb (attempts, and each error code's
+	// answers: a snapshot's head_conflicts per snapshot attempted).
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "answer_counts", Result: declared.Counts(actx.History)}); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
 	open := actx.History.Open()
 	if err := actx.History.Close(); err != nil {
 		return nil, fmt.Errorf("v3_history_end: %w", err)
