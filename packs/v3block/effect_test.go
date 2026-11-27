@@ -187,8 +187,42 @@ func TestPendingPin(t *testing.T) {
 	if _, err := loadOutcomes([]byte(`{"product": "block", "read_at": "x", "about": "a", "rows": [{"action": "a", "path": "p", "code": "c", "outcome": "refused", "pending_pin": true, "cite": "x.go:1"}]}`)); err == nil {
 		t.Error("pending_pin on a plain refusal loaded")
 	}
-	// The embedded table: the delete row is pending and decodes unknown.
-	if out, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", ""); out != tr.OutcomeUnknown || eff != nil {
+	// The embedded table: the delete row's phrase is pinned (indirectly,
+	// through shared code), so it decodes refused_effect with its effect.
+	if out, eff := outcomes.decide(chunkVolumeDelete, "snapshot_has_dependents", ""); out != tr.OutcomeRefusedEffect || eff == nil || eff.Part != "workspace" {
 		t.Fatalf("embedded delete row: %s %v", out, eff)
+	}
+}
+
+// An indirect pin counts only through code both paths share: without
+// shared_source (or through) it is refused at load; a direct pin needs
+// neither.
+func TestIndirectPin(t *testing.T) {
+	table := func(ph string) string {
+		return `{"product": "block", "read_at": "x", "about": "a", "phrases": [` + ph + `], "rows": [
+		  {"action": "delete", "path": "ops chunk volume-delete", "code": "reserved_here", "outcome": "refused_effect", "cite": "x.go:1",
+		   "effect": {"part": "workspace", "to": {"exit": 1, "stderr_contains": "the text"}, "cite": "docs/operator-guide.md:193-196"}}]}`
+	}
+	good := `{"phrase": "the text", "source": "a.go:1", "pinned_by": "a_test.go:9", "pin": "indirect", "through": "another call", "shared_source": "a.go:1"}`
+	if _, err := loadOutcomes([]byte(table(good))); err != nil {
+		t.Fatalf("green twin: %v", err)
+	}
+	if _, err := loadOutcomes([]byte(table(`{"phrase": "the text", "source": "a.go:1", "pinned_by": "a_test.go:9", "pin": "direct"}`))); err != nil {
+		t.Fatalf("a direct pin: %v", err)
+	}
+	for name, ph := range map[string]string{
+		"indirect without shared_source":                     strings.Replace(good, `, "shared_source": "a.go:1"`, ``, 1),
+		"indirect with a shared source that is no code line": strings.Replace(good, `"shared_source": "a.go:1"`, `"shared_source": "the master"`, 1),
+		"indirect without through":                           strings.Replace(good, `"through": "another call", `, ``, 1),
+		"a pin kind without pinned_by":                       strings.Replace(good, `"a_test.go:9"`, `null`, 1),
+		"another pin kind":                                   strings.Replace(good, `"indirect"`, `"hopeful"`, 1),
+		"shared_source on a direct pin":                      strings.Replace(good, `"indirect"`, `"direct"`, 1),
+	} {
+		if !strings.Contains(table(ph), "the text") || ph == good {
+			t.Fatalf("%s: seed not applied", name)
+		}
+		if _, err := loadOutcomes([]byte(table(ph))); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
 	}
 }
