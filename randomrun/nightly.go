@@ -65,6 +65,17 @@ type NightRun struct {
 	// ones in it that its checks.json does not hold (not run: the run FAILs).
 	Checkers []string `json:"checkers"`
 	NotRun   []string `json:"not_run,omitempty"`
+	// Judged is, per required checker, the count of what it judged
+	// (checks.json "judged"; -1 when absent); Failed lists the required
+	// checkers that did not PASS with judged > 0, and why.
+	Judged map[string]int `json:"judged"`
+	Failed []string       `json:"failed,omitempty"`
+}
+
+// verdict is one checker's entry in checks.json.
+type verdict struct {
+	Verdict string `json:"verdict"`
+	Judged  *int   `json:"judged"`
 }
 
 // requiredCheckers reads the checker set from a history's gen_header.
@@ -94,7 +105,7 @@ func requiredCheckers(path string) ([]string, error) {
 }
 
 // checkersRun lists the checkers a checks.json holds a verdict for.
-func checkersRun(path string) (map[string]bool, error) {
+func checkersRun(path string) (map[string]verdict, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -103,9 +114,11 @@ func checkersRun(path string) (map[string]bool, error) {
 	if err := json.Unmarshal(b, &checks); err != nil {
 		return nil, fmt.Errorf("checks.json does not parse")
 	}
-	out := map[string]bool{}
-	for k := range checks {
-		out[k] = true
+	out := map[string]verdict{}
+	for k, raw := range checks {
+		var v verdict
+		_ = json.Unmarshal(raw, &v) // an entry of another shape has no verdict and no count
+		out[k] = v
 	}
 	return out, nil
 }
@@ -153,10 +166,12 @@ func unknownsResolved(path string) (int, string) {
 }
 
 // Judge fills each run's verdict and the night's: a run PASSes only with
-// exit 0, a readable coverage file, and a checks.json that holds every
-// checker of the run's required set (its header's checkers; one missing is
-// "not run"; one present but not in the set is ignored); the night PASSes
-// only if every run does. Union coverage sums the runs' cells; a cell is never reached in the
+// exit 0, a readable coverage file, and a checks.json in which every
+// checker of the run's required set (its header's checkers) PASSes with
+// its own count above zero ("judged" > 0; one missing is "not run", a
+// count of 0 or none is "<C> judged nothing"; a checker present but not in
+// the set is ignored). Each run reports its table checker -> judged. The
+// night PASSes only if every run does. Union coverage sums the runs' cells; a cell is never reached in the
 // union only if no run reached it. A night with fault runs also needs one run
 // whose C6 resolved at least one unknown ("unknowns resolved: <n>", n > 0):
 // otherwise the faults exercised nothing C6 can judge, and the night FAILs.
@@ -189,7 +204,7 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 			r.Faults = cov.Faults != nil
 			req, rerr := requiredCheckers(r.History)
 			r.Checkers = req
-			var ran map[string]bool
+			var ran map[string]verdict
 			if rerr == nil {
 				if r.Checks == "" {
 					rerr = fmt.Errorf("no checks.json in the bundle")
@@ -197,9 +212,27 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 					ran, rerr = checkersRun(r.Checks)
 				}
 			}
+			r.Judged = map[string]int{}
 			for _, c := range req {
-				if rerr == nil && !ran[c] {
+				if rerr != nil {
+					break
+				}
+				v, present := ran[c]
+				switch {
+				case !present:
 					r.NotRun = append(r.NotRun, c)
+					continue
+				case v.Judged == nil:
+					r.Judged[c] = -1
+				default:
+					r.Judged[c] = *v.Judged
+				}
+				// Each required checker passes with its own count above zero.
+				switch {
+				case v.Verdict != "PASS":
+					r.Failed = append(r.Failed, fmt.Sprintf("%s verdict %s", c, v.Verdict))
+				case v.Judged == nil || *v.Judged <= 0:
+					r.Failed = append(r.Failed, c+" judged nothing")
 				}
 			}
 			why := ""
@@ -208,6 +241,8 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 				why = "checker set: " + rerr.Error()
 			case len(r.NotRun) > 0:
 				why = "not run: " + strings.Join(r.NotRun, ", ")
+			case len(r.Failed) > 0:
+				why = strings.Join(r.Failed, "; ")
 			case r.Exit != 0:
 				why = fmt.Sprintf("run exited %d", r.Exit)
 			default:

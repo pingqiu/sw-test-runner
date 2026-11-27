@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,5 +63,27 @@ func TestFindFileFindsTheRunsCoverageAndChecks(t *testing.T) {
 	}
 	if findFile(dir, "nightly.json") != "" {
 		t.Fatal("found a file that is not there")
+	}
+}
+
+// The fault scenario's 5-seed condition: a sequential night of 5 runs, each
+// of -long-ops operations, one seed each from the nightly seed, no parallel
+// and no long run.
+func TestSequentialPlanIsFiveRunsOneSeedEach(t *testing.T) {
+	runs := planSequential(20261201, 5, 300, 20000, 1000)
+	seeds := randomrun.NightlySeeds(20261201, 5)
+	if len(runs) != 5 {
+		t.Fatalf("%d runs", len(runs))
+	}
+	tags := map[string]bool{}
+	for i, r := range runs {
+		if r.Kind != "sequential" || r.Ops != 300 || r.Seed != seeds[i] || r.Index != i || tags[r.Tag] {
+			t.Fatalf("run %d: %+v", i, r)
+		}
+		tags[r.Tag] = true
+		a := strings.Join(argv("/bin/swblock", "scenarios/v3block/m2-faults.yaml", "/res", 20261201, r, nil), " ")
+		if !strings.Contains(a, "gen_ops=300") || !strings.Contains(a, "gen_seed="+strconv.FormatUint(seeds[i], 10)) || !strings.HasSuffix(a, "m2-faults.yaml") {
+			t.Fatalf("argv %s", a)
+		}
 	}
 }
