@@ -366,7 +366,7 @@ func masterAnswers(ctx context.Context, node runner, e opEnv, vol string) bool {
 // runner has recorded (a volume with a holder: not stopped, not deleted) runs
 // and its status says serving. down names processes, not_serving volumes.
 func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node runner) (map[string]any, bool, error) {
-	down, notServing := []string{}, []string{}
+	down, notServing, holders := []string{}, []string{}, map[string]any{}
 	names := strings.Fields(actx.Vars[specOrderVar])
 	if p, why := resolveProc(ctx, actx, node, e, "blockmaster"); why != "" || !alive(ctx, node, p.PID, p.Start) {
 		down = append(down, "blockmaster")
@@ -386,9 +386,38 @@ func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node run
 		if st, ok := readStatus(ctx, node, v.Hosts[v.Cur].Status, n); !ok || !st.serving(n) {
 			notServing = append(notServing, n)
 		}
+		holders[n] = liveHolder(ctx, node, v.Hosts[v.Cur].Status)
 	}
 	healthy := len(down) == 0 && answers && len(notServing) == 0
-	return map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers}, healthy, nil
+	return map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders}, healthy, nil
+}
+
+// liveHolder is the process that holds the volume's status listener now, read
+// from the host (the status answer names no pid), not from the runner's
+// record: {"pid": n, "start": "<start time>"}, or {"error": why} when no
+// single process can be named. A holder restarted behind the runner's back
+// shows its own pid and start time here.
+func liveHolder(ctx context.Context, node runner, statusAddr string) map[string]any {
+	port := portOf(statusAddr)
+	owners, err := listenerPIDs(ctx, node, []string{port})
+	if err != nil {
+		return map[string]any{"error": "listeners: " + err.Error()}
+	}
+	var pids []string // one process may list its listener twice (IPv4 and IPv6)
+	for _, p := range owners[port] {
+		if !contains(pids, p) {
+			pids = append(pids, p)
+		}
+	}
+	if len(pids) != 1 || !digits.MatchString(pids[0]) {
+		return map[string]any{"error": fmt.Sprintf("status port :%s held by %v", port, pids)}
+	}
+	start, state := procStart(ctx, node, pids[0])
+	if state != procRunning {
+		return map[string]any{"error": fmt.Sprintf("pid %s: %s", pids[0], state)}
+	}
+	n, _ := strconv.Atoi(pids[0])
+	return map[string]any{"pid": n, "start": start}
 }
 
 // healthy writes one healthy observation: the first healthy look within wait,

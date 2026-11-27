@@ -363,7 +363,52 @@ func healthNode() *fakeNode {
 		on("/proc/77", ok("start 700\n")).
 		on("/proc/4242", ok("start 100\n")).
 		on("v3ctl resolve", fakeAnswer{out: resolveRefused, code: 1}).
-		on("/status?volume=v1", ok(statusAt(3, true)))
+		on("/status?volume=v1", ok(statusAt(3, true))).
+		on("ss -Hltnp", ok(statusListener("4242")))
+}
+
+func statusListener(pid string) string {
+	return "LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"blockvolume\",pid=" + pid + ",fd=9))\n" +
+		"LISTEN 0 4096 [::ffff:127.0.0.1]:21012 [::]:* users:((\"blockvolume\",pid=" + pid + ",fd=11))"
+}
+
+// The healthy record names, per holder, the process that holds the volume's
+// status listener now, with its start time, read from the host. Red control:
+// a holder restarted behind the runner's back (a supervisor, after a lost
+// lease) must show its new pid and start time, not the runner's record.
+func TestHealthyNamesTheLiveHolder(t *testing.T) {
+	holder := func(f *fakeNode) map[string]any {
+		actx, p, e := faultSetup(t)
+		if _, err := e.healthy(context.Background(), actx, f, 0); err != nil {
+			t.Fatal(err)
+		}
+		hs, _ := healthyRecord(t, actx, p)["holders"].(map[string]any)
+		h, _ := hs["v1"].(map[string]any)
+		if len(hs) != 1 || h == nil {
+			t.Fatalf("holders %v", hs)
+		}
+		return h
+	}
+	if h := holder(healthNode()); h["pid"] != float64(4242) || h["start"] != "100" {
+		t.Errorf("the recorded holder: %v", h)
+	}
+	f := healthNode()
+	f.rules = append([]fakeRule{
+		{match: "ss -Hltnp", answers: []fakeAnswer{ok(statusListener("6000"))}},
+		{match: "/proc/6000", answers: []fakeAnswer{ok("start 900\n")}},
+		{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+	}, f.rules...)
+	if h := holder(f); h["pid"] != float64(6000) || h["start"] != "900" {
+		t.Errorf("restarted behind the runner's back: %v", h)
+	}
+	// Nobody, or two processes, on the status port: no pid is named.
+	for _, ss := range []string{"", statusListener("6000") + "\n" + statusListener("6001")} {
+		f := healthNode()
+		f.rules = append([]fakeRule{{match: "ss -Hltnp", answers: []fakeAnswer{ok(ss)}}, {match: "/proc/600", answers: []fakeAnswer{ok("start 1\n")}}}, f.rules...)
+		if h := holder(f); h["pid"] != nil || h["error"] == nil {
+			t.Errorf("ss %q: %v", ss, h)
+		}
+	}
 }
 
 func healthyRecord(t *testing.T, actx *tr.ActionContext, p string) map[string]any {
