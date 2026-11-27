@@ -580,7 +580,8 @@ def history(*steps):
         n = len(recs)
         if st[0] == 'obs':
             _, vol, gen, files = st[:4]
-            res = dict(st[4]) if len(st) > 4 else {}
+            # Without an extra dict, the control plane's answer C5 requires.
+            res = dict(st[4]) if len(st) > 4 else {'workspace': {'exit': 0, 'text': 'serving epoch 1'}}
             res['head'] = {'gen': gen, 'epoch': 1, 'holder': 'a/r1', 'state': ''} if gen is not None else 'unreadable'
             if files is not None:
                 res['files'] = list(files)
@@ -644,13 +645,13 @@ class C5(unittest.TestCase):
 
     def test_a_refused_create_of_a_never_existing_name_is_judged_on_no_directory(self):
         # No HEAD (a show error) and no directory are observations too.
-        none = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': []}
+        none = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': [], 'workspace': {'exit': 1, 'text': 'v9 not found'}}
         recs = history(*(BASE + (('obs', 'v9', 4, FILES), ('create', 'v9', NEG, 'refused'), ('obs', 'v9', 4, FILES))))
         for i in (-5, -2):
             recs[i]['result'] = dict(none)
         v = hc.check(dump(recs))['C5']
         self.assertEqual(v['verdict'], 'PASS', v)
-        recs[-2]['result'] = {'show_error': {'exit': 1, 'code': 'not_found'}, 'dirs': ['v9-0badc0de']}
+        recs[-2]['result'] = dict(none, dirs=['v9-0badc0de'])
         v = hc.check(dump(recs))['C5']
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('its dirs changed', v['findings'][0])
@@ -703,10 +704,32 @@ class C5(unittest.TestCase):
         self.assertEqual(v['verdict'], 'PASS', v)
         self.assertIn('limit delete while attached: 1 of 1 refusal(s) judged', v['findings'])
 
-    def test_a_negative_not_refused_is_a_note(self):
+    def test_red_a_negative_answered_ok_fails(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'ok'))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertTrue(v['findings'][0].startswith('negative not refused: seq 7 delete v1'), v)
+        self.assertTrue(v['findings'][0].endswith('answered ok'), v)
+
+    def test_a_negative_answered_unknown_is_a_note(self):
+        v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES), ('delete', 'v1', NEG, 'unknown'))
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertTrue(any(x.startswith('negative not refused: seq 7 delete v1') for x in v['findings']), v)
+        self.assertTrue(any(x.startswith('negative not refused: seq 7 delete v1') and x.endswith('answered unknown') for x in v['findings']), v)
+
+    def test_red_a_required_part_recorded_by_no_observation_allows_no_pass(self):
+        # Neither observation records the workspace answer: not judged, so
+        # the limit has no judged refusal and C5 cannot PASS.
+        nows = {'dirs': WS['dirs'], 'snapshots': []}
+        v = self.c5(('obs', 'v1', 4, FILES, nows), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, nows))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('not judged: seq 4 write v1' in x and 'record no workspace (required)' in x for x in v['findings']), v)
+        # nor HEAD (no head and no show error in either)
+        recs = history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))))
+        for i in (-5, -2):
+            del recs[i]['result']['head']
+        v = hc.check(dump(recs))['C5']
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('record no head (required)' in x for x in v['findings']), v)
+        self.assertEqual(hc.REQUIRED_PARTS, ('head', 'workspace'))
 
     def test_no_observation_after_is_not_judged(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'))
@@ -1111,6 +1134,21 @@ class C6(unittest.TestCase):
     # health
     def test_a_kill_restored_to_health_passes(self):
         self.assert_c6('PASS', KILL, ('healthy', False), RESTART, ('healthy', True))
+
+    def test_unknowns_resolved_is_reported_in_its_exact_form(self):
+        # zero unknowns with healthy points: PASS, n = 0 stated, not silent
+        v = self.assert_c6('PASS', KILL, RESTART, ('healthy', True))
+        self.assertIn('unknowns resolved: 0', v['findings'])
+        # two placed unknowns (one took effect, one did not)
+        v = self.assert_c6('PASS', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), ('write', 'v1', {'lba': 1, 'sha256': T}, 'unknown', {}),
+                           KILL, RESTART, ('healthy', True),
+                           ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}), ('read', 'v1', {'lba': 1}, 'ok', {'sha256': hc.ZERO}))
+        self.assertIn('unknowns resolved: 2', v['findings'])
+        self.assertEqual([x for x in v['findings'] if x.startswith('unknowns resolved')], ['unknowns resolved: 2'])
+        # a third state is not counted as resolved
+        v = self.assert_c6('FAIL', ('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                           ('read', 'v1', {'lba': 0}, 'ok', {'sha256': JUNK}))
+        self.assertIn('unknowns resolved: 0', v['findings'])
 
     def test_red_the_run_ends_unhealthy(self):
         self.assert_c6('FAIL', KILL, RESTART, ('healthy', True), KILL, ('healthy', False), contains='ended unhealthy')
