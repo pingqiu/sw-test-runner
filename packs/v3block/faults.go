@@ -367,11 +367,15 @@ func masterAnswers(ctx context.Context, node runner, e opEnv, vol string) bool {
 	return r == tr.OutcomeOK || r == tr.OutcomeRefused
 }
 
-// healthCheck is one look: the blockmaster runs and answers, every holder the
-// runner has recorded (a volume with a holder: not stopped, not deleted) runs
-// and its status says serving. down names processes, not_serving volumes.
+// healthCheck is one look. It first places every UNSETTLED volume by
+// observation (settle; each placement a "settled" record), then demands:
+// the blockmaster runs and answers; every HELD volume serves from a live
+// holder (down names processes, not_serving volumes); no holder serves a
+// NOT HELD volume (served_not_held); and no volume is in the third state
+// (third_state: an UNSETTLED volume observation cannot place).
 func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node runner) (map[string]any, bool, error) {
 	down, notServing, holders := []string{}, []string{}, map[string]any{}
+	thirdState, servedNotHeld := []map[string]any{}, []string{}
 	names := strings.Fields(actx.Vars[specOrderVar])
 	if p, why := resolveProc(ctx, actx, node, e, "blockmaster"); why != "" || !alive(ctx, node, p.PID, p.Start) {
 		down = append(down, "blockmaster")
@@ -382,24 +386,44 @@ func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node run
 		if err != nil {
 			return nil, false, err
 		}
-		if held(actx, v) {
+		if v.Extra["intent"] == intentUnsettled {
+			state, ev, why := e.settle(ctx, node, v)
+			if state == "" {
+				thirdState = append(thirdState, map[string]any{"volume": n, "why": why})
+			} else {
+				setIntent(v, state)
+				if state == intentNotHeld {
+					v.PID, v.PIDStart = "", ""
+				}
+				saveVolume(actx, v)
+				if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "settled", Result: map[string]any{"volume": n, "state": state, "evidence": ev}}); err != nil {
+					return nil, false, err
+				}
+			}
+		}
+		switch v.Extra["intent"] {
+		case intentHeld:
 			if v.PID != "" && !alive(ctx, node, v.PID, v.PIDStart) {
 				down = append(down, fmt.Sprintf("blockvolume:%d", i))
 			}
 			if st, ok := readStatus(ctx, node, v.Hosts[v.Cur].Status, n); !ok || !st.serving(n) {
 				notServing = append(notServing, n)
 			}
+		case intentNotHeld:
+			for _, h := range v.Hosts {
+				if st, ok := readStatus(ctx, node, h.Status, n); ok && st.serving(n) {
+					servedNotHeld = append(servedNotHeld, n)
+					break
+				}
+			}
 		}
 		if v.PID != "" {
 			holders[n] = liveHolder(ctx, node, v.Hosts[v.Cur].Status)
 		}
 	}
-	healthy := len(down) == 0 && answers && len(notServing) == 0
-	res := map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders}
-	if byIntent(actx) {
-		res["rule"] = "intent"
-	}
-	return res, healthy, nil
+	healthy := len(down) == 0 && answers && len(notServing) == 0 && len(thirdState) == 0 && len(servedNotHeld) == 0
+	return map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders,
+		"third_state": thirdState, "served_not_held": servedNotHeld}, healthy, nil
 }
 
 // liveHolder is the process that holds the volume's status listener now, read
@@ -511,13 +535,18 @@ func readExit(ctx context.Context, node runner, file string) (status int, ago ti
 	return s, time.Duration(now - at), ""
 }
 
-// A volume's intended state: held (to be served) or released, set by the
-// holder-lifecycle operation invoked on it, whatever its outcome: a start
-// (attach, a restart, a unit relaunch: launchHolder) holds it; a stop or move
-// (handOver) releases it, also when it ended unknown.
+// A volume's intended state has three values, set by the answer of the last
+// holder-lifecycle operation on it: HELD when an attach (also the one on a
+// move's target) answered ok; NOT HELD when a stop or a move (its hand-over)
+// answered ok; UNSETTLED when such an operation answered unknown (an unknown
+// stop that did not take effect leaves a serving holder). A refusal changes
+// nothing. An UNSETTLED volume is placed by observation at a healthy look
+// (settle) and the placement is a "settled" record in the history. A
+// restart, by the schedule or the unit, is not a lifecycle operation.
 const (
-	intentHeld     = "held"
-	intentReleased = "released"
+	intentHeld      = "held"
+	intentNotHeld   = "not_held"
+	intentUnsettled = "unsettled"
 )
 
 func setIntent(v *opVolume, intent string) {
@@ -527,18 +556,68 @@ func setIntent(v *opVolume, intent string) {
 	v.Extra["intent"] = intent
 }
 
-// byIntent: the healthy rule by intended state (var healthy_by_intent=true).
-// Off by default: it changes the healthy definition and awaits review. Off,
-// a volume is held while the runner records a holder for it.
-func byIntent(actx *tr.ActionContext) bool { return actx.Vars["healthy_by_intent"] == "true" }
+// settleIntent records a lifecycle operation's answer: ok sets target,
+// anything else (unknown) leaves the volume UNSETTLED.
+func settleIntent(v *opVolume, ok bool, target string) {
+	if ok {
+		setIntent(v, target)
+	} else {
+		setIntent(v, intentUnsettled)
+	}
+}
 
 // held: the volume is to be served, so its holder is the unit's to restart
 // and healthy demands that it serve.
-func held(actx *tr.ActionContext, v *opVolume) bool {
-	if byIntent(actx) {
-		return v.Extra["intent"] == intentHeld
+func held(v *opVolume) bool { return v.Extra["intent"] == intentHeld }
+
+// wsLeaseState reads `ops workspace show`: the lease state ("granted",
+// "revoking", "expired", "none") and the recorded ACK ("none" or the ack).
+func wsLeaseState(out string) (lease, ack string) {
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if s, ok := strings.CutPrefix(l, "lease state: "); ok {
+			lease = s
+		}
+		if s, ok := strings.CutPrefix(l, "recorded ACK: "); ok {
+			ack = s
+		}
 	}
-	return v.PID != ""
+	return lease, ack
+}
+
+// settle places an UNSETTLED volume by observation: its recorded holder
+// still runs and serves it from its own status listener (the operation did
+// not take effect): HELD; the holder is gone and the master's workspace
+// shows the lease revoked, acknowledged or lapsed: NOT HELD. Anything else
+// is the third state, and why says which.
+func (e opEnv) settle(ctx context.Context, node runner, v *opVolume) (state string, evidence map[string]any, why string) {
+	h := v.Hosts[v.Cur]
+	if v.PID != "" {
+		switch procState(ctx, node, v.PID, v.PIDStart) {
+		case procRunning:
+			st, ok := readStatus(ctx, node, h.Status, v.Name)
+			live := liveHolder(ctx, node, h.Status)
+			if ok && st.serving(v.Name) && fmt.Sprint(live["pid"]) == v.PID && live["start"] == v.PIDStart {
+				return intentHeld, map[string]any{"pid": v.PID, "start": v.PIDStart, "epoch": st.Epoch, "serving": true}, ""
+			}
+			return "", nil, fmt.Sprintf("holder pid %s alive but not serving from its own status listener", v.PID)
+		case procUnreadable:
+			return "", nil, fmt.Sprintf("holder pid %s: state unreadable", v.PID)
+		}
+	}
+	out, _, code, err := e.workspace(ctx, node, v.Name, "show")
+	if err != nil || code != 0 {
+		return "", nil, fmt.Sprintf("holder gone; workspace show exit %d", code)
+	}
+	lease, ack := wsLeaseState(out)
+	ev := map[string]any{"holder_gone": v.PID, "lease": lease, "ack": ack}
+	switch {
+	case lease == "":
+		return "", nil, "holder gone; workspace show names no lease state"
+	case lease == "revoking" || lease == "expired" || lease == "none" || (ack != "" && ack != "none"):
+		return intentNotHeld, ev, ""
+	}
+	return "", nil, fmt.Sprintf("holder gone; workspace lease still %s, no ACK", lease)
 }
 
 // supervise is the unit: every held volume whose holder (not one the runner
@@ -556,7 +635,7 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 		if err != nil {
 			return err
 		}
-		if !held(actx, v) || v.PID == "" || v.Extra["exit_file"] == "" || v.Extra["killed_pid"] == v.PID {
+		if !held(v) || v.PID == "" || v.Extra["exit_file"] == "" || v.Extra["killed_pid"] == v.PID {
 			continue
 		}
 		if procState(ctx, node, v.PID, v.PIDStart) != procGone {

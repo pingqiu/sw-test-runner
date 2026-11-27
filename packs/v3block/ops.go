@@ -373,7 +373,9 @@ func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
 //     recorded epoch, AND the status and NVMe listeners are held by it;
 //   - only then is the kernel host connected, to this run's NQN.
 func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
-	return e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
+	out, res := e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
+	settleIntent(v, out == tr.OutcomeOK, intentHeld) // the volume's intended state (faults.go)
+	return out, res
 }
 
 // launchHolder is startHolder with the command line given. A restart
@@ -382,7 +384,6 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 // controller of the volume's NQN is left: the kernel reconnects the one a
 // killed holder left behind by itself.
 func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsHost, argv []string, bound time.Duration, restart bool) (string, map[string]any) {
-	setIntent(v, intentHeld) // invoked: held, whatever the outcome (faults.go)
 	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
 	held, err := listenerPIDs(ctx, node, ports)
 	if err != nil {
@@ -809,9 +810,9 @@ func v3OpRelease(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 // --plain, revoke with the sealed generation, wait for the holder to exit by
 // itself, and wait for the master's recorded ACK of (replica, epoch). It
 // returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
-	setIntent(v, intentReleased) // invoked: released, whatever the outcome (faults.go)
-	res := map[string]any{"epoch": v.Epoch}
+func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (res map[string]any, why string) {
+	defer func() { settleIntent(v, why == "", intentNotHeld) }() // the volume's intended state (faults.go)
+	res = map[string]any{"epoch": v.Epoch}
 	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
 		return res, why
 	}

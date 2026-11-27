@@ -37,6 +37,7 @@ func faultSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {
 	actx, p := genRunCtx(t)
 	v, _, e := testVolume()
 	v.PID, v.PIDStart, v.Epoch = "4242", "100", 3
+	v.Extra = map[string]string{"intent": intentHeld}
 	saveVolume(actx, v)
 	actx.Vars[specOrderVar] = "v1"
 	e.master, e.work, e.ownScript, e.owner, e.client = "127.0.0.1:21003", "/w", "/own.sh", "tok", "c1"
@@ -82,7 +83,7 @@ func vol1(t *testing.T, actx *tr.ActionContext) *opVolume {
 func killed(t *testing.T, actx *tr.ActionContext) {
 	v := vol1(t, actx)
 	b, _ := json.Marshal(holderArgv)
-	v.Extra = map[string]string{"killed_pid": "4242", "argv": string(b)}
+	v.Extra["killed_pid"], v.Extra["argv"] = "4242", string(b)
 	saveVolume(actx, v)
 }
 
@@ -488,11 +489,11 @@ func TestHealthyCatchesEachWayOfNotBeingHealthy(t *testing.T) {
 func TestHealthySkipsVolumesWithoutAHolderAndWaits(t *testing.T) {
 	actx, p, e := faultSetup(t)
 	v := vol1(t, actx)
-	v.PID, v.PIDStart = "", ""
+	v.PID, v.PIDStart, v.Extra["intent"] = "", "", intentNotHeld
 	saveVolume(actx, v)
 	f := healthNode()
 	f.rules = append([]fakeRule{{match: "/status?volume=v1", answers: []fakeAnswer{{code: 7}}}}, f.rules...)
-	if out, _ := e.healthy(context.Background(), actx, f, 0); out["healthy"] != "true" || f.issued("/status") {
+	if out, _ := e.healthy(context.Background(), actx, f, 0); out["healthy"] != "true" {
 		t.Errorf("a volume without a holder: %v", out)
 	}
 	_ = closeRecords(t, actx, p)
@@ -615,7 +616,7 @@ const oldExit = "/r/a-v1.1.log.exit"
 func exited(t *testing.T, actx *tr.ActionContext) {
 	v := vol1(t, actx)
 	b, _ := json.Marshal(holderArgv)
-	v.Extra = map[string]string{"launch_argv": string(b), "exit_file": oldExit}
+	v.Extra["launch_argv"], v.Extra["exit_file"] = string(b), oldExit
 	saveVolume(actx, v)
 }
 
@@ -722,7 +723,7 @@ func TestSuperviseLeavesAloneWhatTheUnitWouldNotRestart(t *testing.T) {
 		"status 0 (a planned exit)":          {exit: exitAnswer(0, time.Minute)},
 		"no status written, the log says 75": {exit: ok("none\n2000000000000000000\n")},
 		"exit file unreadable":               {exit: fakeAnswer{errOut: "denied", code: 3}},
-		"volume stopped ok":                  {exit: exitAnswer(75, time.Minute), setup: func(v *opVolume) { v.PID, v.PIDStart = "", "" }},
+		"volume stopped ok":                  {exit: exitAnswer(75, time.Minute), setup: func(v *opVolume) { v.PID, v.PIDStart, v.Extra["intent"] = "", "", intentNotHeld }},
 		"killed by the runner":               {exit: exitAnswer(137, time.Minute), setup: func(v *opVolume) { v.Extra["killed_pid"] = "4242" }},
 		"holder still running":               {exit: exitAnswer(75, time.Minute), rule: &fakeRule{match: "/proc/4242", answers: []fakeAnswer{ok("start 100\n")}}},
 	} {
@@ -782,93 +783,6 @@ func TestHealthyAndMasterRestartSupervise(t *testing.T) {
 	recs = closeRecords(t, actx, p)
 	if len(recs) != 3 || recs[1].Kind != tr.HistoryComplete || recs[2].Verb != "unit_restart" {
 		t.Errorf("records %+v", recs)
-	}
-}
-
-// --- intended state (healthy_by_intent) ---
-
-// The intent is set by the invoked operation, whatever its outcome: a start
-// that launches nothing still holds the volume; a stop that ends at its first
-// step still releases it.
-func TestIntentIsSetByTheInvokedOperation(t *testing.T) {
-	v, h, e := testVolume()
-	f := (&fakeNode{}).on("ss -Hltnp", ok("LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"x\",pid=777,fd=9))"))
-	if out, _ := e.startHolder(context.Background(), f, v, h, 64, time.Second); out != tr.OutcomeUnknown || v.Extra["intent"] != intentHeld {
-		t.Errorf("a refused start: %s, intent %q", out, v.Extra["intent"])
-	}
-	f = (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "write error", code: 4})
-	if _, why := e.handOver(context.Background(), f, v, wsStop); why == "" || v.Extra["intent"] != intentReleased {
-		t.Errorf("a failed stop: %q, intent %q", why, v.Extra["intent"])
-	}
-}
-
-// With the flag, healthy demands serving only of held volumes: a volume
-// whose stop ended unknown (its holder still recorded, then gone) is not
-// demanded; a held volume with no holder is. Without the flag, the rule is
-// unchanged (a recorded holder is demanded). Red control: the unknown stop
-// demanded under the flag.
-func TestHealthyByIntent(t *testing.T) {
-	for name, c := range map[string]struct {
-		flag, intent string
-		pid          bool
-		want         string
-		notServing   []string
-	}{
-		"flag, unknown stop: not demanded": {"true", intentReleased, true, "true", nil},
-		"no flag, unknown stop: demanded":  {"", intentReleased, true, "false", []string{"v1"}},
-		"flag, held, holder gone":          {"true", intentHeld, true, "false", []string{"v1"}},
-		"flag, held, never launched":       {"true", intentHeld, false, "false", []string{"v1"}},
-		"flag, no intent (never attached)": {"true", "", false, "true", nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			actx, p, e := faultSetup(t)
-			actx.Vars["healthy_by_intent"] = c.flag
-			v := vol1(t, actx)
-			v.Extra = map[string]string{}
-			if c.intent != "" {
-				v.Extra["intent"] = c.intent
-			}
-			if !c.pid {
-				v.PID, v.PIDStart = "", ""
-			}
-			saveVolume(actx, v)
-			f := healthNode()
-			f.rules = append([]fakeRule{
-				{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
-				{match: "/status?volume=v1", answers: []fakeAnswer{{code: 7}}},
-			}, f.rules...)
-			if out, _ := e.healthy(context.Background(), actx, f, 0); out["healthy"] != c.want {
-				t.Fatalf("healthy %v, want %s", out, c.want)
-			}
-			r := healthyRecord(t, actx, p)
-			var ns []string
-			for _, x := range r["not_serving"].([]any) {
-				ns = append(ns, x.(string))
-			}
-			if !slices.Equal(ns, c.notServing) || (r["rule"] == "intent") != (c.flag == "true") {
-				t.Errorf("result %v", r)
-			}
-		})
-	}
-}
-
-// Red control: under the flag the unit does not relaunch the holder of a
-// released volume (an unknown stop, then a fence: exit 75).
-func TestSuperviseByIntentLeavesAReleasedVolume(t *testing.T) {
-	for _, intent := range []string{intentReleased, intentHeld} {
-		actx, _, e := faultSetup(t)
-		actx.Vars["healthy_by_intent"] = "true"
-		exited(t, actx)
-		v := vol1(t, actx)
-		v.Extra["intent"] = intent
-		saveVolume(actx, v)
-		f := unitNode(exitAnswer(75, time.Minute))
-		if err := e.supervise(context.Background(), actx, f); err != nil {
-			t.Fatal(err)
-		}
-		if f.issued("setsid") != (intent == intentHeld) {
-			t.Errorf("intent %s: relaunched %v", intent, f.issued("setsid"))
-		}
 	}
 }
 
@@ -973,5 +887,147 @@ func TestGenRunHeaderSaysUnitEmulated(t *testing.T) {
 	u, _ := h.Result["unit"].(map[string]any)
 	if h.Verb != "gen_header" || u["emulated"] != true || u["note"] != unitNotEvidence {
 		t.Errorf("header %+v", h.Result)
+	}
+}
+
+// --- the intended state: held, not held, unsettled ---
+
+// The answer sets the state: a start that answered ok holds, one that
+// answered unknown leaves it unsettled; a stop that answered unknown leaves
+// it unsettled, never "not held".
+func TestIntentIsSetByTheAnswer(t *testing.T) {
+	v, h, e := testVolume()
+	f := (&fakeNode{}).on("ss -Hltnp", ok("LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"x\",pid=777,fd=9))"))
+	if out, _ := e.startHolder(context.Background(), f, v, h, 64, time.Second); out != tr.OutcomeUnknown || v.Extra["intent"] != intentUnsettled {
+		t.Errorf("an unknown start: %s, intent %q", out, v.Extra["intent"])
+	}
+	own := "LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=9))\nLISTEN 0 4096 127.0.0.1:21013 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=10))"
+	f = (&fakeNode{}).on("ss -Hltnp", ok(""), ok(own)).on("mkdir -p", ok("")).on("setsid", ok("4242\n")).on("/proc/4242", ok("start 100\n")).
+		on("/status?volume=v1", ok(servingV1)).on("nvme-fabrics", ok("")).on("subsysnqn", ok("ctrl nvme3\nns nvme3c3n1\nend\n"))
+	if out, _ := e.startHolder(context.Background(), f, v, h, 64, 2*time.Second); out != tr.OutcomeOK || v.Extra["intent"] != intentHeld {
+		t.Errorf("an ok start: %s, intent %q", out, v.Extra["intent"])
+	}
+	f = (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "write error", code: 4})
+	if _, why := e.handOver(context.Background(), f, v, wsStop); why == "" || v.Extra["intent"] != intentUnsettled {
+		t.Errorf("an unknown stop: %q, intent %q", why, v.Extra["intent"])
+	}
+}
+
+func unsettledSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {
+	actx, p, e := faultSetup(t)
+	v := vol1(t, actx)
+	v.Extra["intent"] = intentUnsettled
+	saveVolume(actx, v)
+	return actx, p, e
+}
+
+func wsShow(lease, ack string) fakeAnswer {
+	return ok("volume: v1 (query snapshot, not authority to serve)\nreplica: r1\nepoch: 3\nlease state: " + lease + "\nholder: r1@3 (logical replica)\nrecorded ACK: " + ack + "\nhost: unknown\n")
+}
+
+// An UNSETTLED volume is placed by observation, and the placement is a
+// "settled" record. Red controls: a holder alive but not serving, or gone
+// while the workspace lease is still granted, is the third state (reported,
+// not healthy), never placed.
+func TestUnsettledIsPlacedByObservation(t *testing.T) {
+	for name, c := range map[string]struct {
+		rules  []fakeRule
+		state  string // "" : third state
+		pidSet bool
+	}{
+		"same pid still serving: held": {nil, intentHeld, true},
+		"gone, lease expired: not held": {[]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+			{match: "ops workspace show", answers: []fakeAnswer{wsShow("expired", "none")}}}, intentNotHeld, false},
+		"gone, ACK recorded: not held": {[]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+			{match: "ops workspace show", answers: []fakeAnswer{wsShow("granted", "r1@3 HEAD generation 4")}}}, intentNotHeld, false},
+		"gone, lease revoking: not held": {[]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+			{match: "ops workspace show", answers: []fakeAnswer{wsShow("revoking", "none")}}}, intentNotHeld, false},
+		"alive, not serving: third state": {[]fakeRule{{match: "/status?volume=v1", answers: []fakeAnswer{ok(statusAt(3, false))}}}, "", true},
+		"alive, another pid serves: third state": {[]fakeRule{{match: "ss -Hltnp", answers: []fakeAnswer{ok(statusListener("6000"))}},
+			{match: "/proc/6000", answers: []fakeAnswer{ok("start 900\n")}}}, "", true},
+		"gone, lease granted, no ACK: third state": {[]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+			{match: "ops workspace show", answers: []fakeAnswer{wsShow("granted", "none")}}}, "", true},
+		"gone, workspace unreadable: third state": {[]fakeRule{{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+			{match: "ops workspace show", answers: []fakeAnswer{{code: 3}}}}, "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			actx, p, e := unsettledSetup(t)
+			f := healthNode()
+			f.rules = append(append(c.rules, fakeRule{match: "/status?volume=v1", answers: []fakeAnswer{ok(statusAt(3, true))}}), f.rules...)
+			if c.state == intentNotHeld { // a released volume must not be served
+				f.rules = append([]fakeRule{{match: "/status?volume=v1", answers: []fakeAnswer{{code: 7}}}}, f.rules...)
+			}
+			out, err := e.healthy(context.Background(), actx, f, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := vol1(t, actx)
+			recs := closeRecords(t, actx, p)
+			last := recs[len(recs)-1].Result
+			var settled []tr.HistoryRecord
+			for _, r := range recs {
+				if r.Verb == "settled" {
+					settled = append(settled, r)
+				}
+			}
+			third, _ := last["third_state"].([]any)
+			if c.state == "" {
+				if out["healthy"] != "false" || len(third) != 1 || len(settled) != 0 || v.Extra["intent"] != intentUnsettled {
+					t.Fatalf("third state not reported: %v, settled %+v, intent %q", last, settled, v.Extra["intent"])
+				}
+				if w := third[0].(map[string]any); w["volume"] != "v1" || w["why"] == "" {
+					t.Errorf("third_state %v", third)
+				}
+				return
+			}
+			if out["healthy"] != "true" || len(third) != 0 || len(settled) != 1 || settled[0].Result["state"] != c.state || settled[0].Result["volume"] != "v1" || settled[0].Result["evidence"] == nil {
+				t.Fatalf("not settled %s: %v, settled %+v", c.state, last, settled)
+			}
+			if v.Extra["intent"] != c.state || (v.PID != "") != c.pidSet {
+				t.Errorf("state %+v", v)
+			}
+		})
+	}
+}
+
+// Of a NOT HELD volume healthy demands only that no holder serves it. Red
+// control: one that is served is reported and not healthy.
+func TestNotHeldMustNotBeServed(t *testing.T) {
+	for _, served := range []bool{false, true} {
+		actx, p, e := faultSetup(t)
+		v := vol1(t, actx)
+		v.PID, v.PIDStart, v.Extra["intent"] = "", "", intentNotHeld
+		saveVolume(actx, v)
+		f := healthNode()
+		a := fakeAnswer{code: 7}
+		if served {
+			a = ok(statusAt(4, true))
+		}
+		f.rules = append([]fakeRule{{match: "/status?volume=v1", answers: []fakeAnswer{a}}}, f.rules...)
+		out, _ := e.healthy(context.Background(), actx, f, 0)
+		r := healthyRecord(t, actx, p)
+		sn, _ := r["served_not_held"].([]any)
+		if (out["healthy"] == "true") == served || (len(sn) == 1) != served {
+			t.Errorf("served %v: %v", served, r)
+		}
+	}
+}
+
+// Red control: the unit relaunches only the holder of a HELD volume, not of
+// an UNSETTLED or NOT HELD one (an unknown stop, then a fence: exit 75).
+func TestSuperviseOnlyHeldVolumes(t *testing.T) {
+	for _, intent := range []string{intentUnsettled, intentNotHeld, intentHeld} {
+		actx, _, e := faultSetup(t)
+		exited(t, actx)
+		v := vol1(t, actx)
+		v.Extra["intent"] = intent
+		saveVolume(actx, v)
+		f := unitNode(exitAnswer(75, time.Minute))
+		if err := e.supervise(context.Background(), actx, f); err != nil {
+			t.Fatal(err)
+		}
+		if f.issued("setsid") != (intent == intentHeld) {
+			t.Errorf("intent %s: relaunched %v", intent, f.issued("setsid"))
+		}
 	}
 }
