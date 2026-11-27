@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -891,7 +892,7 @@ func TestUnitPolicyReadFromTheProductTree(t *testing.T) {
 		t.Error("the policy was not kept for the run")
 	}
 	h := unitHeader(p)
-	if h["emulated"] != true || h["note"] != "This run is not evidence for the unit's own behaviour: the runner emulated the unit." || h["policy"].(unitPolicy).Commit != productSHA {
+	if h["emulated"] != true || h["note"] != "a unit-emulated run is not evidence for the unit's own behaviour" || h["cite"] != "deploy/systemd/sw-blockvolume.service at "+productSHA || h["policy"].(unitPolicy).Commit != productSHA {
 		t.Errorf("header %v", h)
 	}
 	for name, f := range map[string]*fakeNode{
@@ -927,7 +928,7 @@ func TestGenRunHeaderSaysUnitEmulated(t *testing.T) {
 	}
 	pol, _ := parseUnit(testUnit)
 	r := genRunner("v3_gen_run", "host", g.m)
-	r.Header = func(func(string) string) (map[string]any, error) { return map[string]any{"unit": unitHeader(pol)}, nil }
+	r.Header = withUnit(r.Header, pol)
 	if _, err := r.Run(context.Background(), actx, g.Generator, func(string) string { return "" }); err != nil {
 		t.Fatal(err)
 	}
@@ -941,27 +942,40 @@ func TestGenRunHeaderSaysUnitEmulated(t *testing.T) {
 
 // --- the intended state: held, not held, unsettled ---
 
-// The answer sets the state: a start that answered ok holds, one that
-// answered unknown leaves it unsettled; a stop that answered unknown leaves
-// it unsettled, never "not held".
+// The answer sets the state: ok sets the operation's target, unknown leaves
+// the volume UNSETTLED (an unknown stop is never "not held"), a refusal or a
+// runner error changes nothing. Red control: an unknown taken for its target.
 func TestIntentIsSetByTheAnswer(t *testing.T) {
-	v, h, e := testVolume()
-	f := (&fakeNode{}).on("ss -Hltnp", ok("LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"x\",pid=777,fd=9))"))
-	if out, _ := e.startHolder(context.Background(), f, v, h, 64, time.Second); out != tr.OutcomeUnknown || v.Extra["intent"] != intentUnsettled {
-		t.Errorf("an unknown start: %s, intent %q", out, v.Extra["intent"])
+	for _, c := range []struct {
+		before, target, answer string
+		err                    error
+		want                   string
+	}{
+		{intentHeld, intentNotHeld, tr.OutcomeOK, nil, intentNotHeld},
+		{intentHeld, intentNotHeld, tr.OutcomeUnknown, nil, intentUnsettled},
+		{intentNotHeld, intentHeld, tr.OutcomeUnknown, nil, intentUnsettled},
+		{intentNotHeld, intentHeld, tr.OutcomeOK, nil, intentHeld},
+		{intentHeld, intentNotHeld, tr.OutcomeRefused, nil, intentHeld},
+		{intentHeld, intentNotHeld, "", fmt.Errorf("no history"), intentHeld},
+	} {
+		v := &opVolume{Extra: map[string]string{"intent": c.before}}
+		out, err := lifecycle(v, c.target)(map[string]string{"value": c.answer}, c.err)
+		if v.Extra["intent"] != c.want || err != c.err || out["value"] != c.answer {
+			t.Errorf("%s, %s answered %q: intent %q, want %q", c.before, c.target, c.answer, v.Extra["intent"], c.want)
+		}
 	}
-	own := "LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=9))\nLISTEN 0 4096 127.0.0.1:21013 0.0.0.0:* users:((\"blockvolume\",pid=4242,fd=10))"
-	f = (&fakeNode{}).on("ss -Hltnp", ok(""), ok(own)).on("mkdir -p", ok("")).on("setsid", ok("4242\n")).on("/proc/4242", ok("start 100\n")).
-		on("/status?volume=v1", ok(servingV1)).on("nvme-fabrics", ok("")).on("subsysnqn", ok("ctrl nvme3\nns nvme3c3n1\nend\n"))
-	if out, _ := e.startHolder(context.Background(), f, v, h, 64, 2*time.Second); out != tr.OutcomeOK || v.Extra["intent"] != intentHeld {
-		t.Errorf("an ok start: %s, intent %q", out, v.Extra["intent"])
+	// The lifecycle operations record their answer through it: attach holds,
+	// stop and move release.
+	src, err := os.ReadFile("ops.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	f = (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "write error", code: 4})
-	if _, why := e.handOver(context.Background(), f, v, wsStop); why == "" || v.Extra["intent"] != intentUnsettled {
-		t.Errorf("an unknown stop: %q, intent %q", why, v.Extra["intent"])
+	for verb, target := range map[string]string{"attach": "intentHeld", "stop": "intentNotHeld", "move": "intentNotHeld"} {
+		if !strings.Contains(string(src), "lifecycle(v, "+target+")(recordBounded(ctx, actx, e, \""+verb+"\",") {
+			t.Errorf("v3_op_%s does not set the intended state from its answer", verb)
+		}
 	}
 }
-
 func unsettledSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {
 	actx, p, e := faultSetup(t)
 	v := vol1(t, actx)
@@ -1077,6 +1091,29 @@ func TestSuperviseOnlyHeldVolumes(t *testing.T) {
 		}
 		if f.issued("setsid") != (intent == intentHeld) {
 			t.Errorf("intent %s: relaunched %v", intent, f.issued("setsid"))
+		}
+	}
+}
+
+// A fault loop's header carries the unit entry too; a loop without faults
+// does not emulate the unit and says nothing.
+func TestLoopRunHeaderSaysUnitEmulated(t *testing.T) {
+	for _, faults := range []string{"", "0.3"} {
+		f := &fakeProduct{}
+		f.install(t)
+		actx, p := genRunCtx(t)
+		act := loopAct("10")
+		if faults != "" {
+			act.Params["faults"], act.Params["fault_processes"], act.Params["fault_restart_within"] = faults, "blockvolume:0", "3"
+		}
+		if _, err := v3LoopRun(context.Background(), actx, act); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		h := records(t, p)[0]
+		u, has := h.Result["unit"].(map[string]any)
+		if h.Verb != "loop_header" || has != (faults != "") || (has && (u["emulated"] != true || u["note"] != unitNotEvidence)) {
+			t.Errorf("faults %q: header %+v", faults, h.Result)
 		}
 	}
 }

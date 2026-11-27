@@ -180,6 +180,20 @@ func (r LoopRunner) RunLoop(ctx context.Context, actx *tr.ActionContext, c LoopC
 	}
 	start := now()
 	header := c.header()
+	// The product's own header entries (a loop's settings are its config:
+	// the product's header function reads no parameter here).
+	if r.Header != nil {
+		extra, err := r.Header(func(string) string { return "" })
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
+		for k, v := range extra {
+			if _, taken := header[k]; taken {
+				return nil, fmt.Errorf("%s: the product's header field %q is the loop's", r.Name, k)
+			}
+			header[k] = v
+		}
+	}
 	if err := r.observe(actx, "loop_header", header); err != nil {
 		return nil, err
 	}
