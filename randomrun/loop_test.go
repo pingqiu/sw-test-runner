@@ -35,6 +35,12 @@ func (testDriver) ValidProcess(p string) bool { return testProcess(p) }
 func (testDriver) Healthy(wait string) Op {
 	return Op{Action: "healthy", Params: map[string]string{"wait": wait}}
 }
+// A loop schedules no master outage: these three are never called here.
+func (testDriver) MasterOutage() (string, int, bool) { return "", 0, false }
+func (testDriver) Look() Op {
+	return Op{Action: "healthy", Params: map[string]string{"look": LookSingle}}
+}
+func (testDriver) OutageRestart() Op { return Op{Action: "restart"} }
 func (testDriver) Resolution(o Op) (*Op, []string) {
 	if o.Action == "write" {
 		return &Op{Action: "read", Volume: o.Volume, Params: map[string]string{"volume": o.Volume, "lbas": o.Params["lbas"]}}, nil

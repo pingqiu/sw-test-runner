@@ -188,7 +188,7 @@ func (r LoopRunner) RunLoop(ctx context.Context, actx *tr.ActionContext, c LoopC
 		if err := r.observe(actx, "fault_schedule", sched.Record()); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(r.Runner, sched.Events, nil, header)
+		fr = newFaultRun(r.Runner, sched.Events, nil, header, nil) // a loop schedules no master outages
 	}
 	no := 0
 	actions, phases := map[string]int{}, map[string]int{}
@@ -480,7 +480,7 @@ func (r LoopRunner) ReplayLoop(ctx context.Context, actx *tr.ActionContext, src 
 		if err := r.observe(actx, "fault_schedule", sched.Record()); err != nil {
 			return nil, err
 		}
-		fr = newFaultRun(r.Runner, sc.events, nil, sc.header)
+		fr = newFaultRun(r.Runner, sc.events, nil, sc.header, nil)
 	}
 	diffs := []any{}
 	steps, cycleNo := 0, 0
