@@ -310,6 +310,33 @@ type Cond struct {
 	NotEquals *string `json:"not_equals,omitempty"`
 }
 
+// UnmarshalJSON reads a condition as the vocabulary allows it: ONE field
+// compared, by equals or by not_equals (not both), with a constant (no
+// template).
+func (c *Cond) UnmarshalJSON(b []byte) error {
+	var o struct {
+		Field     string  `json:"field"`
+		Equals    *string `json:"equals"`
+		NotEquals *string `json:"not_equals"`
+	}
+	if err := strict(b, &o); err != nil {
+		return err
+	}
+	if o.Field == "" || (o.Equals == nil) == (o.NotEquals == nil) {
+		return errors.New("a condition is one field with equals or not_equals")
+	}
+	for _, v := range []*string{o.Equals, o.NotEquals} {
+		if v != nil && strings.Contains(*v, "{{") {
+			return fmt.Errorf("condition on %s: its value is a constant, not a template", o.Field)
+		}
+	}
+	c.Field, c.NotEquals = o.Field, o.NotEquals
+	if o.Equals != nil {
+		c.Equals = *o.Equals
+	}
+	return nil
+}
+
 // Variant is one way to run the action: its command and its decoding.
 type Variant struct {
 	Name    string `json:"name,omitempty"`
