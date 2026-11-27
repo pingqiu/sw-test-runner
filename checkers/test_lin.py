@@ -16,6 +16,8 @@ def hist(*events):
     ('i', key, verb, volume, args)     an invoke
     ('c', key, outcome, result)        the completion of the invoke `key`
     ('o', volume, result)              an observation
+    ('x', key, outcome)                the abandoned child of `key` exited
+    ('d', volume)                      the guest device of `volume` disconnected
     closed by the writer's end record."""
     recs, at = [], {}
     for e in events:
@@ -28,6 +30,13 @@ def hist(*events):
             inv = at[key]
             recs.append({'seq': n, 'kind': 'complete', 'of': inv['seq'], 'op': 'X.Y', 'verb': inv['verb'], 'volume': inv['volume'],
                          'mono_ns': n, 'outcome': outcome, 'result': result})
+        elif e[0] == 'x':
+            _, key, outcome = e
+            recs.append({'seq': n, 'kind': 'observe', 'verb': 'child_exit', 'volume': '', 'mono_ns': n,
+                         'result': {'op_seq': at[key]['seq'], 'pid': 7, 'start': 's7', 'exit': 0 if outcome == 'ok' else 1, 'outcome': outcome}})
+        elif e[0] == 'd':
+            recs.append({'seq': n, 'kind': 'observe', 'verb': 'disconnect', 'volume': e[1], 'mono_ns': n,
+                         'result': {'volume': e[1], 'nqn': 'nqn.test:' + e[1]}})
         else:
             _, vol, result = e
             recs.append({'seq': n, 'kind': 'observe', 'verb': 'observe', 'volume': vol, 'mono_ns': n, 'result': result})
@@ -140,18 +149,55 @@ class Red(Base):
         self.assert_fail(lin(synth(w(0, A), rd(0, JUNK))))
         self.assert_fail(lin(hist(wi('a', A), wi('b', B), ok('a'), ok('b'), ri('r'), ok('r', hc.ZERO))))
 
-    def test_red_an_unknown_write_appearing_after_its_holder_was_killed(self):
-        # The read after the kill saw A: the unknown is settled, U may not land.
-        self.assert_fail(lin(synth(w(0, A), w(0, U, outcome='unknown'), HKILL, rd(0, A), rd(0, U))))
-        # Control: with no kill, U may land late.
-        self.assert_pass(lin(synth(w(0, A), w(0, U, outcome='unknown'), rd(0, A), rd(0, U))))
+    # kb r3: an unknown write's window closes at the first of its child's
+    # exit, its device's disconnect, the line's advance; a kill closes nothing.
+    BASE = (wi('a', A), ok('a'), wi('u', U), ('c', 'u', 'unknown', {}))
+    LATE = (ri('r'), ok('r', A), ri('s'), ok('s', U))   # A read, then U lands
+
+    def test_an_unknown_write_may_land_after_a_kill_while_its_window_is_open(self):
+        kill = (('i', 'k', 'kill', '', HKILL[2]), ok('k'))
+        self.assert_pass(lin(hist(*self.BASE, *kill, *self.LATE)))
+        self.assert_pass(lin(synth(w(0, A), w(0, U, outcome='unknown'), HKILL, rd(0, A), rd(0, U))))
+
+    def test_red_an_unknown_write_landing_after_its_child_exited_failed(self):
+        v = lin(hist(*self.BASE, ('x', 'u', 'failed'), *self.LATE))
+        self.assert_fail(v)
+        self.assertIn('unknown writes whose window closed: exited failed 1', v['findings'])
+        # A failed exit says it never landed: before the exit too.
+        self.assert_fail(lin(hist(*self.BASE, ri('r'), ok('r', U), ('x', 'u', 'failed'))))
+        # Green: the value it never wrote is the one read.
+        self.assert_pass(lin(hist(*self.BASE, ('x', 'u', 'failed'), ri('r'), ok('r', A), ri('s'), ok('s', A))))
+        # Also with a kill before the exit: the kill closed nothing, the exit does.
+        kill = (('i', 'k', 'kill', '', HKILL[2]), ok('k'))
+        self.assert_fail(lin(hist(*self.BASE, *kill, ('x', 'u', 'failed'), *self.LATE)))
+
+    def test_red_an_unknown_write_whose_child_exited_ok_did_land(self):
+        # Exited ok: it landed at or before the exit; a read after it sees U.
+        self.assert_fail(lin(hist(*self.BASE, ('x', 'u', 'ok'), ri('r'), ok('r', A))))
+        self.assert_pass(lin(hist(*self.BASE, ('x', 'u', 'ok'), ri('r'), ok('r', U))))
+        # A read between the invoke and the exit may still see A.
+        self.assert_pass(lin(hist(*self.BASE, ri('r'), ok('r', A), ('x', 'u', 'ok'), ri('s'), ok('s', U))))
+
+    def test_red_an_unknown_write_landing_after_its_device_disconnected(self):
+        self.assert_fail(lin(hist(*self.BASE, ('d', 'v1'), *self.LATE)))
+        # Green: another volume's device, or U landing before the disconnect.
+        self.assert_pass(lin(hist(*self.BASE, ('d', 'v2'), *self.LATE)))
+        self.assert_pass(lin(hist(*self.BASE, ri('r'), ok('r', U), ('d', 'v1'), ri('s'), ok('s', U))))
+
+    def test_an_unknown_write_landing_before_a_flush_is_durable(self):
+        steps = (w(0, A), w(0, U, outcome='unknown', flush=False))
+        # Read U (it landed), then the flush made it durable: A after the kill is red.
+        self.assert_fail(lin(synth(*steps, rd(0, U), fl(), HKILL, rd(0, A))))
+        # Green: unread, U may have landed before or after the flush.
+        self.assert_pass(lin(synth(*steps, fl(), HKILL, rd(0, U))))
+        self.assert_pass(lin(synth(*steps, fl(), HKILL, rd(0, A))))
 
     def test_red_an_unknown_write_appearing_after_the_epoch_advanced(self):
         base = [epoch(1), wi('a', A), ok('a'), wi('u', U), ('c', 'u', 'unknown', {})]
         late = [ri('r'), ok('r', A), ri('s'), ok('s', U)]
         v = lin(hist(*base, epoch(2), *late))
         self.assert_fail(v)
-        self.assertIn('unknown writes whose window an epoch advance closed: 1', v['findings'])
+        self.assertIn('unknown writes whose window closed: line advanced 1', v['findings'])
         # Control: the same epoch shown again closes nothing.
         self.assert_pass(lin(hist(*base, epoch(1), *late)))
         # And U landing before the advance is allowed.
@@ -162,7 +208,7 @@ class Red(Base):
         late = [ri('r'), ok('r', A), ri('s'), ok('s', U)]
         v = lin(hist(*base, ws_epoch(2), *late))
         self.assert_fail(v)
-        self.assertIn('unknown writes whose window an epoch advance closed: 1', v['findings'])
+        self.assertIn('unknown writes whose window closed: line advanced 1', v['findings'])
         self.assert_pass(lin(hist(*base, ws_epoch(1), *late)))
         # The window is the LINE's (as C4 reads it): HEAD's epoch alone closes nothing.
         self.assert_pass(lin(hist(head_epoch(1), wi('a', A), ok('a'), wi('u', U), ('c', 'u', 'unknown', {}),
@@ -245,12 +291,29 @@ class Budget(Base):
         with mock.patch.object(hc, 'LIN_SECONDS', 0):
             v = lin(synth(w(0, A), rd(0, A), w(0, B), rd(0, B)))
         self.assertEqual(v['verdict'], 'UNKNOWN', v)
-        self.assertTrue(any('over the budget of 0 s' in x for x in v['findings']), v)
+        self.assertTrue(any('over the time guard of 0 s' in x and 'budget %d states' % hc.LIN_MAX_STATES in x for x in v['findings']), v)
         self.assertTrue(any("concurrency per block is too high" in x for x in v['findings']), v)
+
+    def test_a_piece_over_the_state_budget_is_not_judged(self):
+        # The primary budget: a deterministic count of states.
+        with mock.patch.object(hc, 'LIN_MAX_STATES', 2):
+            v = lin(hist(*self.OVERLAP))
+        self.assertEqual(v['verdict'], 'UNKNOWN', v)
+        self.assertTrue(any('over the budget of 2 states (time guard 60 s)' in x for x in v['findings']), v)
 
     def test_a_budget_never_passes(self):
         with mock.patch.object(hc, 'LIN_MAX_OPS', 0):
             self.assertNotEqual(lin(synth(w(0, A), rd(0, A)))['verdict'], 'PASS')
+
+
+class Notes(Base):
+    def test_pieces_in_flight_are_counted_and_a_sequential_history_says_so(self):
+        v = lin(synth(w(0, A), rd(0, A)))
+        self.assertIn('pieces with more than one operation in flight: 0', v['findings'])
+        self.assertTrue(any(x.startswith('a sequential history') for x in v['findings']), v)
+        v = lin(hist(wi('a', A), wi('b', B), ok('a'), ok('b'), ri('r'), ok('r', A)))
+        self.assertIn('pieces with more than one operation in flight: 1', v['findings'])
+        self.assertFalse(any(x.startswith('a sequential history') for x in v['findings']), v)
 
 
 class Registry(Base):

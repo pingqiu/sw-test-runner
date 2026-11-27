@@ -530,6 +530,30 @@ def _line(row):
     return None
 
 
+def child_exit(obs):
+    """(op_seq, 'ok' | 'failed') of an observe record of verb child_exit: the
+    abandoned child of the unknown operation invoked at op_seq exited, and
+    the write landed at or before this record (ok) or never (failed); None
+    for any other record."""
+    if obs.get('kind') != 'observe' or obs.get('verb') != 'child_exit':
+        return None
+    res = obs.get('result') or {}
+    op, out = res.get('op_seq'), res.get('outcome')
+    if not isinstance(op, int) or isinstance(op, bool) or out not in ('ok', 'failed'):
+        return None
+    return op, out
+
+
+def disconnect(obs):
+    """The volume whose guest device an observe record of verb disconnect
+    shows disconnected (result.volume, else the record's volume); None for
+    any other record."""
+    if obs.get('kind') != 'observe' or obs.get('verb') != 'disconnect':
+        return None
+    vol = (obs.get('result') or {}).get('volume') or obs.get('volume')
+    return str(vol) if vol else None
+
+
 def master_lines(obs):
     """{volume: (replica, epoch)}: the master's line for each volume an
     observe record shows; empty for a record that shows none (a generator

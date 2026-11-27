@@ -40,7 +40,7 @@ env:
   # The checkers whose verdicts decide the run: the judge's --checkers, and
   # recorded in the run's header, where the nightly judge requires each of
   # them in checks.json. One list, here.
-  checkers: "C0,C1,C2,C3,C5,C7"
+  checkers: "C0,C1,C2,C3,C5,C7,LIN"
   gen_ops: "300"
   gen_blocks: "16"
   nightly_seed: ""

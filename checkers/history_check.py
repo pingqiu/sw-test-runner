@@ -102,16 +102,17 @@ code is 0 only when every checker passes.
   DUR durability with flush: a write is durable once acknowledged with its
       fsync (a write record without "flush": false), or once a later flush
       of its volume is acknowledged; a flush with outcome unknown makes
-      nothing durable. An unknown write may take effect until its holder is
-      known dead. A holder kill (args.volume) reaches that volume only, a
+      nothing durable. An unknown write may take effect until its window
+      closes (unknown_windows: its child exited, its device disconnected or
+      the line advanced; a kill closes nothing). A holder kill (args.volume) reaches that volume only, a
       master kill no volume, a kill naming no volume every volume (noted).
       After a kill that reaches its volume a block may read only its last
       durable value, the value of a write invoked after it, or of an unknown
-      write whose holder was alive after the durable point; anything else
+      write whose window was open after the durable point; anything else
       FAILS (an older value no open unknown explains, content no write
-      produced, ZERO when a durable write exists). The kill settles the
-      unknowns: from the first read after it the value is stable, and a
-      change with no write in between FAILS. Counted on PASS: "acknowledged,
+      produced, ZERO when a durable write exists). From the first read
+      after it the value is stable: a change with no write in between FAILS
+      unless an unknown write whose window is open explains it. Counted on PASS: "acknowledged,
       not flushed, lost: n" and "unknown write landed after a later durable
       write: n". Without a kill, C1's rule judged the same way.
       No kill and no unflushed write: FAIL (not exercised)
@@ -176,7 +177,8 @@ code is 0 only when every checker passes.
   LIN linearizability per block (M3): each block a register, every operation
       taking effect at one point inside its interval (mono_ns), concurrent
       writers allowed. An unknown write may take effect from its invoke until
-      its holder is known dead or its line's epoch advanced, or never; a
+      its child exited, its device disconnected or its line's epoch
+      advanced (a kill closes nothing), or never; a
       kill reaching the volume falls the register back to what DUR's rule
       allows. Cut per block where nothing is in flight; a piece over 2,000
       operations or 60 s is NOT JUDGED, never PASS. FAIL when no order of a
@@ -936,10 +938,56 @@ def holder_kills(recs):
     return out
 
 
+def unknown_windows(recs):
+    """When the window of each unknown write closes (kb r3): {invoke seq:
+    (close mono, close seq, how)}, how one of 'exited ok' (its abandoned
+    child exited and the write landed at or before that record), 'exited
+    failed' (it never landed), 'disconnected' (the guest device of its
+    volume disconnected) or 'line advanced' (the master's line of its volume
+    at an epoch above the last one shown before the invoke, master_lines as
+    C4 reads it); (inf, None, None) while it never closes. The first of them
+    closes it. A kill of the holder closes nothing: the guest's kernel keeps
+    the request while the target is away and sends it again after
+    reconnecting. An unknown write is a write whose outcome is unknown or
+    that never completed. DUR and LIN read the windows only here."""
+    comp_of = {r['of']: r for r in recs if r['kind'] == 'complete'}
+    out, open_, before, last = {}, {}, {}, {}   # open_: volume -> {invoke seq}
+    for r in recs:
+        if r['kind'] == 'invoke' and r['verb'] == 'write':
+            comp = comp_of.get(r['seq'])
+            if comp is None or comp['outcome'] == 'unknown':
+                out[r['seq']] = (float('inf'), None, None)
+                open_.setdefault(r['volume'], set()).add(r['seq'])
+                before[r['seq']] = last.get(r['volume'])
+            continue
+        if r['kind'] != 'observe':
+            continue
+
+        def close(useq, how):
+            for v in open_.values():
+                if useq in v:
+                    v.discard(useq)
+                    out[useq] = (r['mono_ns'], r['seq'], how)
+
+        ex = PRODUCT.child_exit(r)
+        if ex is not None and ex[0] in out and out[ex[0]][2] is None:
+            close(ex[0], 'exited ok' if ex[1] == 'ok' else 'exited failed')
+        dv = PRODUCT.disconnect(r)
+        if dv is not None:
+            for useq in sorted(open_.get(dv, ())):
+                close(useq, 'disconnected')
+        for vol, (_, e) in sorted(PRODUCT.master_lines(r).items()):
+            for useq in sorted(open_.get(vol, ())):
+                if before[useq] is not None and e > before[useq]:
+                    close(useq, 'line advanced')
+            last[vol] = e
+    return out
+
+
 def kill_fallback(durable, newer, open_=()):
     """What a block may hold right after a kill of its holder (the durability
     rule, kb r1): its last durable values, any write after the durable point,
-    and any open unknown write (one whose holder was alive after it)."""
+    and any open unknown write (one whose window is open, unknown_windows)."""
     return set(durable) | set(newer) | set(open_)
 
 
@@ -966,22 +1014,22 @@ def dur(recs):
                 added to the previous durable values). A flush with outcome
                 unknown or refused makes nothing durable.
       volatile  every write completed (ok or unknown) since the durable state.
-      open      the values of unknown writes whose holder is not known dead:
+      open      the values of unknown writes whose window is open
+                (unknown_windows: until its child exited, its device
+                disconnected or the line advanced; a kill closes nothing):
                 such a write may take effect at any time until then, also
-                after a later durable write.
+                after a later durable write and after a kill.
       may hold  what a read may return: C1's shadow (an ok write its value
                 only, an unknown write adds its value), with open unknowns.
     A kill (verb kill, outcome not refused, applied at its invoke) reaches
     the volumes kill_scope() names. A holder kill (args.volume) makes that
-    volume's holder known dead: it may lose that volume's unflushed writes
-    and settles that volume's open unknowns, and no other volume's. A kill of
-    the master reaches no holder: it loses nothing and settles nothing (the
+    volume's holder dead: it may lose that volume's unflushed writes, and
+    no other volume's; it closes no unknown write's window (kb r3). A kill
+    of the master reaches no holder: it loses nothing (the
     data path is the holders'), so a run whose only kills are the master's
     is judged as a run without a kill. A kill naming no volume is applied to
     every volume, and a note says so: there it allows each volume to lose
-    unflushed writes the killed process may not explain, and settles every
-    open unknown, so an unknown whose holder in fact survived and lands
-    later is reported although the product may be right; every finding
+    unflushed writes the killed process may not explain; every finding
     after such a kill says that it was applied to every volume.
     A holder restarted with no recorded kill (a healthy observation whose
     result.holders gives the volume another pid or start time than the
@@ -992,10 +1040,11 @@ def dur(recs):
     seq a -> b)". Reads between the restart and that record are judged as
     before a kill.
     At a kill each block may hold durable | volatile | open: the last durable
-    value, any write invoked after it, or any unknown write whose holder was
-    alive after the durable point. Then the unknowns are settled: the first
-    read of the block after the kill fixes its value, and a later read that
-    differs with no write (and no kill) in between FAILS. That first read
+    value, any write invoked after it, or any unknown write whose window was
+    open after the durable point. The first read of the block after the
+    kill fixes its value, and a later read that differs with no write (and
+    no kill) in between FAILS, unless an unknown write whose window is
+    still open explains it (kb r3: a kill does not settle it). That first read
     also fixes what the next kill may leave: the durable set before the kill
     plus the value read, or the value read alone when it is one of that
     durable set (it says which durable value it was). So a value lost at one
@@ -1013,6 +1062,12 @@ def dur(recs):
     and every written block is read after its last write. No kill and no
     unflushed write: FAIL, not exercised."""
     ops_ = operations(recs)
+    # Unknown writes' windows, by the record that closes them.
+    windows = unknown_windows(recs)
+    close_at, closed = {}, set()
+    for useq, (_, cseq, how) in windows.items():
+        if cseq is not None:
+            close_at.setdefault(cseq, []).append((useq, how))
     # Kills that reach a holder (a master kill reaches none), recorded or
     # inferred from a restarted holder, by the record they apply at.
     kills = holder_kills(recs)
@@ -1039,7 +1094,8 @@ def dur(recs):
             init = set(base.get(vol, {}).get(lba, {ZERO}))
             # kill: (kill seq, durable, volatile, early unknowns, open unknowns) until the
             # first read after the kill; settled: the value that read fixed.
-            b = st[(vol, lba)] = {'durable': init, 'volatile': [], 'cur': set(init), 'open': set(),
+            # open: {invoke seq: value} of the unknown writes whose window is open.
+            b = st[(vol, lba)] = {'durable': init, 'volatile': [], 'cur': set(init), 'open': {},
                                   'produced': set(init), 'kill': None, 'settled': None}
         return b
 
@@ -1050,10 +1106,12 @@ def dur(recs):
                 continue
             drop_kill(b)
             vals = {s for s, _ in b['volatile']}
-            early = b['open'] - b['durable'] - vals   # unknowns invoked before the durable point
-            allowed = kill_fallback(b['durable'], vals, b['open'])
-            b['kill'] = (seq, set(b['durable']), list(b['volatile']), early, set(b['open']))
-            b['cur'], b['open'], b['durable'], b['volatile'] = set(allowed), set(), set(allowed), []
+            opens = set(b['open'].values())
+            early = opens - b['durable'] - vals   # unknowns invoked before the durable point
+            allowed = kill_fallback(b['durable'], vals, opens)
+            b['kill'] = (seq, set(b['durable']), list(b['volatile']), early, opens)
+            # The open unknowns stay open: a kill closes no window.
+            b['cur'], b['durable'], b['volatile'] = set(allowed), set(allowed), []
             b['settled'] = None
 
     def drop_kill(b):
@@ -1065,6 +1123,15 @@ def dur(recs):
         b['kill'] = None
 
     for i, r in enumerate(recs):
+        for useq, how in close_at.get(r['seq'], ()):
+            closed.add(useq)
+            w = inv_of[useq]
+            b = st.get((w['volume'], (w.get('args') or {}).get('lba')))
+            if b is not None and useq in b['open']:
+                sha = b['open'].pop(useq)
+                if how == 'exited ok':   # it landed by now: a write completed here
+                    b['cur'].add(sha)
+                    b['volatile'].append((sha, False))
         for k in kill_at.get(r['seq'], ()):
             apply_kill(r['seq'], k['scope'])
         if r['kind'] == 'invoke':
@@ -1084,7 +1151,8 @@ def dur(recs):
                 b['cur'] = {sha}
             else:
                 b['cur'].add(sha)
-                b['open'].add(sha)
+                if r['of'] not in closed:
+                    b['open'][r['of']] = sha
             if fl and out == 'ok':
                 b['durable'], b['volatile'] = {sha}, []
             else:
@@ -1106,11 +1174,11 @@ def dur(recs):
             lba = args['lba']
             b = block(vol, lba)
             got = (r.get('result') or {}).get('sha256')
-            allowed = b['cur'] | b['open']
+            allowed = b['cur'] | set(b['open'].values())
             k, settled = b['kill'], b['settled']
             if got not in allowed:
                 if settled is not None:
-                    f.append('read %s lba %d seq %d returned %s, but the read at seq %d after the kill at seq %d%s returned %s, with no write in between: the value changed after the unknowns were settled'
+                    f.append('read %s lba %d seq %d returned %s, but the read at seq %d after the kill at seq %d%s returned %s, with no write in between and no unknown write open that explains it: the value changed after the first read after the kill'
                              % (vol, lba, inv['seq'], got, settled[1], settled[0],
                                 kinds.get(settled[0], ''), settled[2]))
                 elif k is None:
@@ -1169,10 +1237,12 @@ def dur(recs):
 
 
 # LIN (M3): per block, the register. Budgets per piece (kb: 2,000 operations,
-# 60 s); a test patches them. More pieces not judged than LIN_FEW: the
+# 60 s; the search counts states first, the clock is a guard); a test
+# patches them. More pieces not judged than LIN_FEW: the
 # scenario's concurrency per block is too high for the checker.
 LIN_MAX_OPS = 2000
-LIN_SECONDS = 60
+LIN_MAX_STATES = 500000   # the primary budget per piece: deterministic
+LIN_SECONDS = 60          # a guard only
 LIN_FEW = 3
 _INF = float('inf')
 _EMPTY = frozenset()
@@ -1223,27 +1293,12 @@ def _lin_step(op, cur, durable, newer):
 def _lin_blocks(recs):
     """{(volume, lba): [_LinOp]} of every block a write or read names, with
     its volume's flushes and restores and the kills reaching it; the count of
-    unknown writes whose window an epoch advance closes; the kills."""
+    unknown writes by what closed their window; the kills. An unknown write
+    whose child exited failed never landed and is left out; one whose child
+    exited ok is an acknowledged write (not durable) ending at the exit."""
     _, _, images = replay(recs)
-    # The master's line per volume, read as C4 reads it (master_lines): one
-    # source, so LIN and C4 never disagree on when the line advanced.
-    epochs = {}   # volume -> [(seq, mono, epoch)]
-    for r in recs:
-        for vol, (_, e) in sorted(PRODUCT.master_lines(r).items()):
-            epochs.setdefault(vol, []).append((r['seq'], r['mono_ns'], e))
-
-    def close_of(vol, inv):
-        # The first record after the invoke showing the line's epoch above
-        # the one last shown before it; no line shown before: never.
-        before = None
-        for seq, mono, e in epochs.get(vol, ()):
-            if seq < inv['seq']:
-                before = e
-            elif before is not None and e > before:
-                return mono
-        return _INF
-
-    blocks, per_volume, closed = {}, {}, 0
+    windows = unknown_windows(recs)
+    blocks, per_volume, closed = {}, {}, {}
     for inv, comp in operations(recs):
         verb, vol, args = inv['verb'], inv['volume'], inv.get('args') or {}
         out = comp['outcome'] if comp is not None else 'unknown'   # never completed: unknown
@@ -1251,9 +1306,15 @@ def _lin_blocks(recs):
             if out == 'ok':
                 op = _LinOp('write', inv['seq'], inv['mono_ns'], comp['mono_ns'], args['sha256'], flushed(args))
             else:
-                close = close_of(vol, inv)
-                closed += close < _INF
-                op = _LinOp('write', inv['seq'], inv['mono_ns'], _INF, args['sha256'], flushed(args), optional=True, close=close)
+                close, _, how = windows[inv['seq']]
+                if how is not None:
+                    closed[how] = closed.get(how, 0) + 1
+                if how == 'exited failed':   # it never landed
+                    continue
+                if how == 'exited ok':       # it landed at or before the exit
+                    op = _LinOp('write', inv['seq'], inv['mono_ns'], close, args['sha256'], False)
+                else:
+                    op = _LinOp('write', inv['seq'], inv['mono_ns'], _INF, args['sha256'], flushed(args), optional=True, close=close)
             blocks.setdefault((vol, args['lba']), []).append(op)
         elif verb == 'read' and out == 'ok':
             got = (comp.get('result') or {}).get('sha256')
@@ -1292,7 +1353,7 @@ def _lin_pieces(ops_):
     return pieces
 
 
-def _lin_piece(piece, starts, seconds):
+def _lin_piece(piece, starts, max_states, seconds):
     """Every register state a linearization of `piece` may end in, from any of
     `starts` ((value, durable, newer, pending unknown writes)): ('judged',
     finals), ('fail', what the deepest search reached) or ('not judged', why).
@@ -1300,8 +1361,9 @@ def _lin_piece(piece, starts, seconds):
     unplaced completed operation precedes in real time may take effect; a
     state is (placed set, register state), memoized, so each is expanded
     once. An unknown write may be placed or left; it is dropped once an
-    operation invoked after its window closed is placed, or a kill invoked
-    after it (its holder is then known dead)."""
+    operation invoked after its window closed is placed. A kill drops
+    nothing (kb r3). The primary budget is the state count (deterministic);
+    the time is a guard."""
     carried = sorted({o for s in starts for o in s[3]}, key=lambda o: (o.inv, o.seq))
     ops_ = sorted(carried + piece, key=lambda o: (o.inv, o.seq))
     n = len(ops_)
@@ -1325,8 +1387,10 @@ def _lin_piece(piece, starts, seconds):
         st = stack.pop()
         if st in seen:
             continue
+        if count >= max_states:
+            return 'not judged', 'over the budget of %d states (time guard %s s)' % (max_states, seconds)
         if count % 256 == 0 and time.monotonic() >= deadline:
-            return 'not judged', 'over the budget of %s s (%d states)' % (seconds, count)
+            return 'not judged', 'over the time guard of %s s after %d states (budget %d states)' % (seconds, count, max_states)
         count += 1
         seen.add(st)
         mask, cur, durable, newer = st
@@ -1353,7 +1417,7 @@ def _lin_piece(piece, starts, seconds):
             o = ops_[i]
             nm = mask | (1 << i)
             for j in opt:
-                if not nm >> j & 1 and (ops_[j].close < o.inv or (o.kind == 'kill' and ops_[j].inv < o.inv)):
+                if not nm >> j & 1 and ops_[j].close < o.inv:
                     nm |= 1 << j
             for c2, d2, n2 in _lin_step(o, cur, durable, newer):
                 if (nm, c2, d2, n2) not in seen:
@@ -1374,12 +1438,12 @@ def lin(recs):
     completion on the history's clock (mono_ns; records with equal clocks
     are concurrent) and an acknowledged operation took effect at one point
     inside it. A write whose outcome is unknown (or that never completed)
-    may take effect at any point after its invoke UNTIL its holder is known
-    dead (a kill invoked after it reaching its volume, holder_kills) or its
-    line's epoch advanced (the master's line, master_lines as C4 reads
-    it: the first record after the invoke showing the volume's line at an
-    epoch above the last one shown before it), or never. A refused write
-    and a read not answered ok are not in the
+    may take effect at any point after its invoke until its window closes
+    (unknown_windows, kb r3: its child exited, its device disconnected or
+    the line's epoch advanced; a kill closes nothing), or never; a child
+    that exited failed says it never landed, one that exited ok that it
+    landed by then. A refused write and a read not answered ok are not in
+    the
     model.
     Durability is part of the register: its state is (value, durable set,
     writes since the durable point); an acknowledged write with its fsync
@@ -1393,7 +1457,7 @@ def lin(recs):
     Size: per block, the history is cut where no operation that completes
     is in flight; pieces chain by the set of states the previous one may
     end in. A piece over LIN_MAX_OPS operations, or whose search passes
-    LIN_SECONDS, is NOT JUDGED and reported, never passed; the next piece
+    LIN_MAX_STATES states (or the LIN_SECONDS guard), is NOT JUDGED and reported, never passed; the next piece
     starts from a state the history does not determine (the first read
     fixes the value), so later pieces are still judged. More than LIN_FEW
     pieces not judged: the scenario's concurrency per block is too high.
@@ -1405,7 +1469,7 @@ def lin(recs):
     n * 2^c.
     FAIL: a piece no order explains (a stale read, a value no write
     produced, a value back after it was overwritten and made durable, an
-    unknown that lands after its holder died). UNKNOWN: a fault operation
+    unknown that lands after its window closed). UNKNOWN: a fault operation
     without a known outcome, or a piece not judged. No ok read: FAIL, not
     exercised."""
     u = unknown_environment(recs)
@@ -1415,18 +1479,19 @@ def lin(recs):
     if not any(o.kind == 'read' for ops_ in blocks.values() for o in ops_):
         return verdict(['no read in the history: LIN judges nothing'])
     f, unjudged = [], []
-    npieces, largest = 0, 0
+    npieces, largest, concurrent = 0, 0, 0
     for (vol, lba) in sorted(blocks):
         starts = {(ZERO, frozenset((ZERO,)), _EMPTY, _EMPTY)}
         for piece in _lin_pieces(blocks[(vol, lba)]):
             npieces += 1
             largest = max(largest, len(piece))
+            concurrent += sum(1 for o in piece if not o.optional) > 1
             where = '%s lba %d, piece of %d operation(s) seq %d..%d' % (
                 vol, lba, len(piece), min(o.seq for o in piece), max(o.seq for o in piece))
             if len(piece) > LIN_MAX_OPS:
                 status, res = 'not judged', 'over the budget of %d operations' % LIN_MAX_OPS
             else:
-                status, res = _lin_piece(piece, starts, LIN_SECONDS)
+                status, res = _lin_piece(piece, starts, LIN_MAX_STATES, LIN_SECONDS)
             if status == 'judged':
                 starts = res
                 continue
@@ -1437,7 +1502,10 @@ def lin(recs):
             pending = frozenset(o for s in starts for o in s[3]) | frozenset(o for o in piece if o.optional)
             starts = {(None, None, _EMPTY, pending)}
     notes = ['pieces judged: %d of %d; largest piece: %d operation(s)' % (npieces - len(f) - len(unjudged), npieces, largest),
-             'unknown writes whose window an epoch advance closed: %d' % closed]
+             'pieces with more than one operation in flight: %d' % concurrent,
+             'unknown writes whose window closed: %s' % (', '.join('%s %d' % (h, closed[h]) for h in sorted(closed)) or 'none')]
+    if not concurrent:
+        notes.append('a sequential history: no two operations of a block in flight at once (unknown writes aside)')
     if any(k['scope'] is None for k in kills):
         notes.append('kill(s) naming no volume, applied to every volume: seq %s' % ', '.join(str(k['seq']) for k in kills if k['scope'] is None))
     if len(unjudged) > LIN_FEW:
