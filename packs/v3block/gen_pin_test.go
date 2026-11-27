@@ -78,7 +78,7 @@ func TestGenProposalPin(t *testing.T) {
 		}
 		_ = actx.History.Close()
 		got := pinLines(t, p)
-		if n := strings.Count(got, " gen_step "); n != 300 {
+		if n := strings.Count(got, " gen_step "); n < 300 || !strings.Contains(got, `"drawn":300`) {
 			t.Fatalf("%d proposals, want 300", n)
 		}
 		checkPin(t, "pin-m1-seed1-300.txt", got)
@@ -94,7 +94,7 @@ func TestGenProposalPin(t *testing.T) {
 		}
 		_ = actx.History.Close()
 		got := pinLines(t, p)
-		if n := strings.Count(got, " gen_step "); n != 300 || !strings.Contains(got, tr.HistoryInvoke+" ") {
+		if n := strings.Count(got, " gen_step "); !strings.Contains(got, `"drawn":300`) || !strings.Contains(got, tr.HistoryInvoke+" ") {
 			t.Fatalf("%d proposals, want 300", n)
 		}
 		if !strings.Contains(got, " kill ") {
@@ -113,7 +113,7 @@ func TestGenProposalPin(t *testing.T) {
 		}
 		_ = actx.History.Close()
 		got := pinLines(t, p)
-		if n := strings.Count(got, " gen_step "); n != 300 || !strings.Contains(got, " master_outage ") {
+		if n := strings.Count(got, " gen_step "); !strings.Contains(got, `"drawn":300`) || !strings.Contains(got, " master_outage ") {
 			t.Fatalf("%d proposals, or no master outage", n)
 		}
 

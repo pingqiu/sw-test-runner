@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -50,8 +51,19 @@ func run(t *testing.T, cfg GenConfig) ([]GenOp, *Generator) {
 		}
 		ops = append(ops, o)
 		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			// The product past the lease horizon: an observation shows it.
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
 	}
 	return ops, g
+}
+
+// leaseRec is a volume observation whose workspace part shows its lease
+// state.
+func leaseRec(vol, state string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Volume: vol, Result: map[string]any{
+		"workspace": map[string]any{"exit": 0, "text": []any{"volume: " + vol, "lease state: " + state}}}}
 }
 
 func TestGeneratorSameSeedSameRunAnotherSeedAnotherRun(t *testing.T) {
@@ -136,7 +148,12 @@ func (o *oracle) allowed(op GenOp) bool {
 		// earlier root lies, always on the volume's own host and geometry.
 		h, _ := strconv.Atoi(op.Params["host"])
 		return (st == "created" || st == "moved") && op.Params["host"] == fmt.Sprint(o.host[v]) && !o.held[v][h] && op.Params["blocks"] == ""
+	case "v3_op_observe":
+		return true // an observation changes nothing
 	case "v3_op_read":
+		if op.Forced != "" { // a forced read names the lbas its reason needs (C2, C3)
+			return st == "serving"
+		}
 		return st == "serving" && o.readOK(v, op.Params["lbas"])
 	case "v3_op_write", "v3_op_stop":
 		return st == "serving"
@@ -394,7 +411,11 @@ func TestGeneratorReadsNameTheirLBAs(t *testing.T) {
 
 func TestGeneratorEndsOnTheBudgetOrAnExhaustedPool(t *testing.T) {
 	ops, g := run(t, GenConfig{Seed: 3, Ops: 50, Pool: pool(40), Blocks: 4})
-	if len(ops) != 50 || g.Ended() != "ops" {
+	drawn := 0
+	for _, o := range ops {
+		drawn += btoi(o.Forced == "")
+	}
+	if drawn != 50 || g.Ended() != "ops" {
 		t.Fatalf("%d ops, ended %q", len(ops), g.Ended())
 	}
 	// A tiny pool, weights that only create and delete: every name is used once
@@ -454,7 +475,7 @@ func TestGeneratorWeightsByTimeAndReportsCoverage(t *testing.T) {
 		t.Errorf("deletes starved: %d deletes, %d writes", count["v3_op_delete"], count["v3_op_write"])
 	}
 	cov := g.Coverage()
-	if cov["proposed"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
+	if cov["drawn"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
 		t.Fatalf("coverage %v", cov)
 	}
 	h := g.Header()
@@ -703,8 +724,16 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.negatives(), "v3_op_attach", "g1", "") {
 		t.Error("attach proposed after a stop")
 	}
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted within its lease horizon (no observation shows it expired)")
+	}
+	g.m.Observed(leaseRec("g1", "revoking"))
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted while its lease is revoking")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.ordinary(), "v3_op_delete", "g1", "") {
-		t.Error("a stopped volume without targets is not deleted")
+		t.Error("a stopped volume without targets past its lease is not deleted")
 	}
 
 	// Reads: the target inherits the snapshot's lbas (2, 6), not the later 7.
@@ -748,6 +777,10 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 
 	g = newG()
 	drive(g, append(src(), op("v3_op_stop", "g1"))...)
+	if has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) {
+		t.Error("a source delete probed within the lease horizon (the horizon refuses first)")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) || !has(g.negatives(), "v3_op_snapshot_delete", "g1", limDeleteSnapDep) {
 		t.Error("no negative source delete or store-direct snapshot delete for a stopped source with a target")
 	}
@@ -918,6 +951,7 @@ func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
 		t.Fatal("an unknown stop is not unsettled")
 	}
 	g.m.Observed(settledRec("g1", "not_held"))
+	g.m.Observed(leaseRec("g1", "expired"))
 	if g.vols["g1"].state != stStopped || !offered(g, "g1")["v3_op_delete"] || offered(g, "g1")["v3_op_write"] {
 		t.Fatalf("settled not_held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
 	}
@@ -951,5 +985,372 @@ func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
 	g.m.Observed(healthyRec(nil, "g2"))
 	if g.vols["g2"].state != stUnknown || len(offered(g, "g2")) != 0 {
 		t.Fatalf("third state: %q %v", g.vols["g2"].state, offered(g, "g2"))
+	}
+}
+
+// unreadAtRelease states C1's need on a proposal list answered as answer()
+// answers: at every ordinary stop or move, no lba of the volume written ok
+// since its last ok read; after an attach of a moved volume, its whole
+// content read before any other operation on it. It returns the violations.
+func unreadAtRelease(ops []GenOp) []string {
+	dirty := map[string]map[string]bool{}
+	content := map[string]map[string]bool{}
+	moved := map[string]bool{}
+	owed := map[string]map[string]bool{} // lbas still to read after an attach on a new host
+	var bad []string
+	for _, o := range ops {
+		v := o.Volume
+		if dirty[v] == nil {
+			dirty[v], content[v] = map[string]bool{}, map[string]bool{}
+		}
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if len(owed[v]) > 0 && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its content was read after the attach on a new host", o.No, o.Action, v))
+			delete(owed, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				dirty[v][b], content[v][b] = true, true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				delete(dirty[v], b)
+				delete(owed[v], b)
+			}
+		case "v3_op_stop", "v3_op_move":
+			if len(dirty[v]) > 0 {
+				bad = append(bad, fmt.Sprintf("op %d %s %s with %d lbas unread", o.No, o.Action, v, len(dirty[v])))
+			}
+			moved[v] = o.Action == "v3_op_move"
+		case "v3_op_attach":
+			if moved[v] {
+				owed[v] = maps.Clone(content[v])
+				moved[v] = false
+			}
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			if content[t] == nil {
+				dirty[t], content[t] = map[string]bool{}, map[string]bool{}
+			}
+		}
+	}
+	return bad
+}
+
+// C1: before an ordinary stop or move, the volume's dirty lbas are read
+// back (forced reads, outside the budget); after an attach on a new host,
+// its whole content is read once.
+func TestGeneratorReadsBackBeforeAStopOrMove(t *testing.T) {
+	forced := 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if bad := unreadAtRelease(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			if o.Forced == "readback" || o.Forced == "attach-check" {
+				forced++
+				if o.Action != "v3_op_read" || len(strings.Fields(o.Params["lbas"])) > 4 {
+					t.Fatalf("forced %+v", o)
+				}
+			}
+		}
+	}
+	if forced == 0 {
+		t.Fatal("no read was forced")
+	}
+	// Red controls: a stop after an unread write, and an attach on a new host
+	// followed by another operation, are caught; their green twins pass.
+	w := func(lbas string) GenOp { return op("v3_op_write", "g1", "lbas", lbas, "round", "r") }
+	base := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("1 2")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"stop with an unread write": {
+			red:   append(slices.Clone(base), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_stop", "g1")),
+		},
+		"move, attach, write before the content is read": {
+			red: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), w("3")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), op("v3_op_read", "g1", "lbas", "1 2"), w("3")),
+		},
+	} {
+		if bad := unreadAtRelease(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := unreadAtRelease(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
+	}
+}
+
+// pairGaps states C2's and C3's needs on a proposal list answered as
+// answer() answers: a restore target's first operations after its first
+// attach read every inherited lba; and before an ordinary stop or move of a
+// source or target whose pair both serve, both sides read the same lbas
+// (the union of their contents) since the restore. It returns the gaps.
+func pairGaps(ops []GenOp) []string {
+	content := map[string]map[string]bool{}
+	serving := map[string]bool{}
+	source := map[string]string{}    // target -> source (live pair)
+	inherit := map[string][]string{} // target -> inherited lbas, until read
+	attached := map[string]bool{}
+	read := map[string]map[string]bool{}  // "src|tgt|vol" -> lbas read on vol since the restore
+	snapc := map[string]map[string]bool{} // "vol|snapshot" -> its content
+	var bad []string
+	set := func(v string) map[string]bool {
+		if content[v] == nil {
+			content[v] = map[string]bool{}
+		}
+		return content[v]
+	}
+	for _, o := range ops {
+		v := o.Volume
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if in := inherit[v]; len(in) > 0 && attached[v] && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its inherited lbas %v were read", o.No, o.Action, v, in))
+			delete(inherit, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				set(v)[b] = true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				inherit[v] = slices.DeleteFunc(inherit[v], func(x string) bool { return x == b })
+				for t, s := range source {
+					if v == t || v == s {
+						k := s + "|" + t + "|" + v
+						if read[k] == nil {
+							read[k] = map[string]bool{}
+						}
+						read[k][b] = true
+					}
+				}
+			}
+		case "v3_op_attach":
+			serving[v] = true
+			attached[v] = true
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			source[t] = v
+			for b := range snapc[v+"|"+o.Params["snapshot"]] {
+				set(t)[b] = true
+				inherit[t] = append(inherit[t], b)
+			}
+		case "v3_op_snapshot":
+			snapc[v+"|"+o.Params["name"]] = maps.Clone(set(v))
+		case "v3_op_stop", "v3_op_move":
+			for t, s := range source {
+				if (v == s || v == t) && serving[s] && serving[t] {
+					for _, side := range []string{s, t} {
+						for b := range content[s] {
+							if !read[s+"|"+t+"|"+side][b] {
+								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, s, b, side))
+							}
+						}
+						for b := range content[t] {
+							if !read[s+"|"+t+"|"+side][b] {
+								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, t, b, side))
+							}
+						}
+					}
+				}
+			}
+			serving[v] = false
+		case "v3_op_delete":
+			delete(source, v)
+		}
+	}
+	return bad
+}
+
+// C2 and C3: a restore target's first reads are its inherited lbas; before
+// a source or target of a live pair leaves while both serve, both sides
+// read the same lbas.
+func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
+	var inherited, pairs int
+	for seed := uint64(1); seed <= 30; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		// The pair needs every content lba read on both sides; content is
+		// tracked here from the shadow's view at restore (the target starts
+		// with the source snapshot's lbas, known to the generator only), so
+		// check inherited reads through the proposals' reasons and the pair
+		// reads through pairGaps on the reads' coverage of written lbas.
+		for _, o := range ops {
+			inherited += btoi(o.Forced == "inherited")
+			pairs += btoi(o.Forced == "pair")
+		}
+		if bad := pairGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+	}
+	if inherited == 0 || pairs == 0 {
+		t.Fatalf("%d inherited reads, %d pair reads", inherited, pairs)
+	}
+	// The generator's own state: the inherited lbas come first after the
+	// first attach; the pair window covers both sides.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_attach", "g2", "host", "0"))
+	if d := g.m.Due(); len(d) != 1 || d[0].Volume != "g2" || d[0].Params["lbas"] != "2 6" || d[0].Forced != "inherited" {
+		t.Fatalf("due after the target's first attach: %+v", d)
+	}
+	drive(g, d0(g))
+	drive(g, op("v3_op_write", "g2", "lbas", "5", "round", "r2"))
+	b := g.m.Before(op("v3_op_stop", "g1"))
+	var got []string
+	for _, o := range b {
+		got = append(got, o.Forced+" "+o.Volume+" "+o.Params["lbas"])
+	}
+	want := []string{"pair g1 2 5 6", "pair g2 2 5 6", "readback g1 "}
+	if len(got) < 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("before a stop of the source: %q", got)
+	}
+	drive(g, b...)
+	drive(g, op("v3_op_write", "g2", "lbas", "7", "round", "r3"))
+	if again := g.m.Before(op("v3_op_stop", "g2")); len(again) != 1 || again[0].Forced != "readback" || again[0].Params["lbas"] != "7" {
+		t.Fatalf("the pair window ran twice, or the readback is wrong: %+v", again)
+	}
+	// Red controls for the checker: a target written before its inherited
+	// read, a source stopped with its target unread at the source's write.
+	w := func(v, lbas string) GenOp { return op("v3_op_write", v, "lbas", lbas, "round", "r") }
+	r := func(v, lbas string) GenOp { return op("v3_op_read", v, "lbas", lbas) }
+	pairBase := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("g1", "1"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_attach", "g2", "host", "0")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"a target written before its inherited read": {
+			red:   append(slices.Clone(pairBase), w("g2", "1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g2", "1")),
+		},
+		"a source stopped before the pair read": {
+			red:   append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), r("g2", "1 3"), op("v3_op_stop", "g1")),
+		},
+	} {
+		if bad := pairGaps(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := pairGaps(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
+	}
+	_ = want
+}
+
+// d0 is the first due operation of g.
+func d0(g *Generator) GenOp { return g.m.Due()[0] }
+
+// horizonGaps: an ordinary delete of a stopped volume, or the negative
+// "delete a source whose snapshot has a restore target", proposed with no
+// observation of the volume since its stop (the lease horizon is learnt
+// from observations only).
+func horizonGaps(ops []GenOp) []string {
+	stoppedUnseen := map[string]bool{}
+	var bad []string
+	for _, o := range ops {
+		switch {
+		case o.Action == "v3_op_stop" && o.Negative == "" && answer(o) == "ok":
+			stoppedUnseen[o.Volume] = true
+		case o.Action == "v3_op_observe":
+			delete(stoppedUnseen, o.Volume)
+		case o.Action == "v3_op_delete" && (o.Negative == "" || o.Negative == "delete a source whose snapshot has a restore target") && stoppedUnseen[o.Volume]:
+			bad = append(bad, fmt.Sprintf("op %d delete %s (%q) with no observation since its stop", o.No, o.Volume, o.Negative))
+		}
+	}
+	return bad
+}
+
+// The lease horizon: a delete after a stop (ordinary, or the source
+// negative) waits for an observation that shows the lease expired; the
+// model observes a stopped volume every leaseObserveEvery drawn operations.
+func TestGeneratorWaitsForTheLeaseHorizonFromObservations(t *testing.T) {
+	deletes, observed := 0, 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 600, Pool: pool(30), Blocks: 8, Negative: 0.3})
+		if bad := horizonGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			observed += btoi(o.Forced == "lease")
+			deletes += btoi(o.Action == "v3_op_delete" && o.Negative == "")
+		}
+	}
+	if observed == 0 || deletes == 0 {
+		t.Fatalf("%d lease observations, %d ordinary deletes", observed, deletes)
+	}
+	red := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_delete", "g1"))
+	green := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_observe", "g1"), op("v3_op_delete", "g1"))
+	if len(horizonGaps(red)) == 0 || len(horizonGaps(green)) != 0 {
+		t.Fatal("the horizon check's red control")
+	}
+}
+
+// C7's coverage tail: a created volume never attached deleted, a stopped
+// volume past its lease deleted, both observed, then a create of a deleted
+// name, refused. Deterministic from the state.
+func TestCoverageTailDeletesObservesAndProbesADeletedName(t *testing.T) {
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(5), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"), op("v3_op_stop", "g2"),
+		op("v3_op_create", "g3"), op("v3_op_attach", "g3", "host", "0"))
+	var got []string
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, fmt.Sprintf("%s %s %s %s", o.Forced, o.Action, o.Volume, o.Negative))
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
+	}
+	want := []string{"tail v3_op_delete g1 ", "tail v3_op_observe g2 ", "tail v3_op_delete g2 ",
+		"tail v3_op_observe g1 ", "tail v3_op_observe g2 ", "tail v3_op_create g1 create a deleted name"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tail\n%q\nwant\n%q", got, want)
+	}
+
+	// A stopped volume whose observation does not show the lease expired is
+	// not deleted; nothing deleted, no create probe.
+	g, _ = NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(2), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"))
+	got = nil
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, o.Action+" "+o.Volume)
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "revoking"))
+		}
+	}
+	if !slices.Equal(got, []string{"v3_op_observe g1"}) {
+		t.Fatalf("tail with the lease live: %q", got)
+	}
+	// Coverage names the ordinary actions that never ran.
+	ops, g2 := run(t, GenConfig{Seed: 3, Ops: 30, Pool: pool(10), Blocks: 4, Weights: map[string]int{"v3_op_create": 1, "v3_op_move": 1}})
+	_ = ops
+	if nr, _ := g2.Coverage()["ordinary_never_ran"].([]string); !slices.Equal(nr, []string{"v3_op_move"}) {
+		t.Fatalf("ordinary_never_ran %v", g2.Coverage()["ordinary_never_ran"])
 	}
 }

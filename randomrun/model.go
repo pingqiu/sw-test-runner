@@ -28,6 +28,7 @@ type Op struct {
 	Volume   string            // the subject it acts on (the history record's volume)
 	Params   map[string]string // the action's params
 	Negative string            // the limit a negative operation probes; "" for an ordinary one
+	Forced   string            // why the model forced it (Before, Due, the tail); "" for a drawn one
 }
 
 // Driver is the product's side of executing a proposal. Replay needs only
@@ -69,6 +70,14 @@ type Driver interface {
 	OutageRestart() Op
 }
 
+// SubjectNamer is an optional part of a Driver: the subjects an operation
+// names, observed around a negative or a refusal (default: its Volume).
+// An operation on a pair (a restore into a target) names both, so the
+// refusal is shown to have changed neither.
+type SubjectNamer interface {
+	ObserveSubjects(o Op) []string
+}
+
 // Model is the product's side of proposing: its state, preconditions and
 // effects, and its coverage cells.
 type Model interface {
@@ -92,6 +101,14 @@ type Model interface {
 	// Negatives lists operations the product must refuse now, each with its
 	// Negative limit set and its expectation in its params, in a stable order.
 	Negatives() []Op
+	// Before lists the operations to run before a drawn operation o (for
+	// example, reading back what a stop would make unreadable), each with
+	// Forced set; none: o runs at once.
+	Before(o Op) []Op
+	// Due lists operations the state makes due now, before the next draw
+	// (each with Forced set). A due operation, once learnt, whatever its
+	// outcome, is no longer due.
+	Due() []Op
 	// Learn applies an operation's outcome (ok, refused, unknown) to the state.
 	Learn(o Op, outcome string)
 	// Resolved says the unknown operations of a subject resolved by a check
@@ -112,6 +129,11 @@ type Model interface {
 	// OutageWrites lists the writes of a short master outage after operation
 	// after: one on every serving subject. Learnt like any outcome.
 	OutageWrites(after int) []Op
+	// Tail is the next operation of the coverage tail, run after the last
+	// operation (and a fault run's final healthy point) and before the sweep:
+	// deterministic from the state, each learnt before the next is asked
+	// for; false when the tail is done.
+	Tail() (Op, bool)
 	// Sweep lists the operations of the end-of-run sweep, in order: reads of
 	// every block with acknowledged content of each live subject, and one
 	// observation of each subject the checkers need to see last (deleted ones

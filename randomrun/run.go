@@ -19,7 +19,8 @@ package randomrun
 //     after every negative operation and every refusal, so "a refused
 //     operation changed nothing" is judged from the observations around it;
 //   - after the last operation (in a fault run, after the final healthy
-//     point), the end-of-run sweep: an observe record "gen_sweep" listing the
+//     point), the model's coverage tail (Model.Tail: gen_steps forced
+//     "tail"), then the end-of-run sweep: an observe record "gen_sweep" listing the
 //     model's sweep operations, then each through Exec (reads of every block
 //     with acknowledged content, and the last observations the checkers need);
 //   - last, an observe record "gen_coverage" (also written to the bundle as
@@ -34,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -97,8 +99,17 @@ func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 // a replay both run every step through here, so a replayed history has the
 // same shape as a recorded one.
 func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
-	observe := func() error {
-		obs := r.Driver.Observe(o.Volume)
+	subjects := []string{o.Volume}
+	if sn, ok := r.Driver.(SubjectNamer); ok {
+		subjects = nil
+		for _, s := range sn.ObserveSubjects(o) {
+			if s != "" && !slices.Contains(subjects, s) {
+				subjects = append(subjects, s)
+			}
+		}
+	}
+	observeOne := func(s string) error {
+		obs := r.Driver.Observe(s)
 		h, ok := r.Handlers[obs.Action]
 		if !ok {
 			return fmt.Errorf("%s: no handler for %s", r.Name, obs.Action)
@@ -106,20 +117,35 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 		_, err := h(ctx, actx, tr.Action{Action: obs.Action, Node: r.Node, Params: obs.Params})
 		return err
 	}
+	observe := func() error {
+		for _, s := range subjects {
+			if err := observeOne(s); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
 	if o.Negative != "" {
 		step["negative"] = o.Negative
 	}
+	if o.Forced != "" {
+		step["forced"] = o.Forced
+	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
 		return "", err
 	}
-	// Two observations before a negative operation: with nothing between
-	// them they must be equal (the product's background work shows there,
-	// not at the refusal), and the second is the refusal's "before".
+	// Two observations of each subject before a negative operation: with
+	// nothing between them they must be equal (the product's background work
+	// shows there, not at the refusal), and the second is the refusal's
+	// "before". The subjects are every volume the operation names
+	// (SubjectNamer), observed pair by pair, and once each after.
 	if o.Negative != "" {
-		for i := 0; i < 2; i++ {
-			if err := observe(); err != nil {
-				return "", err
+		for _, s := range subjects {
+			for i := 0; i < 2; i++ {
+				if err := observeOne(s); err != nil {
+					return "", err
+				}
 			}
 		}
 	}
@@ -261,7 +287,14 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		}
 		if fr != nil {
 			fr.note(o, outcome)
+			before := fr.next
 			err := fr.afterOp(ctx, actx, o.No)
+			if fr.next != before {
+				// A fault event ran: what was queued before it was decided on a
+				// state the event may have changed (a holder fenced, a volume
+				// settled); the queue is dropped, nothing of it is proposed.
+				g.queue = nil
+			}
 			if ferr := g.feed(actx.History); ferr != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, ferr)
 			}
@@ -285,6 +318,23 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 	}
 	if err := g.feed(actx.History); err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name, err)
+	}
+	// The coverage tail: forced operations decided from the state, each
+	// recorded as a gen_step ("forced": "tail") and learnt. Not after a run
+	// stopped at a false healthy point: nothing more against dead volumes.
+	for g.Ended() != "unhealthy" {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		outcome, err := r.Step(ctx, actx, o)
+		if err != nil {
+			return nil, fmt.Errorf("%s: tail operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
+		}
+		g.Learn(o, outcome)
+		if err := g.feed(actx.History); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
 	}
 	if err := r.sweep(ctx, actx, g.m.Sweep()); err != nil {
 		return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)

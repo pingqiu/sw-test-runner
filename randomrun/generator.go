@@ -53,6 +53,25 @@ type Generator struct {
 	down   string         // the process a fault holds down now ("" for none)
 	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
 	fed    int64          // the history's bytes already handed to the model (feed)
+	drawn  int            // operations drawn (the budget counts these only)
+	forced int            // forced operations proposed (Model.Before, Model.Due, the tail)
+	queue  []queued
+	// ordinary counts the operations proposed as ordinary (not negative,
+	// drawn or forced), per action.
+	ordinary map[string]int
+}
+
+// Tail proposes the next operation of the coverage tail (Model.Tail), or
+// false when it is done. Forced, outside the budget.
+func (g *Generator) Tail() (Op, bool) {
+	o, ok := g.m.Tail()
+	if !ok {
+		return Op{}, false
+	}
+	if o.Forced == "" {
+		o.Forced = "tail"
+	}
+	return g.propose(o), true
 }
 
 // feed hands the model every observe record appended to the history since
@@ -119,7 +138,7 @@ func New(cfg Config, m Model) (*Generator, error) {
 		}
 	}
 	g := &Generator{cfg: cfg, m: m, costs: costs, rng: rand.New(rand.NewPCG(cfg.Seed, cfg.Seed^0x9e3779b97f4a7c15)),
-		cells: map[string]int{}, counts: map[string]int{}, fcells: map[string]int{}}
+		cells: map[string]int{}, counts: map[string]int{}, fcells: map[string]int{}, ordinary: map[string]int{}}
 	seen := map[string]bool{}
 	for _, n := range cfg.Pool {
 		if n == "" || seen[n] || strings.ContainsAny(n, " \t") {
@@ -251,13 +270,30 @@ func (g *Generator) weight(action string) float64 {
 }
 
 // Next proposes the next operation, or false when the run ends.
+//
+// Forced operations come first and count against no budget: the queue of
+// operations the model asked for before a drawn one (Model.Before; the
+// drawn operation follows them unless its subject's state changed meanwhile),
+// then the operations the model says are due now (Model.Due). Each carries
+// its reason in Op.Forced, recorded in its gen_step.
 func (g *Generator) Next() (Op, bool) {
 	if g.ended != "" {
 		return Op{}, false
 	}
-	if g.no >= g.cfg.Ops {
+	for len(g.queue) > 0 {
+		q := g.queue[0]
+		g.queue = g.queue[1:]
+		if q.op.Forced == "" && g.m.State(q.op.Volume) != q.state {
+			continue // the drawn operation's precondition no longer holds
+		}
+		return g.propose(q.op), true
+	}
+	if g.drawn >= g.cfg.Ops {
 		g.ended = "ops"
 		return Op{}, false
+	}
+	if due := g.m.Due(); len(due) > 0 {
+		return g.propose(due[0]), true
 	}
 	var cs []Candidate
 	if g.rng.Float64() < g.cfg.Negative {
@@ -283,14 +319,40 @@ func (g *Generator) Next() (Op, bool) {
 		}
 		pick -= c.Weight
 	}
-	g.no++
-	chosen.Op.No = g.no
-	g.cells[chosen.Op.Action+"|"+g.m.State(chosen.Op.Volume)]++
-	g.counts[chosen.Op.Action]++
-	if g.down != "" {
-		g.fcells["while_down|"+chosen.Op.Action]++
+	g.drawn++
+	if before := g.m.Before(chosen.Op); len(before) > 0 {
+		for _, b := range before[1:] {
+			g.queue = append(g.queue, queued{op: b})
+		}
+		g.queue = append(g.queue, queued{op: chosen.Op, state: g.m.State(chosen.Op.Volume)})
+		return g.propose(before[0]), true
 	}
-	return chosen.Op, true
+	return g.propose(chosen.Op), true
+}
+
+// queued is an operation waiting in the forced queue; a drawn one keeps its
+// subject's state at the draw.
+type queued struct {
+	op    Op
+	state string
+}
+
+// propose numbers an operation and counts it in the coverage.
+func (g *Generator) propose(o Op) Op {
+	g.no++
+	o.No = g.no
+	g.cells[o.Action+"|"+g.m.State(o.Volume)]++
+	g.counts[o.Action]++
+	if o.Forced != "" {
+		g.forced++
+	}
+	if o.Negative == "" {
+		g.ordinary[o.Action]++
+	}
+	if g.down != "" {
+		g.fcells["while_down|"+o.Action]++
+	}
+	return o
 }
 
 // Coverage is the bundle's coverage report: proposals per action, per
@@ -348,8 +410,17 @@ func (g *Generator) Coverage() map[string]any {
 	if est > 0 {
 		perHour = float64(g.no) * 3600 / est
 	}
-	cov := map[string]any{"proposed": g.no, "ended": g.ended, "actions": counts, "cells": cells,
-		"cells_never_reached": missed, "estimated_ops_per_hour": int(perHour)}
+	// The actions of the run's weights never proposed as ordinary (drawn or
+	// forced, not negative).
+	neverRan := []string{}
+	for a, w := range g.cfg.Weights {
+		if w > 0 && g.ordinary[a] == 0 {
+			neverRan = append(neverRan, a)
+		}
+	}
+	slices.Sort(neverRan)
+	cov := map[string]any{"proposed": g.no, "drawn": g.drawn, "forced": g.forced, "ended": g.ended, "actions": counts, "cells": cells,
+		"cells_never_reached": missed, "ordinary_never_ran": neverRan, "estimated_ops_per_hour": int(perHour)}
 	if fcells != nil {
 		cov["fault_cells"] = fcells
 	}

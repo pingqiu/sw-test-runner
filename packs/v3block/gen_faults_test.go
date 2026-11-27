@@ -645,7 +645,17 @@ func judgeOutages(recs []tr.HistoryRecord) (int, []string) {
 	open := map[uint64]tr.HistoryRecord{}
 	kill := uint64(0)
 	writes, looks := 0, 0
+	// planned: the writes each outage's marker listed, by its kill's
+	// complete seq (no serving volume: no write to make).
+	planned, listed := map[uint64]int{}, -1
 	for _, r := range recs {
+		if r.Verb == "master_outage" {
+			w, _ := r.Result["writes"].([]any)
+			listed = len(w)
+		}
+		if r.Kind == tr.HistoryComplete && open[r.Of].Verb == FaultKill && listed >= 0 {
+			planned[r.Seq], listed = listed, -1
+		}
 		switch r.Kind {
 		case tr.HistoryInvoke:
 			open[r.Seq] = r
@@ -655,7 +665,7 @@ func judgeOutages(recs []tr.HistoryRecord) (int, []string) {
 			case inv.Verb == FaultKill && inv.Args["process"] == "blockmaster" && r.Outcome == tr.OutcomeOK:
 				kill, writes, looks = r.Seq, 0, 0
 			case inv.Verb == FaultRestart && inv.Args["process"] == "blockmaster" && kill != 0 && r.Outcome == tr.OutcomeOK:
-				if writes == 0 || looks == 0 {
+				if (writes == 0 && planned[kill] > 0) || looks == 0 {
 					f = append(f, fmt.Sprintf("window from seq %d: %d writes, %d looks", kill, writes, looks))
 				}
 				windows++

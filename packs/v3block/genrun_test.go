@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,9 @@ func (f *fakeProduct) install(t *testing.T) {
 			}
 			verb := strings.TrimPrefix(name, "v3_op_")
 			if name == "v3_op_observe" {
-				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"]})
+				// The product past the lease horizon: every observation shows it.
+				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"],
+					Result: map[string]any{"workspace": map[string]any{"exit": 0, "text": []any{"lease state: expired"}}}})
 				return map[string]string{"value": "observed"}, nil // as v3OpObserve: an observation, not an outcome
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + verb, Verb: verb, Volume: act.Params["volume"]})
@@ -115,38 +118,55 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 			last = r
 		}
 	}
-	if last.Verb != "gen_coverage" || out["proposed"] != "300" {
+	if last.Verb != "gen_coverage" || last.Result["drawn"] != float64(300) || out["proposed"] != fmt.Sprint(last.Result["proposed"]) {
 		t.Fatalf("last record %+v, out %v", last, out)
 	}
 	if _, err := os.Stat(filepath.Join(actx.Bundle.Dir, "gen-coverage.json")); err != nil {
 		t.Fatal(err)
 	}
 	// Every operation record follows its gen_step; a negative is preceded by two
-	// observations of its volume (C5's baseline pair) and followed by one.
-	steps, refusals := 0, 0
+	// observations of each volume it names (C5's baseline pair; a restore or a
+	// release names its source and its target) and followed by one of each.
+	steps, refusals, pairs := 0, 0, 0
 	for i, r := range recs {
 		if r.Verb != "gen_step" {
 			continue
 		}
-		steps++
+		if r.Result["forced"] == nil {
+			steps++
+		}
 		next := recs[i+1]
 		if r.Result["negative"] != nil {
-			for _, o := range recs[i+1 : i+3] {
-				if o.Verb != "observe" || o.Volume != r.Volume {
-					t.Fatalf("negative step %v not observed twice before: %+v", r.Result, o)
+			subjects := []string{r.Volume}
+			if a := r.Result["action"]; a == "v3_op_restore" || a == "v3_op_release" {
+				subjects = append(subjects, r.Result["params"].(map[string]any)["target_volume"].(string))
+				pairs++
+			}
+			j := i + 1
+			for _, s := range subjects {
+				for k := 0; k < 2; k++ {
+					if o := recs[j]; o.Verb != "observe" || o.Volume != s {
+						t.Fatalf("negative step %v: %s not observed twice before: %+v", r.Result, s, o)
+					}
+					j++
 				}
 			}
 			refusals++
-			// invoke, complete(refused), then the observation after it
-			if recs[i+3].Kind != tr.HistoryInvoke || recs[i+4].Outcome != tr.OutcomeRefused || recs[i+5].Verb != "observe" || recs[i+5].Volume != r.Volume {
-				t.Fatalf("refusal at step %v not observed after", r.Result)
+			// invoke, complete(refused), then the observations after it
+			if recs[j].Kind != tr.HistoryInvoke || recs[j+1].Outcome != tr.OutcomeRefused {
+				t.Fatalf("negative step %v: %+v %+v", r.Result, recs[j], recs[j+1])
 			}
-		} else if next.Kind != tr.HistoryInvoke {
+			for k, s := range subjects {
+				if o := recs[j+2+k]; o.Verb != "observe" || o.Volume != s {
+					t.Fatalf("refusal at step %v: %s not observed after: %+v", r.Result, s, o)
+				}
+			}
+		} else if next.Kind != tr.HistoryInvoke && r.Result["action"] != "v3_op_observe" {
 			t.Fatalf("step %v not followed by its invocation: %+v", r.Result, next)
 		}
 	}
-	if steps != 300 || refusals == 0 {
-		t.Fatalf("%d steps, %d refusals", steps, refusals)
+	if steps != 300 || refusals == 0 || pairs == 0 {
+		t.Fatalf("%d steps, %d refusals, %d of them on a pair", steps, refusals, pairs)
 	}
 }
 

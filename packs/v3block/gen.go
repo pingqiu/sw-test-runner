@@ -21,6 +21,7 @@ package v3block
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -39,13 +40,21 @@ import (
 // the target still names a source chunk. m1-gen/4: an attach or stop
 // answered unknown leaves its volume unsettled until a settled record places
 // it, and a volume a healthy record lists not serving gets no reads or writes.
-const GenVersion = "m1-gen/4"
+//
+// m1-gen/5 (host run 4): forced operations (recorded "forced" in gen_step,
+// outside the budget): the dirty lbas read back before a stop or move, the
+// content read after an attach on a new host, a restore target's inherited
+// lbas read first, a pair window before a source or target leaves, the
+// lease horizon learnt from observations, and a coverage tail before the
+// sweep; a negative is observed on every volume it names.
+const GenVersion = "m1-gen/5"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
-const GenVersionFaults = "m2-gen/3"
+// m2-gen/4: as m1-gen/5.
+const GenVersionFaults = "m2-gen/4"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -173,7 +182,32 @@ type genVol struct {
 	// fenced: a healthy record listed it not serving; it is offered no reads
 	// or writes until a later healthy record does not.
 	fenced bool
+	// dirty: lbas written (ok, or unknown in a fault run) since that lba's
+	// last ok read. A stop or move would leave them unread for good (no
+	// attach after a stop): they are read back first (Before).
+	dirty map[int]bool
+	// moved: moved since its last attach; its next attach (on the new host)
+	// is followed by a read of its whole content (due).
+	moved bool
+	// due: forced operations owed on this volume, in order (Due).
+	due []GenOp
+	// inheritedLBAs: a restore target's content at its restore, read first
+	// after its first attach (C2); attached: it has been attached once.
+	inheritedLBAs []int
+	attached      bool
+	// pairDone: the restore pairs (source|target) whose pair window ran.
+	pairDone map[string]bool
+	// leaseLapsed: the volume's latest observation shows its lease expired
+	// ("lease state: expired" in the workspace part); leaseObsAt: the drawn
+	// count at its last lease observation (Due observes a stopped volume
+	// every leaseObserveEvery drawn operations until it lapses).
+	leaseLapsed bool
+	leaseObsAt  int
 }
+
+// leaseObserveEvery is how many drawn operations apart a stopped volume
+// whose lease is not seen expired is observed (Due).
+const leaseObserveEvery = 10
 
 // blockModel is the block product's randomrun.Model. Its zero value is a
 // Driver (replay needs no state).
@@ -182,6 +216,16 @@ type blockModel struct {
 	faulty bool
 	vols   map[string]*genVol
 	order  []string // pool order
+	drawn  int      // drawn (not forced) operations learnt
+	tail   tailState
+}
+
+// tailState is where the coverage tail stands (Tail).
+type tailState struct {
+	stage    int
+	observe  []string // volumes to observe next
+	deleted  []string // volumes the tail deleted
+	stoppedC string   // the stopped candidate observed for its lease
 }
 
 var _ randomrun.Model = (*blockModel)(nil)
@@ -195,7 +239,7 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
 	for _, n := range pool {
 		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
-			snapRewrote: map[string]bool{}}
+			snapRewrote: map[string]bool{}, dirty: map[int]bool{}, pairDone: map[string]bool{}}
 		m.order = append(m.order, n)
 	}
 	return nil
@@ -302,7 +346,10 @@ func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
 			// a clean move to the same host, which v3_op_move cannot issue. A
 			// reserved volume never serves again (OG:193-195); its delete is
 			// rerun with the same request id once its dependents are gone.
-			if len(v.targets) == 0 {
+			// After a stop the lease horizon refuses a delete first
+			// (VL:409-411): it is proposed once an observation shows the
+			// lease expired (a reserved volume is past it).
+			if len(v.targets) == 0 && (v.state == stReserved || v.leaseLapsed) {
 				add(op("v3_op_delete", n))
 			}
 		case stMoved:
@@ -395,7 +442,9 @@ func (m *blockModel) Negatives() []GenOp {
 				}
 			}
 		case stStopped:
-			if len(v.targets) > 0 {
+			// Within the lease horizon the horizon refuses first, not this
+			// limit: probed only once an observation shows the lease expired.
+			if len(v.targets) > 0 && v.leaseLapsed {
 				add(op("v3_op_delete", n), limDeleteSource)
 			}
 		}
@@ -446,6 +495,22 @@ func (m *blockModel) Negatives() []GenOp {
 // read at a healthy point resolves it.
 func (m *blockModel) Learn(o GenOp, outcome string) {
 	v := m.vols[o.Volume]
+	if o.Forced != "" && v != nil && len(v.due) > 0 && sameOp(v.due[0], o) {
+		v.due = v.due[1:] // learnt, whatever its outcome: no longer due
+	}
+	if o.Forced == "" {
+		m.drawn++
+	}
+	if o.Forced == "lease" && v != nil {
+		v.leaseObsAt = m.drawn
+	}
+	if o.Action == "v3_op_read" && outcome == "ok" && v != nil {
+		for _, f := range strings.Fields(o.Params["lbas"]) {
+			if b, err := strconv.Atoi(f); err == nil {
+				delete(v.dirty, b)
+			}
+		}
+	}
 	if outcome == "unknown" && o.Action == "v3_op_read" {
 		return // a read changes nothing, whatever its outcome
 	}
@@ -453,6 +518,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		for _, f := range strings.Fields(o.Params["lbas"]) {
 			if n, err := strconv.Atoi(f); err == nil {
 				v.lbas[n] = true
+				v.dirty[n] = true
 			}
 		}
 		v.unresolved++
@@ -495,12 +561,25 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_create":
 		v.state = stCreated
 	case "v3_op_attach":
-		v.state, v.fenced = stServing, false // a new holder: no earlier not_serving applies
+		v.state, v.fenced, v.leaseLapsed = stServing, false, false // a new holder and lease
 		v.held[v.host] = true
+		if v.source != "" && !v.attached && len(v.inheritedLBAs) > 0 {
+			// C2: a restore target's first reads are its inherited lbas,
+			// before anything writes them.
+			v.due = append(v.due, m.readsOf(v, v.inheritedLBAs, "inherited")...)
+		}
+		v.attached = true
+		if v.moved {
+			// The move's own data check: every acknowledged lba read once on
+			// the new host.
+			v.moved = false
+			v.due = append(v.due, m.readsOf(v, sortedLBAs(v.lbas), "attach-check")...)
+		}
 	case "v3_op_write":
 		for _, f := range strings.Fields(o.Params["lbas"]) {
 			if b, err := strconv.Atoi(f); err == nil {
 				v.lbas[b] = true
+				v.dirty[b] = true
 			}
 		}
 		v.rewrote = true
@@ -523,11 +602,12 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			t.lbas[b] = true
 		}
 		t.inherited, t.rewrote = len(v.snapLBAs[o.Params["snapshot"]]) > 0, false
+		t.inheritedLBAs = slices.Clone(v.snapLBAs[o.Params["snapshot"]])
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
-		v.state = stStopped
+		v.state, v.leaseLapsed, v.leaseObsAt = stStopped, false, m.drawn
 	case "v3_op_move":
-		v.state, v.host = stMoved, 1-v.host
+		v.state, v.host, v.moved = stMoved, 1-v.host, true
 	case "v3_op_delete":
 		v.state = stDeleted
 		if v.source != "" {
@@ -556,6 +636,93 @@ func (m *blockModel) Cells() map[string][]string {
 
 // sweepReadSize is the most lbas one sweep read names (a read's size).
 const sweepReadSize = 4
+
+// readsOf is the reads of lbas on v, at most a read's size each, forced for
+// reason.
+func (m *blockModel) readsOf(v *genVol, lbas []int, reason string) []GenOp {
+	var out []GenOp
+	for i := 0; i < len(lbas); i += sweepReadSize {
+		var f []string
+		for _, b := range lbas[i:min(i+sweepReadSize, len(lbas))] {
+			f = append(f, strconv.Itoa(b))
+		}
+		o := op("v3_op_read", v.name, "lbas", strings.Join(f, " "))
+		o.Forced = reason
+		out = append(out, o)
+	}
+	return out
+}
+
+// sameOp says two proposals are the same operation (number aside).
+func sameOp(a, b GenOp) bool {
+	return a.Action == b.Action && a.Volume == b.Volume && a.Forced == b.Forced && maps.Equal(a.Params, b.Params)
+}
+
+// Before an ordinary stop or move (not on a fenced volume: it cannot be
+// read):
+//   - C3, the pair window: when the volume is the source of a live target,
+//     or the target of a live source, and both serve, the same lbas (the
+//     content of either) are read on both, once per pair, so both
+//     directions are exercised before one side leaves;
+//   - C1: the volume's dirty lbas are read back.
+func (m *blockModel) Before(o GenOp) []GenOp {
+	v := m.vols[o.Volume]
+	if o.Negative != "" || v == nil || v.fenced || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
+		return nil
+	}
+	var out []GenOp
+	pending := maps.Clone(v.dirty) // the dirty lbas no pair read covers
+	pair := func(src, tgt *genVol) {
+		key := src.name + "|" + tgt.name
+		if src.pairDone[key] || src.state != stServing || tgt.state != stServing || src.fenced || tgt.fenced {
+			return
+		}
+		src.pairDone[key] = true
+		u := maps.Clone(src.lbas)
+		maps.Copy(u, tgt.lbas)
+		lbas := sortedLBAs(u)
+		out = append(out, m.readsOf(src, lbas, "pair")...)
+		out = append(out, m.readsOf(tgt, lbas, "pair")...)
+		for b := range u {
+			delete(pending, b)
+		}
+	}
+	for _, s := range slices.Sorted(maps.Keys(v.targets)) {
+		pair(v, m.vols[v.targets[s]])
+	}
+	if v.source != "" {
+		if src := m.vols[v.source]; src != nil && src.targets[v.fromSnap] == v.name {
+			pair(src, v)
+		}
+	}
+	return append(out, m.readsOf(v, sortedLBAs(pending), "readback")...)
+}
+
+// Due is the first owed operation of a volume, in pool order. Owed reads of
+// a volume that no longer serves (or is fenced) are dropped.
+func (m *blockModel) Due() []GenOp {
+	for _, n := range m.order {
+		v := m.vols[n]
+		if len(v.due) > 0 && v.due[0].Action == "v3_op_read" && (v.state != stServing || v.fenced) {
+			v.due = nil
+		}
+		if len(v.due) > 0 {
+			return []GenOp{v.due[0]}
+		}
+	}
+	// The lease horizon is learnt from observations, never from the clock: a
+	// stopped volume whose lease is not seen expired is observed every
+	// leaseObserveEvery drawn operations.
+	for _, n := range m.order {
+		v := m.vols[n]
+		if v.state == stStopped && !v.leaseLapsed && m.drawn-v.leaseObsAt >= leaseObserveEvery {
+			o := m.Observe(n)
+			o.Forced = "lease"
+			return []GenOp{o}
+		}
+	}
+	return nil
+}
 
 // Sweep is the end-of-run sweep (C1, C2/C3, C7 need it): for every serving
 // volume, reads of every lba with acknowledged content (written, or inherited
@@ -590,6 +757,9 @@ func (m *blockModel) Sweep() []GenOp {
 }
 
 // Observed learns from observe records (not from the invokes):
+//   - observe (a volume's observation): its workspace part's lease state;
+//     "lease state: expired" lets a stopped volume be deleted, and the
+//     source negative be probed, past the lease horizon;
 //   - settled {volume, state, evidence}: an unsettled volume placed by
 //     observation; held means serving again (ordinary operations offered),
 //     not_held means stopped. A volume that is not unsettled is not moved;
@@ -598,6 +768,17 @@ func (m *blockModel) Sweep() []GenOp {
 //     result.third_state [{volume, why}] takes the volume out of the run.
 func (m *blockModel) Observed(r tr.HistoryRecord) {
 	switch r.Verb {
+	case "observe":
+		// The workspace part of a volume's observation: its lease state.
+		if v := m.vols[r.Volume]; v != nil {
+			ws, _ := r.Result["workspace"].(map[string]any)
+			text, _ := ws["text"].([]any)
+			lapsed := false
+			for _, l := range text {
+				lapsed = lapsed || l == "lease state: expired"
+			}
+			v.leaseLapsed = lapsed
+		}
 	case "settled":
 		vol, _ := r.Result["volume"].(string)
 		v := m.vols[vol]
@@ -638,6 +819,69 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 // VerbHealthyRecord is the healthy record's verb (randomrun's contract).
 const VerbHealthyRecord = randomrun.VerbHealthy
 
+// Tail is the coverage tail (C7), deterministic from the state, one
+// operation at a time:
+//  1. delete one created volume that was never attached (pool order), if any;
+//  2. delete one stopped volume without targets whose observation shows its
+//     lease expired; when none does yet, observe the first candidate once
+//     and delete it if that observation shows it expired;
+//  3. observe each volume the tail deleted;
+//  4. create a deleted name (the first in pool order): a negative, refused.
+func (m *blockModel) Tail() (GenOp, bool) {
+	t := &m.tail
+	for {
+		switch t.stage {
+		case 0:
+			t.stage = 1
+			if n := m.firstName(func(v *genVol) bool {
+				return v.state == stCreated && !v.held[0] && !v.held[1] && len(v.targets) == 0 && v.source == ""
+			}); n != "" {
+				t.deleted = append(t.deleted, n)
+				return op("v3_op_delete", n), true
+			}
+		case 1:
+			stopped := func(v *genVol) bool { return v.state == stStopped && len(v.targets) == 0 }
+			if n := m.firstName(func(v *genVol) bool { return stopped(v) && v.leaseLapsed }); n != "" {
+				t.stage = 3
+				t.deleted = append(t.deleted, n)
+				return op("v3_op_delete", n), true
+			}
+			t.stage = 3
+			if n := m.firstName(stopped); n != "" {
+				t.stage, t.stoppedC = 2, n
+				return m.Observe(n), true
+			}
+		case 2:
+			t.stage = 3
+			if v := m.vols[t.stoppedC]; v.state == stStopped && v.leaseLapsed {
+				t.deleted = append(t.deleted, v.name)
+				return op("v3_op_delete", v.name), true
+			}
+		case 3:
+			t.stage, t.observe = 4, nil
+			for _, n := range t.deleted {
+				if m.vols[n].state == stDeleted {
+					t.observe = append(t.observe, n)
+				}
+			}
+		case 4:
+			if len(t.observe) > 0 {
+				n := t.observe[0]
+				t.observe = t.observe[1:]
+				return m.Observe(n), true
+			}
+			t.stage = 5
+			if n := m.firstName(func(v *genVol) bool { return v.state == stDeleted }); n != "" {
+				o := op("v3_op_create", n)
+				o.Params["expect"], o.Negative = "refused", limCreateDeleted
+				return o, true
+			}
+		default:
+			return GenOp{}, false
+		}
+	}
+}
+
 // Driver side: how a block proposal is executed.
 
 func (m *blockModel) Version(faults bool) string {
@@ -646,6 +890,18 @@ func (m *blockModel) Version(faults bool) string {
 	}
 	return GenVersion
 }
+
+// ObserveSubjects: a restore or a release names its source and its target
+// (the typed restore records the target as its subject); every other
+// operation its own volume.
+func (m *blockModel) ObserveSubjects(o GenOp) []string {
+	if o.Action == "v3_op_restore" || o.Action == "v3_op_release" {
+		return []string{o.Volume, o.Params["target_volume"]}
+	}
+	return []string{o.Volume}
+}
+
+var _ randomrun.SubjectNamer = (*blockModel)(nil)
 
 // Calls issues a write over several lbas one lba per call (the handler
 // records one operation per lba either way), so that every lba's outcome
