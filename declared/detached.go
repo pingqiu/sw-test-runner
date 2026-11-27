@@ -8,7 +8,7 @@ package declared
 //   - RunDetached runs a command DETACHED on the node, in its own session,
 //     with its output and exit code in files the runner polls. The runner
 //     never holds a pipe to it, so a child in uninterruptible sleep (dd on
-//     a dead NVMe device) cannot block it. At the deadline the session is
+//     a dead device) cannot block it. At the deadline the session is
 //     killed; whatever survives the kill is abandoned, and its pid and
 //     start time are returned so the history and the teardown know of it.
 //

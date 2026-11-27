@@ -66,7 +66,10 @@ type File struct {
 	// kinds ({{run.<name>}}), each with why; the executor's Values supplies
 	// them, and a step it cannot supply them for does not run.
 	RunValues []RunValue `json:"run_values,omitempty"`
-	scripts   map[string]string
+	// DeviceResolvers are the product's declared guest-device resolvers, by
+	// name (resolver.go).
+	DeviceResolvers map[string]*Resolver `json:"device_resolvers,omitempty"`
+	scripts         map[string]string
 	// Guest is the product's guest configuration, read by the product's
 	// own code; the executor does not interpret it.
 	Guest json.RawMessage `json:"guest,omitempty"`
@@ -482,6 +485,16 @@ func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 	}
 	if err := f.checkSequences(keys, run); err != nil {
 		return nil, err
+	}
+	for name, r := range f.DeviceResolvers {
+		if err := r.check(); err != nil {
+			return nil, fmt.Errorf("actions: device resolver %s: %w", name, err)
+		}
+	}
+	for _, n := range f.resolverRefs() {
+		if f.DeviceResolvers[n] == nil {
+			return nil, fmt.Errorf("actions: device resolver %q is named and not declared", n)
+		}
 	}
 	if len(f.Actions) > 0 {
 		for _, n := range names(f.RunnerIODir) {

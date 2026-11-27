@@ -25,11 +25,12 @@ package declared
 //     trimmed stderr), each with its own failure; or "first_line", the
 //     first line of stdout matched by Pattern, each Match group equal to
 //     its template. Capture names fields from paths (json) or groups.
-//   - "nvme_disconnect": every kernel controller of Subsystem deleted
-//     through sysfs, certified only by a scan that then finds none; the
-//     disconnect is recorded as an observe record "disconnect" (nqn,
-//     controllers deleted, ok) of the operation, which the checkers close
-//     an unknown write's window on.
+//   - "device_disconnect": the devices of Subsystem removed by the declared
+//     device Resolver, certified only by a scan that then finds none; with
+//     Observe the disconnect is recorded as an observe record of the
+//     operation (Verb; the subsystem and the count removed under the
+//     declared names, ok, detail), which the checkers close an unknown
+//     write's window on.
 //   - "wait_gone": the process (PID, Start: templates naming its recorded
 //     identity) is gone within WithinSeconds, certified by a check.
 //   - "poll": Command reruns every EveryMs within WithinSeconds until it
@@ -93,8 +94,10 @@ type SeqStep struct {
 	ResultAnswered    map[string]Value  `json:"result_answered,omitempty"`
 	Result            map[string]Value  `json:"result,omitempty"`
 	OnOKSet           map[string]string `json:"on_ok_set,omitempty"`
-	// nvme_disconnect
-	Subsystem string `json:"subsystem,omitempty"`
+	// device_disconnect: the declared device resolver, and the record of it
+	Resolver  string            `json:"resolver,omitempty"`
+	Observe   *DisconnectRecord `json:"observe,omitempty"`
+	Subsystem string            `json:"subsystem,omitempty"`
 	// wait_gone
 	PID   string `json:"pid,omitempty"`
 	Start string `json:"start,omitempty"`
@@ -111,6 +114,13 @@ type Judge struct {
 	Kind   string `json:"kind"`
 	Action string `json:"action,omitempty"` // the outcome table's action; default the verb
 	Path   string `json:"path,omitempty"`
+}
+
+// DisconnectRecord names a disconnect's observe record and its fields.
+type DisconnectRecord struct {
+	Verb      string `json:"verb"`
+	Subsystem string `json:"subsystem"`
+	Removed   string `json:"removed"`
 }
 
 // SeqAnswer reads an ok answer.
@@ -316,9 +326,12 @@ func (f *File) checkSequence(a *Action, keys, run map[string]bool) error {
 					}
 				}
 			}
-		case "nvme_disconnect":
-			if err := base(st.Subsystem); err != nil || st.Subsystem == "" {
-				return fmt.Errorf("%s: a disconnect names its subsystem: %v", at, err)
+		case "device_disconnect":
+			if err := base(st.Subsystem); err != nil || st.Subsystem == "" || st.Resolver == "" {
+				return fmt.Errorf("%s: a disconnect names its resolver and subsystem: %v", at, err)
+			}
+			if o := st.Observe; o != nil && (o.Verb == "" || o.Subsystem == "" || o.Removed == "" || o.Subsystem == o.Removed) {
+				return fmt.Errorf("%s: a disconnect record names its verb and two fields", at)
 			}
 		case "wait_gone":
 			if st.PID == "" || st.Start == "" || st.WithinSeconds <= 0 {
@@ -471,22 +484,23 @@ func (x *Executor) seqStep(s *scope, ctx context.Context, a *Action, st *SeqStep
 		return "", "", true
 	}
 	switch st.Kind {
-	case "nvme_disconnect":
+	case "device_disconnect":
 		nqn, err := s.expand(st.Subsystem)
 		if err != nil {
 			return tr.OutcomeUnknown, err.Error(), false
 		}
-		n, why := NVMeDisconnectCount(ctx, s.node, nqn)
-		if ref, ok := OpOf(ctx); ok {
-			var controllers any
+		n, why := x.DeviceDisconnect(ctx, s.node, st.Resolver, nqn)
+		if ref, ok := OpOf(ctx); ok && st.Observe != nil {
+			var removed any
 			if n >= 0 {
-				controllers = n
+				removed = n
 			}
-			r := map[string]any{"nqn": nqn, "controllers": controllers, "ok": why == ""}
+			o := st.Observe
+			r := map[string]any{o.Subsystem: nqn, o.Removed: removed, "ok": why == ""}
 			if why != "" {
 				r["detail"] = why
 			}
-			_ = ref.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "disconnect", Volume: ref.Volume, Result: r})
+			_ = ref.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: o.Verb, Volume: ref.Volume, Result: r})
 		}
 		if why != "" {
 			s.vals["why"] = why

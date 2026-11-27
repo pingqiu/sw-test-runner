@@ -58,10 +58,14 @@ func readStatus(ctx context.Context, node runner, statusAddr, vol string) (vsSta
 	return st, true
 }
 
+// guestResolver is the description's device resolver of the guest.
+const guestResolver = "nvme_namespace"
+
 // nvmeConnect connects the kernel NVMe/TCP host to nqn at host:port through
-// the kernel's fabrics interface (declared.NVMeConnect).
+// the kernel's fabrics interface: the declared device resolver
+// (product/actions.json device_resolvers nvme_namespace, its connect).
 func nvmeConnect(ctx context.Context, node runner, host, port, nqn, extra string) string {
-	return declared.NVMeConnect(ctx, node, host, port, nqn, extra)
+	return blockActions.DeviceConnect(ctx, node, guestResolver, host+":"+port, nqn, extra)
 }
 
 // nvmeDisconnect deletes every kernel controller of subsystem nqn through
@@ -74,31 +78,31 @@ func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
 }
 
 // nvmeDisconnectCount is nvmeDisconnect, also answering how many
-// controllers it deleted (declared.NVMeDisconnectCount).
+// controllers it deleted (the declared resolver's disconnect).
 func nvmeDisconnectCount(ctx context.Context, node runner, nqn string) (int, string) {
-	return declared.NVMeDisconnectCount(ctx, node, nqn)
+	return blockActions.DeviceDisconnect(ctx, node, guestResolver, nqn)
 }
 
 // What a scan of the kernel's NVMe controllers says about one subsystem
-// (declared.NVMeScan).
+// (the declared resolver's scan).
 const (
-	nvmeAbsent     = declared.NVMeAbsent
-	nvmeOne        = declared.NVMeOne
-	nvmeIncomplete = declared.NVMeIncomplete
-	nvmeUnreadable = declared.NVMeUnreadable
+	nvmeAbsent     = declared.DeviceAbsent
+	nvmeOne        = declared.DeviceOne
+	nvmeIncomplete = declared.DeviceIncomplete
+	nvmeUnreadable = declared.DeviceUnreadable
 )
 
 // nvmeScan reads every controller's subsystem NQN and the namespaces of the
-// ones that match (declared.NVMeScan).
+// ones that match (the declared resolver's scan).
 func nvmeScan(ctx context.Context, node runner, nqn string) (state, dev, why string) {
-	return declared.NVMeScan(ctx, node, nqn)
+	return blockActions.DeviceScan(ctx, node, guestResolver, nqn)
 }
 
 // deviceOf waits until the subsystem has exactly one controller with one
-// namespace and returns its device (declared.NVMeDevice): no I/O goes to an
+// namespace and returns its device (the declared resolver): no I/O goes to an
 // identity the runner could not establish.
 func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration) (string, string) {
-	return declared.NVMeDevice(ctx, node, nqn, bound)
+	return blockActions.DeviceOf(ctx, node, guestResolver, nqn, bound)
 }
 
 // listenerPIDs maps each port to the pids holding a TCP listener on it
