@@ -14,7 +14,8 @@ does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
 
-  C0  every invoke has its complete; no outcome is unknown; a refusal only
+  C0  every invoke has its complete; no outcome is unknown; a refusal
+      (refused or refused_effect) only
       where its own step declared it (args.expect = refused), never by verb;
       a declared refusal answered ok is a finding (half of the spec's C6);
       every fault applied (outcome ok or unknown) is restored: a fault_restore
@@ -62,7 +63,15 @@ code is 0 only when every checker passes.
       least once and none changed anything; FAIL (not exercised) if there was
       no refusal at all, like the other checkers. A negative operation
       answered ok is a FAIL ("negative not refused"); one answered unknown is
-      listed in a note (unknown is not ok)
+      listed in a note (unknown is not ok).
+      REFUSED_EFFECT: a refusal with a definite, documented change, its
+      complete carrying result.effect {part, to, cite}. It is judged like a
+      refusal, strictly: between the same two observations EXACTLY
+      effect.part changed, to exactly effect.to (the product reader's
+      effect_mismatches), and every other compared part is unchanged;
+      anything more or less FAILS. Baseline and limits as for refused. A
+      refused_effect without its effect breaks the writer's rule: the
+      history is unreadable (UNKNOWN for every checker)
   C7  after a delete with outcome ok, the volume's next observation shows HEAD
       in state deleted (the tombstone), and its directory holds exactly HEAD
       and VOLUME: any pool, seg, root or RETENTION object is a FAIL, and so is
@@ -166,7 +175,12 @@ import sys
 
 ZERO = None       # sha256 of one block of zeros, the product's block_bytes: set by load_product
 KINDS = {'invoke', 'complete', 'observe', 'end'}   # a fault is an operation of module Runner, not a kind
-OUTCOMES = {'ok', 'refused', 'unknown'}
+# refused_effect: the product refused definitely and made a definite,
+# documented change; its complete carries result.effect {part, to, cite},
+# copied by the runner from the outcome map. It is "not ok" everywhere, and
+# C5 judges its change strictly.
+OUTCOMES = {'ok', 'refused', 'refused_effect', 'unknown'}
+REFUSALS = ('refused', 'refused_effect')
 
 # The product description: a directory holding checks.json (see the runner's
 # packs/<product>/product/). Its facts fill the tables below, and its reader
@@ -265,6 +279,12 @@ def read_history(lines):
                 raise Malformed('line %d: completion of %r, not an open invocation' % (n, of))
             if r.get('outcome') not in OUTCOMES:
                 raise Malformed('line %d: outcome %r' % (n, r.get('outcome')))
+            if r['outcome'] == 'refused_effect':
+                # The runner copies the effect from the outcome map; without it
+                # the record breaks the writer's own rule, and nothing is judged.
+                eff = (r.get('result') or {}).get('effect')
+                if not isinstance(eff, dict) or not isinstance(eff.get('part'), str) or 'to' not in eff or not eff.get('cite'):
+                    raise Malformed('line %d: refused_effect without result.effect {part, to, cite}: %r' % (n, eff))
             inv = open_inv.pop(of)
             if (r.get('op'), r.get('verb'), r.get('volume')) != (inv.get('op'), inv.get('verb'), inv.get('volume')):
                 raise Malformed('line %d: completion does not match its invocation' % n)
@@ -337,7 +357,7 @@ def c0(recs):
             f.append('no completion: ' + name)
         elif comp['outcome'] == 'unknown':
             f.append('outcome unknown: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
-        elif comp['outcome'] == 'refused' and not expected:
+        elif comp['outcome'] in REFUSALS and not expected:
             f.append('refusal not expected: %s: %s' % (name, (comp.get('result') or {}).get('detail', '')))
         elif comp['outcome'] == 'ok' and expected:
             f.append('declared refusal answered ok: ' + name)
@@ -707,12 +727,13 @@ def baseline(recs):
 
 @unknown_on_overlap
 def c5(recs):
-    """A refused operation changed nothing. Judged only when the operations
-    never overlap (unknown_on_overlap): an operation open on the volume during
-    the refusal could move HEAD between the two observations, and the
-    observations could no longer be laid to the refusal alone."""
+    """A refused operation changed nothing; a refused_effect changed exactly
+    its effect. Judged only when the operations never overlap
+    (unknown_on_overlap): an operation open on the volume during the refusal
+    could move HEAD between the two observations, and the observations could
+    no longer be laid to the refusal alone."""
     ops_ = operations(recs)
-    refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] == 'refused']
+    refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
     if not refusals:
         return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
@@ -720,7 +741,7 @@ def c5(recs):
     f, notes, gaps = [], [], set()
     per = {}   # limit -> [refusals, judged]
     for inv, comp in ops_:
-        if comp is not None and comp['outcome'] != 'refused' and (inv.get('args') or {}).get('expect') == 'refused':
+        if comp is not None and comp['outcome'] not in REFUSALS and (inv.get('args') or {}).get('expect') == 'refused':
             # ok is a FAIL: the limit let the operation through; unknown is not
             # ok and stays a note.
             (f if comp['outcome'] == 'ok' else notes).append('negative not refused: seq %d %s %s (%s) answered %s'
@@ -734,12 +755,12 @@ def c5(recs):
             notes.append('not judged: %s: an operation on no volume' % name)
             continue
         before = after = None
-        for r in recs:   # the latest observation before the invoke; an ok or unknown completion on the volume voids it
+        for r in recs:   # the latest observation before the invoke; a completion on the volume that may have changed it voids it
             if r['seq'] >= inv['seq']:
                 break
             if r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume') == vol:
                 before = r
-            elif before is not None and r['kind'] == 'complete' and r['outcome'] in ('ok', 'unknown') and touches(inv_of[r['of']], vol):
+            elif before is not None and r['kind'] == 'complete' and r['outcome'] != 'refused' and touches(inv_of[r['of']], vol):
                 before = None
         for r in recs:   # the first observation after the complete, unless an operation on the volume is invoked first
             if r['seq'] <= comp['seq']:
@@ -761,11 +782,32 @@ def c5(recs):
         if lacking:
             notes.append('not judged: %s: observations seq %d, %d record no %s (required)' % (name, before['seq'], after['seq'], ', '.join(lacking)))
             continue
+        effect = (comp.get('result') or {}).get('effect') if comp['outcome'] == 'refused_effect' else None
+        if effect is not None and effect['part'] not in STATE_PARTS:
+            notes.append('not judged: %s: its effect names %r, not a compared part (%s)' % (name, effect['part'], ', '.join(STATE_PARTS)))
+            continue
+        if effect is not None and effect['part'] in missing:
+            notes.append('not judged: %s: observations seq %d, %d record no %s (its effect)' % (name, before['seq'], after['seq'], effect['part']))
+            continue
         gaps.update(missing)
         per[lim][1] += 1
+        span = '(observations seq %d, %d)' % (before['seq'], after['seq'])
         for part in diff:
-            f.append('%s (%s) refused but its %s changed: %s -> %s (observations seq %d, %d)'
-                     % (name, lim, part, show_part(b, part), show_part(a, part), before['seq'], after['seq']))
+            if effect is not None and part == effect['part']:
+                continue   # its own change, judged below
+            f.append('%s (%s) %s but its %s changed: %s -> %s %s'
+                     % (name, lim, comp['outcome'], part, show_part(b, part), show_part(a, part), span))
+        if effect is not None:
+            # Strict: exactly the effect's part changed, and to exactly its value.
+            part = effect['part']
+            if part not in diff:
+                f.append('%s (%s) refused_effect but its %s did not change (effect %r, %s) %s'
+                         % (name, lim, part, effect['to'], effect['cite'], span))
+            else:
+                bad = PRODUCT.effect_mismatches(part, effect['to'], before, after)
+                if bad:
+                    f.append('%s (%s) refused_effect but its %s changed to another value: %s (effect %r, %s) %s'
+                             % (name, lim, part, '; '.join(bad), effect['to'], effect['cite'], span))
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
     if gaps:
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
