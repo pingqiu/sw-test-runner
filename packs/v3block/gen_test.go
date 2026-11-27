@@ -3,9 +3,12 @@ package v3block
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 func pool(n int) []string {
@@ -823,7 +826,7 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	}
 
 	// An unknown write in a fault run may have persisted: no release negative.
-	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster"}})
+	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
 	drive(gf, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
 	gf.Learn(op("v3_op_write", "g2", "lbas", "4", "round", "r3"), "unknown")
 	if has(gf.negatives(), "v3_op_release", "g1", limReleaseLive) {
@@ -835,5 +838,118 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	g.Learn(neg(op("v3_op_delete", "g1"), limDeleteAttached), "ok")
 	if g.vols["g1"].state != stUnknown {
 		t.Error("a negative answered ok left the volume in the run")
+	}
+}
+
+// settledRec and healthyRec are the records the faults write: the model
+// learns from them, not from the invokes.
+func settledRec(vol, state string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "settled", Result: map[string]any{"volume": vol, "state": state, "evidence": "test"}}
+}
+
+func healthyRec(notServing []string, third ...string) tr.HistoryRecord {
+	ns := []any{}
+	for _, s := range notServing {
+		ns = append(ns, s)
+	}
+	res := map[string]any{"healthy": len(notServing) == 0, "down": []any{}, "not_serving": ns}
+	if len(third) > 0 {
+		var ts []any
+		for _, v := range third {
+			ts = append(ts, map[string]any{"volume": v, "why": "test"})
+		}
+		res["third_state"] = ts
+	}
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "healthy", Result: res}
+}
+
+// offered lists the actions offered for vol, ordinary and negative.
+func offered(g *Generator, vol string) map[string]bool {
+	out := map[string]bool{}
+	for _, c := range append(g.ordinary(), g.negatives()...) {
+		if c.op.Volume == vol {
+			out[c.op.Action] = true
+		}
+	}
+	return out
+}
+
+// F9 and the settled record: an unknown attach or stop leaves the volume
+// unsettled, offered nothing but observation, until a settled record places
+// it: held serves again, not_held is stopped. A healthy record's not_serving
+// fences a volume from reads and writes until a later one leaves it out;
+// third_state takes it out of the run.
+func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
+	newG := func() *Generator {
+		g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	// An unknown attach: unsettled, nothing offered, observed by the sweep.
+	g := newG()
+	drive(g, op("v3_op_create", "g1"))
+	g.Learn(op("v3_op_attach", "g1", "host", "0"), "unknown")
+	if g.vols["g1"].state != stUnsettled || len(offered(g, "g1")) != 0 {
+		t.Fatalf("an unknown attach: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	var sw []string
+	for _, o := range g.m.Sweep() {
+		if o.Volume == "g1" {
+			sw = append(sw, o.Action)
+		}
+	}
+	if !slices.Equal(sw, []string{"v3_op_observe"}) {
+		t.Fatalf("sweep of an unsettled volume %v", sw)
+	}
+	// The invoke alone settles nothing; another volume's record neither.
+	g.m.Observed(settledRec("g2", "held"))
+	if g.vols["g1"].state != stUnsettled || g.vols["g2"].state != stUnborn {
+		t.Fatal("a settled record of another volume moved one")
+	}
+	g.m.Observed(settledRec("g1", "held"))
+	if g.vols["g1"].state != stServing || !offered(g, "g1")["v3_op_write"] || !offered(g, "g1")["v3_op_read"] {
+		t.Fatalf("settled held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	// An unknown stop settled not_held is stopped.
+	g.Learn(op("v3_op_stop", "g1"), "unknown")
+	if g.vols["g1"].state != stUnsettled {
+		t.Fatal("an unknown stop is not unsettled")
+	}
+	g.m.Observed(settledRec("g1", "not_held"))
+	if g.vols["g1"].state != stStopped || !offered(g, "g1")["v3_op_delete"] || offered(g, "g1")["v3_op_write"] {
+		t.Fatalf("settled not_held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	// A settled record for a volume that is not unsettled changes nothing.
+	g.m.Observed(settledRec("g1", "held"))
+	if g.vols["g1"].state != stStopped {
+		t.Fatal("a settled record moved a stopped volume")
+	}
+
+	// not_serving fences reads and writes until a healthy record leaves it out.
+	g = newG()
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"))
+	g.m.Observed(healthyRec([]string{"g1"}))
+	if a := offered(g, "g1"); a["v3_op_write"] || a["v3_op_read"] || !offered(g, "g2")["v3_op_write"] {
+		t.Fatalf("fenced g1 offered %v, g2 %v", a, offered(g, "g2"))
+	}
+	for _, o := range g.m.Sweep() {
+		if o.Volume == "g1" && o.Action == "v3_op_read" {
+			t.Fatal("the sweep reads a fenced volume")
+		}
+	}
+	g.m.Observed(tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Result: map[string]any{"not_serving": []any{}}})
+	if offered(g, "g1")["v3_op_write"] {
+		t.Fatal("a record that is not a healthy record unfenced g1")
+	}
+	g.m.Observed(healthyRec(nil))
+	if !offered(g, "g1")["v3_op_write"] {
+		t.Fatal("g1 still fenced after a healthy record without it")
+	}
+	// third_state: out of the run.
+	g.m.Observed(healthyRec(nil, "g2"))
+	if g.vols["g2"].state != stUnknown || len(offered(g, "g2")) != 0 {
+		t.Fatalf("third state: %q %v", g.vols["g2"].state, offered(g, "g2"))
 	}
 }

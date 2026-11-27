@@ -793,7 +793,8 @@ func (e opEnv) singleLook(ctx context.Context, actx *tr.ActionContext, node runn
 		return nil, err
 	}
 	actx.Log("  v3_op_healthy look=single: %v", res)
-	return map[string]string{"value": tr.OutcomeOK, "healthy": strconv.FormatBool(ok)}, nil
+	down, _ := res["down"].([]string)
+	return map[string]string{"value": tr.OutcomeOK, "healthy": strconv.FormatBool(ok), "down": strings.Join(down, " ")}, nil
 }
 
 // v3OpHealthy writes the healthy observation. Params: wait_seconds (0), look

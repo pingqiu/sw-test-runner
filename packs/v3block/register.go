@@ -67,7 +67,7 @@ func RegisterPack(r *tr.Registry) {
 		"v3_op_create": blockActions.Handler("v3_op_create"), "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
 		"v3_op_snapshot": blockActions.Handler("v3_op_snapshot"), "v3_op_snapshot_delete": blockActions.Handler("v3_op_snapshot_delete"), "v3_op_restore": blockActions.Handler("v3_op_restore"),
 		"v3_op_release": blockActions.Handler("v3_op_release"), "v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": blockActions.Handler("v3_op_delete"),
-		"v3_op_observe": v3OpObserve, "v3_op_flush": v3OpFlush,
+		"v3_op_observe": blockActions.Handler("v3_op_observe"), "v3_op_flush": v3OpFlush,
 		// Process faults (faults.go): kill and restart by recorded identity, and the healthy observation.
 		"v3_op_kill": v3OpKill, "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	} {

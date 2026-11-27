@@ -1,5 +1,5 @@
-observe gen gen_header   null {"blocks":8,"fault_processes":["blockmaster","blockvolume:0"],"fault_restart_within":20,"faults":0.05,"generator":"m2-gen/2","negative":0.1,"ops":300,"pool":["g1","g2","g3","g4","g5","g6","g7","g8","g9","g10","g11","g12","g13","g14","g15","g16","g17","g18","g19","g20","g21","g22","g23","g24","g25","g26","g27","g28","g29","g30","g31","g32","g33","g34","g35","g36","g37","g38","g39","g40","g41","g42","g43","g44","g45","g46","g47","g48","g49","g50","g51","g52","g53","g54","g55","g56","g57","g58","g59","g60","g61","g62","g63","g64","g65","g66","g67","g68","g69","g70","g71","g72","g73","g74","g75","g76","g77","g78","g79","g80","g81","g82","g83","g84","g85","g86","g87","g88","g89","g90","g91","g92","g93","g94","g95","g96","g97","g98","g99","g100"],"seed":"1","unit":{"cite":" at ","emulated":true,"note":"a unit-emulated run is not evidence for the unit's own behaviour","policy":{"commit":"","file":"","restart":"on-failure","restart_prevent_exit_status":[78],"restart_sec":5,"timeout_stop_sec":30}},"weights":{"v3_op_attach":10,"v3_op_create":6,"v3_op_delete":8,"v3_op_move":6,"v3_op_read":20,"v3_op_restore":6,"v3_op_snapshot":8,"v3_op_snapshot_delete":5,"v3_op_stop":6,"v3_op_write":25}}
-observe gen fault_schedule   null {"events":[{"action":"kill","after_op":4,"process":"blockmaster"},{"action":"restart","after_op":20,"process":"blockmaster"},{"action":"kill","after_op":28,"process":"blockvolume:0"},{"action":"restart","after_op":31,"process":"blockvolume:0"},{"action":"kill","after_op":38,"process":"blockmaster"},{"action":"restart","after_op":56,"process":"blockmaster"},{"action":"kill","after_op":82,"process":"blockvolume:0"},{"action":"restart","after_op":84,"process":"blockvolume:0"},{"action":"kill","after_op":85,"process":"blockmaster"},{"action":"restart","after_op":89,"process":"blockmaster"},{"action":"kill","after_op":102,"process":"blockvolume:0"},{"action":"restart","after_op":107,"process":"blockvolume:0"},{"action":"kill","after_op":129,"process":"blockvolume:0"},{"action":"restart","after_op":147,"process":"blockvolume:0"},{"action":"kill","after_op":170,"process":"blockvolume:0"},{"action":"restart","after_op":172,"process":"blockvolume:0"},{"action":"kill","after_op":196,"process":"blockmaster"},{"action":"restart","after_op":216,"process":"blockmaster"},{"action":"kill","after_op":228,"process":"blockvolume:0"},{"action":"restart","after_op":240,"process":"blockvolume:0"}],"seed":"1"}
+observe gen gen_header   null {"blocks":8,"fault_processes":["blockvolume:0","blockvolume:1"],"fault_restart_within":20,"faults":0.05,"generator":"m2-gen/3","negative":0.1,"ops":300,"pool":["g1","g2","g3","g4","g5","g6","g7","g8","g9","g10","g11","g12","g13","g14","g15","g16","g17","g18","g19","g20","g21","g22","g23","g24","g25","g26","g27","g28","g29","g30","g31","g32","g33","g34","g35","g36","g37","g38","g39","g40","g41","g42","g43","g44","g45","g46","g47","g48","g49","g50","g51","g52","g53","g54","g55","g56","g57","g58","g59","g60","g61","g62","g63","g64","g65","g66","g67","g68","g69","g70","g71","g72","g73","g74","g75","g76","g77","g78","g79","g80","g81","g82","g83","g84","g85","g86","g87","g88","g89","g90","g91","g92","g93","g94","g95","g96","g97","g98","g99","g100"],"seed":"1","unit":{"cite":" at ","emulated":true,"note":"a unit-emulated run is not evidence for the unit's own behaviour","policy":{"commit":"","file":"","restart":"on-failure","restart_prevent_exit_status":[78],"restart_sec":5,"timeout_stop_sec":30}},"weights":{"v3_op_attach":10,"v3_op_create":6,"v3_op_delete":8,"v3_op_move":6,"v3_op_read":20,"v3_op_restore":6,"v3_op_snapshot":8,"v3_op_snapshot_delete":5,"v3_op_stop":6,"v3_op_write":25}}
+observe gen fault_schedule   null {"events":[{"action":"kill","after_op":4,"process":"blockvolume:0"},{"action":"restart","after_op":20,"process":"blockvolume:0"},{"action":"kill","after_op":28,"process":"blockvolume:1"},{"action":"restart","after_op":31,"process":"blockvolume:1"},{"action":"kill","after_op":38,"process":"blockvolume:0"},{"action":"restart","after_op":56,"process":"blockvolume:0"},{"action":"kill","after_op":82,"process":"blockvolume:1"},{"action":"restart","after_op":84,"process":"blockvolume:1"},{"action":"kill","after_op":85,"process":"blockvolume:0"},{"action":"restart","after_op":89,"process":"blockvolume:0"},{"action":"kill","after_op":102,"process":"blockvolume:1"},{"action":"restart","after_op":107,"process":"blockvolume:1"},{"action":"kill","after_op":129,"process":"blockvolume:1"},{"action":"restart","after_op":147,"process":"blockvolume:1"},{"action":"kill","after_op":170,"process":"blockvolume:1"},{"action":"restart","after_op":172,"process":"blockvolume:1"},{"action":"kill","after_op":196,"process":"blockvolume:0"},{"action":"restart","after_op":216,"process":"blockvolume:0"},{"action":"kill","after_op":228,"process":"blockvolume:1"},{"action":"restart","after_op":240,"process":"blockvolume:1"}],"seed":"1"}
 observe gen gen_step g1  null {"action":"v3_op_create","opno":1,"params":{"volume":"g1"}}
 invoke  create g1  null null
 complete  create g1 ok null null
@@ -12,7 +12,9 @@ complete  create g3 ok null null
 observe gen gen_step g1  null {"action":"v3_op_attach","opno":4,"params":{"host":"0","volume":"g1"}}
 invoke  attach g1  null null
 complete  attach g1 ok null null
-invoke  kill   {"process":"blockmaster"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":4,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
+invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g2  null {"action":"v3_op_attach","opno":5,"params":{"host":"0","volume":"g2"}}
 invoke  attach g2  null null
@@ -77,7 +79,7 @@ complete  write g1 unknown null null
 observe gen gen_step g1  null {"action":"v3_op_read","opno":20,"params":{"lbas":"1","volume":"g1"}}
 invoke  read g1  null null
 complete  read g1 ok null null
-invoke  restart   {"process":"blockmaster"} null
+invoke  restart   {"process":"blockvolume:0"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g2  null null
@@ -134,6 +136,8 @@ invoke  write g1  null null
 complete  write g1 ok null null
 invoke  write g1  null null
 complete  write g1 ok null null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":28,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:1","skipped":false}
 invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_read","opno":29,"params":{"lbas":"3","volume":"g1"}}
@@ -182,7 +186,9 @@ observe  observe g1  null null
 invoke  delete g1  null null
 complete  delete g1 refused null null
 observe  observe g1  null null
-invoke  kill   {"process":"blockmaster"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":38,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
+invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_write","opno":39,"params":{"lbas":"7 1","round":"g39","volume":"g1"}}
 invoke  write g1  null null
@@ -274,7 +280,7 @@ observe  observe g1  null null
 invoke  delete g1  null null
 complete  delete g1 refused null null
 observe  observe g1  null null
-invoke  restart   {"process":"blockmaster"} null
+invoke  restart   {"process":"blockvolume:0"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g1  null null
@@ -413,7 +419,9 @@ complete  write g1 ok null null
 observe gen gen_step g3  null {"action":"v3_op_read","opno":82,"params":{"lbas":"0 3","volume":"g3"}}
 invoke  read g3  null null
 complete  read g3 ok null null
-invoke  kill   {"process":"blockvolume:0"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":82,"down":[],"process":"blockvolume:2","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:2"} null
 complete  kill  ok null null
 observe gen gen_step g3  null {"action":"v3_op_restore","opno":83,"params":{"snapshot":"g3-s1","target_volume":"g7","volume":"g3"}}
 invoke  restore g3  null null
@@ -421,7 +429,7 @@ complete  restore g3 unknown null null
 observe gen gen_step g8  null {"action":"v3_op_create","opno":84,"params":{"volume":"g8"}}
 invoke  create g8  null null
 complete  create g8 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:2"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g3  null null
@@ -433,7 +441,9 @@ observe  observe g1  null null
 invoke  restore g1  null null
 complete  restore g1 refused null null
 observe  observe g1  null null
-invoke  kill   {"process":"blockmaster"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":85,"down":[],"process":"blockvolume:0","scheduled":"blockvolume:0","skipped":false}
+invoke  kill   {"process":"blockvolume:0"} null
 complete  kill  ok null null
 observe gen gen_step g1  null {"action":"v3_op_write","opno":86,"params":{"lbas":"1 0 5","round":"g86","volume":"g1"}}
 invoke  write g1  null null
@@ -455,7 +465,7 @@ invoke  write g1  null null
 complete  write g1 unknown null null
 invoke  write g1  null null
 complete  write g1 unknown null null
-invoke  restart   {"process":"blockmaster"} null
+invoke  restart   {"process":"blockvolume:0"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g1  null null
@@ -521,7 +531,9 @@ complete  read g10 ok null null
 observe gen gen_step g10  null {"action":"v3_op_read","opno":102,"params":{"lbas":"0 4 7","volume":"g10"}}
 invoke  read g10  null null
 complete  read g10 ok null null
-invoke  kill   {"process":"blockvolume:0"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":102,"down":[],"process":"blockvolume:9","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:9"} null
 complete  kill  ok null null
 observe gen gen_step g9  null {"action":"v3_op_attach","opno":103,"params":{"host":"0","volume":"g9"}}
 invoke  attach g9  null null
@@ -547,7 +559,7 @@ complete  delete g4 unknown null null
 observe gen gen_step g11  null {"action":"v3_op_create","opno":107,"params":{"volume":"g11"}}
 invoke  create g11  null null
 complete  create g11 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:9"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g9  null null
@@ -644,7 +656,9 @@ complete  write g10 ok null null
 observe gen gen_step g10  null {"action":"v3_op_read","opno":129,"params":{"lbas":"1 2 5","volume":"g10"}}
 invoke  read g10  null null
 complete  read g10 ok null null
-invoke  kill   {"process":"blockvolume:0"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":129,"down":[],"process":"blockvolume:9","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:9"} null
 complete  kill  ok null null
 observe gen gen_step g10  null {"action":"v3_op_write","opno":130,"params":{"lbas":"7 0 1","round":"g130","volume":"g10"}}
 invoke  write g10  null null
@@ -716,7 +730,7 @@ complete  create g20 unknown null null
 observe gen gen_step g21  null {"action":"v3_op_create","opno":147,"params":{"volume":"g21"}}
 invoke  create g21  null null
 complete  create g21 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:9"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g10  null null
@@ -827,7 +841,9 @@ complete  read g22 ok null null
 observe gen gen_step g22  null {"action":"v3_op_read","opno":170,"params":{"lbas":"2 3 5 7","volume":"g22"}}
 invoke  read g22  null null
 complete  read g22 ok null null
-invoke  kill   {"process":"blockvolume:0"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":170,"down":[],"process":"blockvolume:21","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:21"} null
 complete  kill  ok null null
 observe gen gen_step g22  null {"action":"v3_op_snapshot_delete","opno":171,"params":{"name":"g22-s1","volume":"g22"}}
 invoke  snapshot_delete g22  null null
@@ -835,7 +851,7 @@ complete  snapshot_delete g22 unknown null null
 observe gen gen_step g23  null {"action":"v3_op_attach","opno":172,"params":{"host":"0","volume":"g23"}}
 invoke  attach g23  null null
 complete  attach g23 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:21"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g22  null null
@@ -946,7 +962,9 @@ complete  write g25 ok null null
 observe gen gen_step g25  null {"action":"v3_op_read","opno":196,"params":{"lbas":"2 3 4 6","volume":"g25"}}
 invoke  read g25  null null
 complete  read g25 ok null null
-invoke  kill   {"process":"blockmaster"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":196,"down":[],"process":"blockvolume:24","scheduled":"blockvolume:0","skipped":false}
+invoke  kill   {"process":"blockvolume:24"} null
 complete  kill  ok null null
 observe gen gen_step g25  null {"action":"v3_op_stop","opno":197,"params":{"volume":"g25"}}
 invoke  stop g25  null null
@@ -1011,7 +1029,7 @@ complete  create g42 unknown null null
 observe gen gen_step g43  null {"action":"v3_op_create","opno":216,"params":{"volume":"g43"}}
 invoke  create g43  null null
 complete  create g43 unknown null null
-invoke  restart   {"process":"blockmaster"} null
+invoke  restart   {"process":"blockvolume:24"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 observe  observe g25  null null
@@ -1084,7 +1102,9 @@ complete  write g46 ok null null
 observe gen gen_step g46  null {"action":"v3_op_read","opno":228,"params":{"lbas":"4 7","volume":"g46"}}
 invoke  read g46  null null
 complete  read g46 ok null null
-invoke  kill   {"process":"blockvolume:0"} null
+observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
+observe gen fault_kill   null {"after_op":228,"down":[],"process":"blockvolume:45","scheduled":"blockvolume:1","skipped":false}
+invoke  kill   {"process":"blockvolume:45"} null
 complete  kill  ok null null
 observe gen gen_step g46  null {"action":"v3_op_write","opno":229,"params":{"lbas":"1","round":"g229","volume":"g46"}}
 invoke  write g46  null null
@@ -1125,7 +1145,7 @@ complete  create g50 unknown null null
 observe gen gen_step g51  null {"action":"v3_op_create","opno":240,"params":{"volume":"g51"}}
 invoke  create g51  null null
 complete  create g51 unknown null null
-invoke  restart   {"process":"blockvolume:0"} null
+invoke  restart   {"process":"blockvolume:45"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  read g46  null null
@@ -1426,9 +1446,19 @@ observe gen gen_step g52  null {"action":"v3_op_read","opno":300,"params":{"lbas
 invoke  read g52  null null
 complete  read g52 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
-observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g52"},"volume":"g52"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g53"},"volume":"g53"},{"action":"v3_op_read","params":{"lbas":"1 4 6","volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g55"},"volume":"g55"},{"action":"v3_op_read","params":{"lbas":"0 1 3 5","volume":"g56"},"volume":"g56"},{"action":"v3_op_read","params":{"lbas":"6 7","volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g57"},"volume":"g57"},{"action":"v3_op_observe","params":{"volume":"g58"},"volume":"g58"},{"action":"v3_op_observe","params":{"volume":"g59"},"volume":"g59"},{"action":"v3_op_observe","params":{"volume":"g60"},"volume":"g60"}]}
+observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g9"},"volume":"g9"},{"action":"v3_op_observe","params":{"volume":"g12"},"volume":"g12"},{"action":"v3_op_observe","params":{"volume":"g23"},"volume":"g23"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"},{"action":"v3_op_observe","params":{"volume":"g25"},"volume":"g25"},{"action":"v3_op_observe","params":{"volume":"g26"},"volume":"g26"},{"action":"v3_op_observe","params":{"volume":"g27"},"volume":"g27"},{"action":"v3_op_observe","params":{"volume":"g28"},"volume":"g28"},{"action":"v3_op_observe","params":{"volume":"g44"},"volume":"g44"},{"action":"v3_op_observe","params":{"volume":"g45"},"volume":"g45"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g52"},"volume":"g52"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g53"},"volume":"g53"},{"action":"v3_op_read","params":{"lbas":"1 4 6","volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g55"},"volume":"g55"},{"action":"v3_op_read","params":{"lbas":"0 1 3 5","volume":"g56"},"volume":"g56"},{"action":"v3_op_read","params":{"lbas":"6 7","volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g57"},"volume":"g57"},{"action":"v3_op_observe","params":{"volume":"g58"},"volume":"g58"},{"action":"v3_op_observe","params":{"volume":"g59"},"volume":"g59"},{"action":"v3_op_observe","params":{"volume":"g60"},"volume":"g60"}]}
 observe  observe g1  null null
+observe  observe g2  null null
+observe  observe g9  null null
+observe  observe g12  null null
+observe  observe g23  null null
 observe  observe g24  null null
+observe  observe g25  null null
+observe  observe g26  null null
+observe  observe g27  null null
+observe  observe g28  null null
+observe  observe g44  null null
+observe  observe g45  null null
 invoke  read g52  null null
 complete  read g52 ok null null
 invoke  read g52  null null
@@ -1448,5 +1478,5 @@ observe  observe g57  null null
 observe  observe g58  null null
 observe  observe g59  null null
 observe  observe g60  null null
-observe gen gen_coverage   null {"actions":{"v3_op_attach":20,"v3_op_create":58,"v3_op_delete":27,"v3_op_read":76,"v3_op_release":1,"v3_op_restore":10,"v3_op_snapshot":14,"v3_op_snapshot_delete":10,"v3_op_stop":4,"v3_op_write":80},"cells":{"v3_op_attach|created":20,"v3_op_create|deleted":2,"v3_op_create|unborn":56,"v3_op_delete|created":3,"v3_op_delete|serving":15,"v3_op_delete|stopped":9,"v3_op_read|serving":76,"v3_op_release|serving":1,"v3_op_restore|serving":10,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":6,"v3_op_snapshot|serving":14,"v3_op_stop|serving":4,"v3_op_write|serving":80},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","v3_op_release|stopped","while_down|v3_op_move","while_down|v3_op_release"],"ended":"ops","estimated_ops_per_hour":473,"fault_cells":{"kill|blockmaster":4,"kill|blockvolume:0":6,"restart|blockmaster":4,"restart|blockvolume:0":6,"while_down|v3_op_attach":9,"while_down|v3_op_create":32,"while_down|v3_op_delete":8,"while_down|v3_op_read":19,"while_down|v3_op_restore":3,"while_down|v3_op_snapshot":1,"while_down|v3_op_snapshot_delete":4,"while_down|v3_op_stop":1,"while_down|v3_op_write":23},"proposed":300}
+observe gen gen_coverage   null {"actions":{"v3_op_attach":20,"v3_op_create":58,"v3_op_delete":27,"v3_op_read":76,"v3_op_release":1,"v3_op_restore":10,"v3_op_snapshot":14,"v3_op_snapshot_delete":10,"v3_op_stop":4,"v3_op_write":80},"cells":{"v3_op_attach|created":20,"v3_op_create|deleted":2,"v3_op_create|unborn":56,"v3_op_delete|created":3,"v3_op_delete|serving":15,"v3_op_delete|stopped":9,"v3_op_read|serving":76,"v3_op_release|serving":1,"v3_op_restore|serving":10,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":6,"v3_op_snapshot|serving":14,"v3_op_stop|serving":4,"v3_op_write|serving":80},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","v3_op_release|stopped","while_down|v3_op_move","while_down|v3_op_release"],"ended":"ops","estimated_ops_per_hour":473,"fault_cells":{"kill|blockvolume:0":4,"kill|blockvolume:1":6,"restart|blockvolume:0":4,"restart|blockvolume:1":6,"while_down|v3_op_attach":9,"while_down|v3_op_create":32,"while_down|v3_op_delete":8,"while_down|v3_op_read":19,"while_down|v3_op_restore":3,"while_down|v3_op_snapshot":1,"while_down|v3_op_snapshot_delete":4,"while_down|v3_op_stop":1,"while_down|v3_op_write":23},"proposed":300}
 end     null {"open_invocations":0}

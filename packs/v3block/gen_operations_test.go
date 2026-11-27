@@ -44,12 +44,28 @@ func TestOperationsTableKeepsTheGeneratorsValues(t *testing.T) {
 		"restore_from_target":       {"restore from a snapshot of a restore target", "v3_op_restore"},
 		"release_live":              {"release a live restore target", "v3_op_release"},
 	}
-	if len(genTable.Limits) != len(limits) {
-		t.Errorf("%d limits, want %d", len(genTable.Limits), len(limits))
+	// The documented refusals the generator does not propose, listed.
+	notProposed := map[string][2]string{
+		"attach_moved_old_host": {"attach on the old host after a move", "v3_op_attach"},
+		"attach_deleted":        {"attach a deleted volume", "v3_op_attach"},
+		"attach_stale_root":     {"attach on a stale local root", "v3_op_attach"},
+		"attach_geometry":       {"attach with other geometry", "v3_op_attach"},
+		"attach_after_stop":     {"attach after a stop", "v3_op_attach"},
+		"restore_deleted_name":  {"restore into a deleted name", "v3_op_restore"},
+	}
+	if len(genTable.Limits) != len(limits)+len(notProposed) {
+		t.Errorf("%d limits, want %d", len(genTable.Limits), len(limits)+len(notProposed))
 	}
 	for _, l := range genTable.Limits {
-		if w, ok := limits[l.ID]; !ok || w != [2]string{l.Name, l.Action} {
+		want, proposed := limits[l.ID]
+		if !proposed {
+			want = notProposed[l.ID]
+		}
+		if want != [2]string{l.Name, l.Action} || l.IsProposed() != proposed || (!proposed && l.Why == "") {
 			t.Errorf("limit %+v", l)
+		}
+		if l.VerifiedAt != "14dff69" {
+			t.Errorf("limit %s: cite not verified at 14dff69", l.ID)
 		}
 		for _, c := range strings.Split(l.Cite, ", ") {
 			if !strings.HasPrefix(c, "docs/") || !strings.Contains(c, ".md:") {
@@ -68,6 +84,33 @@ func TestOperationsTableOpIDsAreTheRecordedOnes(t *testing.T) {
 		}
 		if genHandlers[o.Action] == nil {
 			t.Errorf("%s has no handler", o.Action)
+		}
+	}
+}
+
+// A limit the table lists as not proposed is never probed: genLimit refuses
+// it, and no run proposes a negative under its name.
+func TestNotProposedLimitsAreNeverProbed(t *testing.T) {
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("genLimit accepted a limit listed as not proposed")
+			}
+		}()
+		genLimit("attach_after_stop")
+	}()
+	names := map[string]bool{}
+	for _, l := range genTable.Limits {
+		if !l.IsProposed() {
+			names[l.Name] = true
+		}
+	}
+	for seed := uint64(1); seed <= 4; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 2000, Pool: pool(60), Blocks: 8, Negative: 0.3})
+		for _, o := range ops {
+			if names[o.Negative] || (o.Negative != "" && o.Action == "v3_op_attach") {
+				t.Fatalf("seed %d: %s proposed as a negative (%q)", seed, o.Action, o.Negative)
+			}
 		}
 	}
 }

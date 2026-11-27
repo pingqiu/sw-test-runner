@@ -38,6 +38,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -53,6 +54,9 @@ type Script struct {
 	Sweep  []Op         // the end-of-run sweep; nil when the history has none
 	// Outages are the writes of each recorded master outage, by after_op.
 	Outages map[int][]Op
+	// Kills are the recorded kill decisions (fault_kill), in order; nil when
+	// the history has none.
+	Kills []KillDecision
 }
 
 // ReplayStep is one step of a recorded script with its recorded outcome.
@@ -88,6 +92,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	var steps []ReplayStep
 	var events, sweep = []FaultEvent(nil), []Op(nil)
 	outages := map[int][]Op{}
+	var kills []KillDecision
 	faulty, needSchedule := false, false
 	cur := -1 // the index of the step whose records are being read; -1 for none
 	s := bufio.NewScanner(f)
@@ -144,6 +149,16 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 				}
 				cur = -1
+			case "fault_kill":
+				k, ok := r.Result["after_op"].(float64)
+				p, ok2 := r.Result["process"].(string)
+				s, ok3 := r.Result["skipped"].(bool)
+				if !ok || !ok2 || !ok3 || k != float64(int(k)) {
+					return Script{}, fmt.Errorf("%s: %s line %d: fault_kill %v", name, path, line, r.Result)
+				}
+				sch, _ := r.Result["scheduled"].(string) // "" in a history from before targets were resolved
+				kills = append(kills, KillDecision{AfterOp: int(k), Scheduled: sch, Process: p, Skipped: s})
+				cur = -1
 			case "master_outage":
 				k, ok := r.Result["after_op"].(float64)
 				w, err := parseOps(r.Result, "writes")
@@ -152,7 +167,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				}
 				outages[int(k)] = w
 				cur = -1
-			case "gen_coverage", "gen_replay", VerbHealthy:
+			case "gen_coverage", "gen_replay", "gen_stop", VerbHealthy:
 				cur = -1
 			}
 		case tr.HistoryInvoke:
@@ -184,7 +199,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			return Script{}, fmt.Errorf("%s: %s: the master outage after operation %d has no master_outage record", name, path, e.AfterOp)
 		}
 	}
-	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages}, nil
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, Kills: kills}, nil
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.
@@ -201,9 +216,13 @@ func replaySchedule(header, res map[string]any, d Driver) ([]FaultEvent, error) 
 	if err := CheckFaultSchedule(events, int(ops), int(within), d.ValidProcess); err != nil {
 		return nil, fmt.Errorf("fault_schedule: %w", err)
 	}
+	master, _, ok := d.MasterOutage()
 	for _, e := range events {
-		if master, _, ok := d.MasterOutage(); e.Action == FaultMasterOutage && (!ok || e.Process != master) {
+		if e.Action == FaultMasterOutage && (!ok || e.Process != master) {
 			return nil, fmt.Errorf("fault_schedule: a master outage of %s, the product's master is %q", e.Process, master)
+		}
+		if e.Action != FaultMasterOutage && ok && e.Process == master {
+			return nil, fmt.Errorf("fault_schedule: an ordinary %s of the master %s", e.Action, master)
 		}
 	}
 	return events, nil
@@ -267,9 +286,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 			return nil, err
 		}
 		fr = newFaultRun(r, events, nil, header, sc.Outages)
+		fr.kills = sc.Kills
+		fr.stopOnUnhealthy = true
 	}
 	diffs := []replayDiff{}
-	for _, st := range steps {
+	for i, st := range steps {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
@@ -287,7 +308,16 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		}
 		if fr != nil {
 			fr.note(o, replayed)
-			if err := fr.afterOp(ctx, actx, o.No); err != nil {
+			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+				if err := stopRun(actx, o.No); err != nil {
+					return nil, err
+				}
+				// The steps the replay no longer runs differ from the record.
+				for _, rest := range steps[i+1:] {
+					diffs = append(diffs, replayDiff{OpNo: rest.Op.No, Action: rest.Op.Action, Volume: rest.Op.Volume, Recorded: rest.Recorded, Replayed: "not run"})
+				}
+				break
+			} else if err != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, err)
 			}
 		}

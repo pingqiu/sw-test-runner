@@ -29,6 +29,7 @@ package randomrun
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -240,6 +241,7 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, err
 		}
 		fr = newFaultRun(r, s.Events, g, header, nil)
+		fr.stopOnUnhealthy = true
 	}
 	for {
 		if ctx.Err() != nil {
@@ -254,9 +256,24 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
 		g.Learn(o, outcome)
+		if err := g.feed(actx.History); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
 		if fr != nil {
 			fr.note(o, outcome)
-			if err := fr.afterOp(ctx, actx, o.No); err != nil {
+			err := fr.afterOp(ctx, actx, o.No)
+			if ferr := g.feed(actx.History); ferr != nil {
+				return nil, fmt.Errorf("%s: %w", r.Name, ferr)
+			}
+			if errors.Is(err, errUnhealthy) {
+				// No more operations against dead subjects: record it, then
+				// finish, sweep and end.
+				if err := stopRun(actx, o.No); err != nil {
+					return nil, err
+				}
+				g.stop("unhealthy")
+				break
+			} else if err != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, err)
 			}
 		}
@@ -265,6 +282,9 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		if err := fr.finish(ctx, actx); err != nil {
 			return nil, fmt.Errorf("%s: end of run: %w", r.Name, err)
 		}
+	}
+	if err := g.feed(actx.History); err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name, err)
 	}
 	if err := r.sweep(ctx, actx, g.m.Sweep()); err != nil {
 		return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)
@@ -349,6 +369,14 @@ func parseOps(res map[string]any, key string) ([]Op, error) {
 // through here, so a replayed history has the same shape):
 //   - after operation k completes (and is learnt), every event with
 //     after_op k runs through the Driver's fault operation;
+//   - before each kill, one single look (Driver.Look): "one down at a time"
+//     is checked against what is observed, not only against what this run
+//     killed. When the look shows anything down the kill is skipped, and so
+//     is its restart. The kill's target is resolved first: the model names,
+//     at kill time, the process that holds for the scheduled name
+//     (Model.KillTarget); none holding skips the kill too. An observe record
+//     "fault_kill" {after_op, scheduled, process, down, skipped, why}
+//     records the decision; a replay follows the recorded one;
 //   - after each restart, the Driver's healthy operation records a `healthy`
 //     observation; at a healthy point (it answers healthy=true) every
 //     operation whose outcome was unknown since the last healthy point is
@@ -357,6 +385,10 @@ func parseOps(res map[string]any, key string) ([]Op, error) {
 //     operation pending for the next healthy point;
 //   - a short master outage after operation k (see outage) runs as one
 //     event, nothing else down meanwhile;
+//   - in a run and its replay, a healthy point still false after its full
+//     wait ends the run: an observe record "gen_stop" {after_op, why}, then
+//     finish, the sweep and the end (no more operations against dead
+//     subjects; Ended "unhealthy");
 //   - at the end of the run a process still down is restarted (its scheduled
 //     restart lay after the last operation), and the run ends on a healthy
 //     point with its resolution, so no unknown is left unobserved.
@@ -372,6 +404,89 @@ type faultRun struct {
 	gen     *Generator   // nil in a replay
 	wait    string       // the healthy operation's wait ("" for its default: look once)
 	outages map[int][]Op // a replay's recorded outage writes, by after_op
+	// kills are a replay's recorded kill decisions, in order (nil: decide
+	// from the look); skip is the process whose kill was skipped, so its
+	// restart is skipped too.
+	kills         []KillDecision
+	skip          string
+	downScheduled string // the scheduled name of the kill holding f.down down
+	// stopOnUnhealthy: a healthy point still false after its full wait ends
+	// the run (errUnhealthy) instead of carrying on against dead subjects.
+	stopOnUnhealthy bool
+}
+
+// errUnhealthy is a healthy point still false after its full wait.
+var errUnhealthy = errors.New("a healthy point still false after its full wait")
+
+// stopRun records that the run stops proposing after operation opno because
+// a healthy point stayed false, and why.
+func stopRun(actx *tr.ActionContext, opno int) error {
+	return actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_stop",
+		Result: map[string]any{"after_op": opno, "why": errUnhealthy.Error()}})
+}
+
+// KillDecision is one recorded "fault_kill" record: the scheduled process
+// of the kill after operation after_op, the process it resolved to, and
+// whether it ran.
+type KillDecision struct {
+	AfterOp   int
+	Scheduled string
+	Process   string
+	Skipped   bool
+}
+
+// killDecision resolves a scheduled kill and decides whether it runs. The
+// target is the process the model names for it now among those that hold
+// (Model.KillTarget; a replay takes the recorded one; with no model, the
+// scheduled name). Then one single look: the kill runs only while the look
+// shows nothing down and a target exists. The decision is recorded.
+func (f *faultRun) killDecision(ctx context.Context, actx *tr.ActionContext, e FaultEvent) (string, bool, error) {
+	target, why := e.Process, ""
+	if f.gen != nil {
+		if p, ok := f.gen.m.KillTarget(e.Process); ok {
+			target = p
+		} else {
+			target, why = "", "nothing holds"
+		}
+	}
+	o := f.r.Driver.Look()
+	h, ok := f.r.Handlers[o.Action]
+	if !ok {
+		return "", false, fmt.Errorf("no handler for %s", o.Action)
+	}
+	out, err := h(ctx, actx, tr.Action{Action: o.Action, Node: f.r.Node, Params: o.Params})
+	if err != nil {
+		return "", false, fmt.Errorf("look before kill %s after operation %d: %w", e.Process, e.AfterOp, err)
+	}
+	down := strings.Fields(out[DownKey])
+	if len(down) > 0 && why == "" {
+		why = "a process is down"
+	}
+	skipped := why != ""
+	if f.kills != nil {
+		k := KillDecision{}
+		if len(f.kills) > 0 {
+			k = f.kills[0]
+		}
+		if len(f.kills) == 0 || k.AfterOp != e.AfterOp || (k.Scheduled != e.Process && !(k.Scheduled == "" && k.Process == e.Process)) {
+			return "", false, fmt.Errorf("kill %s after operation %d: no recorded fault_kill for it", e.Process, e.AfterOp)
+		}
+		target, skipped, f.kills = k.Process, k.Skipped, f.kills[1:]
+		if skipped && why == "" {
+			why = "recorded skipped"
+		} else if !skipped {
+			why = ""
+		}
+	}
+	if down == nil {
+		down = []string{}
+	}
+	res := map[string]any{"after_op": e.AfterOp, "scheduled": e.Process, "process": target, "down": down, "skipped": skipped}
+	if why != "" {
+		res["why"] = why
+	}
+	err = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_kill", Result: res})
+	return target, skipped, err
 }
 
 // newFaultRun takes the header's fault_healthy_wait (absent: "").
@@ -406,27 +521,54 @@ func (f *faultRun) afterOp(ctx context.Context, actx *tr.ActionContext, opno int
 // point); otherwise one last healthy point.
 func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 	f.next = len(f.events) // kills scheduled after the last operation do not run
+	var err error
 	if f.down != "" {
-		return f.run(ctx, actx, FaultEvent{Action: FaultRestart, Process: f.down})
+		err = f.run(ctx, actx, FaultEvent{Action: FaultRestart, Process: f.down})
+	} else {
+		err = f.healthy(ctx, actx)
 	}
-	return f.healthy(ctx, actx)
+	if errors.Is(err, errUnhealthy) {
+		return nil // the run ends here anyway; the record says it
+	}
+	return err
 }
 
 func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
 	if e.Action == FaultMasterOutage {
 		return f.outage(ctx, actx, e)
 	}
+	scheduled := e.Process
+	if e.Action == FaultKill && e.AfterOp > 0 { // a scheduled kill (finish restarts with after_op 0)
+		target, skipped, err := f.killDecision(ctx, actx, e)
+		if err != nil {
+			return err
+		}
+		if skipped {
+			f.skip = e.Process
+			return nil
+		}
+		e.Process = target
+	}
+	if e.Action == FaultRestart {
+		if f.skip != "" && f.skip == e.Process {
+			f.skip = ""
+			return nil
+		}
+		if e.Process == f.downScheduled && f.down != "" {
+			e.Process = f.down // the process the kill resolved to
+		}
+	}
 	if _, err := f.r.Exec(ctx, actx, f.r.Driver.Fault(e)); err != nil {
 		return fmt.Errorf("%s %s after operation %d: %w", e.Action, e.Process, e.AfterOp, err)
 	}
 	if f.gen != nil {
-		f.gen.Fault(e.Action, e.Process)
+		f.gen.Fault(e.Action, scheduled) // coverage by the schedule's names
 	}
 	if e.Action == FaultKill {
-		f.down = e.Process
+		f.down, f.downScheduled = e.Process, scheduled
 		return nil
 	}
-	f.down = ""
+	f.down, f.downScheduled = "", ""
 	return f.healthy(ctx, actx)
 }
 
@@ -509,6 +651,9 @@ func (f *faultRun) healthy(ctx context.Context, actx *tr.ActionContext) error {
 		return fmt.Errorf("%s: %w", o.Action, err)
 	}
 	if out[HealthyKey] != HealthyTrue {
+		if f.stopOnUnhealthy {
+			return errUnhealthy
+		}
 		return nil // not a healthy point: unknowns stay pending
 	}
 	return f.resolve(ctx, actx)

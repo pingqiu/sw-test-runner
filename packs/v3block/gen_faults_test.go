@@ -60,6 +60,17 @@ type faultFake struct {
 	inOutage      bool
 	outageUnknown bool
 	ready         []string // ready_seconds of each restart
+	// alsoDown is a process a look finds down that this run never killed
+	// (a holder fenced on its own): looks report it.
+	alsoDown string
+	// settle: at each normal healthy point, a settled record with this state
+	// for every volume whose attach or stop answered unknown since ("": none,
+	// they stay unsettled). fenceAll: the first n normal healthy records list
+	// every pool name not serving.
+	settle    string
+	unsettled []string
+	fenceAll  int
+	pool      []string
 }
 
 func (f *faultFake) install(t *testing.T) {
@@ -74,6 +85,9 @@ func (f *faultFake) install(t *testing.T) {
 				return inner(ctx, actx, act)
 			}
 			f.calls = append(f.calls, act)
+			if name == "v3_op_attach" || name == "v3_op_stop" {
+				f.unsettled = append(f.unsettled, act.Params["volume"])
+			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"]})
 			_ = actx.History.Complete(seq, tr.OutcomeUnknown, nil)
 			return map[string]string{"value": tr.OutcomeUnknown}, nil
@@ -105,14 +119,24 @@ func (f *faultFake) install(t *testing.T) {
 			f.inOutage = f.inOutage || f.down == "blockmaster"
 			f.log = append(f.log, "look")
 			_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{
-				"healthy": false, "down": []string{f.down}, "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
-			return map[string]string{"value": tr.OutcomeOK, "healthy": "false"}, nil
+				"healthy": f.down == "" && f.alsoDown == "", "down": strings.Fields(f.down + " " + f.alsoDown), "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
+			return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(f.down == "" && f.alsoDown == ""), "down": strings.TrimSpace(f.down + " " + f.alsoDown)}, nil
 		}
 		f.healthyCall++
 		ok := f.down == "" && f.healthyCall > f.unhealthy
 		f.log = append(f.log, fmt.Sprintf("healthy %v", ok))
 		f.waits = append(f.waits, act.Params["wait_seconds"])
-		_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{"healthy": ok, "down": []string{}, "not_serving": []string{}}})
+		ns := []string{}
+		if f.healthyCall <= f.fenceAll {
+			ns = f.pool
+		}
+		_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{"healthy": ok, "down": []string{}, "not_serving": ns}})
+		if ok && f.settle != "" {
+			for _, v := range f.unsettled {
+				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "settled", Result: map[string]any{"volume": v, "state": f.settle, "evidence": "fake"}})
+			}
+			f.unsettled = nil
+		}
 		return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(ok)}, nil
 	}
 }
@@ -121,7 +145,7 @@ func faultAct(ops, rate string) tr.Action {
 	a := genAct(ops)
 	a.Params["pool"] = strings.Join(pool(100), " ") // not exhausted before the budget
 	a.Params["faults"] = rate
-	a.Params["fault_processes"] = "blockmaster blockvolume:0"
+	a.Params["fault_processes"] = "blockvolume:0 blockvolume:1"
 	return a
 }
 
@@ -197,26 +221,43 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 	if recs[0].Result["generator"] != GenVersionFaults || recs[1].Verb != "fault_schedule" {
 		t.Fatalf("header %+v, then %+v", recs[0], recs[1])
 	}
-	want, _ := NewFaultSchedule(5, 300, []string{"blockmaster", "blockvolume:0"}, 0.05, DefaultRestartWithin)
+	want, _ := NewFaultSchedule(5, 300, []string{"blockvolume:0", "blockvolume:1"}, 0.05, DefaultRestartWithin)
 	if !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.Record())) || len(want.Events) < 4 {
 		t.Fatalf("fault_schedule %v, want %v", recs[1].Result, want.Record())
 	}
-	// Each event ran after its operation: the last gen_step before it has its after_op.
-	lastStep, ev := 0, 0
+	// Each event ran after its operation (the last gen_step before it has its
+	// after_op), on the process its fault_kill record resolved; a kill the
+	// record skipped ran neither, nor did its restart.
+	lastStep, ev, ran := 0, 0, 0
+	target, skipped := "", false
 	for _, r := range recs {
 		if r.Verb == "gen_step" {
 			lastStep = int(r.Result["opno"].(float64))
 		}
+		for ev < len(want.Events) && skipped && want.Events[ev].Action == FaultRestart {
+			ev, skipped = ev+1, false // the skipped kill's restart
+		}
+		if r.Verb == "fault_kill" {
+			e := want.Events[ev]
+			if e.Action != FaultKill || r.Result["scheduled"] != e.Process || lastStep != e.AfterOp {
+				t.Fatalf("decision %+v for scheduled %+v after op %d", r.Result, e, lastStep)
+			}
+			target, skipped = r.Result["process"].(string), r.Result["skipped"] == true
+			if skipped {
+				ev++
+			}
+		}
 		if r.Kind == tr.HistoryInvoke && (r.Verb == FaultKill || r.Verb == FaultRestart) {
 			e := want.Events[ev]
-			if r.Verb != e.Action || r.Args["process"] != e.Process || lastStep != e.AfterOp {
-				t.Fatalf("event %d ran as %s %v after op %d, scheduled %+v", ev, r.Verb, r.Args, lastStep, e)
+			if r.Verb != e.Action || r.Args["process"] != target || lastStep != e.AfterOp {
+				t.Fatalf("event %d ran as %s %v after op %d, scheduled %+v, resolved %s", ev, r.Verb, r.Args, lastStep, e, target)
 			}
 			ev++
+			ran++
 		}
 	}
-	if ev != len(want.Events) || f.maxDown != 1 || f.down != "" {
-		t.Fatalf("%d of %d events ran, max down %d, down at end %q", ev, len(want.Events), f.maxDown, f.down)
+	if ran == 0 || ev != len(want.Events) || f.maxDown != 1 || f.down != "" {
+		t.Fatalf("%d of %d events done (%d ran), max down %d, down at end %q", ev, len(want.Events), ran, f.maxDown, f.down)
 	}
 	// After every restart, a healthy point.
 	for i, l := range f.log {
@@ -256,7 +297,7 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 	}
 	cov := lastVerb(t, p, "gen_coverage").Result
 	fc, _ := cov["fault_cells"].(map[string]any)
-	for _, c := range []string{"kill|blockmaster", "restart|blockmaster", "kill|blockvolume:0", "restart|blockvolume:0", "while_down|v3_op_write"} {
+	for _, c := range []string{"kill|blockvolume:1", "restart|blockvolume:1", "kill|blockvolume:0", "restart|blockvolume:0", "while_down|v3_op_write"} {
 		if fc[c] == nil {
 			t.Errorf("fault cell %s missing: %v", c, fc)
 		}
@@ -269,36 +310,67 @@ func roundTrip(t *testing.T, m map[string]any) map[string]any {
 	return records(t, p)[0].Result
 }
 
-func TestGenRunWithFaultsResolvesAtTheNextHealthyPoint(t *testing.T) {
+// F7: a healthy point still false after its full wait ends the run: the
+// record gen_stop, then finish, the sweep and the end; no operation after
+// it. Nothing is resolved at the false point.
+func TestGenRunEndsAtAHealthyPointStillFalse(t *testing.T) {
 	f := &faultFake{unhealthy: 1}
 	f.install(t)
 	actx, p := genRunCtx(t)
-	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
-		t.Fatal(err)
+	out, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05"))
+	if err != nil || out["value"] != "unhealthy" {
+		t.Fatalf("%v %v", out, err)
 	}
 	_ = actx.History.Close()
 	recs := records(t, p)
-	if left := unresolvedUnknowns(recs); len(left) != 0 {
-		t.Fatalf("unknowns not resolved: %v", left)
-	}
-	// Nothing is resolved at the point that was not healthy.
+	stop := -1
 	for i, r := range recs {
-		if r.Verb == "healthy" && r.Result["healthy"] == false {
-			if n := recs[i+1]; n.Verb == "observe" || n.Kind == tr.HistoryInvoke && n.Verb == "read" {
-				t.Fatalf("resolution after an unhealthy point: %+v", n)
+		if stop < 0 && r.Verb == "healthy" && r.Result["look"] == nil && r.Result["healthy"] == false {
+			if n := recs[i+1]; n.Verb != "gen_stop" || n.Result["why"] == nil {
+				t.Fatalf("the false healthy point is followed by %+v, not gen_stop", n)
 			}
-			break
+			stop = i + 1
+		}
+		if stop >= 0 && r.Verb == "gen_step" {
+			t.Fatalf("an operation after the stop: %+v", r.Result)
 		}
 	}
+	if stop < 0 {
+		t.Fatal("no false healthy point")
+	}
+	if left := unresolvedUnknowns(recs); len(left) != 0 {
+		t.Fatalf("unknowns not resolved at the end: %v", left)
+	}
+	if lastVerb(t, p, "gen_sweep").Seq < recs[stop].Seq || lastVerb(t, p, "gen_coverage").Result["ended"] != "unhealthy" {
+		t.Fatal("no sweep after the stop, or coverage does not say unhealthy")
+	}
+	// The replay stops at the same point.
+	f.healthyCall = 0
+	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
+		t.Fatalf("replay: %v %v", out, err)
+	}
+	// Red control: a replay that meets a false healthy point the record did
+	// not is a difference (the steps it no longer runs).
+	f2 := &faultFake{}
+	f2.install(t)
+	actx2, a := genRunCtx(t)
+	if out, err := v3GenRun(context.Background(), actx2, faultAct("300", "0.05")); err != nil || out["value"] != "ops" {
+		t.Fatalf("%v %v", out, err)
+	}
+	_ = actx2.History.Close()
+	f2.unhealthy, f2.healthyCall = 1, 0
+	if _, _, err := replayInto(t, a); err == nil || !strings.Contains(err.Error(), "not run") {
+		t.Fatalf("a replay stopped early matched: %v", err)
+	}
 }
-
 func TestGenRunWithFaultsEndsHealthyWhenTheRunEndsWhileDown(t *testing.T) {
 	f := &faultFake{}
 	f.install(t)
 	actx, p := genRunCtx(t)
 	a := faultAct("1000", "1")
 	a.Params["pool"] = "g1 g2 g3"
-	a.Params["weights"] = "v3_op_create=1 v3_op_delete=1"
+	a.Params["weights"] = "v3_op_create=1 v3_op_attach=1" // holders to kill, then nothing ordinary left
+	a.Params["fault_restart_within"] = "1"                // kills often enough to meet a holder
 	out, err := v3GenRun(context.Background(), actx, a)
 	if err != nil {
 		t.Fatal(err)
@@ -427,13 +499,19 @@ func TestGenReplayRefusesABadFaultScheduleBeforeAnyCall(t *testing.T) {
 		},
 		"kill never restarted": func(h *tr.History) {
 			obs(h, "gen_header", "", hdr)
-			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster")}})
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockvolume:1")}})
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},
 		"two down": func(h *tr.History) {
 			obs(h, "gen_header", "", hdr)
-			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster"), ev(2, FaultKill, "blockvolume:0"), ev(3, FaultRestart, "blockvolume:0"), ev(4, FaultRestart, "blockmaster")}})
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockvolume:1"), ev(2, FaultKill, "blockvolume:0"), ev(3, FaultRestart, "blockvolume:0"), ev(4, FaultRestart, "blockvolume:1")}})
+			obs(h, "gen_step", "g1", step)
+			opRec(h, "create", "g1", tr.OutcomeOK)
+		},
+		"an ordinary kill of the master": func(h *tr.History) {
+			obs(h, "gen_header", "", hdr)
+			obs(h, "fault_schedule", "", map[string]any{"seed": "1", "events": []any{ev(1, FaultKill, "blockmaster"), ev(2, FaultRestart, "blockmaster")}})
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},
@@ -466,7 +544,7 @@ func TestGenReplayRefusesABadFaultScheduleBeforeAnyCall(t *testing.T) {
 
 func TestGeneratorLearnsAnUnknownWriteInAFaultRun(t *testing.T) {
 	cfg := GenConfig{Seed: 1, Ops: 400, Pool: pool(1), Blocks: 4, Negative: 0.01,
-		Faults: 0.1, FaultProcesses: []string{"blockmaster"},
+		Faults: 0.1, FaultProcesses: []string{"blockvolume:0"},
 		Weights: map[string]int{"v3_op_create": 1, "v3_op_attach": 1, "v3_op_write": 1, "v3_op_stop": 50, "v3_op_move": 50}}
 	g, err := NewGenerator(cfg)
 	if err != nil {
@@ -724,5 +802,266 @@ func TestOutageFactsComeFromChecksJSON(t *testing.T) {
 	}
 	if f, ok := readOutageFacts([]byte(`{"master_outage": {"max_seconds": 7, "cite": "x"}, "fault_targets": [{"name": "blockmaster", "role": "master"}]}`)); !ok || f.maxSeconds != 7 {
 		t.Errorf("%+v %v", f, ok)
+	}
+}
+
+// The master is never killed by an ordinary kill: a run configured to is
+// refused before anything runs (the short outage is its own event).
+func TestNoOrdinaryKillOfTheMaster(t *testing.T) {
+	_, err := NewGenerator(GenConfig{Seed: 1, Ops: 50, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockmaster", "blockvolume:0"}})
+	if err == nil {
+		t.Fatal("an ordinary kill of the master was scheduled")
+	}
+	f := &faultFake{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	a := faultAct("50", "0.1")
+	a.Params["fault_processes"] = "blockmaster"
+	if _, err := v3GenRun(context.Background(), actx, a); err == nil {
+		t.Fatal("v3_gen_run accepted fault_processes blockmaster")
+	}
+	_ = actx.History.Close()
+	if n := len(records(t, p)); n != 1 || len(f.log) != 0 {
+		t.Fatalf("%d records, log %v before the refusal", n, f.log)
+	}
+	if _, err := NewGenerator(GenConfig{Seed: 1, Ops: 50, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}}); err != nil {
+		t.Fatalf("green: %v", err)
+	}
+}
+
+// F6: "one down at a time" is checked against what is observed. A single
+// look before each kill; when it shows anything down, the kill and its
+// restart are skipped and the decision is recorded; a replay follows the
+// recorded decisions.
+func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
+	kills := func(log []string) int {
+		n := 0
+		for _, l := range log {
+			n += btoi(strings.HasPrefix(l, FaultKill+" ") || strings.HasPrefix(l, FaultRestart+" "))
+		}
+		return n
+	}
+	// Green: nothing else down, every scheduled kill runs, each after a look.
+	f := &faultFake{}
+	f.install(t)
+	actx, a := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	recs := records(t, a)
+	decided, held, ran := 0, 0, kills(f.log)
+	for i, r := range recs {
+		if r.Verb != "fault_kill" {
+			continue
+		}
+		decided++
+		if recs[i-1].Verb != "healthy" || recs[i-1].Result["look"] != "single" {
+			t.Fatalf("kill decision at %d without its look: %+v", i, recs[i-1])
+		}
+		if r.Result["why"] == "nothing holds" {
+			continue // F10: no target
+		}
+		held++
+		if r.Result["skipped"] != false || recs[i+1].Kind != tr.HistoryInvoke || recs[i+1].Verb != FaultKill {
+			t.Fatalf("kill decision at %d: %+v, then %+v", i, r.Result, recs[i+1])
+		}
+	}
+	if held == 0 || ran != 2*held {
+		t.Fatalf("%d decisions with a target, %d kills and restarts ran", held, ran)
+	}
+	// The replay follows the recorded decisions, whatever its own looks show.
+	f.alsoDown = "blockvolume:7"
+	f.log = nil
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" || kills(f.log) != ran {
+		t.Fatalf("replay of the kills: %v %v, log %v", out, err, f.log)
+	} // Red: a holder the run never killed is down: no kill and no restart runs.
+	f2 := &faultFake{alsoDown: "blockvolume:7"}
+	f2.install(t)
+	actx2, b := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx2, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx2.History.Close()
+	if n := kills(f2.log); n != 0 {
+		t.Fatalf("%d kills and restarts ran while a look showed blockvolume:7 down: %v", n, f2.log)
+	}
+	skips := 0
+	for _, r := range records(t, b) {
+		if r.Verb == "fault_kill" {
+			d, _ := r.Result["down"].([]any)
+			if r.Result["skipped"] != true || (r.Result["why"] != "nothing holds" && (len(d) != 1 || d[0] != "blockvolume:7")) {
+				t.Fatalf("decision %+v", r.Result)
+			}
+			skips++
+		}
+	}
+	if skips != decided {
+		t.Fatalf("%d skips, %d scheduled kills", skips, decided)
+	}
+	f2.alsoDown = ""
+	f2.log = nil
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" || kills(f2.log) != 0 {
+		t.Fatalf("replay of the skips: %v %v, log %v", out, err, f2.log)
+	}
+
+}
+
+// The run hands the model the records its handlers write: a volume whose
+// attach or stop answered unknown is offered nothing until a settled record
+// places it; a healthy record's not_serving fences reads and writes.
+func TestGenRunLearnsFromSettledAndHealthyRecords(t *testing.T) {
+	type window struct{ from, to uint64 }
+	run := func(f *faultFake) []tr.HistoryRecord {
+		f.install(t)
+		actx, p := genRunCtx(t)
+		if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		return records(t, p)
+	}
+	// unsettledSteps: steps on a volume after its unknown attach or stop
+	// and before its settled record (none may exist), and the volumes that
+	// had an operation after their settled record.
+	check := func(recs []tr.HistoryRecord) (bad []string, served int) {
+		since := map[string]bool{}
+		settledOnce := map[string]bool{}
+		var stepVol, stepAct string
+		for _, r := range recs {
+			switch {
+			case r.Verb == "gen_step":
+				stepVol, stepAct = r.Volume, r.Result["action"].(string)
+				if since[stepVol] {
+					bad = append(bad, fmt.Sprintf("%s %s while unsettled", stepAct, stepVol))
+				}
+				if settledOnce[stepVol] && r.Result["negative"] == nil {
+					served++
+					delete(settledOnce, stepVol)
+				}
+			case r.Kind == tr.HistoryComplete && r.Outcome == tr.OutcomeUnknown && r.Volume == stepVol && (stepAct == "v3_op_attach" || stepAct == "v3_op_stop") && (r.Verb == "attach" || r.Verb == "stop"):
+				since[stepVol] = true
+			case r.Verb == "settled":
+				v := r.Result["volume"].(string)
+				delete(since, v)
+				settledOnce[v] = true
+			case r.Verb == "gen_sweep":
+				stepVol = ""
+			}
+		}
+		return bad, served
+	}
+	recs := run(&faultFake{settle: "held"})
+	bad, served := check(recs)
+	if len(bad) != 0 || served == 0 {
+		t.Fatalf("settled held: %v, %d volumes served again after their settled record", bad, served)
+	}
+	// Red control: without settled records the volumes stay unsettled.
+	bad, served = check(run(&faultFake{}))
+	if len(bad) != 0 || served != 0 {
+		t.Fatalf("no settled records: %v, %d served", bad, served)
+	}
+	// not_serving: no write or read between the fencing record and the next
+	// healthy record that leaves the volumes out.
+	// The volumes written before it (serving then) and not attached again
+	// since are the fenced ones.
+	recs = run(&faultFake{fenceAll: 1, pool: pool(100)})
+	fenced, wrote := map[string]bool{}, map[string]bool{}
+	n, during := 0, 0
+	inWindow := false
+	for _, r := range recs {
+		if r.Verb == "healthy" && r.Result["look"] == nil {
+			ns, _ := r.Result["not_serving"].([]any)
+			inWindow = len(ns) > 0
+			if inWindow {
+				n++
+				for v := range wrote {
+					fenced[v] = true
+				}
+			} else {
+				fenced = map[string]bool{}
+			}
+		}
+		if r.Verb != "gen_step" {
+			continue
+		}
+		a := r.Result["action"]
+		switch {
+		case a == "v3_op_attach":
+			delete(fenced, r.Volume)
+		case (a == "v3_op_write" || a == "v3_op_read") && fenced[r.Volume]:
+			t.Fatalf("%v on %s while not serving", a, r.Volume)
+		case a == "v3_op_write":
+			wrote[r.Volume] = true
+		}
+		if inWindow {
+			during++
+		}
+	}
+	if n != 1 || during == 0 {
+		t.Fatalf("%d fencing records, %d steps in the window", n, during)
+	}
+	_ = window{}
+}
+
+// F10: a scheduled holder kill resolves at kill time to a volume that holds
+// (serving per the model), recorded in its fault_kill record and in the
+// kill's args; with nothing holding, the kill is skipped.
+func TestKillTargetsAVolumeThatHolds(t *testing.T) {
+	f := &faultFake{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	names := pool(100)
+	serving := map[string]bool{}
+	var step map[string]any
+	var stepVol string
+	resolved, unresolvedHolds := 0, 0
+	for _, r := range records(t, p) {
+		switch {
+		case r.Verb == "gen_step":
+			step, stepVol = r.Result, r.Volume
+		case r.Kind == tr.HistoryComplete && step != nil && r.Outcome == tr.OutcomeOK && step["negative"] == nil && r.Volume == stepVol:
+			switch step["action"] {
+			case "v3_op_attach":
+				serving[stepVol] = true
+			case "v3_op_stop", "v3_op_move", "v3_op_delete":
+				serving[stepVol] = false
+			}
+		case r.Verb == "fault_kill" && r.Result["skipped"] == false:
+			proc := r.Result["process"].(string)
+			k, err := strconv.Atoi(strings.TrimPrefix(proc, "blockvolume:"))
+			if err != nil || !serving[names[k]] {
+				t.Fatalf("kill resolved to %s (%v), which does not hold", proc, err)
+			}
+			if sch := r.Result["scheduled"].(string); sch != proc {
+				resolved++
+			}
+			// The scheduled name taken literally would often name no holder.
+			if k2, _ := strconv.Atoi(strings.TrimPrefix(r.Result["scheduled"].(string), "blockvolume:")); !serving[names[k2]] {
+				unresolvedHolds++
+			}
+		}
+	}
+	if resolved == 0 || unresolvedHolds == 0 {
+		t.Fatalf("%d kills resolved away from their scheduled name, %d whose scheduled name held nothing", resolved, unresolvedHolds)
+	}
+	// Nothing holds: the model names no target.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(3), Blocks: 8})
+	if _, ok := g.m.KillTarget("blockvolume:0"); ok {
+		t.Fatal("a target with nothing holding")
+	}
+	drive(g, op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"), op("v3_op_create", "g3"), op("v3_op_attach", "g3", "host", "0"))
+	for sch, want := range map[string]string{"blockvolume:0": "blockvolume:1", "blockvolume:1": "blockvolume:2", "blockvolume:2": "blockvolume:1"} {
+		if got, ok := g.m.KillTarget(sch); !ok || got != want {
+			t.Errorf("%s resolved to %s %v, want %s", sch, got, ok, want)
+		}
+	}
+	g.m.Observed(healthyRec([]string{"g2"}))
+	if got, _ := g.m.KillTarget("blockvolume:0"); got != "blockvolume:2" {
+		t.Errorf("a fenced holder is a target: %s", got)
 	}
 }
