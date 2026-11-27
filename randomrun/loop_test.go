@@ -35,6 +35,7 @@ func (testDriver) ValidProcess(p string) bool { return testProcess(p) }
 func (testDriver) Healthy(wait string) Op {
 	return Op{Action: "healthy", Params: map[string]string{"wait": wait}}
 }
+
 // A loop schedules no master outage: these three are never called here.
 func (testDriver) MasterOutage() (string, int, bool) { return "", 0, false }
 func (testDriver) Look() Op {

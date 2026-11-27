@@ -142,6 +142,7 @@
     "device_io_runner_deadline_seconds": 120,
     "device_io_runner_deadline_about": "The RUNNER's own bound on one read, write or flush through the kernel block device, not a product bound. Under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at this deadline and records the abandoned child by pid and start time. It lies above fast_io_fail_tmo of every connect variant.",
     "connect": {
+      "about": "A variant is DECLARED here, named, with its source and evidence false; a run selects one by name with the run var select_var (a scenario env value), and empty selects the default. Its options go into the kernel's fabrics connect string under the kernel's option names, in the order of options (the runner connects through /dev/nvme-fabrics, not nvme-cli, whose flags are --ctrl-loss-tmo, --reconnect-delay, --fast_io_fail_tmo, --keep-alive-tmo). A variant's option names may be written with _ or -; an unknown name, a value that is not an integer, or a name given twice refuses the description at load. A variant is named 'guest connect variant: <values>' in the run header and in every attach, is never release evidence, and no checker changes with it.",
       "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
       "select_var": "guest_connect_variant",
       "default": {"name": "plain", "evidence": true,
