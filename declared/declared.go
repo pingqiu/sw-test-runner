@@ -44,8 +44,9 @@ type Subject interface {
 }
 
 // LookupFunc decides a failed answer from the product's outcome table:
-// refused or unknown, for (action, path, code, message).
-type LookupFunc func(action, path, code, message string) string
+// refused, refused_effect (with the documented effect: part, to, cite) or
+// unknown, for (action, path, code, message).
+type LookupFunc func(action, path, code, message string) (string, map[string]any)
 
 // File is a product's actions description.
 type File struct {
@@ -903,10 +904,13 @@ func (x *Executor) once(s *scope, a *Action, v *Variant, cmd string) (string, ma
 		if action == "" {
 			action = a.Verb
 		}
-		out, detail := DecodeErrorBody(x.Lookup, action, d.Path, stdout, code)
+		out, detail, effect := DecodeErrorBody(x.Lookup, action, d.Path, stdout, code)
 		res := map[string]any{}
 		if detail != "" {
 			res["detail"] = detail
+		}
+		if effect != nil {
+			res["effect"] = effect
 		}
 		return out, res, false
 	case "self_reported":
@@ -1035,12 +1039,12 @@ func decodeSelf(d Decode, s *scope, stdout string, code int) (map[string]any, st
 }
 
 // DecodeErrorBody maps one call's exit code and JSON error body to an
-// outcome: exit 0 ok; a code the table refuses for (action, path), refused;
-// every other answer unknown. The detail is "code: message", or why there
-// is no code.
-func DecodeErrorBody(lookup LookupFunc, action, path, stdout string, code int) (string, string) {
+// outcome: exit 0 ok; a code the table refuses for (action, path), refused,
+// or refused_effect with its documented effect; every other answer
+// unknown. The detail is "code: message", or why there is no code.
+func DecodeErrorBody(lookup LookupFunc, action, path, stdout string, code int) (string, string, map[string]any) {
 	if code == 0 {
-		return tr.OutcomeOK, ""
+		return tr.OutcomeOK, "", nil
 	}
 	var e struct {
 		Code      string `json:"code"`
@@ -1048,9 +1052,13 @@ func DecodeErrorBody(lookup LookupFunc, action, path, stdout string, code int) (
 		Retryable bool   `json:"retryable"`
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
-		return tr.OutcomeUnknown, fmt.Sprintf("exit %d without an error body", code)
+		return tr.OutcomeUnknown, fmt.Sprintf("exit %d without an error body", code), nil
 	}
-	return lookup(action, path, e.Code, e.Message), e.Code + ": " + e.Message
+	out, effect := lookup(action, path, e.Code, e.Message)
+	if out != tr.OutcomeRefusedEffect {
+		effect = nil
+	}
+	return out, e.Code + ": " + e.Message, effect
 }
 
 // ShellQuote leaves s bare only when every byte is plainly safe for a POSIX

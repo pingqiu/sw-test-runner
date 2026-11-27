@@ -91,9 +91,7 @@ var blockActions = func() *declared.Executor {
 			}
 			return &volumeSubject{actx: actx, v: v}, nil
 		},
-		Lookup: func(action, path, code, message string) string {
-			return outcomes.lookup(opPath{action, path}, code, message)
-		},
+		Lookup: outcomes.lookupFunc(),
 	}
 }()
 

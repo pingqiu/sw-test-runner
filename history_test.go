@@ -191,3 +191,25 @@ func TestHistoryConcurrentAppendsHaveNoGap(t *testing.T) {
 		}
 	}
 }
+
+// The four outcomes complete; any other value is refused.
+func TestHistoryOutcomes(t *testing.T) {
+	h, err := OpenHistory(filepath.Join(t.TempDir(), "h.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	for _, o := range []string{OutcomeOK, OutcomeRefused, OutcomeRefusedEffect, OutcomeUnknown} {
+		seq, err := h.Invoke(HistoryRecord{Op: "M.A", Verb: "v"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Complete(seq, o, map[string]any{"effect": map[string]any{"part": "workspace"}}); err != nil {
+			t.Errorf("%s: %v", o, err)
+		}
+	}
+	seq, _ := h.Invoke(HistoryRecord{Op: "M.A", Verb: "v"})
+	if err := h.Complete(seq, "refused_maybe", nil); err == nil {
+		t.Error("an unknown outcome value completed")
+	}
+}

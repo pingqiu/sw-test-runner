@@ -52,7 +52,7 @@ type Runner struct {
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.
-var outcomeRank = map[string]int{tr.OutcomeOK: 0, tr.OutcomeRefused: 1, tr.OutcomeUnknown: 2}
+var outcomeRank = map[string]int{tr.OutcomeOK: 0, tr.OutcomeRefused: 1, tr.OutcomeRefusedEffect: 2, tr.OutcomeUnknown: 3}
 
 // worseOutcome returns the worse of two outcomes; "" (none yet) loses to any.
 func worseOutcome(a, b string) string {

@@ -37,6 +37,10 @@ const (
 	OutcomeOK      = "ok"
 	OutcomeRefused = "refused"
 	OutcomeUnknown = "unknown"
+	// OutcomeRefusedEffect is a refusal with a documented effect: the
+	// product refused, and its page states what the refused call changed
+	// anyway (the completion's result.effect names it).
+	OutcomeRefusedEffect = "refused_effect"
 )
 
 // HistoryRecord is one line of the history file.
@@ -112,7 +116,7 @@ func (h *History) Invoke(r HistoryRecord) (uint64, error) {
 
 // Complete records the end of invocation of with its outcome and result.
 func (h *History) Complete(of uint64, outcome string, result map[string]any) error {
-	if outcome != OutcomeOK && outcome != OutcomeRefused && outcome != OutcomeUnknown {
+	if outcome != OutcomeOK && outcome != OutcomeRefused && outcome != OutcomeRefusedEffect && outcome != OutcomeUnknown {
 		return fmt.Errorf("history: outcome %q", outcome)
 	}
 	h.mu.Lock()
