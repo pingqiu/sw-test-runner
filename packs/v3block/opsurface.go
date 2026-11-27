@@ -64,7 +64,7 @@ func nvmeConnect(ctx context.Context, node runner, host, port, nqn, extra string
 	if !regexp.MustCompile(`^[0-9.]+$`).MatchString(host) || !regexp.MustCompile(`^[0-9]+$`).MatchString(port) || !regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`).MatchString(nqn) {
 		return "nvme connect: malformed address or nqn"
 	}
-	if !regexp.MustCompile(`^(,[a-z_]+=[0-9]+)*$`).MatchString(extra) {
+	if !regexp.MustCompile(`^(,[a-z_]+=-?[0-9]+)*$`).MatchString(extra) {
 		return "nvme connect: malformed options " + extra
 	}
 	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s%s", host, port, nqn, extra)

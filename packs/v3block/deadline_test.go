@@ -168,32 +168,36 @@ func TestEveryTypedOperationHasARunnerDeadline(t *testing.T) {
 	}
 }
 
-// The guest connect: by default the product's plain connect (no timeout
-// option); a declared variant adds its options in the declared order and is
-// named as a variant in the run header and in every attach.
+// The guest connect: empty is the product's plain connect, today's exact
+// string; a declared variant's options are appended under the kernel's
+// option names in the declared order and named as a variant in the header
+// and in every attach; an undeclared name is refused.
 func TestGuestConnect(t *testing.T) {
+	const plainCmd = "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1 > /dev/nvme-fabrics"
 	plain, err := selectConnect("")
 	if err != nil || plain.Options != "" || !strings.HasPrefix(plain.Label, "plain") {
 		t.Fatalf("default: %+v %v", plain, err)
 	}
 	f := (&fakeNode{}).on("nvme-fabrics", ok(""))
-	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", plain.Options); why != "" || len(f.calls) != 1 ||
-		f.calls[0] != "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1 > /dev/nvme-fabrics" {
+	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", plain.Options); why != "" || len(f.calls) != 1 || f.calls[0] != plainCmd {
 		t.Fatalf("plain connect: %q %q", why, f.calls)
 	}
-	v, err := selectConnect("fast_faults")
-	if err != nil || v.Options != ",fast_io_fail_tmo=5,ctrl_loss_tmo=60" || v.Label != "guest connect variant: fast_io_fail_tmo=5,ctrl_loss_tmo=60" {
+	v, err := selectConnect("host_connect_settings")
+	if err != nil || v.Options != ",ctrl_loss_tmo=180,reconnect_delay=2" || v.Label != "guest connect variant: ctrl_loss_tmo=180,reconnect_delay=2" {
 		t.Fatalf("variant: %+v %v", v, err)
 	}
 	f = (&fakeNode{}).on("nvme-fabrics", ok(""))
 	if why := nvmeConnect(context.Background(), f, "127.0.0.1", "4420", "nqn.x:v1", v.Options); why != "" ||
-		!strings.Contains(f.calls[0], "nqn=nqn.x:v1,fast_io_fail_tmo=5,ctrl_loss_tmo=60 > /dev/nvme-fabrics") {
+		f.calls[0] != "printf %s transport=tcp,traddr=127.0.0.1,trsvcid=4420,nqn=nqn.x:v1,ctrl_loss_tmo=180,reconnect_delay=2 > /dev/nvme-fabrics" {
 		t.Fatalf("variant connect: %q %q", why, f.calls)
 	}
-	if _, err := selectConnect("nope"); err == nil {
-		t.Fatal("an undeclared connect was accepted")
+	if ff, err := selectConnect("fast_faults"); err != nil || ff.Options != ",fast_io_fail_tmo=5,ctrl_loss_tmo=60" {
+		t.Fatalf("fast_faults: %+v %v", ff, err)
 	}
-	h, err := guestHeader(func(k string) string { return map[string]string{guest.Connect.SelectVar: "fast_faults"}[k] })
+	if _, err := selectConnect("ctrl-loss-tmo=180"); err == nil {
+		t.Fatal("a free-form value was accepted: a variant is declared")
+	}
+	h, err := guestHeader(func(k string) string { return map[string]string{guest.Connect.SelectVar: "host_connect_settings"}[k] })
 	if err != nil || h["guest_connect"] != v.Label {
 		t.Fatalf("variant header: %v %v", h, err)
 	}
@@ -203,4 +207,47 @@ func TestGuestConnect(t *testing.T) {
 	if why := nvmeConnect(context.Background(), &fakeNode{}, "127.0.0.1", "4420", "nqn.x:v1", ",x=1;reboot"); why == "" {
 		t.Fatal("malformed options were accepted")
 	}
+}
+
+// A variant row's options are checked at load: - or _ spellings name the
+// same kernel option; an unknown name, a non-integer and a repeat are
+// refused.
+func TestVariantOptionsAtLoad(t *testing.T) {
+	opts := guest.Connect.Options
+	got, err := variantOptions(opts, json.RawMessage(`{"ctrl-loss-tmo": 180, "reconnect_delay": 2, "keep-alive-tmo": -1}`))
+	if err != nil || got["ctrl_loss_tmo"] != 180 || got["reconnect_delay"] != 2 || got["keep_alive_tmo"] != -1 || len(got) != 3 {
+		t.Fatalf("%v %v", got, err)
+	}
+	for _, bad := range []string{
+		`{"ctrl_loss": 180}`, `{"nr_io_queues": 4}`, `{"ctrl_loss_tmo": "180"}`, `{"ctrl_loss_tmo": 1.5}`,
+		`{"ctrl_loss_tmo": 1, "ctrl-loss-tmo": 2}`, `{"ctrl_loss_tmo": 1, "ctrl_loss_tmo": 2}`, `[1]`,
+	} {
+		if _, err := variantOptions(opts, json.RawMessage(bad)); err == nil {
+			t.Errorf("%s was accepted", bad)
+		}
+	}
+}
+
+// The attach's history record names the connect in effect, from the run's
+// declared variant; an undeclared name refuses the step before anything
+// runs.
+func TestAttachRecordsTheGuestConnect(t *testing.T) {
+	defer func(d time.Duration) { exceptionDeadlineOverride = d }(exceptionDeadlineOverride)
+	exceptionDeadlineOverride = 300 * time.Millisecond
+	actx, p := deadlineCtx(t, &fakeNode{})
+	actx.Vars["guest_connect_variant"] = "host_connect_settings"
+	if _, err := v3OpAttach(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	rs := historyRecords(t, p)
+	if len(rs) < 2 || rs[0].Args["guest_connect"] != "guest connect variant: ctrl_loss_tmo=180,reconnect_delay=2" {
+		t.Fatalf("records %+v", rs)
+	}
+	actx, _ = deadlineCtx(t, &fakeNode{})
+	actx.Vars["guest_connect_variant"] = "ctrl-loss-tmo=1"
+	if _, err := v3OpAttach(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err == nil || actx.History.Open() != 0 {
+		t.Fatalf("an unknown option was not refused: %v", err)
+	}
+	_ = actx.History.Close()
 }
