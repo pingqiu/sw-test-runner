@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 // v3ctlAnswer is v3ctl's JSON answer.
@@ -173,18 +175,9 @@ func chunkOutcome(op opPath, stdout string, code int) (string, string) {
 }
 
 func chunkOutcomeIn(t outcomeTable, op opPath, stdout string, code int) (string, string) {
-	if code == 0 {
-		return "ok", ""
-	}
-	var e struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		Retryable bool   `json:"retryable"`
-	}
-	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
-		return "unknown", fmt.Sprintf("exit %d without an error body", code)
-	}
-	return t.lookup(op, e.Code, e.Message), e.Code + ": " + e.Message
+	return declared.DecodeErrorBody(func(action, path, code, message string) string {
+		return t.lookup(opPath{action, path}, code, message)
+	}, op.action, op.path, stdout, code)
 }
 
 // The runner actions that issue `sw-block ops workspace` commands, and the

@@ -1,0 +1,100 @@
+{
+  "product": "block",
+  "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
+  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (name, nqn, layout_id, status_addr: the current host's status address, holder_alive: the recorded holder runs), variant, and in a decoding answer.<field>, stderr or exit. Timeouts lie above the command's own bound, so they end only a hung call (recorded unknown). The exceptions are the actions that stay Go handlers, each with its reason.",
+  "config": {
+    "keys": [
+      {"name": "bin_dir", "required": true},
+      {"name": "master", "required": true},
+      {"name": "filer", "required": true},
+      {"name": "chunk_path", "required": true},
+      {"name": "root", "required": true},
+      {"name": "client", "default": "c1"}
+    ],
+    "client": "client"
+  },
+  "actions": [
+    {
+      "action": "v3_op_create", "verb": "create", "op": "VolumeCreate.MarkReady", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "size_bytes", "kind": "int", "default": "16777216"}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"size_bytes": {"template": "{{size_bytes}}", "type": "int"}}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/v3ctl", "create", "--master", "{{config.master}}", "--volume", "{{volume.name}}", "--size", "{{size_bytes}}"],
+        "timeout_seconds": 90,
+        "cite": "the runner's client of the master's CreateVolume (core/host/master/services.go:57): packs/v3block/v3ctl/main.go:120-124 (flags), :139-147 (the call), :165-180 (the answer and its exit: ok 0, refused 1, unknown 3); its --timeout is 60s (:124)",
+        "decode": {
+          "kind": "self_reported",
+          "fields": {"outcome": "string", "volume": "string", "layout_id": "string", "store_ready": "bool", "call_ns": "int", "error": "string"},
+          "outcome_field": "outcome",
+          "exits": {"ok": 0, "refused": 1, "unknown": 3},
+          "match": {"volume": "{{volume.name}}"},
+          "ok_length": {"layout_id": 32},
+          "result": {"call_ns": "call_ns"},
+          "result_ok": {"layout_id": "layout_id"},
+          "detail": "{{answer.error}} {{stderr}}"
+        }
+      }],
+      "on_ok_set": {"volume.layout_id": "{{answer.layout_id}}"}
+    },
+    {
+      "action": "v3_op_snapshot", "verb": "snapshot", "op": "SnapshotRemoval.Commit", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "name", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "snapshot", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--name", "{{name}}", "--request-id", "{{volume.name}}-{{name}}"],
+        "timeout_seconds": 90,
+        "cite": "cmd/sw-block/chunk.go:81-82 (dispatch), :207-208, :216-219 (--volume, --status-addr, --name, --request-id), :226 (--timeout 60s)",
+        "decode": {"kind": "error_body", "path": "ops chunk snapshot"}
+      }]
+    },
+    {
+      "action": "v3_op_restore", "verb": "restore", "op": "RestoreTarget.CreateHead", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "snapshot", "vars": true, "required": true},
+        {"name": "target_volume", "kind": "subject", "vars": true}
+      ],
+      "record": {"volume": "{{target_volume}}", "args": {"source": "{{volume.name}}", "snapshot": "{{snapshot}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "restore", "--source", "{{volume.name}}", "--snapshot", "{{snapshot}}", "--target", "{{target_volume}}", "--master", "{{config.master}}", "--request-id", "restore-{{target_volume}}"],
+        "timeout_seconds": 420,
+        "cite": "cmd/sw-block/chunk.go:101-102 (dispatch); cmd/sw-block/chunk_b.go:253-259 (--source, --target, --snapshot, --request-id; --timeout 6m), :122 (--master)",
+        "decode": {"kind": "error_body", "path": "ops chunk restore"}
+      }]
+    },
+    {
+      "action": "v3_op_release", "verb": "release", "op": "RestoreTarget.OpRelease", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "target_volume", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"target": "{{target_volume}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "release", "--source", "{{volume.name}}", "--target", "{{target_volume}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}"],
+        "timeout_seconds": 60,
+        "cite": "cmd/sw-block/chunk.go:93-94 (dispatch); cmd/sw-block/chunk_b.go:305-309 (--source, --target through bindVolume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master)",
+        "decode": {"kind": "error_body", "path": "ops chunk release"}
+      }]
+    }
+  ],
+  "exceptions": [
+    {"action": "v3_op_snapshot_delete", "why": "pending: declared in the next change"},
+    {"action": "v3_op_delete", "why": "pending: declared in the next change"},
+    {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup"},
+    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba"},
+    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each"},
+    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN"},
+    {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's"},
+    {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes"},
+    {"action": "v3_op_observe", "why": "an observation, not an operation: it writes an observe record with no outcome, and reading the answers into comparable values (HEAD and its snapshot names, the authority lines, the filer listings) is code by the platform ruling; its listings also depend on the runner's record (the layout id)"},
+    {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit"},
+    {"action": "v3_op_restart", "why": "a fault's repair: restarts the killed process with the command line it ran, recorded in the ledger, and waits for readiness as attach does"},
+    {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound"}
+  ]
+}
