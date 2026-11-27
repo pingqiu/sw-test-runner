@@ -45,6 +45,9 @@ type Runner struct {
 	Node     string
 	Driver   Driver
 	Handlers map[string]tr.ActionHandlerFunc
+	// Header, when set, adds the product's run settings to the run's
+	// header (get reads the run's parameters); it may refuse the run.
+	Header func(get func(string) string) (map[string]any, error)
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.
@@ -214,6 +217,18 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: fault_healthy_wait %q", r.Name, w)
 		}
 		header["fault_healthy_wait"] = w
+	}
+	if r.Header != nil {
+		extra, err := r.Header(get)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
+		for k, v := range extra {
+			if _, taken := header[k]; taken {
+				return nil, fmt.Errorf("%s: the product's header field %q is the generator's", r.Name, k)
+			}
+			header[k] = v
+		}
 	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: header}); err != nil {
 		return nil, err

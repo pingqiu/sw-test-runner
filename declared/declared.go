@@ -49,12 +49,18 @@ type LookupFunc func(action, path, code, message string) string
 
 // File is a product's actions description.
 type File struct {
-	Product    string      `json:"product"`
-	ReadAt     string      `json:"read_at"`
-	About      string      `json:"about,omitempty"`
-	Config     Config      `json:"config"`
-	Actions    []Action    `json:"actions"`
-	Exceptions []Exception `json:"exceptions"`
+	Product string `json:"product"`
+	ReadAt  string `json:"read_at"`
+	About   string `json:"about,omitempty"`
+	Config  Config `json:"config"`
+	// RunnerIODir is where a detached command keeps its output and exit
+	// code on the node (a template over config.<key>).
+	RunnerIODir string      `json:"runner_io_dir"`
+	Actions     []Action    `json:"actions"`
+	Exceptions  []Exception `json:"exceptions"`
+	// Guest is the product's guest configuration, read by the product's
+	// own code; the executor does not interpret it.
+	Guest json.RawMessage `json:"guest,omitempty"`
 }
 
 // Config is the configuration every declared action shares, each key read
@@ -73,10 +79,43 @@ type ConfigKey struct {
 	Default  string `json:"default,omitempty"`
 }
 
-// Exception names an action that stays a Go handler, and why.
+// Exception names an action that stays a Go handler, why, and its runner
+// deadline: the RUNNER's bound on one operation, never a product bound. At
+// the deadline the operation is recorded unknown and the run moves on. With
+// PlusParam the deadline grows by that int param's seconds (a wait the step
+// may set).
 type Exception struct {
-	Action string `json:"action"`
-	Why    string `json:"why"`
+	Action                string     `json:"action"`
+	Why                   string     `json:"why"`
+	RunnerDeadlineSeconds int        `json:"runner_deadline_seconds"`
+	PlusParam             *PlusParam `json:"plus_param,omitempty"`
+}
+
+// PlusParam is an int step param added to a deadline (Default when absent
+// or not an int).
+type PlusParam struct {
+	Name    string `json:"name"`
+	Default int    `json:"default"`
+}
+
+// ExceptionDeadline is the runner deadline of the Go handler name for a
+// step with params; false when the description lists no such exception.
+func (f *File) ExceptionDeadline(name string, params map[string]string) (time.Duration, bool) {
+	for _, x := range f.Exceptions {
+		if x.Action != name {
+			continue
+		}
+		d := time.Duration(x.RunnerDeadlineSeconds) * time.Second
+		if p := x.PlusParam; p != nil {
+			n, err := strconv.Atoi(params[p.Name])
+			if err != nil {
+				n = p.Default
+			}
+			d += time.Duration(max(n, 0)) * time.Second
+		}
+		return d, true
+	}
+	return 0, false
 }
 
 // Action is one declared action.
@@ -173,11 +212,14 @@ type Cond struct {
 
 // Variant is one way to run the action: its command and its decoding.
 type Variant struct {
-	Name           string `json:"name,omitempty"`
-	When           *Cond  `json:"when,omitempty"`
-	Command        []Word `json:"command"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	Decode         Decode `json:"decode"`
+	Name    string `json:"name,omitempty"`
+	When    *Cond  `json:"when,omitempty"`
+	Command []Word `json:"command"`
+	// RunnerDeadlineSeconds is the runner's bound on the command, not a
+	// product bound: at it the command's session is killed (what survives
+	// is abandoned and recorded) and the operation is unknown.
+	RunnerDeadlineSeconds int    `json:"runner_deadline_seconds"`
+	Decode                Decode `json:"decode"`
 	// Cite is where the product states the command and its flags.
 	Cite string `json:"cite"`
 }
@@ -272,9 +314,25 @@ func Parse(b []byte) (*File, error) {
 		}
 		seen[a.Action] = true
 	}
+	if len(f.Actions) > 0 {
+		for _, n := range names(f.RunnerIODir) {
+			if !strings.HasPrefix(n, "config.") || !keys[strings.TrimPrefix(n, "config.")] {
+				return nil, fmt.Errorf("actions: runner_io_dir names %q, not a config key", n)
+			}
+		}
+		if f.RunnerIODir == "" {
+			return nil, errors.New("actions: runner_io_dir is required")
+		}
+	}
 	for _, x := range f.Exceptions {
 		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
 			return nil, fmt.Errorf("actions: exception %q needs its action and why", x.Action)
+		}
+		if x.RunnerDeadlineSeconds <= 0 {
+			return nil, fmt.Errorf("actions: exception %s has no runner_deadline_seconds", x.Action)
+		}
+		if x.PlusParam != nil && x.PlusParam.Name == "" {
+			return nil, fmt.Errorf("actions: exception %s: plus_param needs a name", x.Action)
 		}
 		if seen[x.Action] {
 			return nil, fmt.Errorf("actions: %s is both declared and an exception", x.Action)
@@ -348,8 +406,8 @@ func (a *Action) check(keys map[string]bool) error {
 				return fmt.Errorf("%s: %w", at, err)
 			}
 		}
-		if len(v.Command) == 0 || strings.TrimSpace(v.Cite) == "" || v.TimeoutSeconds <= 0 {
-			return fmt.Errorf("%s: command, cite and a positive timeout_seconds are required", at)
+		if len(v.Command) == 0 || strings.TrimSpace(v.Cite) == "" || v.RunnerDeadlineSeconds <= 0 {
+			return fmt.Errorf("%s: command, cite and a positive runner_deadline_seconds are required", at)
 		}
 		for _, w := range v.Command {
 			for _, t := range append([]string{w.Text}, mapValues(w.JSON)...) {
@@ -459,6 +517,11 @@ type Executor struct {
 	Lookup LookupFunc
 	// Pause, when set, replaces a retry's declared pause (tests).
 	Pause func(declared time.Duration) time.Duration
+	// Deadline, when set, replaces a variant's declared runner deadline
+	// (tests).
+	Deadline func(declared time.Duration) time.Duration
+	// Poll is how often a detached command is polled (default 200ms).
+	Poll time.Duration
 }
 
 // Handlers returns one handler per declared action, by its name.
@@ -734,13 +797,22 @@ func (x *Executor) run(s *scope, a *Action, v *Variant, cmd, expect string) (str
 // once runs the command and decodes its answer; transport is true when the
 // command could not be run (or, for an HTTP answer, did not answer).
 func (x *Executor) once(s *scope, a *Action, v *Variant, cmd string) (string, map[string]any, bool) {
-	ctx, cancel := context.WithTimeout(s.ctx, time.Duration(v.TimeoutSeconds)*time.Second)
-	defer cancel()
-	run := s.node.Run
-	if a.AsRoot {
-		run = s.node.RunRoot
+	deadline := time.Duration(v.RunnerDeadlineSeconds) * time.Second
+	if x.Deadline != nil {
+		deadline = x.Deadline(deadline)
 	}
-	stdout, stderr, code, err := run(ctx, cmd)
+	poll := x.Poll
+	if poll <= 0 {
+		poll = 200 * time.Millisecond
+	}
+	dir, err := s.expand(x.File.RunnerIODir)
+	if err != nil {
+		return tr.OutcomeUnknown, map[string]any{"detail": err.Error()}, true
+	}
+	stdout, stderr, code, err := RunDetached(s.ctx, s.node, a.AsRoot, dir, cmd, deadline, poll)
+	if t, ok := AsDetached(err); ok {
+		return tr.OutcomeUnknown, TimeoutResult(t), true
+	}
 	d := v.Decode
 	switch d.Kind {
 	case "error_body":
@@ -935,4 +1007,14 @@ func FirstLine(s string) string {
 		s = s[:200]
 	}
 	return s
+}
+
+// TimeoutResult is the result of an operation its runner deadline ended:
+// the detail, and the processes that survived the kill, if any.
+func TimeoutResult(t *Detached) map[string]any {
+	res := map[string]any{"detail": t.Error()}
+	if len(t.Abandoned) > 0 {
+		res["abandoned"] = t.Abandoned
+	}
+	return res
 }
