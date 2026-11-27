@@ -177,7 +177,7 @@ func TestGenReplayRecordedOutcomeIsTheWorstCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) != 2 || steps[0].recorded != tr.OutcomeUnknown || steps[1].recorded != tr.OutcomeRefused || steps[1].op.Negative != "x" {
+	if len(steps) != 2 || steps[0].Recorded != tr.OutcomeUnknown || steps[1].Recorded != tr.OutcomeRefused || steps[1].Op.Negative != "x" {
 		t.Fatalf("steps %+v", steps)
 	}
 	f := &fakeProduct{failWrite: "3"}

@@ -1,7 +1,7 @@
 // Command m1-nightly runs one night of the block product's M1 random runs:
 // -parallel short runs at the same time plus one long run, each an
 // independent run of the M1 scenario (its own seed, ports, work dir and
-// cluster), then judges the night (packs/v3block Judge) and writes
+// cluster), then judges the night (randomrun.Judge) and writes
 // nightly.json. It exits 0 only if every run passed.
 //
 //	m1-nightly -swblock ./swblock -scenario scenarios/v3block/m1-random.yaml \
@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingqiu/sw-test-runner/packs/v3block"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 type envList []string
@@ -36,11 +36,11 @@ func (e *envList) String() string     { return strings.Join(*e, ",") }
 func (e *envList) Set(v string) error { *e = append(*e, v); return nil }
 
 // plan lays out the night's runs without running anything.
-func plan(nightly uint64, parallel, shortOps, longOps, portBase, portStep int) []v3block.NightRun {
-	seeds := v3block.NightlySeeds(nightly, parallel+1)
-	var runs []v3block.NightRun
+func plan(nightly uint64, parallel, shortOps, longOps, portBase, portStep int) []randomrun.NightRun {
+	seeds := randomrun.NightlySeeds(nightly, parallel+1)
+	var runs []randomrun.NightRun
 	for i := 0; i <= parallel; i++ {
-		r := v3block.NightRun{Index: i, Kind: "short", Seed: seeds[i], Ops: shortOps,
+		r := randomrun.NightRun{Index: i, Kind: "short", Seed: seeds[i], Ops: shortOps,
 			PortBase: portBase + i*portStep, Tag: fmt.Sprintf("n%dr%d", nightly, i)}
 		if i == parallel {
 			r.Kind, r.Ops = "long", longOps
@@ -51,7 +51,7 @@ func plan(nightly uint64, parallel, shortOps, longOps, portBase, portStep int) [
 }
 
 // argv is one run's swblock command line.
-func argv(swblock, scenario, results string, nightly uint64, r v3block.NightRun, env []string) []string {
+func argv(swblock, scenario, results string, nightly uint64, r randomrun.NightRun, env []string) []string {
 	a := []string{swblock, "run", "-results-dir", filepath.Join(results, fmt.Sprintf("run-%d", r.Index))}
 	for _, kv := range env {
 		a = append(a, "-env", kv)
@@ -117,7 +117,7 @@ func main() {
 	var wg sync.WaitGroup
 	for i := range runs {
 		wg.Add(1)
-		go func(r *v3block.NightRun) {
+		go func(r *randomrun.NightRun) {
 			defer wg.Done()
 			a := argv(*swblock, *scenario, *results, nightly, *r, env)
 			dir := filepath.Join(*results, fmt.Sprintf("run-%d", r.Index))
@@ -143,7 +143,7 @@ func main() {
 		}(&runs[i])
 	}
 	wg.Wait()
-	rep := v3block.Judge(nightly, runs)
+	rep := randomrun.Judge(nightly, runs)
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	if err := os.WriteFile(filepath.Join(*results, "nightly.json"), b, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "m1-nightly:", err)

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pingqiu/sw-test-runner/packs/v3block"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 func TestPlanGivesEachRunItsOwnSeedPortsAndTagAndAlwaysALongRun(t *testing.T) {
@@ -13,7 +13,7 @@ func TestPlanGivesEachRunItsOwnSeedPortsAndTagAndAlwaysALongRun(t *testing.T) {
 	if len(runs) != 5 || runs[4].Kind != "long" || runs[4].Ops != 10000 || runs[0].Ops != 2500 {
 		t.Fatalf("%+v", runs)
 	}
-	seeds := v3block.NightlySeeds(20261127, 5)
+	seeds := randomrun.NightlySeeds(20261127, 5)
 	ports, tags := map[int]bool{}, map[string]bool{}
 	for i, r := range runs {
 		if r.Seed != seeds[i] {

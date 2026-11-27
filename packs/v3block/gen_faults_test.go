@@ -10,114 +10,33 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 )
 
-var faultProcs = []string{"blockvolume:1", "blockmaster", "blockvolume:0"}
-
-func TestFaultScheduleSameSeedSameScheduleAndPinned(t *testing.T) {
-	a, err := NewFaultSchedule(8, 60, faultProcs, 0.08, 20)
+// The schedule itself is generic (randomrun, with its pin and red
+// controls); the block names its processes. The same pinned schedule over
+// the block's process names, and the block's name check in both directions.
+func TestFaultScheduleOverBlockProcesses(t *testing.T) {
+	a, err := NewFaultSchedule(8, 60, []string{"blockvolume:1", "blockmaster", "blockvolume:0"}, 0.08, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := NewFaultSchedule(8, 60, []string{"blockmaster", "blockvolume:0", "blockvolume:1"}, 0.08, 20)
-	if !reflect.DeepEqual(a, b) {
-		t.Fatal("the same seed (processes in another order) gave two schedules")
-	}
-	// Pinned: a change to the derivation changes every recorded run's schedule,
-	// so it must come with a new GenVersionFaults.
 	want := []FaultEvent{
-		{24, FaultKill, "blockvolume:0"}, {29, FaultRestart, "blockvolume:0"},
-		{34, FaultKill, "blockvolume:0"}, {39, FaultRestart, "blockvolume:0"},
-		{50, FaultKill, "blockmaster"}, {57, FaultRestart, "blockmaster"},
+		{AfterOp: 24, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 29, Action: FaultRestart, Process: "blockvolume:0"},
+		{AfterOp: 34, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 39, Action: FaultRestart, Process: "blockvolume:0"},
+		{AfterOp: 50, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 57, Action: FaultRestart, Process: "blockmaster"},
 	}
-	if !reflect.DeepEqual(a.Events, want) {
+	if !reflect.DeepEqual(a.Events, want) || CheckFaultSchedule(a.Events, 60, 20) != nil {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
 	}
-	c, _ := NewFaultSchedule(9, 60, faultProcs, 0.08, 20)
-	if reflect.DeepEqual(a.Events, c.Events) {
-		t.Fatal("another seed gave the same schedule")
-	}
-	if off, err := NewFaultSchedule(7, 60, nil, 0, 20); err != nil || len(off.Events) != 0 {
-		t.Fatalf("rate 0: %v %v", off, err)
-	}
-}
-
-func TestFaultScheduleEveryKillRestartedWithinTheBoundOneDownAtATime(t *testing.T) {
-	kills := 0
-	for seed := uint64(1); seed <= 200; seed++ {
-		for _, rate := range []float64{0.01, 0.1, 0.5, 1} {
-			for _, within := range []int{1, 5, 20} {
-				ops := 20 + int(seed%7)*30
-				s, err := NewFaultSchedule(seed, ops, faultProcs, rate, within)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := CheckFaultSchedule(s.Events, ops, within); err != nil {
-					t.Fatalf("seed %d rate %v within %d: %v\n%v", seed, rate, within, err, s.Events)
-				}
-				// The same rules, stated directly here, independent of the checker.
-				down := map[string]int{}
-				for _, e := range s.Events {
-					if e.Action == FaultKill {
-						if len(down) != 0 {
-							t.Fatalf("seed %d: %s killed while %v down", seed, e.Process, down)
-						}
-						down[e.Process] = e.AfterOp
-						kills++
-					} else {
-						k, ok := down[e.Process]
-						if !ok || e.AfterOp <= k || e.AfterOp-k > within || e.AfterOp > ops {
-							t.Fatalf("seed %d: restart %+v (killed after %d, ok %v)", seed, e, k, ok)
-						}
-						delete(down, e.Process)
-					}
-				}
-				if len(down) != 0 {
-					t.Fatalf("seed %d: never restarted %v", seed, down)
-				}
-			}
+	for _, p := range []string{"blockvolume", "blockvolume:x", "blockvolume:01", "blockvolume:-1", "master"} {
+		if ValidFaultProcess(p) {
+			t.Errorf("process %q accepted", p)
+		}
+		if _, err := NewFaultSchedule(1, 10, []string{p}, 0.1, 20); err == nil {
+			t.Errorf("a schedule over %q accepted", p)
 		}
 	}
-	if kills < 1000 {
-		t.Fatalf("only %d kills over the sweep", kills)
-	}
-	for name, f := range map[string]func() error{
-		"rate above 1":    func() error { _, err := NewFaultSchedule(1, 10, faultProcs, 1.5, 20); return err },
-		"bound 0":         func() error { _, err := NewFaultSchedule(1, 10, faultProcs, 0.1, 0); return err },
-		"no processes":    func() error { _, err := NewFaultSchedule(1, 10, nil, 0.1, 20); return err },
-		"unknown process": func() error { _, err := NewFaultSchedule(1, 10, []string{"blockvolume"}, 0.1, 20); return err },
-		"repeated process": func() error {
-			_, err := NewFaultSchedule(1, 10, []string{"blockmaster", "blockmaster"}, 0.1, 20)
-			return err
-		},
-	} {
-		if f() == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-}
-
-// Red controls for CheckFaultSchedule: each seeded defect must be caught.
-func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
-	k := func(n int, p string) FaultEvent { return FaultEvent{n, FaultKill, p} }
-	r := func(n int, p string) FaultEvent { return FaultEvent{n, FaultRestart, p} }
-	good := []FaultEvent{k(2, "blockmaster"), r(5, "blockmaster"), k(5, "blockvolume:0"), r(25, "blockvolume:0")}
-	if err := CheckFaultSchedule(good, 30, 20); err != nil {
-		t.Fatalf("green: %v", err)
-	}
-	for name, ev := range map[string][]FaultEvent{
-		"kill never restarted":     {k(2, "blockmaster")},
-		"master and volume down":   {k(2, "blockmaster"), k(3, "blockvolume:0"), r(4, "blockvolume:0"), r(5, "blockmaster")},
-		"restart beyond the bound": {k(2, "blockmaster"), r(23, "blockmaster")},
-		"restart with no op down":  {k(2, "blockmaster"), r(2, "blockmaster")},
-		"restart of another":       {k(2, "blockmaster"), r(4, "blockvolume:0")},
-		"out of order":             {k(9, "blockmaster"), r(12, "blockmaster"), k(3, "blockvolume:0"), r(4, "blockvolume:0")},
-		"after the last op":        {k(29, "blockmaster"), r(31, "blockmaster")},
-		"before the first op":      {k(0, "blockmaster"), r(1, "blockmaster")},
-		"unknown process":          {k(2, "blockvolume:x"), r(3, "blockvolume:x")},
-		"unknown action":           {{2, "pause", "blockmaster"}},
-	} {
-		if err := CheckFaultSchedule(ev, 30, 20); err == nil {
-			t.Errorf("red control %q not caught", name)
-		}
+	bad := []FaultEvent{{AfterOp: 2, Action: FaultKill, Process: "blockvolume:x"}, {AfterOp: 3, Action: FaultRestart, Process: "blockvolume:x"}}
+	if CheckFaultSchedule(bad, 30, 20) == nil {
+		t.Error("a recorded schedule over an unknown process passed")
 	}
 }
 
@@ -263,8 +182,8 @@ func TestGenRunWithFaultsKillsRestartsAndResolvesEveryUnknown(t *testing.T) {
 		t.Fatalf("header %+v, then %+v", recs[0], recs[1])
 	}
 	want, _ := NewFaultSchedule(5, 300, []string{"blockmaster", "blockvolume:0"}, 0.05, DefaultRestartWithin)
-	if !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.record())) || len(want.Events) < 4 {
-		t.Fatalf("fault_schedule %v, want %v", recs[1].Result, want.record())
+	if !reflect.DeepEqual(recs[1].Result, roundTrip(t, want.Record())) || len(want.Events) < 4 {
+		t.Fatalf("fault_schedule %v, want %v", recs[1].Result, want.Record())
 	}
 	// Each event ran after its operation: the last gen_step before it has its after_op.
 	lastStep, ev := 0, 0
