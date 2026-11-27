@@ -61,6 +61,11 @@ type opEnv struct {
 	connect                  guestConnect
 	// node is the bounded node, for the abandoned-child watcher.
 	node runner
+	// connectMismatch is set when a connect's effective values differ from
+	// the declared ones: the operation then fails the run.
+	connectMismatch *string
+	// lastReadback is the latest connect read-back of this operation.
+	lastReadback *map[string]any
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -183,6 +188,7 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
 	}
 	e.deadline, e.deviceDeadline, e.ioDir, e.connect, e.node = deadline, deviceDeadline(), e.root+"/.runner-io", conn, node
+	e.connectMismatch, e.lastReadback = new(string), new(map[string]any)
 	return node, e, nil
 }
 
@@ -407,7 +413,8 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	h := v.Hosts[v.Cur]
 	defer saveVolume(actx, v)
 	// The answer sets the volume's intended state (faults.go lifecycle).
-	return lifecycle(v, intentHeld)(recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
+	defer firstConnect(actx, e)
+	out, err := lifecycle(v, intentHeld)(recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
 		if v.LayoutID == "" {
 			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
 			if err != nil {
@@ -421,6 +428,12 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		}
 		return e.startHolder(ctx, node, v, h, blocks, bound)
 	}))
+	// A connect whose effective values differ from the declared ones fails
+	// the run: nothing after it could count as evidence.
+	if err == nil && e.connectMismatch != nil && *e.connectMismatch != "" {
+		return nil, fmt.Errorf("v3_op_attach: %s: the run stops before any other operation", *e.connectMismatch)
+	}
+	return out, err
 }
 
 func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
@@ -522,6 +535,10 @@ func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsH
 						return tr.OutcomeUnknown, res
 					}
 					res["device"] = dev
+					if why := e.checkConnect(ctx, node, v, res); why != "" {
+						res["detail"] = why
+						return tr.OutcomeUnknown, res
+					}
 					return tr.OutcomeOK, res
 				}
 			}

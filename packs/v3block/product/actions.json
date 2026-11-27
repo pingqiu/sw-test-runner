@@ -337,15 +337,19 @@
       "about": "A variant is DECLARED here, named, with its source and evidence false; a run selects one by name with the run var select_var (a scenario env value), and empty selects the default. Its options go into the kernel's fabrics connect string under the kernel's option names, in the order of options (the runner connects through /dev/nvme-fabrics, not nvme-cli, whose flags are --ctrl-loss-tmo, --reconnect-delay, --fast_io_fail_tmo, --keep-alive-tmo). A variant's option names may be written with _ or -; an unknown name, a value that is not an integer, or a name given twice refuses the description at load. A variant is named 'guest connect variant: <values>' in the run header and in every attach, is never release evidence, and no checker changes with it.",
       "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
       "select_var": "guest_connect_variant",
-      "default": {"name": "plain", "evidence": true,
-        "cite": "the product's CSI driver connects with no timeout option: core/csi/linux_util.go:318 (nvme connect -t -a -s -n). Since product change #662 the documented manual connect carries the host connect settings (docs/standalone-deployment.md:463-464, docs/operator-guide.md:252-265): which connect counts as release evidence awaits a ruling"},
+      "default": {"name": "documented", "evidence": true, "deployment": "standalone",
+        "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2},
+        "cite": "docs/standalone-deployment.md:463-464 (the documented connect: sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n \"$NQN\" --ctrl-loss-tmo=180 --reconnect-delay=2), docs/operator-guide.md:252-265 (Host connect settings: --ctrl-loss-tmo 180, --reconnect-delay 2, --fast_io_fail_tmo left off)",
+        "why": "test what ships: the connect the standalone deployment's own documented procedure performs. A test (the page comparison) keeps these options equal to the page's command at the pin"},
+      "readback": {"ctrl_loss_tmo": "ctrl_loss_tmo", "reconnect_delay": "reconnect_delay", "fast_io_fail_tmo": "fast_io_fail_tmo", "keep_alive_tmo": "kato"},
+      "readback_about": "after each connect the runner reads the controller's effective values from /sys/class/nvme/<ctrl>/<file> (these files, where present) and records them in the attach and, at the run's first connect, in a guest_connect record; a declared option the kernel does not hold, or cannot show, fails the run before any other operation",
       "variants": [
+        {"name": "csi_plain", "options": {}, "evidence": false,
+         "source": "core/csi/linux_util.go:318 (the CSI node's nvme connect -t -a -s -n: no timeout option, the kernel's defaults)",
+         "why": "the Kubernetes deployment's connect: the evidence configuration of the CSI row (M4) until the product changes it; in a standalone scenario a declared variant, never evidence"},
         {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
          "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
-         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."},
-        {"name": "host_connect_settings", "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2}, "evidence": false,
-         "source": "docs/operator-guide.md:252-265 (Host connect settings: ctrl-loss-tmo 180, reconnect-delay 2, fast_io_fail_tmo left off), docs/standalone-deployment.md:463-464 (product change #662, shipped)",
-         "why": "measures what those documented values give a guest while its holder is away (scenarios/v3block/connect-settings.yaml); the product's documented connect since #662; it stays evidence false until the ruling on which connect is release evidence"}
+         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the documented connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."}
       ]
     }
   }
