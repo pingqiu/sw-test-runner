@@ -17,8 +17,8 @@
  "recovery_note": "A holder is healthy again by max(kill completion + regrant, restart completion) + start_wait. The pages state no restart bound for the master: its restart is not judged.",
  "master_outage": {"max_seconds": 10, "cite": "docs/standalone-deployment.md:670",
    "what": "volumes already serving keep serving through a master restart this short: each holder renews every 10 s or less and may serve until 20 s after its last renewal, so a master that answers again within 10 s interrupts nothing. A longer outage is not judged by MO (it is fail-closed, with its own recovery bound)."},
- "holder_unit": {"restart_sec": 5, "no_restart_status": [0, 78], "cite": "deploy/systemd/sw-blockvolume.service:72-74",
-   "what": "the product's unit for blockvolume: Restart=on-failure, RestartPreventExitStatus=78, RestartSec=5s. The runner plays it for every holder it launched: a holder of a held volume that exits with any other status is started again, with its own command line, 5 s after the exit. A holder the runner killed itself is left to the fault schedule's restart (systemd would restart a SIGKILLed unit too)."},
+ "holder_unit": {"file": "deploy/systemd/sw-blockvolume.service",
+   "what": "the product's shipped unit for blockvolume. The runner plays it for every holder it launched and reads its policy (Restart, RestartPreventExitStatus, RestartSec, TimeoutStopSec) from this file at the product commit the run built, never from a copy here; if the file cannot be read or parsed, it refuses to emulate. A holder the runner killed itself is left to the fault schedule's restart."},
  "fault_targets": [
   {"name": "blockmaster", "role": "master", "unit": "process", "cite": "cmd/blockmaster/main.go:1-2",
    "what": "the block master daemon; a kill of it reaches no holder, so no volume's data path"},

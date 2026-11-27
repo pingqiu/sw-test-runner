@@ -81,7 +81,14 @@ func genRunCtx(t *testing.T) (*tr.ActionContext, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() }) // an open file blocks the temp dir's removal on Windows
-	return &tr.ActionContext{History: h, Bundle: &tr.RunBundle{Dir: dir}, Vars: map[string]string{}, Log: func(string, ...interface{}) {}}, p
+	// A fault run reads the holder unit's policy from the product tree; here
+	// it is the fixture's, as if already read.
+	pol, err := parseUnit(testUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(pol)
+	return &tr.ActionContext{History: h, Bundle: &tr.RunBundle{Dir: dir}, Vars: map[string]string{unitPolicyVar: string(b)}, Log: func(string, ...interface{}) {}}, p
 }
 
 func genAct(ops string) tr.Action {
