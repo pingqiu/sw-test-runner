@@ -640,7 +640,9 @@ def c7(recs):
     seen = set()
     for r in recs:
         vol = r.get('volume')
-        if r['kind'] != 'observe' or vol not in deleted or vol in seen or r['seq'] < deleted[vol]:
+        # An observation of the volume, not a generator record (gen_step and
+        # the like are observe records that name a volume too).
+        if r['kind'] != 'observe' or r.get('verb') != 'observe' or vol not in deleted or vol in seen or r['seq'] < deleted[vol]:
             continue
         seen.add(vol)
         # The product's shape of a deleted volume (its tombstone).

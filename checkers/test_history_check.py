@@ -485,6 +485,16 @@ class C7(unittest.TestCase):
     def test_the_real_run_passes(self):
         self.assertEqual(verdicts(load())['C7'], 'PASS', hc.check(dump(load()))['C7'])
 
+    def test_a_generator_record_naming_the_volume_is_not_its_observation(self):
+        # Host run 5: a gen_step for the next tail step named the deleted
+        # volume before its observation; C7 must judge the observation.
+        recs = load()
+        at = ops(recs, 'delete', 'v1')[0][1]['seq']
+        i = next(i for i, r in enumerate(recs) if r['seq'] > at)
+        recs.insert(i, {'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'gen_step', 'volume': 'v1',
+                        'mono_ns': recs[i - 1]['mono_ns'], 'result': {'action': 'v3_op_observe', 'params': {'volume': 'v1'}}})
+        self.assertEqual(verdicts(renumber(recs))['C7'], 'PASS', hc.check(dump(renumber(recs)))['C7'])
+
     def test_a_pool_object_left_behind(self):
         recs = load()
         self.after_delete(recs, 'v1')['result']['files'].append('pool/0/0-' + 'a' * 64)
