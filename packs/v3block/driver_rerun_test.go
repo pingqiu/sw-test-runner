@@ -3,6 +3,7 @@ package v3block
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +105,40 @@ func TestRerunSetIsTheDeclarations(t *testing.T) {
 	}
 	if blockActions.RequestArg("v3_op_snapshot") != "request" || blockActions.RequestArg("v3_op_delete") != "request" {
 		t.Fatal("request args")
+	}
+}
+
+// The COUNT ends a normal run, never the guard: each declared guard
+// (within_param's default) is at least count x (period + the action's
+// runner deadline), and with the slowest attempts the count allows the
+// last one is still within it (Rerun answers max_attempts, not guard).
+func TestRerunGuardIsAboveTheCount(t *testing.T) {
+	for _, a := range blockActions.File.Actions {
+		r := a.Retry
+		if r == nil || r.WithinParam == "" {
+			continue
+		}
+		guard := -1
+		for _, p := range a.Params {
+			if p.Name == r.WithinParam {
+				guard, _ = strconv.Atoi(p.Default)
+			}
+		}
+		deadline := 0
+		for _, v := range a.Variants {
+			deadline = max(deadline, v.RunnerDeadlineSeconds)
+		}
+		if want := r.MaxAttempts * (r.EverySeconds + deadline); guard < want {
+			t.Errorf("%s: guard %s default %d is below count x (period + deadline) = %d", a.Action, r.WithinParam, guard, want)
+		}
+		params := map[string]string{"volume": "v1"}
+		refused := map[string]string{"value": tr.OutcomeRefused, "detail": r.WhileCode + ": " + r.WhileMessageContains}
+		slowest := time.Duration((r.MaxAttempts-1)*r.EverySeconds+r.MaxAttempts*deadline) * time.Second
+		if again, _, why := blockActions.Rerun(a.Action, params, r.MaxAttempts-1, slowest, refused); !again {
+			t.Errorf("%s: the guard ended attempt %d (%s) before the count", a.Action, r.MaxAttempts-1, why)
+		}
+		if _, _, why := blockActions.Rerun(a.Action, params, r.MaxAttempts, slowest, refused); why != "max_attempts" {
+			t.Errorf("%s: attempt %d ended by %q, not the count", a.Action, r.MaxAttempts, why)
+		}
 	}
 }
