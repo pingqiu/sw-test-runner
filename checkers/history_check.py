@@ -112,9 +112,11 @@ code is 0 only when every checker passes.
       on an unknown no clean observation places (none after the point, or the
       volume or block changed in between), on a run whose last healthy
       record is not healthy, and on a kill with no healthy point after it.
-      A volume's intended state (product LIFECYCLE): held after an ok attach
-      or move, not held after an ok stop or delete, unsettled after one of
-      them answered unknown. An unknown lifecycle operation is resolved by
+      A volume's intended state (product LIFECYCLE): held after an ok
+      attach; not held after an ok stop, move (a hand-off: nothing serves
+      the volume until the next attach) or delete; unsettled after one of
+      them answered unknown. An unknown attach, stop or move (product
+      NEEDS_SETTLED; a delete has its own observation rule) is resolved by
       a `settled` observation of its volume (counted once) within the
       recovery deadline max(the latest kill reaching the volume before its
       end + regrant, its end) + start_wait, or its end + regrant +
@@ -135,7 +137,8 @@ code is 0 only when every checker passes.
       max_seconds long is judged, a longer one (or one never restarted) is
       NOT JUDGED and listed. Inside it: every write invoked is answered ok;
       every single-look healthy record (result.look "single", one per look)
-      shows no volume not serving; and every holder identity such a look
+      shows no volume intended to be held (or with no lifecycle record) not
+      serving, the others noted; and every holder identity such a look
       shows equals the last one recorded before the kill. A judged window
       with no write or no look is UNKNOWN ("short master outage not exercised
       in window"). Reported: "short master outages judged: <n>". FAIL (not
@@ -1266,7 +1269,7 @@ def c6(recs):
     for inv, comp in unknowns:
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
         settled_ok = False
-        if inv['verb'] in PRODUCT.LIFECYCLE:
+        if inv['verb'] in PRODUCT.NEEDS_SETTLED:
             # An unknown lifecycle operation is resolved by the settled record;
             # a verb with its own placement rule is still checked by it below
             # for a third state.
@@ -1341,7 +1344,9 @@ def mo(recs):
     kill of the master's completion to its ok restart's completion, when the
     window is at most MASTER_OUTAGE seconds on the history's clock, (a) every
     write invoked in it is answered ok, (b) every single-look healthy record
-    in it (result.look == "single") shows no volume not serving, (c) every
+    in it (result.look == "single") shows no volume intended to be held not
+    serving (product intended_states; a volume with no lifecycle record
+    counts as held), (c) every
     holder identity such a look shows equals the volume's last identity
     recorded before the kill. A window with no write or no look is UNKNOWN; a
     longer window, or a kill never restarted, is not judged and listed. FAIL
@@ -1382,7 +1387,17 @@ def mo(recs):
             if ns is None:
                 f.append('%s: look seq %d does not say which volumes serve' % (name, r['seq']))
             elif ns:
-                f.append('%s: look seq %d shows not serving: %s' % (name, r['seq'], ', '.join(ns)))
+                # Only a volume intended to be held must serve: one stopped,
+                # moved away or deleted is not held, and one unsettled is
+                # placed by C6, not here.
+                intent = PRODUCT.intended_states(recs, r['seq'])
+                must = [v for v in ns if intent.get(v, 'held') == 'held']
+                rest = [v for v in ns if v not in must]
+                if must:
+                    f.append('%s: look seq %d shows not serving: %s' % (name, r['seq'], ', '.join(must)))
+                if rest:
+                    notes.append('%s: look seq %d: not serving, not intended to be held: %s' % (
+                        name, r['seq'], ', '.join('%s (%s)' % (v, intent[v]) for v in rest)))
             for vol, ident in sorted(PRODUCT.holder_identity(r).items()):
                 if vol not in before:
                     notes.append('%s: look seq %d: no identity of the holder of %s recorded before the kill' % (name, r['seq'], vol))

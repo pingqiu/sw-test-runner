@@ -1221,32 +1221,30 @@ class C6(unittest.TestCase):
 
     # deletes
     def test_an_unknown_delete_placed_by_status_and_listing_passes(self):
-        # a lifecycle unknown also needs its settled record (the settled rule)
-        for after, state in ((live(['HEAD', 'VOLUME'], state='deleted'), 'not_held'), (live(['HEAD', 'VOLUME', ROOT1]), 'held')):
-            v = self.assert_c6('PASS', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
-                               ('settled', 'v1', state), ('obs', 'v1', after))
-            self.assertIn('unknowns resolved: 1', v['findings'], 'counted once, not by both rules')
+        # a delete is placed by its observation alone: no settled record
+        for after in (live(['HEAD', 'VOLUME'], state='deleted'), live(['HEAD', 'VOLUME', ROOT1])):
+            v = self.assert_c6('PASS', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after))
+            self.assertIn('unknowns resolved: 1', v['findings'])
 
     def test_red_an_unknown_delete_stuck_half_way(self):
-        # settled in time, yet the observation shows a third state: still a FAIL
         for after, why in ((live(['HEAD', 'VOLUME'], state='deleting'), 'state deleting'),
                            (live(['HEAD', 'VOLUME', ROOT1], state='deleted'), 'deleted but'),
                            ({'show_error': {'exit': 1, 'code': 'volume_not_found'}}, 'absent instead')):
-            self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True),
-                           ('settled', 'v1', 'not_held'), ('obs', 'v1', after), contains=why)
+            self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), KILL, RESTART, ('healthy', True), ('obs', 'v1', after),
+                           contains=why)
 
-    def test_red_an_unknown_delete_neither_settled_nor_observed(self):
+    def test_red_an_unknown_delete_never_observed(self):
         self.assert_c6('FAIL', ('delete', 'v1', {'request': 'd1'}, 'unknown', {}), ('obs', 'v1', live(state='deleted')), KILL, RESTART,
-                       ('healthy', True), contains='unsettled: seq 1 delete v1: never settled')
+                       ('healthy', True), contains='no observation of v1 after healthy point')
 
     # moves
     def test_an_unknown_move_placed_by_holder_and_epoch_passes(self):
         for after in (live(holder='b-v1/r1', epoch=2), live(holder='a-v1/r1', epoch=1)):
-            self.assert_c6('PASS', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'held'), ('obs', 'v1', after))
+            self.assert_c6('PASS', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'not_held'), ('obs', 'v1', after))
 
     def test_red_an_unknown_move_in_a_third_state(self):
         for after in (live(holder='b-v1/r1', epoch=1), live(holder='a-v1/r1', epoch=2)):
-            self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'held'),
+            self.assert_c6('FAIL', ('move', 'v1', MOVE, 'unknown', {}), KILL, RESTART, ('healthy', True), ('settled', 'v1', 'not_held'),
                            ('obs', 'v1', after), contains='third state')
 
     # settled (lifecycle unknowns)
@@ -1465,7 +1463,7 @@ HOLDERS = {'v1': {'pid': 101, 'start': 's101'}, 'v2': {'pid': 102, 'start': 's10
 MRESTART = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
 
 
-def mo_history(window, secs=5, holders=HOLDERS):
+def mo_history(window, secs=5, holders=HOLDERS, pre=()):
     """A short master outage: a healthy record naming the holders, an ok
     master kill, the window's steps, the master's ok restart `secs` seconds
     after the kill's completion, a healthy point. Window steps: an operation
@@ -1489,6 +1487,8 @@ def mo_history(window, secs=5, holders=HOLDERS):
 
     s = 10**9
     healthy(True, [], holders)
+    for st in pre:   # operations before the kill
+        op(*st)
     op(*MKILL)
     kill_c = recs[-1]
     for st in window:
@@ -1576,6 +1576,23 @@ class MO(unittest.TestCase):
         v = hc.check(dump(recs))['MO']
         self.assertEqual(v['verdict'], 'UNKNOWN', v)
         self.assertTrue(any('no ok restart of blockmaster after it' in x for x in v['findings']), v)
+
+    def test_lifecycle_an_ok_move_is_not_held(self):
+        self.assertEqual(hc.PRODUCT.LIFECYCLE, {'attach': 'held', 'stop': 'not_held', 'move': 'not_held', 'delete': 'not_held'})
+        self.assertNotIn('delete', hc.PRODUCT.NEEDS_SETTLED)
+        recs = hc.read_history(dump(mo_history(self.GOOD, pre=[('attach', 'v2', {}, 'ok', {}), ('move', 'v2', MOVE, 'ok', {})])))
+        self.assertEqual(hc.PRODUCT.intended_states(recs, len(recs))['v2'], 'not_held')
+
+    def test_red_an_ok_move_then_nothing_serving_the_volume_is_healthy(self):
+        # v2 was moved away (a hand-off): nothing serves it until the next
+        # attach, so a look showing it not serving is no failure.
+        one = {'v1': HOLDERS['v1']}
+        w = [('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {}), ('look', ['v2'], one)]
+        v = self.assert_mo('PASS', w, pre=[('attach', 'v2', {}, 'ok', {}), ('move', 'v2', MOVE, 'ok', {})],
+                           contains='not serving, not intended to be held: v2 (not_held)')
+        self.assertIn('short master outages judged: 1', v['findings'])
+        # the same look after an ok attach (held) is a failure
+        self.assert_mo('FAIL', w, pre=[('move', 'v2', MOVE, 'ok', {}), ('attach', 'v2', {}, 'ok', {})], contains='shows not serving: v2')
 
     def test_no_master_kill_is_not_exercised(self):
         v = hc.check(dump(synth(KILL, RESTART)))['MO']

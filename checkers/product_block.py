@@ -22,6 +22,8 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   holder_identity(healthy_obs)  {volume: (pid, start)} of each holder, from a healthy record
   not_serving(healthy_obs)      the volumes a healthy record shows not serving, or None
   LIFECYCLE                     verb -> the intended state (held, not_held) its ok answer sets
+  NEEDS_SETTLED                 of those, the verbs whose unknown a settled record resolves
+  intended_states(recs, seq)    {volume: held | not_held | unsettled} before a record
   third_state(healthy_obs)      [(volume, why)] of volumes in neither consistent state
   settled(obs)                  (volume, state, evidence) of a settled record, else None
 """
@@ -323,10 +325,42 @@ def not_serving(healthy_obs):
 
 
 # The intended state a lifecycle operation answered ok sets on its volume: an
-# attach or a move leaves it held, a stop or a delete not held. One answered
-# unknown leaves the volume unsettled until a settled record places it.
-LIFECYCLE = {'attach': 'held', 'move': 'held', 'stop': 'not_held', 'delete': 'not_held'}
+# attach leaves it held; a stop, a move or a delete not held. A move only
+# hands the volume off (the source stops, the clean move is recorded) and
+# nothing serves it until the next attach on the target host: the model's
+# "moved" state is unattached. One answered unknown leaves the volume
+# unsettled until a settled record places it.
+LIFECYCLE = {'attach': 'held', 'stop': 'not_held', 'move': 'not_held', 'delete': 'not_held'}
+# Of those, the verbs whose unknown is resolved by a settled record. A delete
+# is placed by its own observation rule; the runner writes no settled record
+# for it.
+NEEDS_SETTLED = ('attach', 'stop', 'move')
 SETTLED_STATES = ('held', 'not_held')
+
+
+def intended_states(recs, upto_seq):
+    """{volume: 'held' | 'not_held' | 'unsettled'} as the records before seq
+    `upto_seq` leave it: a lifecycle operation's completion (ok: its state;
+    unknown: unsettled; refused: no change), and a settled record (its
+    state). A volume with neither is absent."""
+    out, inv_of = {}, {}
+    for r in recs:
+        if r['seq'] >= upto_seq:
+            break
+        if r['kind'] == 'invoke':
+            inv_of[r['seq']] = r
+        elif r['kind'] == 'complete':
+            inv = inv_of.get(r['of'])
+            st = LIFECYCLE.get(inv['verb']) if inv else None
+            if st is not None and r['outcome'] == 'ok':
+                out[inv.get('volume')] = st
+            elif st is not None and r['outcome'] == 'unknown':
+                out[inv.get('volume')] = 'unsettled'
+        else:
+            got = settled(r)
+            if got is not None:
+                out[got[0]] = got[1]
+    return out
 
 
 def third_state(healthy_obs):
