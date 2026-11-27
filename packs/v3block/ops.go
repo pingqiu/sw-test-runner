@@ -870,43 +870,6 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	})
 }
 
-// v3OpObserve records what the product shows of the volume: HEAD from `ops
-// chunk show` (or its error code), the authority line from `ops workspace
-// show`, and every file under the volume's directory in the filer. An
-// observation is a fact for the checkers, never a verdict.
-func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_observe")
-	if err != nil {
-		return nil, err
-	}
-	// An observation has no outcome; its runner deadline ends its commands.
-	ctx, cancel := context.WithTimeout(ctx, e.deadline)
-	defer cancel()
-	res := map[string]any{}
-	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
-		shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
-	observeChunkShow(res, stdout, code, err)
-	if out, _, c, e2 := e.workspace(ctx, node, v.Name, "show"); e2 == nil {
-		res["workspace"] = map[string]any{"exit": c, "text": firstLines(out, 12)}
-	}
-	// The volume's directories in the filer, whatever its layout: a name that
-	// never existed is observed as having none.
-	if dirs, why := listDirs(ctx, node, e.filer, e.chunkPath, v.Name+"-"); why != "" {
-		res["dirs_error"] = why
-	} else {
-		res["dirs"] = dirs
-	}
-	if v.LayoutID != "" {
-		files, why := listFiles(ctx, node, e.filer, e.chunkPath, v.Name+"-"+v.LayoutID[:8])
-		if why != "" {
-			res["listing_error"] = why
-		} else {
-			res["files"] = files
-		}
-	}
-	return map[string]string{"value": "observed"}, actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: e.client, Volume: v.Name, Verb: "observe", Result: res})
-}
-
 // observeChunkShow records the answer of `ops chunk show`: HEAD's generation,
 // epoch, holder and state as "head", and the names of HEAD's snapshots map
 // (sorted; empty when HEAD holds none) as "snapshots". The command prints

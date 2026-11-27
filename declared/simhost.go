@@ -91,7 +91,7 @@ func (h *SimHost) do(ctx context.Context, cmd string, root bool) (string, string
 		select {
 		case <-j.done:
 			if j.err != nil {
-				return "", "", -1, j.err
+				return j.out, j.errOut, j.code, j.err
 			}
 		case <-time.After(wait):
 		}

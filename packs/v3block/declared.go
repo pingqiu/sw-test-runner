@@ -140,6 +140,9 @@ func runnerDeadline(name string, params map[string]string) (time.Duration, error
 			for _, v := range a.Variants {
 				d = max(d, time.Duration(v.RunnerDeadlineSeconds)*time.Second)
 			}
+			for _, st := range a.Steps {
+				d += time.Duration(st.RunnerDeadlineSeconds) * time.Second
+			}
 			return d, nil
 		}
 	}

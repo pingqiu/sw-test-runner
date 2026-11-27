@@ -24,9 +24,17 @@ func TestActionsDescription(t *testing.T) {
 	for _, x := range blockActions.File.Exceptions {
 		excepted[x.Action] = true
 	}
+	setup := map[string]bool{}
+	for _, x := range blockActions.File.RunnerSetup {
+		setup[x.Action] = true
+		if !r.Has(x.Action) {
+			t.Errorf("runner setup %s is not registered", x.Action)
+		}
+	}
 	var missing []string
 	for _, name := range r.List() {
-		if strings.HasPrefix(name, "v3_op_") && name != "v3_op_spec" && !declaredNames[name] && !excepted[name] {
+		typed := strings.HasPrefix(name, "v3_op_") || name == "v3_run_plan" || name == "v3_history_end"
+		if typed && !declaredNames[name] && !excepted[name] && !setup[name] {
 			missing = append(missing, name)
 		}
 	}
@@ -59,6 +67,11 @@ func TestActionsDescription(t *testing.T) {
 		}
 		if a.Op != opIDs[a.Verb] || (ops[a.Action] != "" && ops[a.Action] != a.Op) {
 			t.Errorf("%s: op %q; opIDs %q, operations.json %q", a.Action, a.Op, opIDs[a.Verb], ops[a.Action])
+		}
+		for _, st := range a.Steps {
+			if !strings.Contains(st.Cite, ".go:") {
+				t.Errorf("%s: step %q cites no source line: %q", a.Action, st.Name, st.Cite)
+			}
 		}
 		for _, v := range a.Variants {
 			if !strings.Contains(v.Cite, ".go:") {

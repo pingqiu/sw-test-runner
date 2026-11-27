@@ -66,7 +66,7 @@ const desc = head + `
        "ok_length": {"id": 4}, "result": {"ns": "ns"}, "result_ok": {"id": "id"}, "detail": "{{answer.error}} {{stderr}}"}}],
    "on_ok_set": {"volume.id": "{{answer.id}}"}}
  ],
- "exceptions": [{"action": "p_attach", "why": "a process start", "runner_deadline_seconds": 30}]}`
+ "exceptions": [{"action": "p_attach", "why": "a process start", "declarable_with": "a process step", "runner_deadline_seconds": 30}]}`
 
 func lookup(action, path, code, message string) string {
 	if code == "nope" || (code == "gone" && strings.Contains(message, "before")) {
@@ -189,16 +189,18 @@ func TestParseRedControls(t *testing.T) {
 		t.Fatalf("green twin: %v", err)
 	}
 	for name, bad := range map[string][2]string{
-		"no cite":                             {`"cite": "x.go:1"`, `"cite": " "`},
-		"no timeout":                          {`"runner_deadline_seconds": 1`, `"runner_deadline_seconds": 0`},
-		"undefined name":                      {`"{{p}}"]`, `"{{q}}"]`},
-		"unknown decode":                      {`"kind": "error_body"`, `"kind": "grep"`},
-		"no path":                             {`"path": "x"`, `"path": ""`},
-		"unknown field":                       {`"op": "M.A"`, `"op": "M.A", "shell": "x"`},
-		"declared and excepted":               {`"exceptions": []`, `"exceptions": [{"action": "a", "why": "w", "runner_deadline_seconds": 5}]`},
-		"exception without why":               {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "", "runner_deadline_seconds": 5}]`},
-		"exception without a runner deadline": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w"}]`},
-		"other node":                          {`"runs_on": "step_node"`, `"runs_on": "anywhere"`},
+		"no cite":               {`"cite": "x.go:1"`, `"cite": " "`},
+		"no timeout":            {`"runner_deadline_seconds": 1`, `"runner_deadline_seconds": 0`},
+		"undefined name":        {`"{{p}}"]`, `"{{q}}"]`},
+		"unknown decode":        {`"kind": "error_body"`, `"kind": "grep"`},
+		"no path":               {`"path": "x"`, `"path": ""`},
+		"unknown field":         {`"op": "M.A"`, `"op": "M.A", "shell": "x"`},
+		"declared and excepted": {`"exceptions": []`, `"exceptions": [{"action": "a", "why": "w", "declarable_with": "f", "runner_deadline_seconds": 5}]`},
+		"exception without why": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "", "declarable_with": "f", "runner_deadline_seconds": 5}]`},
+		"exception without the feature that would declare it": {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w", "runner_deadline_seconds": 5}]`},
+		"runner setup without why":                            {`"exceptions": []`, `"exceptions": [], "runner_setup": [{"action": "s", "why": ""}]`},
+		"exception without a runner deadline":                 {`"exceptions": []`, `"exceptions": [{"action": "b", "why": "w", "declarable_with": "f"}]`},
+		"other node":                                          {`"runs_on": "step_node"`, `"runs_on": "anywhere"`},
 	} {
 		if !strings.Contains(good, bad[0]) {
 			t.Fatalf("%s: seed %q not in the green twin", name, bad[0])
@@ -278,5 +280,32 @@ func TestRunnerDeadlineEndsAHungNode(t *testing.T) {
 	out, err := x.Handler("p_put")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "key": "k"}})
 	if err != nil || out["value"] != tr.OutcomeUnknown || time.Since(start) > 2*time.Second || h.Open() != 0 {
 		t.Fatalf("%v %v after %s", out, err, time.Since(start))
+	}
+}
+
+// Red controls of an observation's checks.
+func TestParseObserveRedControls(t *testing.T) {
+	good := `"actions": [{"action": "o", "verb": "observe", "kind": "observe", "runs_on": "step_node", "params": [{"name": "volume", "kind": "subject"}],
+	  "record": {"volume": "{{volume.name}}"}, "derived": {"p": {"kind": "prefix", "from": "{{volume.id}}", "length": 2}},
+	  "steps": [{"name": "s", "command": ["show", "{{derived.p}}"], "runner_deadline_seconds": 1, "cite": "x.go:1",
+	    "read": {"kind": "json_strings", "into": "l", "error_into": "e", "error": "listing: {{stderr_first_line}}"}}]}], "exceptions": []}`
+	if _, err := Parse([]byte(head + good)); err != nil {
+		t.Fatalf("green twin: %v", err)
+	}
+	for name, bad := range map[string][2]string{
+		"step without a cite":      {`"cite": "x.go:1"`, `"cite": ""`},
+		"step without a deadline":  {`"runner_deadline_seconds": 1`, `"runner_deadline_seconds": 0`},
+		"an op on an observation":  {`"kind": "observe",`, `"kind": "observe", "op": "M.A",`},
+		"unknown read":             {`"kind": "json_strings"`, `"kind": "grep"`},
+		"undefined derived":        {`{{derived.p}}`, `{{derived.q}}`},
+		"unknown derived kind":     {`"kind": "prefix"`, `"kind": "eval"`},
+		"undefined name in a read": {`{{stderr_first_line}}`, `{{stdout_all}}`},
+	} {
+		if !strings.Contains(good, bad[0]) {
+			t.Fatalf("%s: seed not in the green twin", name)
+		}
+		if _, err := Parse([]byte(head + strings.Replace(good, bad[0], bad[1], 1))); err == nil {
+			t.Errorf("%s: not refused", name)
+		}
 	}
 }
