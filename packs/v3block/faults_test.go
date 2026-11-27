@@ -784,3 +784,90 @@ func TestHealthyAndMasterRestartSupervise(t *testing.T) {
 		t.Errorf("records %+v", recs)
 	}
 }
+
+// --- intended state (healthy_by_intent) ---
+
+// The intent is set by the invoked operation, whatever its outcome: a start
+// that launches nothing still holds the volume; a stop that ends at its first
+// step still releases it.
+func TestIntentIsSetByTheInvokedOperation(t *testing.T) {
+	v, h, e := testVolume()
+	f := (&fakeNode{}).on("ss -Hltnp", ok("LISTEN 0 4096 127.0.0.1:21012 0.0.0.0:* users:((\"x\",pid=777,fd=9))"))
+	if out, _ := e.startHolder(context.Background(), f, v, h, 64, time.Second); out != tr.OutcomeUnknown || v.Extra["intent"] != intentHeld {
+		t.Errorf("a refused start: %s, intent %q", out, v.Extra["intent"])
+	}
+	f = (&fakeNode{}).on("delete_controller", fakeAnswer{errOut: "write error", code: 4})
+	if _, why := e.handOver(context.Background(), f, v, wsStop); why == "" || v.Extra["intent"] != intentReleased {
+		t.Errorf("a failed stop: %q, intent %q", why, v.Extra["intent"])
+	}
+}
+
+// With the flag, healthy demands serving only of held volumes: a volume
+// whose stop ended unknown (its holder still recorded, then gone) is not
+// demanded; a held volume with no holder is. Without the flag, the rule is
+// unchanged (a recorded holder is demanded). Red control: the unknown stop
+// demanded under the flag.
+func TestHealthyByIntent(t *testing.T) {
+	for name, c := range map[string]struct {
+		flag, intent string
+		pid          bool
+		want         string
+		notServing   []string
+	}{
+		"flag, unknown stop: not demanded": {"true", intentReleased, true, "true", nil},
+		"no flag, unknown stop: demanded":  {"", intentReleased, true, "false", []string{"v1"}},
+		"flag, held, holder gone":          {"true", intentHeld, true, "false", []string{"v1"}},
+		"flag, held, never launched":       {"true", intentHeld, false, "false", []string{"v1"}},
+		"flag, no intent (never attached)": {"true", "", false, "true", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			actx, p, e := faultSetup(t)
+			actx.Vars["healthy_by_intent"] = c.flag
+			v := vol1(t, actx)
+			v.Extra = map[string]string{}
+			if c.intent != "" {
+				v.Extra["intent"] = c.intent
+			}
+			if !c.pid {
+				v.PID, v.PIDStart = "", ""
+			}
+			saveVolume(actx, v)
+			f := healthNode()
+			f.rules = append([]fakeRule{
+				{match: "/proc/4242", answers: []fakeAnswer{ok("absent\n")}},
+				{match: "/status?volume=v1", answers: []fakeAnswer{{code: 7}}},
+			}, f.rules...)
+			if out, _ := e.healthy(context.Background(), actx, f, 0); out["healthy"] != c.want {
+				t.Fatalf("healthy %v, want %s", out, c.want)
+			}
+			r := healthyRecord(t, actx, p)
+			var ns []string
+			for _, x := range r["not_serving"].([]any) {
+				ns = append(ns, x.(string))
+			}
+			if !slices.Equal(ns, c.notServing) || (r["rule"] == "intent") != (c.flag == "true") {
+				t.Errorf("result %v", r)
+			}
+		})
+	}
+}
+
+// Red control: under the flag the unit does not relaunch the holder of a
+// released volume (an unknown stop, then a fence: exit 75).
+func TestSuperviseByIntentLeavesAReleasedVolume(t *testing.T) {
+	for _, intent := range []string{intentReleased, intentHeld} {
+		actx, _, e := faultSetup(t)
+		actx.Vars["healthy_by_intent"] = "true"
+		exited(t, actx)
+		v := vol1(t, actx)
+		v.Extra["intent"] = intent
+		saveVolume(actx, v)
+		f := unitNode(exitAnswer(75, time.Minute))
+		if err := e.supervise(context.Background(), actx, f); err != nil {
+			t.Fatal(err)
+		}
+		if f.issued("setsid") != (intent == intentHeld) {
+			t.Errorf("intent %s: relaunched %v", intent, f.issued("setsid"))
+		}
+	}
+}

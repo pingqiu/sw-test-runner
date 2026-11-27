@@ -383,19 +383,24 @@ func (e opEnv) healthCheck(ctx context.Context, actx *tr.ActionContext, node run
 		if err != nil {
 			return nil, false, err
 		}
-		if v.PID == "" {
-			continue
+		if held(actx, v) {
+			if v.PID != "" && !alive(ctx, node, v.PID, v.PIDStart) {
+				down = append(down, fmt.Sprintf("blockvolume:%d", i))
+			}
+			if st, ok := readStatus(ctx, node, v.Hosts[v.Cur].Status, n); !ok || !st.serving(n) {
+				notServing = append(notServing, n)
+			}
 		}
-		if !alive(ctx, node, v.PID, v.PIDStart) {
-			down = append(down, fmt.Sprintf("blockvolume:%d", i))
+		if v.PID != "" {
+			holders[n] = liveHolder(ctx, node, v.Hosts[v.Cur].Status)
 		}
-		if st, ok := readStatus(ctx, node, v.Hosts[v.Cur].Status, n); !ok || !st.serving(n) {
-			notServing = append(notServing, n)
-		}
-		holders[n] = liveHolder(ctx, node, v.Hosts[v.Cur].Status)
 	}
 	healthy := len(down) == 0 && answers && len(notServing) == 0
-	return map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders}, healthy, nil
+	res := map[string]any{"healthy": healthy, "down": down, "not_serving": notServing, "master_answers": answers, "holders": holders}
+	if byIntent(actx) {
+		res["rule"] = "intent"
+	}
+	return res, healthy, nil
 }
 
 // liveHolder is the process that holds the volume's status listener now, read
@@ -526,8 +531,35 @@ func readExit(ctx context.Context, node runner, file string) (status int, ago ti
 	return s, time.Duration(now - at), ""
 }
 
-// held: the volume is to be served, so its holder is the unit's to restart.
-func held(v *opVolume) bool { return v.PID != "" }
+// A volume's intended state: held (to be served) or released, set by the
+// holder-lifecycle operation invoked on it, whatever its outcome: a start
+// (attach, a restart, a unit relaunch: launchHolder) holds it; a stop or move
+// (handOver) releases it, also when it ended unknown.
+const (
+	intentHeld     = "held"
+	intentReleased = "released"
+)
+
+func setIntent(v *opVolume, intent string) {
+	if v.Extra == nil {
+		v.Extra = map[string]string{}
+	}
+	v.Extra["intent"] = intent
+}
+
+// byIntent: the healthy rule by intended state (var healthy_by_intent=true).
+// Off by default: it changes the healthy definition and awaits review. Off,
+// a volume is held while the runner records a holder for it.
+func byIntent(actx *tr.ActionContext) bool { return actx.Vars["healthy_by_intent"] == "true" }
+
+// held: the volume is to be served, so its holder is the unit's to restart
+// and healthy demands that it serve.
+func held(actx *tr.ActionContext, v *opVolume) bool {
+	if byIntent(actx) {
+		return v.Extra["intent"] == intentHeld
+	}
+	return v.PID != ""
+}
 
 // supervise is the unit: every held volume whose holder (not one the runner
 // killed) exited by itself with a restartable status is launched again with
@@ -543,7 +575,7 @@ func (e opEnv) supervise(ctx context.Context, actx *tr.ActionContext, node runne
 		if err != nil {
 			return err
 		}
-		if !held(v) || v.PID == "" || v.Extra["exit_file"] == "" || v.Extra["killed_pid"] == v.PID {
+		if !held(actx, v) || v.PID == "" || v.Extra["exit_file"] == "" || v.Extra["killed_pid"] == v.PID {
 			continue
 		}
 		if procState(ctx, node, v.PID, v.PIDStart) != procGone {
