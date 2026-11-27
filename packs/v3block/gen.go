@@ -1,24 +1,32 @@
 package v3block
 
-// The M1 seeded generator (runner spec S5): it proposes one typed operation at
-// a time, each allowed by its precondition on a small lifecycle shadow of the
-// volumes, and learns each outcome. It never judges: the checkers judge the
-// history alone. Where the generator's shadow and the product disagree, C0's
-// "refusal not expected" (or "declared refusal answered ok") shows it.
+// The block model of the random run (runner spec S5). The generic machine
+// (package randomrun: seed, time-weighted choice, negative share, name pool,
+// coverage, fault schedule, run and replay loops) calls this model through
+// randomrun.Model: a small lifecycle shadow of the volumes, the precondition
+// of each operation on it, the negatives possible in each state, the effect
+// of each outcome, and the coverage cells. The model never judges: the
+// checkers judge the history alone. Where the shadow and the product
+// disagree, C0's "refusal not expected" (or "declared refusal answered ok")
+// shows it.
 //
 // One operation at a time, across several volumes on one host (two holder
-// hosts for a move). A fixed share of operations are NEGATIVE: ones the
-// operator pages say must be refused, issued with expect=refused. Names come
-// from a finite pool declared in the cluster spec; each is used once (a
-// deleted, delete-reserved or restore-bound name is burnt), and an exhausted
-// pool is a normal end.
+// hosts for a move). A NEGATIVE operation is one the operator pages say must
+// be refused, issued with expect=refused. Names come from the pool; each is
+// used once (a deleted, delete-reserved or restore-bound name is burnt).
+//
+// The weights, costs and refusal limits (each with its page line) are data:
+// product/operations.json.
 
 import (
+	_ "embed"
 	"fmt"
 	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 // GenVersion is recorded in the history's first record; a replay of another
@@ -28,12 +36,47 @@ import (
 // typed actions can answer, and names every read's lbas.
 const GenVersion = "m1-gen/2"
 
-// MaxSnapshots is the per-volume snapshot limit. No operator page states it:
-// it is the design invariant INV-SNAPK-HEAD-BOUND-001
-// (docs/design/invariants.md:1092). An eleventh is still a negative
-// operation; what the product answers to it (not a typed refusal, and HEAD
-// advances) is a product result, not the generator's to settle.
-const MaxSnapshots = 10
+// GenVersionFaults is the generator version recorded in the header when a
+// fault schedule is active; a run without faults keeps GenVersion, so an M1
+// history replays as before.
+const GenVersionFaults = "m2-gen/1"
+
+//go:embed product/operations.json
+var operationsJSON []byte
+
+// genTable is the block's operations table.
+var genTable = mustOperations(operationsJSON)
+
+func mustOperations(b []byte) randomrun.Operations {
+	t, err := randomrun.ParseOperations(b)
+	if err != nil {
+		panic("v3block: product/operations.json: " + err.Error())
+	}
+	return t
+}
+
+// genLimit is the name of a documented limit in the table (by its id).
+func genLimit(id string) randomrun.Limit {
+	l, ok := genTable.Limit(id)
+	if !ok {
+		panic("v3block: product/operations.json has no limit " + id)
+	}
+	return l
+}
+
+// DefaultWeights are shares of run time per operation (operations.json).
+var DefaultWeights = genTable.DefaultWeights()
+
+// OpCost is an operation's rough duration in seconds on one host
+// (operations.json).
+var OpCost = genTable.Costs()
+
+// MaxSnapshots is the per-volume snapshot limit (the "eleventh snapshot"
+// limit's value). No operator page states it: it is a design invariant. An
+// eleventh is still a negative operation; what the product answers to it
+// (not a typed refusal, and HEAD advances) is a product result, not the
+// generator's to settle.
+var MaxSnapshots = genLimit("eleventh_snapshot").Value
 
 // Volume lifecycle states of the generator's shadow.
 const (
@@ -49,8 +92,9 @@ const (
 )
 
 // The limits a negative operation probes: each is a refusal an operator page
-// documents (page:line on the m1 product branch; VL volume-lifecycle.md, SD
-// standalone-deployment.md, OG operator-guide.md, all under docs/).
+// documents; the names and page lines are in product/operations.json (VL
+// volume-lifecycle.md, SD standalone-deployment.md, OG operator-guide.md, all
+// under docs/, in the comments below).
 //
 // Documented refusals NOT proposed, because the typed action cannot answer
 // them "refused" and an unknown outcome takes the volume out of the run:
@@ -61,15 +105,15 @@ const (
 // VL:336-337), and a restore into a deleted name (VL:90-91: the restore's
 // not_admitted is not a refusal the runner can tell from a persisted one).
 // The shadow still keeps ordinary() from proposing those attaches.
-const (
-	limCreateDeleted   = "create a deleted name"                               // VL:201-204
-	limDeleteAttached  = "delete while attached"                               // VL:409-411, VL:527
-	limDeleteSource    = "delete a source whose snapshot has a restore target" // VL:413-415, SD:653; side effect OG:193-196
-	limDeleteSnapDep   = "delete a snapshot that has a restore target"         // SD:692
-	limEleventhSnap    = "an eleventh snapshot"                                // design page only: docs/design/invariants.md:1092
-	limRestoreExisting = "restore into an existing name"                       // VL:88-90, SD:672
-	limRestoreTarget   = "restore from a snapshot of a restore target"         // SD:688, SD:693 (side effect: the target name stays bound)
-	limReleaseLive     = "release a live restore target"                       // SD:696
+var (
+	limCreateDeleted   = genLimit("create_deleted").Name            // VL:201-204
+	limDeleteAttached  = genLimit("delete_attached").Name           // VL:409-411, VL:527
+	limDeleteSource    = genLimit("delete_source").Name             // VL:413-415, SD:653; side effect OG:193-196
+	limDeleteSnapDep   = genLimit("delete_snapshot_dependent").Name // SD:692
+	limEleventhSnap    = genLimit("eleventh_snapshot").Name         // design page only: docs/design/invariants.md:1092
+	limRestoreExisting = genLimit("restore_existing").Name          // VL:88-90, SD:672
+	limRestoreTarget   = genLimit("restore_from_target").Name       // SD:688, SD:693 (side effect: the target name stays bound)
+	limReleaseLive     = genLimit("release_live").Name              // SD:696
 )
 
 // burnt says a name can never be created or restored into again.
@@ -77,48 +121,9 @@ func burnt(state string) bool {
 	return state == stDeleted || state == stReserved || state == stBound
 }
 
-// GenOp is one proposed operation: the typed action and its params.
-type GenOp struct {
-	No       int               // operation number in the run, from 1
-	Action   string            // the typed action, v3_op_*
-	Volume   string            // the volume it acts on
-	Params   map[string]string // the action's params (volume included)
-	Negative string            // the limit a negative operation probes; "" for an ordinary one
-}
-
-// GenConfig sets a run.
-type GenConfig struct {
-	Seed     uint64
-	Ops      int            // the most operations to propose
-	Pool     []string       // volume names, each used once
-	Blocks   int            // lbas 0..Blocks-1 are used for writes and reads
-	Negative float64        // share of operations that must be refused (default 0.1)
-	Weights  map[string]int // relative share of TIME per operation; default DefaultWeights
-
-	// M2 process faults (gen_faults.go); off when Faults is 0.
-	Faults         float64  // chance of a kill after each operation while nothing is down
-	FaultProcesses []string // the processes the schedule may kill
-	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
-}
-
-// DefaultWeights are shares of run time per operation; the proposal
-// probability of an operation is its weight divided by its cost, so slow
-// operations (a delete waits out the lease horizon) are not starved and fast
-// ones do not swamp the run.
-var DefaultWeights = map[string]int{
-	"v3_op_create": 6, "v3_op_attach": 10, "v3_op_write": 25, "v3_op_read": 20,
-	"v3_op_snapshot": 8, "v3_op_snapshot_delete": 5, "v3_op_restore": 6,
-	"v3_op_stop": 6, "v3_op_move": 6, "v3_op_delete": 8,
-}
-
-// OpCost is an operation's rough duration in seconds on one host: the time
-// half of the weighting, and the operations-per-hour estimate.
-var OpCost = map[string]float64{
-	"v3_op_create": 2, "v3_op_attach": 8, "v3_op_write": 1, "v3_op_read": 1,
-	"v3_op_snapshot": 2, "v3_op_snapshot_delete": 2, "v3_op_restore": 3,
-	"v3_op_stop": 3, "v3_op_move": 20, "v3_op_delete": 65, "v3_op_observe": 1,
-	"v3_op_release": 2, // proposed only as a negative (SD:696: a repair step, not part of the procedure)
-}
+// GenOp is one proposed operation: the typed action (v3_op_*), the volume it
+// acts on, its params (volume included) and the limit a negative probes.
+type GenOp = randomrun.Op
 
 type genVol struct {
 	name     string
@@ -144,170 +149,40 @@ type genVol struct {
 	unresolved int
 }
 
-// Generator proposes operations; Learn feeds back each outcome.
-type Generator struct {
-	cfg    GenConfig
-	rng    *rand.Rand
+// blockModel is the block product's randomrun.Model. Its zero value is a
+// Driver (replay needs no state).
+type blockModel struct {
+	blocks int // lbas 0..blocks-1 are used for writes and reads
+	faulty bool
 	vols   map[string]*genVol
 	order  []string // pool order
-	no     int
-	ended  string
-	cells  map[string]int // "action|state" -> count proposed
-	counts map[string]int // action -> count proposed
-	down   string         // the process a fault holds down now ("" for none)
-	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
 }
 
-// NewGenerator validates the config and starts a run.
-func NewGenerator(cfg GenConfig) (*Generator, error) {
-	if cfg.Ops <= 0 || len(cfg.Pool) == 0 || cfg.Blocks <= 0 {
-		return nil, fmt.Errorf("generator: ops, a name pool and blocks are required")
+var _ randomrun.Model = (*blockModel)(nil)
+
+func (m *blockModel) Operations() randomrun.Operations { return genTable }
+
+func (m *blockModel) Begin(pool []string, faults bool) error {
+	if m.blocks <= 0 {
+		return fmt.Errorf("blocks are required")
 	}
-	if cfg.Negative == 0 {
-		cfg.Negative = 0.1
+	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
+	for _, n := range pool {
+		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{}}
+		m.order = append(m.order, n)
 	}
-	if cfg.Negative < 0 || cfg.Negative > 0.5 {
-		return nil, fmt.Errorf("generator: negative share %v outside 0..0.5", cfg.Negative)
-	}
-	if cfg.Weights == nil {
-		cfg.Weights = DefaultWeights
-	}
-	for a, w := range cfg.Weights {
-		if _, ok := OpCost[a]; !ok || w < 0 {
-			return nil, fmt.Errorf("generator: weight for unknown operation %q or negative", a)
-		}
-	}
-	if cfg.Faults != 0 {
-		if cfg.RestartWithin == 0 {
-			cfg.RestartWithin = DefaultRestartWithin
-		}
-		cfg.FaultProcesses = slices.Clone(cfg.FaultProcesses)
-		slices.Sort(cfg.FaultProcesses)
-		if _, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin); err != nil {
-			return nil, fmt.Errorf("generator: %w", err)
-		}
-	}
-	g := &Generator{cfg: cfg, rng: rand.New(rand.NewPCG(cfg.Seed, cfg.Seed^0x9e3779b97f4a7c15)),
-		vols: map[string]*genVol{}, cells: map[string]int{}, counts: map[string]int{}, fcells: map[string]int{}}
-	seen := map[string]bool{}
-	for _, n := range cfg.Pool {
-		if n == "" || seen[n] || strings.ContainsAny(n, " \t") {
-			return nil, fmt.Errorf("generator: pool name %q empty, repeated or not a token", n)
-		}
-		seen[n] = true
-		g.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{}}
-		g.order = append(g.order, n)
-	}
-	return g, nil
+	return nil
 }
 
-// Header is the history's first record: everything a replay must match.
-func (g *Generator) Header() map[string]any {
-	w := map[string]any{}
-	for k, v := range g.cfg.Weights {
-		w[k] = v
-	}
-	h := map[string]any{"generator": GenVersion, "seed": strconv.FormatUint(g.cfg.Seed, 10),
-		"ops": g.cfg.Ops, "pool": slices.Clone(g.cfg.Pool), "blocks": g.cfg.Blocks,
-		"negative": g.cfg.Negative, "weights": w}
-	if g.faulty() {
-		h["generator"] = GenVersionFaults
-		h["faults"] = g.cfg.Faults
-		h["fault_processes"] = slices.Clone(g.cfg.FaultProcesses)
-		h["fault_restart_within"] = g.cfg.RestartWithin
-	}
-	return h
-}
+func (m *blockModel) Header(h map[string]any) { h["blocks"] = m.blocks }
 
-func (g *Generator) faulty() bool { return g.cfg.Faults != 0 }
+func (m *blockModel) State(vol string) string { return m.vols[vol].state }
 
-// Schedule is the run's fault schedule (empty when faults are off).
-func (g *Generator) Schedule() FaultSchedule {
-	if !g.faulty() {
-		return FaultSchedule{Seed: g.cfg.Seed, Events: []FaultEvent{}}
-	}
-	s, _ := NewFaultSchedule(g.cfg.Seed, g.cfg.Ops, g.cfg.FaultProcesses, g.cfg.Faults, g.cfg.RestartWithin)
-	return s
-}
-
-// Fault tells the generator a fault event ran: a kill puts the process down,
-// a restart brings it back. The shadow's lifecycle states do not change (a
-// healthy point requires every volume back as it was); operations proposed
-// while a process is down are counted as fault cells.
-func (g *Generator) Fault(action, process string) {
-	g.fcells[action+"|"+process]++
-	if action == FaultKill {
-		g.down = process
-	} else if g.down == process {
-		g.down = ""
-	}
-}
-
-// Resolved tells the generator that the unknown writes of a volume were
-// resolved by observation at a healthy point.
-func (g *Generator) Resolved(vol string) {
-	if v := g.vols[vol]; v != nil {
+// Resolved: the volume's unknown writes were resolved by a read at a healthy point.
+func (m *blockModel) Resolved(vol string) {
+	if v := m.vols[vol]; v != nil {
 		v.unresolved = 0
 	}
-}
-
-// Ended is why the run stopped proposing ("" while it goes on): "ops" when
-// the operation budget is spent, "pool exhausted" when no operation is
-// possible any more (every name used and nothing left to do with them).
-func (g *Generator) Ended() string { return g.ended }
-
-// candidate is one possible next operation with its precondition met.
-type candidate struct {
-	op     GenOp
-	weight float64
-}
-
-// Next proposes the next operation, or false when the run ends.
-func (g *Generator) Next() (GenOp, bool) {
-	if g.ended != "" {
-		return GenOp{}, false
-	}
-	if g.no >= g.cfg.Ops {
-		g.ended = "ops"
-		return GenOp{}, false
-	}
-	var cs []candidate
-	if g.rng.Float64() < g.cfg.Negative {
-		cs = g.negatives()
-	}
-	if len(cs) == 0 {
-		cs = g.ordinary()
-	}
-	if len(cs) == 0 {
-		g.ended = "pool exhausted"
-		return GenOp{}, false
-	}
-	total := 0.0
-	for _, c := range cs {
-		total += c.weight
-	}
-	pick := g.rng.Float64() * total
-	chosen := cs[len(cs)-1]
-	for _, c := range cs {
-		if pick < c.weight {
-			chosen = c
-			break
-		}
-		pick -= c.weight
-	}
-	g.no++
-	chosen.op.No = g.no
-	v := g.vols[chosen.op.Volume]
-	g.cells[chosen.op.Action+"|"+v.state]++
-	g.counts[chosen.op.Action]++
-	if g.down != "" {
-		g.fcells["while_down|"+chosen.op.Action]++
-	}
-	return chosen.op, true
-}
-
-func (g *Generator) w(action string) float64 {
-	return float64(g.cfg.Weights[action]) / OpCost[action]
 }
 
 func op(action, vol string, kv ...string) GenOp {
@@ -319,12 +194,12 @@ func op(action, vol string, kv ...string) GenOp {
 }
 
 // lbas picks 1..4 distinct lbas, space separated (parseLBAs' form).
-func (g *Generator) lbas() string {
-	n := 1 + g.rng.IntN(min(4, g.cfg.Blocks))
+func (m *blockModel) lbas(r *rand.Rand) string {
+	n := 1 + r.IntN(min(4, m.blocks))
 	set := map[int]bool{}
 	var out []string
 	for len(out) < n {
-		b := g.rng.IntN(g.cfg.Blocks)
+		b := r.IntN(m.blocks)
 		if !set[b] {
 			set[b] = true
 			out = append(out, strconv.Itoa(b))
@@ -337,16 +212,16 @@ func (g *Generator) lbas() string {
 // the handler's own written set does not know a restore target's inherited
 // content): 1..4 distinct lbas with acknowledged content, or, when there are
 // none, one random lba (a block never written reads zero).
-func (g *Generator) readLBAs(v *genVol) string {
+func (m *blockModel) readLBAs(r *rand.Rand, v *genVol) string {
 	if len(v.lbas) == 0 {
-		return strconv.Itoa(g.rng.IntN(g.cfg.Blocks))
+		return strconv.Itoa(r.IntN(m.blocks))
 	}
 	have := make([]int, 0, len(v.lbas))
 	for b := range v.lbas {
 		have = append(have, b)
 	}
 	slices.Sort(have)
-	pick := g.rng.Perm(len(have))[:1+g.rng.IntN(min(4, len(have)))]
+	pick := r.Perm(len(have))[:1+r.IntN(min(4, len(have)))]
 	slices.Sort(pick)
 	out := make([]string, len(pick))
 	for i, j := range pick {
@@ -366,30 +241,26 @@ func sortedLBAs(set map[int]bool) []int {
 }
 
 // firstName is the first pool name (in pool order) that ok accepts, or "".
-func (g *Generator) firstName(ok func(v *genVol) bool) string {
-	for _, n := range g.order {
-		if ok(g.vols[n]) {
+func (m *blockModel) firstName(ok func(v *genVol) bool) string {
+	for _, n := range m.order {
+		if ok(m.vols[n]) {
 			return n
 		}
 	}
 	return ""
 }
 
-// ordinary lists every operation whose precondition holds on the shadow and
+// Ordinary lists every operation whose precondition holds on the shadow and
 // that the operator pages do not say is refused.
-func (g *Generator) ordinary() []candidate {
-	var cs []candidate
-	add := func(o GenOp) {
-		if w := g.w(o.Action); w > 0 {
-			cs = append(cs, candidate{o, w})
-		}
-	}
-	unborn := g.firstName(func(v *genVol) bool { return v.state == stUnborn })
+func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
+	var cs []GenOp
+	add := func(o GenOp) { cs = append(cs, o) }
+	unborn := m.firstName(func(v *genVol) bool { return v.state == stUnborn })
 	if unborn != "" {
 		add(op("v3_op_create", unborn))
 	}
-	for _, n := range g.order {
-		v := g.vols[n]
+	for _, n := range m.order {
+		v := m.vols[n]
 		switch v.state {
 		case stCreated:
 			if !v.held[v.host] {
@@ -416,8 +287,8 @@ func (g *Generator) ordinary() []candidate {
 			}
 			add(op("v3_op_delete", n))
 		case stServing:
-			add(op("v3_op_write", n, "lbas", g.lbas(), "round", fmt.Sprintf("g%d", g.no+1)))
-			add(op("v3_op_read", n, "lbas", g.readLBAs(v)))
+			add(op("v3_op_write", n, "lbas", m.lbas(r), "round", fmt.Sprintf("g%d", next)))
+			add(op("v3_op_read", n, "lbas", m.readLBAs(r, v)))
 			if len(v.snaps) < MaxSnapshots {
 				add(op("v3_op_snapshot", n, "name", fmt.Sprintf("%s-s%d", n, v.snapSeq+1)))
 			}
@@ -444,19 +315,19 @@ func (g *Generator) ordinary() []candidate {
 	return cs
 }
 
-// negatives lists operations that must be refused now, each tagged with the
+// Negatives lists operations that must be refused now, each tagged with the
 // limit it probes; they carry expect=refused. Each is proposed only where no
 // other documented refusal would answer first, so the limit names the cause.
-func (g *Generator) negatives() []candidate {
-	var cs []candidate
+func (m *blockModel) Negatives() []GenOp {
+	var cs []GenOp
 	add := func(o GenOp, limit string) {
 		o.Params["expect"] = "refused"
 		o.Negative = limit
-		cs = append(cs, candidate{o, 1})
+		cs = append(cs, o)
 	}
-	unborn := g.firstName(func(v *genVol) bool { return v.state == stUnborn })
-	for _, n := range g.order {
-		v := g.vols[n]
+	unborn := m.firstName(func(v *genVol) bool { return v.state == stUnborn })
+	for _, n := range m.order {
+		v := m.vols[n]
 		if v.state == stUnknown {
 			continue
 		}
@@ -473,7 +344,7 @@ func (g *Generator) negatives() []candidate {
 				if v.source == "" {
 					// Into a name that exists, not this restore's own replay
 					// (target_exists).
-					if t := g.firstName(func(t *genVol) bool {
+					if t := m.firstName(func(t *genVol) bool {
 						return t.name != n && (t.state == stCreated || t.state == stServing || t.state == stStopped ||
 							t.state == stMoved || t.state == stBound) && !(t.source == n && t.fromSnap == s)
 					}); t != "" {
@@ -494,7 +365,7 @@ func (g *Generator) negatives() []candidate {
 		if v.state == stServing || v.state == stStopped || v.state == stReserved {
 			for s, t := range v.targets {
 				add(op("v3_op_snapshot_delete", n, "name", s), limDeleteSnapDep)
-				if ts := g.vols[t].state; ts == stCreated || ts == stServing || ts == stStopped {
+				if ts := m.vols[t].state; ts == stCreated || ts == stServing || ts == stStopped {
 					add(op("v3_op_release", n, "target_volume", t), limReleaseLive)
 				}
 			}
@@ -502,11 +373,11 @@ func (g *Generator) negatives() []candidate {
 	}
 	// Candidates came partly from map iteration: order them on a key that
 	// identifies each one, so the same seed always picks the same operation.
-	key := func(c candidate) string {
-		p := c.op.Params
-		return strings.Join([]string{c.op.Action, c.op.Volume, c.op.Negative, p["name"], p["snapshot"], p["target_volume"]}, "|")
+	key := func(o GenOp) string {
+		p := o.Params
+		return strings.Join([]string{o.Action, o.Volume, o.Negative, p["name"], p["snapshot"], p["target_volume"]}, "|")
 	}
-	slices.SortFunc(cs, func(a, b candidate) int { return strings.Compare(key(a), key(b)) })
+	slices.SortFunc(cs, func(a, b GenOp) int { return strings.Compare(key(a), key(b)) })
 	return cs
 }
 
@@ -531,12 +402,12 @@ func (g *Generator) negatives() []candidate {
 // lifecycle state, so the volume stays serving, its lbas count as having
 // content (a read may name them), and the write is counted unresolved until a
 // read at a healthy point resolves it.
-func (g *Generator) Learn(o GenOp, outcome string) {
-	v := g.vols[o.Volume]
+func (m *blockModel) Learn(o GenOp, outcome string) {
+	v := m.vols[o.Volume]
 	if outcome == "unknown" && o.Action == "v3_op_read" {
 		return // a read changes nothing, whatever its outcome
 	}
-	if outcome == "unknown" && o.Action == "v3_op_write" && g.faulty() && o.Negative == "" {
+	if outcome == "unknown" && o.Action == "v3_op_write" && m.faulty && o.Negative == "" {
 		for _, f := range strings.Fields(o.Params["lbas"]) {
 			if n, err := strconv.Atoi(f); err == nil {
 				v.lbas[n] = true
@@ -553,7 +424,7 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 			}
 			return
 		case limRestoreTarget:
-			t := g.vols[o.Params["target_volume"]]
+			t := m.vols[o.Params["target_volume"]]
 			t.state, t.source, t.fromSnap = stBound, o.Volume, o.Params["snapshot"]
 			return
 		}
@@ -561,7 +432,7 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 	if outcome == "unknown" || (outcome == "ok" && o.Negative != "") {
 		v.state = stUnknown
 		if t := o.Params["target_volume"]; t != "" {
-			g.vols[t].state = stUnknown
+			m.vols[t].state = stUnknown
 		}
 		return
 	}
@@ -592,7 +463,7 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 		delete(v.snapLBAs, o.Params["name"])
 	case "v3_op_restore":
 		// The target's content is the source's at the snapshot.
-		t := g.vols[o.Params["target_volume"]]
+		t := m.vols[o.Params["target_volume"]]
 		t.state, t.source, t.fromSnap, t.host = stCreated, o.Volume, o.Params["snapshot"], v.host
 		for _, b := range v.snapLBAs[o.Params["snapshot"]] {
 			t.lbas[b] = true
@@ -605,7 +476,7 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 	case "v3_op_delete":
 		v.state = stDeleted
 		if v.source != "" {
-			src := g.vols[v.source]
+			src := m.vols[v.source]
 			for s, t := range src.targets {
 				if t == v.name {
 					delete(src.targets, s)
@@ -615,70 +486,133 @@ func (g *Generator) Learn(o GenOp, outcome string) {
 	}
 }
 
-// Coverage is the bundle's coverage report: proposals per action, per
-// (action, state) cell, and the cells that were possible in principle but
-// never reached.
-func (g *Generator) Coverage() map[string]any {
-	// Ordinary and negative cells alike, by the state of the operation's volume
-	// (delete|serving is only the negative "delete while attached"; delete is
-	// ordinary from created, stopped, moved and reserved).
-	all := map[string][]string{
+// Cells are the coverage cells, ordinary and negative alike, by the state of
+// the operation's volume (delete|serving is only the negative "delete while
+// attached"; delete is ordinary from created, stopped, moved and reserved).
+func (m *blockModel) Cells() map[string][]string {
+	return map[string][]string{
 		"v3_op_create": {stUnborn, stDeleted}, "v3_op_attach": {stCreated, stMoved},
 		"v3_op_write": {stServing}, "v3_op_read": {stServing}, "v3_op_snapshot": {stServing},
 		"v3_op_snapshot_delete": {stServing, stStopped}, "v3_op_restore": {stServing}, "v3_op_stop": {stServing},
 		"v3_op_move": {stServing}, "v3_op_delete": {stCreated, stStopped, stMoved, stReserved, stServing},
 		"v3_op_release": {stServing, stStopped},
 	}
-	var missed []string
-	for a, sts := range all {
-		for _, s := range sts {
-			if g.cells[a+"|"+s] == 0 {
-				missed = append(missed, a+"|"+s)
-			}
-		}
-	}
-	var fcells map[string]int
-	if g.faulty() {
-		// Fault cells: each process killed and restarted, and each ordinary
-		// action proposed while a process was down.
-		fcells = map[string]int{}
-		for k, v := range g.fcells {
-			fcells[k] = v
-		}
-		var want []string
-		for _, p := range g.cfg.FaultProcesses {
-			want = append(want, FaultKill+"|"+p, FaultRestart+"|"+p)
-		}
-		for a := range all {
-			want = append(want, "while_down|"+a)
-		}
-		for _, c := range want {
-			if g.fcells[c] == 0 {
-				missed = append(missed, c)
-			}
-		}
-	}
-	slices.Sort(missed)
-	cells := map[string]int{}
-	for k, v := range g.cells {
-		cells[k] = v
-	}
-	counts := map[string]int{}
-	for k, v := range g.counts {
-		counts[k] = v
-	}
-	est := 0.0
-	for a, n := range g.counts {
-		est += OpCost[a] * float64(n)
-	}
-	perHour := 0.0
-	if est > 0 {
-		perHour = float64(g.no) * 3600 / est
-	}
-	cov := map[string]any{"proposed": g.no, "ended": g.ended, "actions": counts, "cells": cells,
-		"cells_never_reached": missed, "estimated_ops_per_hour": int(perHour)}
-	if fcells != nil {
-		cov["fault_cells"] = fcells
-	}
-	return cov
 }
+
+// Driver side: how a block proposal is executed.
+
+func (m *blockModel) Version(faults bool) string {
+	if faults {
+		return GenVersionFaults
+	}
+	return GenVersion
+}
+
+// Calls issues a write over several lbas one lba per call (the handler
+// records one operation per lba either way), so that every lba's outcome
+// counts.
+func (m *blockModel) Calls(o GenOp) []map[string]string {
+	if o.Action != "v3_op_write" {
+		return []map[string]string{o.Params}
+	}
+	var calls []map[string]string
+	for _, lba := range strings.Fields(o.Params["lbas"]) {
+		p := map[string]string{}
+		for k, v := range o.Params {
+			p[k] = v
+		}
+		p["lbas"] = lba
+		calls = append(calls, p)
+	}
+	return calls
+}
+
+// Observe is v3_op_observe of one volume (it answers "observed", no outcome).
+func (m *blockModel) Observe(vol string) GenOp {
+	return GenOp{Action: "v3_op_observe", Volume: vol, Params: map[string]string{"volume": vol}}
+}
+
+// Resolution (kb C6): an unknown write is resolved by reading its lbas, any
+// other unknown by observing its volume and a restore's target. A read
+// changes nothing, so an unknown read has nothing to resolve.
+func (m *blockModel) Resolution(o GenOp) (*GenOp, []string) {
+	switch o.Action {
+	case "v3_op_read":
+		return nil, nil
+	case "v3_op_write":
+		return &GenOp{Action: "v3_op_read", Volume: o.Volume, Params: map[string]string{"volume": o.Volume, "lbas": o.Params["lbas"]}}, nil
+	}
+	return nil, []string{o.Volume, o.Params["target_volume"]}
+}
+
+// Fault is v3_op_kill or v3_op_restart of the process.
+func (m *blockModel) Fault(e randomrun.FaultEvent) GenOp {
+	return GenOp{Action: "v3_op_" + e.Action, Params: map[string]string{"process": e.Process}}
+}
+
+// Healthy is v3_op_healthy (wait: its wait_seconds).
+func (m *blockModel) Healthy(wait string) GenOp {
+	p := map[string]string{}
+	if wait != "" {
+		p["wait_seconds"] = wait
+	}
+	return GenOp{Action: "v3_op_healthy", Params: p}
+}
+
+func (m *blockModel) ValidProcess(p string) bool { return ValidFaultProcess(p) }
+
+// GenConfig sets a block run: the generic config and the lbas used.
+type GenConfig struct {
+	Seed     uint64
+	Ops      int            // the most operations to propose
+	Pool     []string       // volume names, each used once
+	Blocks   int            // lbas 0..Blocks-1 are used for writes and reads
+	Negative float64        // share of operations that must be refused (default 0.1)
+	Weights  map[string]int // relative share of TIME per operation; default DefaultWeights
+
+	// M2 process faults (gen_faults.go); off when Faults is 0.
+	Faults         float64  // chance of a kill after each operation while nothing is down
+	FaultProcesses []string // the processes the schedule may kill
+	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
+}
+
+// Generator is the generic generator over the block model; the model's
+// shadow stays reachable for the tests.
+type Generator struct {
+	*randomrun.Generator
+	m    *blockModel
+	vols map[string]*genVol
+}
+
+// NewGenerator validates the config and starts a run.
+func NewGenerator(cfg GenConfig) (*Generator, error) {
+	if cfg.Blocks <= 0 {
+		return nil, fmt.Errorf("generator: ops, a name pool and blocks are required")
+	}
+	m := &blockModel{blocks: cfg.Blocks}
+	g, err := randomrun.New(randomrun.Config{Seed: cfg.Seed, Ops: cfg.Ops, Pool: cfg.Pool, Negative: cfg.Negative, Weights: cfg.Weights,
+		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin}, m)
+	if err != nil {
+		return nil, err
+	}
+	return &Generator{Generator: g, m: m, vols: m.vols}, nil
+}
+
+// candidate is one possible next operation with its weight.
+type candidate struct {
+	op     GenOp
+	weight float64
+}
+
+func candidates(cs []randomrun.Candidate) []candidate {
+	out := make([]candidate, len(cs))
+	for i, c := range cs {
+		out[i] = candidate{c.Op, c.Weight}
+	}
+	return out
+}
+
+// ordinary and negatives are the candidates the generic generator would
+// choose from now (ordinary ones draw from the run's random stream).
+func (g *Generator) ordinary() []candidate  { return candidates(g.Candidates(false)) }
+func (g *Generator) negatives() []candidate { return candidates(g.Candidates(true)) }

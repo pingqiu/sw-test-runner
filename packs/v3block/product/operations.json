@@ -1,0 +1,42 @@
+{
+  "product": "block",
+  "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
+  "comment": "The random run's operations (weight: default share of run TIME; cost: rough seconds on one host; a proposal's chance is weight/cost) and the documented refusals its negative operations probe. Documented refusals NOT proposed are listed in gen.go with the reason.",
+  "operations": [
+    {"action": "v3_op_create", "op": "VolumeCreate.MarkReady", "weight": 6, "cost": 2},
+    {"action": "v3_op_attach", "op": "HolderInterface.Start", "weight": 10, "cost": 8},
+    {"action": "v3_op_write", "op": "HolderInterface.Write", "weight": 25, "cost": 1},
+    {"action": "v3_op_read", "op": "Guest.Read", "weight": 20, "cost": 1},
+    {"action": "v3_op_snapshot", "op": "SnapshotRemoval.Commit", "weight": 8, "cost": 2},
+    {"action": "v3_op_snapshot_delete", "op": "SnapshotRemoval.DeleteSnap", "weight": 5, "cost": 2},
+    {"action": "v3_op_restore", "op": "RestoreTarget.CreateHead", "weight": 6, "cost": 3},
+    {"action": "v3_op_stop", "op": "HolderInterface.StopCommit", "weight": 6, "cost": 3},
+    {"action": "v3_op_move", "op": "MoveAdmission.IssueClean", "weight": 6, "cost": 20},
+    {"action": "v3_op_delete", "op": "MoveAdmission.DelMark", "weight": 8, "cost": 65, "note": "a delete waits out the lease horizon"},
+    {"action": "v3_op_observe", "cost": 1, "note": "an observation; never proposed"},
+    {"action": "v3_op_release", "op": "RestoreTarget.OpRelease", "cost": 2, "note": "proposed only as a negative: a repair step, not part of the procedure (docs/standalone-deployment.md:696)"}
+  ],
+  "limits": [
+    {"id": "create_deleted", "name": "create a deleted name", "action": "v3_op_create",
+     "cite": "docs/volume-lifecycle.md:201-204"},
+    {"id": "delete_attached", "name": "delete while attached", "action": "v3_op_delete",
+     "cite": "docs/volume-lifecycle.md:409-411, docs/volume-lifecycle.md:527"},
+    {"id": "delete_source", "name": "delete a source whose snapshot has a restore target", "action": "v3_op_delete",
+     "cite": "docs/volume-lifecycle.md:413-415, docs/standalone-deployment.md:653",
+     "side_effect": "refused for a snapshot dependent after its reservation committed: the source is reserved and never serves again",
+     "side_effect_cite": "docs/operator-guide.md:193-196"},
+    {"id": "delete_snapshot_dependent", "name": "delete a snapshot that has a restore target", "action": "v3_op_snapshot_delete",
+     "cite": "docs/standalone-deployment.md:692"},
+    {"id": "eleventh_snapshot", "name": "an eleventh snapshot", "action": "v3_op_snapshot", "value": 10,
+     "cite": "docs/design/invariants.md:1092",
+     "note": "no operator page states the limit: it is the design invariant INV-SNAPK-HEAD-BOUND-001; what the product answers to an eleventh is a product result"},
+    {"id": "restore_existing", "name": "restore into an existing name", "action": "v3_op_restore",
+     "cite": "docs/volume-lifecycle.md:88-90, docs/standalone-deployment.md:672"},
+    {"id": "restore_from_target", "name": "restore from a snapshot of a restore target", "action": "v3_op_restore",
+     "cite": "docs/standalone-deployment.md:688",
+     "side_effect": "the target name stays bound and is never created",
+     "side_effect_cite": "docs/standalone-deployment.md:693"},
+    {"id": "release_live", "name": "release a live restore target", "action": "v3_op_release",
+     "cite": "docs/standalone-deployment.md:696"}
+  ]
+}

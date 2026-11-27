@@ -1,9 +1,8 @@
-package v3block
+package randomrun
 
-// The M1 nightly: N short random runs in parallel plus one long run, each an
-// INDEPENDENT run of scenarios/v3block/m1-random.yaml (its own seed,
-// blockmaster, SeaweedFS, ports, work dir and name pool; sequential inside).
-// The architect's conditions:
+// The nightly: N short random runs in parallel plus one long run, each an
+// INDEPENDENT run of a product's random-run scenario (its own seed, cluster,
+// ports, work dir and name pool; sequential inside). The conditions:
 //   - every run's seed comes from one recorded nightly seed (NightlySeeds),
 //     and each run's header names both, so any one run replays alone;
 //   - coverage is reported per run AND as a union;

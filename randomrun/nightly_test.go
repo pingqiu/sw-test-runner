@@ -1,4 +1,4 @@
-package v3block
+package randomrun
 
 import (
 	"encoding/json"
@@ -41,15 +41,15 @@ func coverageFile(t *testing.T, cells map[string]int, never []string) string {
 }
 
 func TestNightPassesOnlyIfEveryRunPasses(t *testing.T) {
-	ok1 := coverageFile(t, map[string]int{"v3_op_write|serving": 5}, []string{"v3_op_move|serving"})
-	ok2 := coverageFile(t, map[string]int{"v3_op_move|serving": 1}, []string{"v3_op_delete|created"})
+	ok1 := coverageFile(t, map[string]int{"write|up": 5}, []string{"move|up"})
+	ok2 := coverageFile(t, map[string]int{"move|up": 1}, []string{"delete|new"})
 	all := []NightRun{{Index: 0, Exit: 0, Coverage: ok1}, {Index: 1, Exit: 0, Coverage: ok2}}
 	rep := Judge(7, all)
-	if rep.Verdict != "PASS" || rep.Runs[0].Verdict != "PASS" || rep.UnionCells["v3_op_write|serving"] != 5 {
+	if rep.Verdict != "PASS" || rep.Runs[0].Verdict != "PASS" || rep.UnionCells["write|up"] != 5 {
 		t.Fatalf("%+v", rep)
 	}
 	// A cell one run never reached but the other did is reached in the union.
-	if len(rep.UnionNeverReached) != 1 || rep.UnionNeverReached[0] != "v3_op_delete|created" {
+	if len(rep.UnionNeverReached) != 1 || rep.UnionNeverReached[0] != "delete|new" {
 		t.Fatalf("union never reached %v", rep.UnionNeverReached)
 	}
 	for name, runs := range map[string][]NightRun{
