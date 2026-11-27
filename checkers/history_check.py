@@ -9,6 +9,12 @@ leaves, a kill's scope) from the reader module it names. DIR defaults to the
 block product (packs/v3block/product); the rules below name block's facts as
 the example.
 
+A rerun is never folded: each attempt is its own invoke and complete, its
+args carrying the request and "attempt": n, and a request's outcome is its
+LAST attempt's (superseded()). C0, C5, C6 and C7 judge a request by its last
+attempt; an earlier refused attempt counts under no C5 limit (it is still
+judged by the whole-state rule when a clean observation pair allows).
+
 Each checker returns PASS, FAIL or UNKNOWN with its findings, and "judged":
 the number of items it actually judged (C0 operations with a known outcome,
 C1 reads compared, C2 restored blocks compared, C3 cross reads compared, C5
@@ -313,6 +319,33 @@ def operations(recs):
     return [(r, comp.get(r['seq'])) for r in recs if r['kind'] == 'invoke']
 
 
+def superseded(recs):
+    """Invoke seqs of attempts a later attempt of the same request replaced.
+    A rerun is never folded: each attempt is its own invoke and complete,
+    its args carrying the request (whatever arg the action names it by) and
+    "attempt": n, and the request's outcome is its LAST attempt's. Attempts
+    of one request share verb, volume and every arg but "attempt", and are
+    numbered on from 1; an attempt 1 (or a number that does not follow)
+    starts a new request, so a later operation with the same args is its
+    own. An invoke with no attempt is a request of one attempt."""
+    groups, open_ = [], {}   # open_: key -> index into groups of its request so far
+    for r in recs:
+        if r['kind'] != 'invoke':
+            continue
+        args = dict(r.get('args') or {})
+        n = args.pop('attempt', None)
+        if n is None:
+            continue
+        key = (r['verb'], r.get('volume'), json.dumps(args, sort_keys=True))
+        g = open_.get(key)
+        if n != 1 and g is not None and groups[g][-1][0] == n - 1:
+            groups[g].append((n, r['seq']))
+        else:
+            open_[key] = len(groups)
+            groups.append([(n, r['seq'])])
+    return {seq for g in groups for _, seq in g[:-1]}
+
+
 FAULT_VERBS = ('fault_apply', 'fault_restore')
 
 
@@ -356,11 +389,19 @@ def verdict(findings, unknown=False, judged=0):
 def c0(recs):
     """A refusal is expected only where its own invocation declares it
     (args.expect == "refused", one step of the scenario), never by verb."""
-    f, judged = [], 0   # judged: operations with a known outcome checked
+    f, judged = [], 0   # judged: operations (requests, by their last attempt) with a known outcome checked
     if not operations(recs):
         return verdict(['no operation in the history: nothing was exercised'])
+    earlier = superseded(recs)
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
+        if inv['seq'] in earlier:
+            # An attempt a later attempt of its request replaced: the
+            # request's outcome is the last attempt's, judged there. The
+            # attempt itself must still have completed.
+            if comp is None:
+                f.append('no completion: ' + name)
+            continue
         if comp is not None and comp['outcome'] != 'unknown':
             judged += 1
         if inv['verb'] in FAULT_VERBS:
@@ -643,12 +684,13 @@ def c3(recs):
 
 def c7(recs):
     f = []
+    earlier = superseded(recs)   # an ok is always a request's last attempt (nothing reruns an ok)
     deleted = {}    # volume -> completion seq of its ok delete
     creates = []    # (volume, invocation seq, completion) of every create
     for inv, comp in operations(recs):
         if inv['verb'] == 'delete' and comp and comp['outcome'] == 'ok':
             deleted[inv['volume']] = comp['seq']
-        elif inv['verb'] == 'create':
+        elif inv['verb'] == 'create' and inv['seq'] not in earlier:   # a request's answer is its last attempt's
             creates.append((inv['volume'], inv['seq'], comp))
     if not deleted:
         return verdict(['no delete with outcome ok in the history: C7 judges nothing'])
@@ -757,14 +799,21 @@ def c5(recs):
     could move HEAD between the two observations, and the observations could
     no longer be laid to the refusal alone."""
     ops_ = operations(recs)
+    # A request's refusal is its LAST attempt's: an earlier attempt (a rerun
+    # through, say, the lease horizon) is no refusal of the request's limit.
+    earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
-    if not refusals:
-        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
+    if not [1 for inv, _ in refusals if inv['seq'] not in earlier]:
+        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']
+                + (['%d refused attempt(s) a later attempt of the same request replaced: no refusal of any limit' % len(refusals)] if refusals else [])}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
-    per = {}   # limit -> [refusals, judged]
+    per = {}   # limit -> [refusals, judged], last attempts only
+    attempts_judged = 0   # earlier attempts judged by the whole-state rule, under no limit
     for inv, comp in ops_:
+        if inv['seq'] in earlier:
+            continue   # the request's answer is its last attempt's
         if comp is not None and comp['outcome'] not in REFUSALS and (inv.get('args') or {}).get('expect') == 'refused':
             # ok is a FAIL: the limit let the operation through; unknown is not
             # ok and stays a note.
@@ -772,8 +821,11 @@ def c5(recs):
                                                             % (inv['seq'], inv['verb'], inv.get('volume'), limit[inv['seq']], comp['outcome']))
     for inv, comp in refusals:
         vol = inv.get('volume')
-        lim = limit[inv['seq']]
-        per.setdefault(lim, [0, 0])[0] += 1
+        last = inv['seq'] not in earlier
+        lim = limit[inv['seq']] if last else '%s, attempt %s replaced by a later attempt (counted under no limit)' % (
+            limit[inv['seq']], (inv.get('args') or {}).get('attempt'))
+        if last:
+            per.setdefault(lim, [0, 0])[0] += 1
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], vol or '(no volume)')
         if not vol:
             notes.append('not judged: %s: an operation on no volume' % name)
@@ -830,12 +882,19 @@ def c5(recs):
                 notes.append('not judged: %s: observation seq %d cannot show its effect: %s' % (name, after['seq'], '; '.join(cannot)))
                 continue
         gaps.update(missing)
-        per[lim][1] += 1
+        if last:
+            per[lim][1] += 1
+        else:
+            attempts_judged += 1
         f += found
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
     if gaps:
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
-    judged = sum(j for _, j in per.values())   # judged: refusals judged
+    replaced = sum(1 for inv, _ in refusals if inv['seq'] in earlier)
+    if replaced:
+        notes.append('refused attempts a later attempt of the same request replaced: %d (%d judged by the whole-state rule), counted under no limit'
+                     % (replaced, attempts_judged))
+    judged = sum(j for _, j in per.values()) + attempts_judged   # judged: refusals judged (last attempts, and earlier ones a pair allowed)
     checked, bf = baseline(recs)
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
@@ -1299,8 +1358,11 @@ def c6(recs):
     f, notes, unruled, resolved = [], [], [], 0
     ops_ = operations(recs)
     healthy = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'healthy']
+    # An unknown resolves per request, by its last attempt: an earlier attempt
+    # a later one replaced is not an unknown of its own.
+    earlier = superseded(recs)
     unknowns = [(inv, comp) for inv, comp in ops_ if inv['verb'] not in RUNNER_VERBS and inv['verb'] != 'read'
-                and (comp is None or comp['outcome'] == 'unknown')]
+                and inv['seq'] not in earlier and (comp is None or comp['outcome'] == 'unknown')]
     if not unknowns and not healthy:
         return {'verdict': 'FAIL', 'findings': ['no unknown outcome and no healthy point in the history: C6 not exercised']}
     # Latency, only against a stated bound and never under a fault.
