@@ -21,6 +21,7 @@ package v3block
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -39,13 +40,21 @@ import (
 // the target still names a source chunk. m1-gen/4: an attach or stop
 // answered unknown leaves its volume unsettled until a settled record places
 // it, and a volume a healthy record lists not serving gets no reads or writes.
-const GenVersion = "m1-gen/4"
+//
+// m1-gen/5 (host run 4): forced operations (recorded "forced" in gen_step,
+// outside the budget): the dirty lbas read back before a stop or move, the
+// content read after an attach on a new host, a restore target's inherited
+// lbas read first, a pair window before a source or target leaves, the
+// lease horizon learnt from observations, and a coverage tail before the
+// sweep; a negative is observed on every volume it names.
+const GenVersion = "m1-gen/5"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
-const GenVersionFaults = "m2-gen/3"
+// m2-gen/4: as m1-gen/5.
+const GenVersionFaults = "m2-gen/4"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -173,6 +182,15 @@ type genVol struct {
 	// fenced: a healthy record listed it not serving; it is offered no reads
 	// or writes until a later healthy record does not.
 	fenced bool
+	// dirty: lbas written (ok, or unknown in a fault run) since that lba's
+	// last ok read. A stop or move would leave them unread for good (no
+	// attach after a stop): they are read back first (Before).
+	dirty map[int]bool
+	// moved: moved since its last attach; its next attach (on the new host)
+	// is followed by a read of its whole content (due).
+	moved bool
+	// due: forced operations owed on this volume, in order (Due).
+	due []GenOp
 }
 
 // blockModel is the block product's randomrun.Model. Its zero value is a
@@ -195,7 +213,7 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
 	for _, n := range pool {
 		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
-			snapRewrote: map[string]bool{}}
+			snapRewrote: map[string]bool{}, dirty: map[int]bool{}}
 		m.order = append(m.order, n)
 	}
 	return nil
@@ -446,6 +464,16 @@ func (m *blockModel) Negatives() []GenOp {
 // read at a healthy point resolves it.
 func (m *blockModel) Learn(o GenOp, outcome string) {
 	v := m.vols[o.Volume]
+	if o.Forced != "" && v != nil && len(v.due) > 0 && sameOp(v.due[0], o) {
+		v.due = v.due[1:] // learnt, whatever its outcome: no longer due
+	}
+	if o.Action == "v3_op_read" && outcome == "ok" && v != nil {
+		for _, f := range strings.Fields(o.Params["lbas"]) {
+			if b, err := strconv.Atoi(f); err == nil {
+				delete(v.dirty, b)
+			}
+		}
+	}
 	if outcome == "unknown" && o.Action == "v3_op_read" {
 		return // a read changes nothing, whatever its outcome
 	}
@@ -453,6 +481,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		for _, f := range strings.Fields(o.Params["lbas"]) {
 			if n, err := strconv.Atoi(f); err == nil {
 				v.lbas[n] = true
+				v.dirty[n] = true
 			}
 		}
 		v.unresolved++
@@ -497,10 +526,17 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_attach":
 		v.state, v.fenced = stServing, false // a new holder: no earlier not_serving applies
 		v.held[v.host] = true
+		if v.moved {
+			// The move's own data check: every acknowledged lba read once on
+			// the new host.
+			v.moved = false
+			v.due = append(v.due, m.readsOf(v, sortedLBAs(v.lbas), "attach-check")...)
+		}
 	case "v3_op_write":
 		for _, f := range strings.Fields(o.Params["lbas"]) {
 			if b, err := strconv.Atoi(f); err == nil {
 				v.lbas[b] = true
+				v.dirty[b] = true
 			}
 		}
 		v.rewrote = true
@@ -527,7 +563,7 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 	case "v3_op_stop":
 		v.state = stStopped
 	case "v3_op_move":
-		v.state, v.host = stMoved, 1-v.host
+		v.state, v.host, v.moved = stMoved, 1-v.host, true
 	case "v3_op_delete":
 		v.state = stDeleted
 		if v.source != "" {
@@ -556,6 +592,53 @@ func (m *blockModel) Cells() map[string][]string {
 
 // sweepReadSize is the most lbas one sweep read names (a read's size).
 const sweepReadSize = 4
+
+// readsOf is the reads of lbas on v, at most a read's size each, forced for
+// reason.
+func (m *blockModel) readsOf(v *genVol, lbas []int, reason string) []GenOp {
+	var out []GenOp
+	for i := 0; i < len(lbas); i += sweepReadSize {
+		var f []string
+		for _, b := range lbas[i:min(i+sweepReadSize, len(lbas))] {
+			f = append(f, strconv.Itoa(b))
+		}
+		o := op("v3_op_read", v.name, "lbas", strings.Join(f, " "))
+		o.Forced = reason
+		out = append(out, o)
+	}
+	return out
+}
+
+// sameOp says two proposals are the same operation (number aside).
+func sameOp(a, b GenOp) bool {
+	return a.Action == b.Action && a.Volume == b.Volume && a.Forced == b.Forced && maps.Equal(a.Params, b.Params)
+}
+
+// Before (C1): an ordinary stop or move would leave the volume's dirty lbas
+// unread for good; they are read back first (not on a fenced volume: it
+// cannot be read).
+func (m *blockModel) Before(o GenOp) []GenOp {
+	v := m.vols[o.Volume]
+	if o.Negative != "" || v == nil || v.fenced || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
+		return nil
+	}
+	return m.readsOf(v, sortedLBAs(v.dirty), "readback")
+}
+
+// Due is the first owed operation of a volume, in pool order. Owed reads of
+// a volume that no longer serves (or is fenced) are dropped.
+func (m *blockModel) Due() []GenOp {
+	for _, n := range m.order {
+		v := m.vols[n]
+		if len(v.due) > 0 && v.due[0].Action == "v3_op_read" && (v.state != stServing || v.fenced) {
+			v.due = nil
+		}
+		if len(v.due) > 0 {
+			return []GenOp{v.due[0]}
+		}
+	}
+	return nil
+}
 
 // Sweep is the end-of-run sweep (C1, C2/C3, C7 need it): for every serving
 // volume, reads of every lba with acknowledged content (written, or inherited

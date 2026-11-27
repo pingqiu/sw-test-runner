@@ -249,6 +249,11 @@ func replayOp(r tr.HistoryRecord) (Op, error) {
 		}
 		o.Params[k] = sv
 	}
+	if f, present := r.Result["forced"]; present {
+		if o.Forced, ok = f.(string); !ok {
+			return Op{}, fmt.Errorf("gen_step %d: forced %v", o.No, f)
+		}
+	}
 	if n, present := r.Result["negative"]; present {
 		if o.Negative, ok = n.(string); !ok {
 			return Op{}, fmt.Errorf("gen_step %d: negative %v", o.No, n)

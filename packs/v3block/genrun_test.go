@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,7 +116,7 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 			last = r
 		}
 	}
-	if last.Verb != "gen_coverage" || out["proposed"] != "300" {
+	if last.Verb != "gen_coverage" || last.Result["drawn"] != float64(300) || out["proposed"] != fmt.Sprint(last.Result["proposed"]) {
 		t.Fatalf("last record %+v, out %v", last, out)
 	}
 	if _, err := os.Stat(filepath.Join(actx.Bundle.Dir, "gen-coverage.json")); err != nil {
@@ -128,7 +129,9 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 		if r.Verb != "gen_step" {
 			continue
 		}
-		steps++
+		if r.Result["forced"] == nil {
+			steps++
+		}
 		next := recs[i+1]
 		if r.Result["negative"] != nil {
 			for _, o := range recs[i+1 : i+3] {

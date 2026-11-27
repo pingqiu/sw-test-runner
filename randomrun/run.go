@@ -110,6 +110,9 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 	if o.Negative != "" {
 		step["negative"] = o.Negative
 	}
+	if o.Forced != "" {
+		step["forced"] = o.Forced
+	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
 		return "", err
 	}
@@ -261,7 +264,14 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		}
 		if fr != nil {
 			fr.note(o, outcome)
+			before := fr.next
 			err := fr.afterOp(ctx, actx, o.No)
+			if fr.next != before {
+				// A fault event ran: what was queued before it was decided on a
+				// state the event may have changed (a holder fenced, a volume
+				// settled); the queue is dropped, nothing of it is proposed.
+				g.queue = nil
+			}
 			if ferr := g.feed(actx.History); ferr != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, ferr)
 			}

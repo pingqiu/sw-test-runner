@@ -71,7 +71,7 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	sa, sb := stepsOf(t, a), stepsOf(t, b)
-	if out["value"] != "match" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) != 300 {
+	if out["value"] != "match" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) < 300 {
 		t.Fatalf("out %v, %d steps", out, len(sa))
 	}
 	if !reflect.DeepEqual(sa, sb) {
@@ -82,7 +82,7 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatalf("replay header %+v", hdr)
 	}
 	rep := lastVerb(t, b, "gen_replay")
-	if rep.Result["steps"] != float64(300) || len(rep.Result["differences"].([]any)) != 0 {
+	if rep.Result["steps"] != float64(len(sa)) || len(rep.Result["differences"].([]any)) != 0 {
 		t.Fatalf("gen_replay %+v", rep.Result)
 	}
 	// A replayed history is itself replayable, judged the same way.
@@ -147,7 +147,7 @@ func TestGenRunSweepsAtTheEndAndTheReplayReExecutesIt(t *testing.T) {
 	if reads == 0 || observes == 0 || !reflect.DeepEqual(after, want) {
 		t.Fatalf("%d reads, %d observations; records after gen_sweep\n%v\nwant\n%v", reads, observes, after, want)
 	}
-	if lastVerb(t, a, "gen_coverage").Result["proposed"] != float64(300) {
+	if lastVerb(t, a, "gen_coverage").Result["drawn"] != float64(300) {
 		t.Fatal("the sweep counted as proposals")
 	}
 	out, b, err := replayInto(t, a)
@@ -204,7 +204,7 @@ func TestGenReplayReportsAnOutcomeThatDiffers(t *testing.T) {
 		return inner(ctx, actx, act)
 	}
 	_, b, err := replayInto(t, a)
-	if err == nil || !strings.Contains(err.Error(), "operation "+strconv.Itoa(opno)+" ") || !strings.Contains(err.Error(), "1 of 300") {
+	if err == nil || !strings.Contains(err.Error(), "operation "+strconv.Itoa(opno)+" ") || !strings.Contains(err.Error(), "1 of "+strconv.Itoa(len(stepsOf(t, a)))) {
 		t.Fatalf("the difference at operation %d was not named: %v", opno, err)
 	}
 	diffs := lastVerb(t, b, "gen_replay").Result["differences"].([]any)
@@ -212,7 +212,7 @@ func TestGenReplayReportsAnOutcomeThatDiffers(t *testing.T) {
 	if len(diffs) != 1 || !reflect.DeepEqual(diffs[0], want) {
 		t.Fatalf("differences %v, want [%v]", diffs, want)
 	}
-	if len(stepsOf(t, b)) != 300 {
+	if len(stepsOf(t, b)) != len(stepsOf(t, a)) {
 		t.Fatal("the replay did not go through every step")
 	}
 }

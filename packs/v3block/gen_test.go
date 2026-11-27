@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -394,7 +395,11 @@ func TestGeneratorReadsNameTheirLBAs(t *testing.T) {
 
 func TestGeneratorEndsOnTheBudgetOrAnExhaustedPool(t *testing.T) {
 	ops, g := run(t, GenConfig{Seed: 3, Ops: 50, Pool: pool(40), Blocks: 4})
-	if len(ops) != 50 || g.Ended() != "ops" {
+	drawn := 0
+	for _, o := range ops {
+		drawn += btoi(o.Forced == "")
+	}
+	if drawn != 50 || g.Ended() != "ops" {
 		t.Fatalf("%d ops, ended %q", len(ops), g.Ended())
 	}
 	// A tiny pool, weights that only create and delete: every name is used once
@@ -454,7 +459,7 @@ func TestGeneratorWeightsByTimeAndReportsCoverage(t *testing.T) {
 		t.Errorf("deletes starved: %d deletes, %d writes", count["v3_op_delete"], count["v3_op_write"])
 	}
 	cov := g.Coverage()
-	if cov["proposed"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
+	if cov["drawn"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
 		t.Fatalf("coverage %v", cov)
 	}
 	h := g.Header()
@@ -951,5 +956,107 @@ func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
 	g.m.Observed(healthyRec(nil, "g2"))
 	if g.vols["g2"].state != stUnknown || len(offered(g, "g2")) != 0 {
 		t.Fatalf("third state: %q %v", g.vols["g2"].state, offered(g, "g2"))
+	}
+}
+
+// unreadAtRelease states C1's need on a proposal list answered as answer()
+// answers: at every ordinary stop or move, no lba of the volume written ok
+// since its last ok read; after an attach of a moved volume, its whole
+// content read before any other operation on it. It returns the violations.
+func unreadAtRelease(ops []GenOp) []string {
+	dirty := map[string]map[string]bool{}
+	content := map[string]map[string]bool{}
+	moved := map[string]bool{}
+	owed := map[string]map[string]bool{} // lbas still to read after an attach on a new host
+	var bad []string
+	for _, o := range ops {
+		v := o.Volume
+		if dirty[v] == nil {
+			dirty[v], content[v] = map[string]bool{}, map[string]bool{}
+		}
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if len(owed[v]) > 0 && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its content was read after the attach on a new host", o.No, o.Action, v))
+			delete(owed, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				dirty[v][b], content[v][b] = true, true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				delete(dirty[v], b)
+				delete(owed[v], b)
+			}
+		case "v3_op_stop", "v3_op_move":
+			if len(dirty[v]) > 0 {
+				bad = append(bad, fmt.Sprintf("op %d %s %s with %d lbas unread", o.No, o.Action, v, len(dirty[v])))
+			}
+			moved[v] = o.Action == "v3_op_move"
+		case "v3_op_attach":
+			if moved[v] {
+				owed[v] = maps.Clone(content[v])
+				moved[v] = false
+			}
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			if content[t] == nil {
+				dirty[t], content[t] = map[string]bool{}, map[string]bool{}
+			}
+		}
+	}
+	return bad
+}
+
+// C1: before an ordinary stop or move, the volume's dirty lbas are read
+// back (forced reads, outside the budget); after an attach on a new host,
+// its whole content is read once.
+func TestGeneratorReadsBackBeforeAStopOrMove(t *testing.T) {
+	forced := 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if bad := unreadAtRelease(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			if o.Forced == "readback" || o.Forced == "attach-check" {
+				forced++
+				if o.Action != "v3_op_read" || len(strings.Fields(o.Params["lbas"])) > 4 {
+					t.Fatalf("forced %+v", o)
+				}
+			}
+		}
+	}
+	if forced == 0 {
+		t.Fatal("no read was forced")
+	}
+	// Red controls: a stop after an unread write, and an attach on a new host
+	// followed by another operation, are caught; their green twins pass.
+	w := func(lbas string) GenOp { return op("v3_op_write", "g1", "lbas", lbas, "round", "r") }
+	base := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("1 2")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"stop with an unread write": {
+			red:   append(slices.Clone(base), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_stop", "g1")),
+		},
+		"move, attach, write before the content is read": {
+			red: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), w("3")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), op("v3_op_read", "g1", "lbas", "1 2"), w("3")),
+		},
+	} {
+		if bad := unreadAtRelease(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := unreadAtRelease(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
 	}
 }
