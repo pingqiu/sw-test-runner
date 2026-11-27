@@ -493,7 +493,7 @@ func (f *faultRun) healthy(ctx context.Context, actx *tr.ActionContext) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", o.Action, err)
 	}
-	if out["healthy"] != "true" {
+	if out[HealthyKey] != HealthyTrue {
 		return nil // not a healthy point: unknowns stay pending
 	}
 	return f.resolve(ctx, actx)

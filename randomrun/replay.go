@@ -152,11 +152,11 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				}
 				outages[int(k)] = w
 				cur = -1
-			case "gen_coverage", "gen_replay", "healthy":
+			case "gen_coverage", "gen_replay", VerbHealthy:
 				cur = -1
 			}
 		case tr.HistoryInvoke:
-			if faulty && (r.Verb == FaultKill || r.Verb == FaultRestart) {
+			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
 				cur = -1
 			}
 		case tr.HistoryComplete:

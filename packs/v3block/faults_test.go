@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/randomrun"
 )
 
 // Unit tests of the process faults against a fake node. Each action has a red
@@ -593,5 +594,53 @@ func TestHealthySingleLookLooksOnceAndSaysSo(t *testing.T) {
 	}
 	if _, err := v3OpHealthy(context.Background(), actx, tr.Action{Action: "v3_op_healthy", Params: map[string]string{"look": "twice"}}); err == nil {
 		t.Error("look=twice accepted")
+	}
+}
+
+// The block handlers keep the generic run's handler verb contract
+// (randomrun/doc.go): a kill and a restart record invoke and complete with
+// verb kill / restart; a healthy record has verb healthy and answers
+// {"value": "ok", "healthy": "true"|"false"}; a single look says
+// result.look "single".
+func TestBlockHandlersKeepTheHandlerVerbContract(t *testing.T) {
+	actx, p, e := faultSetup(t)
+	f := (&fakeNode{}).on("kill -KILL", ok("sent "+cmdline(holderArgv)+"\n")).on("/proc/4242", ok("absent\n"))
+	if _, err := e.kill(context.Background(), actx, f, "blockvolume:0", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.restart(context.Background(), actx, (&fakeNode{}), "blockvolume:0", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	var verbs []string
+	for _, r := range closeRecords(t, actx, p) {
+		if r.Kind == tr.HistoryInvoke || r.Kind == tr.HistoryComplete {
+			verbs = append(verbs, r.Kind+" "+r.Verb)
+		}
+	}
+	want := []string{tr.HistoryInvoke + " " + randomrun.VerbKill, tr.HistoryComplete + " " + randomrun.VerbKill,
+		tr.HistoryInvoke + " " + randomrun.VerbRestart, tr.HistoryComplete + " " + randomrun.VerbRestart}
+	if !slices.Equal(verbs, want) {
+		t.Fatalf("records %v, want %v", verbs, want)
+	}
+	for name, look := range map[string]func(*tr.ActionContext, opEnv) (map[string]string, error){
+		"healthy": func(a *tr.ActionContext, e opEnv) (map[string]string, error) {
+			return e.healthy(context.Background(), a, healthNode(), 0)
+		},
+		"single look": func(a *tr.ActionContext, e opEnv) (map[string]string, error) {
+			return e.singleLook(context.Background(), a, healthNode())
+		},
+	} {
+		actx, p, e := faultSetup(t)
+		out, err := look(actx, e)
+		if err != nil || out["value"] != tr.OutcomeOK || (out[randomrun.HealthyKey] != randomrun.HealthyTrue && out[randomrun.HealthyKey] != "false") || len(out) != 2 {
+			t.Fatalf("%s: answer %v %v", name, out, err)
+		}
+		recs := closeRecords(t, actx, p)
+		if len(recs) != 1 || recs[0].Verb != randomrun.VerbHealthy {
+			t.Fatalf("%s: records %+v", name, recs)
+		}
+		if l := recs[0].Result["look"]; (name == "single look") != (l == randomrun.LookSingle) {
+			t.Fatalf("%s: look %v", name, l)
+		}
 	}
 }
