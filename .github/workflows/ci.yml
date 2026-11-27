@@ -21,6 +21,27 @@ jobs:
       - name: build
         run: go build ./cmd/sw-test-runner
 
+  citations:
+    # The block description's citations, checked at the product commit its
+    # read_at names (packs/v3block/citations_test.go). The product is public.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: seaweedfs/seaweed-block
+          path: product-src
+          fetch-depth: 0
+      - name: fetch the product's pull request heads (a pin may precede its merge)
+        run: git -C product-src fetch --quiet origin '+refs/pull/*/head:refs/remotes/origin/pr/*'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: citations at the pin
+        env:
+          PRODUCT_SRC: ${{ github.workspace }}/product-src
+        run: go test ./packs/v3block/ -run 'TestCitations' -count=1 -v
+
   build-matrix:
     strategy:
       matrix:
