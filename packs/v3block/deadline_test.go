@@ -61,14 +61,16 @@ func deadlineCtx(t *testing.T, node runner) (*tr.ActionContext, string) {
 // unknown at the device deadline, the run continues with the next lba, and
 // with a child that survives the kill, its pid and start time are recorded.
 func TestDeviceIOEndsAtItsRunnerDeadline(t *testing.T) {
-	defer func(d, p time.Duration) { deviceDeadlineOverride, devicePoll = d, p }(deviceDeadlineOverride, devicePoll)
-	deviceDeadlineOverride, devicePoll = 200*time.Millisecond, 5*time.Millisecond
+	defer func(d func(time.Duration) time.Duration, p time.Duration) {
+		blockActions.Deadline, blockActions.Poll = d, p
+	}(blockActions.Deadline, blockActions.Poll)
+	blockActions.Deadline, blockActions.Poll = func(time.Duration) time.Duration { return 200 * time.Millisecond }, 5*time.Millisecond
 	for _, unkillable := range []bool{false, true} {
 		dev := (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("skip=1 ", ok(strings.Repeat("a", 64)+"\n"))
 		host := &declared.SimHost{Inner: stuckOn{match: "skip=0 ", inner: dev}, Unkillable: unkillable}
 		actx, p := deadlineCtx(t, host)
 		start := time.Now()
-		out, err := v3OpRead(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "lbas": "0 1"}})
+		out, err := blockActions.Handler("v3_op_read")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "lbas": "0 1"}})
 		if err != nil || time.Since(start) > 10*time.Second {
 			t.Fatalf("unkillable=%v: %v %v after %s", unkillable, out, err, time.Since(start))
 		}
@@ -99,7 +101,7 @@ func TestExceptionEndsAtItsRunnerDeadline(t *testing.T) {
 	}{
 		"stop: the guest disconnect hangs": {v3OpStop, map[string]string{"volume": "v1"}, "delete_controller"},
 		"attach: the listener check hangs": {v3OpAttach, map[string]string{"volume": "v1"}, "ss -Hltnp"},
-		"flush: the device scan hangs":     {v3OpFlush, map[string]string{"volume": "v1"}, "subsysnqn"},
+		"flush: the device scan hangs":     {blockActions.Handler("v3_op_flush"), map[string]string{"volume": "v1"}, "subsysnqn"},
 	} {
 		actx, p := deadlineCtx(t, stuckOn{match: c.stuck, inner: &fakeNode{}})
 		start := time.Now()
@@ -166,13 +168,22 @@ func TestEveryTypedOperationHasARunnerDeadline(t *testing.T) {
 			}
 		}
 	}
-	// The device deadline is the runner's, below the kernel's default
-	// ctrl_loss_tmo (600 s), and inside the deadlines of its operations.
-	dd := time.Duration(guest.DeviceIODeadlineSecs) * time.Second
-	if dd <= 0 || dd >= 600*time.Second {
-		t.Fatalf("device I/O runner deadline %s", dd)
-	}
+	// Each device I/O deadline is the runner's, below the kernel's default
+	// ctrl_loss_tmo (600 s), and inside the deadline of its operation.
 	for _, n := range []string{"v3_op_read", "v3_op_write", "v3_op_flush"} {
+		var io *declared.IO
+		for _, a := range blockActions.File.Actions {
+			if a.Action == n {
+				io = a.IO
+			}
+		}
+		if io == nil {
+			t.Fatalf("%s: not a declared device action", n)
+		}
+		dd := time.Duration(io.RunnerDeadlineSeconds) * time.Second
+		if dd <= 0 || dd >= 600*time.Second {
+			t.Fatalf("%s: device I/O runner deadline %s", n, dd)
+		}
 		if d, _ := runnerDeadline(n, nil); d <= dd {
 			t.Errorf("%s: deadline %s does not leave room for the device deadline %s", n, d, dd)
 		}
@@ -267,12 +278,14 @@ func TestAttachRecordsTheGuestConnect(t *testing.T) {
 // run's end (v3_history_end), it is recorded child_exit unknown, alive
 // true, naming the read's invoke seq.
 func TestAbandonedDeviceIOIsWatchedToTheEnd(t *testing.T) {
-	defer func(d, p time.Duration) { deviceDeadlineOverride, devicePoll = d, p }(deviceDeadlineOverride, devicePoll)
-	deviceDeadlineOverride, devicePoll = 200*time.Millisecond, 5*time.Millisecond
+	defer func(d func(time.Duration) time.Duration, p time.Duration) {
+		blockActions.Deadline, blockActions.Poll = d, p
+	}(blockActions.Deadline, blockActions.Poll)
+	blockActions.Deadline, blockActions.Poll = func(time.Duration) time.Duration { return 200 * time.Millisecond }, 5*time.Millisecond
 	dev := (&fakeNode{}).on("subsysnqn", ok(oneDevice))
 	host := &declared.SimHost{Inner: stuckOn{match: "skip=0 ", inner: dev}, Unkillable: true}
 	actx, p := deadlineCtx(t, host)
-	if _, err := v3OpRead(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "lbas": "0"}}); err != nil {
+	if _, err := blockActions.Handler("v3_op_read")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "lbas": "0"}}); err != nil {
 		t.Fatal(err)
 	}
 	if declared.Watched(actx.History) != 1 {

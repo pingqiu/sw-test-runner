@@ -12,6 +12,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,15 +61,36 @@ func (s *volumeSubject) Field(ctx context.Context, node declared.Runner, f strin
 			s.alive = &a
 		}
 		return strconv.FormatBool(*s.alive), nil
+	case "written":
+		// Every lba a write was attempted on, in numeric order.
+		var out []uint64
+		for k := range v.Written {
+			n, _ := strconv.ParseUint(k, 10, 64)
+			out = append(out, n)
+		}
+		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+		parts := make([]string, len(out))
+		for i, n := range out {
+			parts[i] = strconv.FormatUint(n, 10)
+		}
+		return strings.Join(parts, " "), nil
 	}
 	return "", fmt.Errorf("volume field %q", f)
 }
 
 func (s *volumeSubject) Set(f, val string) error {
-	if f != "layout_id" {
+	switch f {
+	case "layout_id":
+		s.v.LayoutID = val
+	case "written":
+		// A write attempted on lba val (set before its invoke).
+		if s.v.Written == nil {
+			s.v.Written = map[string]bool{}
+		}
+		s.v.Written[val] = true
+	default:
 		return fmt.Errorf("volume field %q is not settable", f)
 	}
-	s.v.LayoutID = val
 	return nil
 }
 
@@ -92,8 +114,27 @@ var blockActions = func() *declared.Executor {
 			return &volumeSubject{actx: actx, v: v}, nil
 		},
 		Lookup: outcomes.lookupFunc(),
+		OpDeadline: func(d time.Duration) time.Duration {
+			if exceptionDeadlineOverride > 0 {
+				return exceptionDeadlineOverride
+			}
+			return d
+		},
 	}
 }()
+
+func init() {
+	// The run values: the guest connect the run selected (its label and its
+	// kernel options), from the description's guest section (set here: the
+	// guest configuration is read from the executor's description).
+	blockActions.Values = func(actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		c, err := selectConnect(opParam(act, actx, guest.Connect.SelectVar))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"guest_connect": c.Label, "guest_connect_options": c.Options}, nil
+	}
+}
 
 // boundedNode bounds every command of a Go handler: a command runs at most
 // until its context ends (bound when the context has none), and the runner
@@ -134,6 +175,12 @@ func runnerDeadline(name string, params map[string]string) (time.Duration, error
 	}
 	for _, a := range blockActions.File.Actions {
 		if a.Action == name {
+			if d, ok := a.RunnerDeadline(params); ok {
+				if exceptionDeadlineOverride > 0 {
+					return exceptionDeadlineOverride, nil
+				}
+				return d, nil
+			}
 			var d time.Duration
 			for _, v := range a.Variants {
 				d = max(d, time.Duration(v.RunnerDeadlineSeconds)*time.Second)
@@ -150,10 +197,8 @@ func runnerDeadline(name string, params map[string]string) (time.Duration, error
 // guestConfig is the description's guest configuration: runner settings for
 // the kernel NVMe/TCP host the runner connects, not product facts.
 type guestConfig struct {
-	About                 string `json:"about"`
-	DeviceIODeadlineSecs  int    `json:"device_io_runner_deadline_seconds"`
-	DeviceIODeadlineAbout string `json:"device_io_runner_deadline_about"`
-	Connect               struct {
+	About   string `json:"about"`
+	Connect struct {
 		About     string   `json:"about"`
 		Options   []string `json:"options"`
 		SelectVar string   `json:"select_var"`
@@ -186,8 +231,8 @@ var guest = func() guestConfig {
 	if err := strictJSON(blockActions.File.Guest, &g); err != nil {
 		panic("v3block: product/actions.json guest: " + err.Error())
 	}
-	if g.DeviceIODeadlineSecs <= 0 || g.Connect.SelectVar == "" || g.Connect.Default.Name == "" || !g.Connect.Default.Evidence {
-		panic("v3block: product/actions.json guest: device_io_runner_deadline_seconds, connect.select_var and an evidence default connect are required")
+	if g.Connect.SelectVar == "" || g.Connect.Default.Name == "" || !g.Connect.Default.Evidence {
+		panic("v3block: product/actions.json guest: connect.select_var and an evidence default connect are required")
 	}
 	g.variants = map[string]map[string]int{}
 	for _, v := range g.Connect.Variants {
@@ -205,19 +250,9 @@ var guest = func() guestConfig {
 	return g
 }()
 
-// exceptionDeadlineOverride replaces every Go handler's runner deadline
-// (tests).
+// exceptionDeadlineOverride replaces every operation-level runner deadline:
+// a Go handler's and a declared step kind's (tests).
 var exceptionDeadlineOverride time.Duration
-
-// deviceDeadlineOverride replaces the device I/O runner deadline (tests).
-var deviceDeadlineOverride time.Duration
-
-func deviceDeadline() time.Duration {
-	if deviceDeadlineOverride > 0 {
-		return deviceDeadlineOverride
-	}
-	return time.Duration(guest.DeviceIODeadlineSecs) * time.Second
-}
 
 // selectConnect resolves the run's connect by name: "" or the default's
 // name is the product's plain connect (the only one whose results are

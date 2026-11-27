@@ -53,12 +53,10 @@ type opEnv struct {
 	// Per step, never per verb: any other refusal still fails the run.
 	expect   string
 	lockDirs bool
-	// The action's runner deadline (actions.json), the device I/O runner
-	// deadline and where detached commands keep their files (guest
-	// configuration); the guest's NVMe connect options.
-	deadline, deviceDeadline time.Duration
-	ioDir                    string
-	connect                  guestConnect
+	// The action's runner deadline (actions.json) and the guest's NVMe
+	// connect options.
+	deadline time.Duration
+	connect  guestConnect
 	// node is the bounded node, for the abandoned-child watcher.
 	node runner
 }
@@ -182,7 +180,7 @@ func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv
 	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
 		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
 	}
-	e.deadline, e.deviceDeadline, e.ioDir, e.connect, e.node = deadline, deviceDeadline(), e.root+"/.runner-io", conn, node
+	e.deadline, e.connect, e.node = deadline, conn, node
 	return node, e, nil
 }
 
@@ -237,26 +235,6 @@ func pause(ctx context.Context, d time.Duration) bool {
 		return ctx.Err() == nil
 	}
 }
-
-// runDevice runs one I/O command on the volume's kernel block device,
-// detached, under the device I/O runner deadline: a child stuck in
-// uninterruptible sleep on a dead device never holds the runner. At the
-// deadline the answer is unknown ("timeout after <n>s") and whatever
-// survived the kill is named under "abandoned". A non-nil result is the
-// operation's (unknown) result.
-func (e opEnv) runDevice(ctx context.Context, node runner, cmd string) (string, string, int, map[string]any) {
-	stdout, stderr, code, err := declared.RunDetached(ctx, node, true, e.ioDir, cmd, e.deviceDeadline, devicePoll)
-	if t, ok := declared.AsDetached(err); ok {
-		return "", "", -1, declared.Abandon(ctx, t)
-	}
-	if err != nil {
-		return "", "", -1, map[string]any{"detail": err.Error()}
-	}
-	return stdout, stderr, code, nil
-}
-
-// devicePoll is how often a detached device command is polled.
-var devicePoll = 200 * time.Millisecond
 
 func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
@@ -553,219 +531,6 @@ func contains(set []string, v string) bool {
 		}
 	}
 	return false
-}
-
-// blockTag is the content of one written block: a repeated tag naming the
-// volume, the round and the block, so a block from another volume, round or
-// offset cannot match.
-func blockTag(vol, round string, lba uint64) string { return fmt.Sprintf("%s|%s|%d|", vol, round, lba) }
-
-// parseLBAs reads "0 2048 4095" or "written" (every lba a write was attempted
-// on, in order).
-func parseLBAs(v *opVolume, s string) ([]uint64, error) {
-	if s == "written" {
-		var out []uint64
-		for k := range v.Written {
-			n, _ := strconv.ParseUint(k, 10, 64)
-			out = append(out, n)
-		}
-		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
-		return out, nil
-	}
-	var out []uint64
-	for _, f := range strings.Fields(s) {
-		n, err := strconv.ParseUint(f, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("lba %q", f)
-		}
-		out = append(out, n)
-	}
-	if len(out) == 0 {
-		return nil, errors.New("lbas are required")
-	}
-	return out, nil
-}
-
-// writeCmd is the device write of one block: O_DIRECT, and with flush also
-// conv=fsync (the kernel sends the device a cache flush before dd exits), so
-// exit 0 is acknowledged and flushed. Without flush exit 0 is acknowledged
-// only: the block reached the device, which may still hold it volatile.
-func writeCmd(blk, dev string, lba uint64, flush bool) string {
-	conv := "notrunc"
-	if flush {
-		conv = "fsync,notrunc"
-	}
-	return fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=%s status=none", shellQuote(blk), dev, lba, conv)
-}
-
-// writeArgs is a write's invocation: a write issued without the fsync says
-// so ("flush": false); a flushed write's record is today's, without the key.
-func writeArgs(lba uint64, sha, round string, flush bool) map[string]any {
-	a := map[string]any{"lba": lba, "sha256": sha, "round": round}
-	if !flush {
-		a["flush"] = false
-	}
-	return a
-}
-
-// writeBlock writes the generated block blk at lba of v's device: ok on dd's
-// exit 0, unknown otherwise.
-func (e opEnv) writeBlock(ctx context.Context, node runner, v *opVolume, blk string, lba uint64, flush bool) (string, map[string]any) {
-	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-	if why != "" {
-		return fail(why)
-	}
-	_, stderr, code, res := e.runDevice(ctx, node, writeCmd(blk, dev, lba, flush))
-	if res != nil {
-		return tr.OutcomeUnknown, res
-	}
-	if code != 0 {
-		return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
-	}
-	return tr.OutcomeOK, nil
-}
-
-// v3OpWrite writes one block per lba through the kernel block device (O_DIRECT
-// + fsync: exit 0 is acknowledged and flushed), each its own operation
-// (HolderInterface.Write). The record carries the sha256 of the attempted
-// block; the outcome is ok or unknown. Params: lbas, round, flush ("true",
-// the default; "false" issues the write without the fsync and records
-// "flush": false, so it is durable only after a later acknowledged flush).
-func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_write")
-	if err != nil {
-		return nil, err
-	}
-	round := requireParam(act, actx, "round")
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`).MatchString(round) {
-		return nil, errors.New("v3_op_write: round (1-16 of [A-Za-z0-9_-]) is required")
-	}
-	flush := true
-	switch f := optionalParam(act, "flush"); f {
-	case "", "true":
-	case "false":
-		flush = false
-	default:
-		return nil, fmt.Errorf("v3_op_write: flush %q; want true or false", f)
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_write: %w", err)
-	}
-	if v.Written == nil {
-		v.Written = map[string]bool{}
-	}
-	defer saveVolume(actx, v)
-	var last map[string]string
-	for _, lba := range lbas {
-		tag := blockTag(v.Name, round, lba)
-		want := blockSHA(tag)
-		// The block is generated and checked BEFORE the invocation: a block
-		// whose hash is not the one recorded would put a content on the device
-		// that the history names nowhere, and the checker would blame the
-		// product. A mismatch is the runner's failure: the run fails, nothing
-		// is written.
-		blk := fmt.Sprintf("%s/.block-%s-%d", e.root, v.Name, lba)
-		gen := fmt.Sprintf(`mkdir -p %s && python3 -c 'import sys;t=sys.argv[1].encode();open(sys.argv[2],"wb").write((t*(4096//len(t)+1))[:4096])' %s %s && sha256sum < %s | cut -c1-64`,
-			shellQuote(e.root), shellQuote(tag), shellQuote(blk), shellQuote(blk))
-		stdout, stderr, code, err := node.Run(ctx, gen)
-		if err != nil || code != 0 || strings.TrimSpace(stdout) != want {
-			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
-		}
-		v.Written[strconv.FormatUint(lba, 10)] = true
-		last, err = recordBounded(ctx, actx, e, "write", v.Name, writeArgs(lba, want, round, flush), func(ctx context.Context) (string, map[string]any) {
-			return e.writeBlock(ctx, node, v, blk, lba, flush)
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// flushCmd is fsync(2) of the device: on a block device the kernel sends the
-// device a cache flush and returns only once it is acknowledged. python3 is
-// on the host already (the block generator); exit 0 only after fsync returns.
-func flushCmd(dev string) string {
-	return fmt.Sprintf(`python3 -I -c 'import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)' %s`, dev)
-}
-
-// flushDevice fsyncs v's device: ok on exit 0, unknown otherwise (a failed
-// or unanswered fsync may or may not have flushed; the product has no
-// refusal for it).
-func (e opEnv) flushDevice(ctx context.Context, node runner, v *opVolume) (string, map[string]any) {
-	dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-	if why != "" {
-		return fail(why)
-	}
-	_, stderr, code, res := e.runDevice(ctx, node, flushCmd(dev))
-	if res != nil {
-		res["device"] = dev
-		return tr.OutcomeUnknown, res
-	}
-	if code != 0 {
-		return fail(fmt.Sprintf("fsync exit %d: %s", code, firstLine(stderr)))
-	}
-	return tr.OutcomeOK, map[string]any{"device": dev}
-}
-
-// v3OpFlush flushes the volume through the kernel block device (fsync of the
-// device), its own operation: an acknowledged flush makes every earlier write
-// of the volume durable. No params beyond the volume.
-func v3OpFlush(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_flush")
-	if err != nil {
-		return nil, err
-	}
-	return recordBounded(ctx, actx, e, "flush", v.Name, map[string]any{}, func(ctx context.Context) (string, map[string]any) {
-		return e.flushDevice(ctx, node, v)
-	})
-}
-
-// v3OpRead reads one block per lba through the kernel block device and
-// records the sha256 it read; it compares nothing. Params: lbas ("written":
-// every lba a write was attempted on).
-func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_read")
-	if err != nil {
-		return nil, err
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_read: %w", err)
-	}
-	if len(lbas) == 0 {
-		// Nothing to read records no operation and has no outcome: a runner
-		// error, never a silent empty answer.
-		return nil, fmt.Errorf("v3_op_read: no lba to read on %s (lbas %q)", v.Name, requireParam(act, actx, "lbas"))
-	}
-	var last map[string]string
-	for _, lba := range lbas {
-		last, err = recordBounded(ctx, actx, e, "read", v.Name, map[string]any{"lba": lba}, func(ctx context.Context) (string, map[string]any) {
-			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-			if why != "" {
-				return fail(why)
-			}
-			stdout, stderr, code, res := e.runDevice(ctx, node, readCmd(dev, lba))
-			if res != nil {
-				return tr.OutcomeUnknown, res
-			}
-			sum := strings.TrimSpace(stdout)
-			if code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
-				return fail(fmt.Sprintf("read exit %d: %s", code, firstLine(stderr)))
-			}
-			return tr.OutcomeOK, map[string]any{"sha256": sum}
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// readCmd reads one block of the device and prints its sha256.
-func readCmd(dev string, lba uint64) string {
-	return fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba)))
 }
 
 // disconnect disconnects the guest from v and records it (observe

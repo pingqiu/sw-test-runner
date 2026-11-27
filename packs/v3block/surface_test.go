@@ -71,7 +71,7 @@ const servingV1 = `{"VolumeID":"v1","Epoch":1,"Healthy":true,"AuthorityRole":"pr
 
 func testVolume() (*opVolume, vsHost, opEnv) {
 	h := vsHost{Server: "a-v1", Data: "127.0.0.1:21010", Ctrl: "127.0.0.1:21011", Status: "127.0.0.1:21012", NVMe: "127.0.0.1:21013"}
-	return &opVolume{Name: "v1", NQN: "nqn.2026-11.io.seaweedfs:op-run-1-v1", LayoutID: strings.Repeat("ab", 16), Hosts: []vsHost{h}}, h, opEnv{bin: "/b", root: "/r", master: "m", filer: "f:29588", deadline: time.Minute, deviceDeadline: time.Minute, ioDir: "/r/.runner-io"}
+	return &opVolume{Name: "v1", NQN: "nqn.2026-11.io.seaweedfs:op-run-1-v1", LayoutID: strings.Repeat("ab", 16), Hosts: []vsHost{h}}, h, opEnv{bin: "/b", root: "/r", master: "m", filer: "f:29588", deadline: time.Minute}
 }
 
 // A listener already on one of the volume's endpoints (another run's, or a

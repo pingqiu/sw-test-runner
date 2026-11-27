@@ -100,7 +100,7 @@ const deviceDesc = head + `
    "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 0, "cite": "x.go:10"},
    "io": {"command": ["bash", "-c", "rd {{device}} {{item}} | sha256sum"], "as_root": true, "runner_deadline_seconds": 5, "cite": "x.go:12",
      "ok_stdout": "^[0-9a-f]{64}$", "failure": "read exit {{exit}}: {{stderr_first_line}}", "result": {"sha256": "{{io.stdout}}"},
-     "result_abandoned": {"device": "{{device}}"}}}
+     "result_unanswered": {"device": "{{device}}"}}}
  ]}`
 
 const oneNS = "ctrl nvme3\nns nvme3c3n1\nend\n"

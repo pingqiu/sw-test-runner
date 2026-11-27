@@ -14,6 +14,10 @@
     "client": "client"
   },
   "runner_io_dir": "{{config.root}}/.runner-io",
+  "run_values": [
+    {"name": "guest_connect", "why": "the label of the guest connect the run selected (guest.connect), recorded in every attach"},
+    {"name": "guest_connect_options", "why": "that connect's kernel fabrics options (\",key=value...\"; empty for the product's plain connect)"}
+  ],
   "actions": [
     {
       "action": "v3_op_create", "verb": "create", "op": "VolumeCreate.MarkReady", "runs_on": "step_node",
@@ -126,6 +130,74 @@
         "expected_refusal": {"param": "retry_horizon", "while_message_contains": "workspace: deletion refused before persistence",
           "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes; the phrase is the delete sentinel (outcomes.json phrases)"}},
       "note": "after a stop the master admits the delete only once the holder's lease horizon has passed, answering not_admitted until then; the CLI's procedure is to rerun with the same request id. A step that declares expect=refused is one call, unless it sets retry_horizon: it then reruns through the lease-horizon refusal before persistence."
+    },
+    {
+      "action": "v3_op_write", "verb": "write", "op": "HolderInterface.Write", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "round", "vars": true, "pattern": "^[A-Za-z0-9_-]{1,16}$"},
+        {"name": "flush", "kind": "enum", "values": ["true", "false"], "default": "true"},
+        {"name": "lbas", "kind": "list", "vars": true, "item_pattern": "^(0|[1-9][0-9]{0,18})$", "aliases": {"written": "volume.written"}}
+      ],
+      "derived": {
+        "conv": {"kind": "map", "from": "{{flush}}", "map": {"true": "fsync,notrunc", "false": "notrunc"}, "error": "flush is true or false"},
+        "flush_arg": {"kind": "map", "from": "{{flush}}", "map": {"true": "", "false": "false"}, "error": "flush is true or false"}
+      },
+      "runner_deadline_seconds": 150,
+      "each": "lbas",
+      "input": {
+        "kind": "repeat", "text": "{{volume.name}}|{{round}}|{{item}}|", "bytes": 4096, "path": "{{config.root}}/.block-{{volume.name}}-{{item}}",
+        "command": ["mkdir", "-p", "{{config.root}}", {"raw": "&&"}, "python3", "-c", "import sys;t=sys.argv[1].encode();open(sys.argv[2],\"wb\").write((t*(4096//len(t)+1))[:4096])", "{{input.text}}", "{{input.path}}", {"raw": "&&"}, "sha256sum", {"raw": "<"}, "{{input.path}}", {"raw": "| cut -c1-64"}],
+        "cite": "the block's content is a tag naming the volume, the round and the lba, repeated to one 4096-byte block, so a block from another volume, round or offset cannot match; its sha256 is recorded before the invoke"
+      },
+      "on_invoke_set": {"volume.written": "{{item}}"},
+      "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}, "sha256": "{{input.sha256}}", "round": "{{round}}", "flush": {"template": "{{derived.flush_arg}}", "type": "bool", "optional": true}}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "io": {
+        "command": ["dd", "if={{input.path}}", "of={{device}}", "bs=4096", "seek={{item}}", "count=1", "oflag=direct", "conv={{derived.conv}}", "status=none"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "dd(1): oflag=direct writes through the device, conv=fsync makes the kernel send the device a cache flush before dd exits, so exit 0 is acknowledged and flushed; without it exit 0 is acknowledged only",
+        "failure": "dd exit {{exit}}: {{stderr_first_line}}"
+      },
+      "note": "one operation per lba (lbas: a list, or written: every lba a write was attempted on); ok on dd's exit 0, unknown otherwise. flush=false issues the write without the fsync and records flush: false, so it is durable only after a later acknowledged flush. The I/O runner deadline lies above fast_io_fail_tmo of every guest connect variant and below the kernel's default ctrl_loss_tmo (600 s), under which I/O to a dead controller stays blocked"
+    },
+    {
+      "action": "v3_op_read", "verb": "read", "op": "Guest.Read", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "lbas", "kind": "list", "vars": true, "item_pattern": "^(0|[1-9][0-9]{0,18})$", "aliases": {"written": "volume.written"}, "non_empty": true}
+      ],
+      "runner_deadline_seconds": 150,
+      "each": "lbas",
+      "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "io": {
+        "command": ["bash", "-c", "set -o pipefail; dd if={{device}} bs=4096 skip={{item}} count=1 iflag=direct status=none | sha256sum | cut -c1-64"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "dd(1) iflag=direct reads one block through the device; the sha256 of what it read is the result, compared with nothing here",
+        "ok_stdout": "^[0-9a-f]{64}$",
+        "failure": "read exit {{exit}}: {{stderr_first_line}}",
+        "result": {"sha256": "{{io.stdout}}"}
+      },
+      "note": "one operation per lba; records the sha256 it read and compares nothing. Nothing to read (written, before any write) is the runner's error, never a silent empty answer"
+    },
+    {
+      "action": "v3_op_flush", "verb": "flush", "op": "Guest.Flush", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 150,
+      "record": {"volume": "{{volume.name}}", "args": {}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "the guest's kernel NVMe/TCP controller of the volume's subsystem NQN (the holder's --nvme-subsysnqn), one namespace"},
+      "io": {
+        "command": ["python3", "-I", "-c", "import os,sys;fd=os.open(sys.argv[1],os.O_WRONLY);os.fsync(fd);os.close(fd)", "{{device}}"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "fsync(2) of a block device: the kernel sends the device a cache flush and returns only once it is acknowledged; exit 0 only after fsync returns",
+        "failure": "fsync exit {{exit}}: {{stderr_first_line}}",
+        "result": {"device": "{{device}}"},
+        "result_unanswered": {"device": "{{device}}"}
+      },
+      "note": "an acknowledged flush makes every earlier write of the volume durable; a failed or unanswered fsync may or may not have flushed, and the product has no refusal for it: unknown"
     },
     {
       "action": "v3_op_observe",
@@ -318,9 +390,6 @@
   ],
   "exceptions": [
     {"action": "v3_op_attach", "why": "starts a long-lived holder process and credits readiness only to it: free endpoints before the launch, the child's pid and start time recorded as owned, a readiness wait polling its status and its listeners, then the kernel NVMe/TCP connect and the device lookup", "declarable_with": "a long-lived process step: launch detached, record its identity as owned, and a readiness probe polled until a declared condition holds (status JSON serving above the recorded epoch, listeners held by that pid), then dependent steps (connect, device lookup) run only after it", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
-    {"action": "v3_op_write", "why": "writes through the kernel block device: the device is looked up by the volume's NQN, the block is generated and its hash checked before the invocation, one invocation per lba; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step: resolve the guest device from the subject (NQN to /dev path) as a declared lookup, plus a runner-side generated input whose hash is recorded before the invocation; then one invocation per element of a list param", "runner_deadline_seconds": 150},
-    {"action": "v3_op_read", "why": "reads through the kernel block device: device lookup by NQN, then dd per lba, one invocation each; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step (the declared NQN-to-device lookup) and one invocation per element of a list param, with a result field read from stdout by a pattern (the sha256)", "runner_deadline_seconds": 150},
-    {"action": "v3_op_flush", "why": "fsync of the kernel block device, found by its NQN; the I/O runs detached under the guest device_io_runner_deadline_seconds, so a child stuck on a dead device is abandoned and recorded, never waited on", "declarable_with": "a device step (the declared NQN-to-device lookup); with it the fsync is one declared command", "runner_deadline_seconds": 150},
     {"action": "v3_op_stop", "why": "the planned hand-over is steps that feed each other: the guest disconnect, detach --plain whose sealed generation the revoke takes, a wait for the holder's own exit by its recorded identity, and a poll for the master's recorded ACK. Any failed step makes the operation unknown, not the step's own outcome, because the earlier steps already changed state (outcomes.json, the stop's revoke rows); so it is not a sequence whose outcome is its worst step's", "declarable_with": "a step sequence with data passed between steps (the sealed generation parsed from detach feeds revoke), waits for a process's exit by its recorded identity and a poll for an answer line, and an outcome rule other than the worst step's (any failure after the first change is unknown)", "runner_deadline_seconds": 300},
     {"action": "v3_op_move", "why": "the stop's hand-over (see v3_op_stop), then move --clean, whose answer must name this move (volume, request, epoch, target) before the runner's record of the current host changes", "declarable_with": "the stop's step sequence (see v3_op_stop), then a command whose answer must match the operation's own args before a subject field (the current host) is updated", "runner_deadline_seconds": 360},
     {"action": "v3_op_kill", "why": "a fault: the process is resolved from the run's ownership ledger and killed by its recorded identity, and the kill is certified by its exit", "declarable_with": "process identity from the run's ownership ledger as a subject, a kill command bound to that identity, and a wait for the exit certified by a successful check", "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20}},
@@ -328,9 +397,7 @@
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],
   "guest": {
-    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default.",
-    "device_io_runner_deadline_seconds": 120,
-    "device_io_runner_deadline_about": "The RUNNER's own bound on one read, write or flush through the kernel block device, not a product bound. Under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at this deadline and records the abandoned child by pid and start time. It lies above fast_io_fail_tmo of every connect variant.",
+    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default. The runner's own bound on one read, write or flush through the kernel block device is each device action's io.runner_deadline_seconds: under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at that deadline and records the abandoned child by pid and start time.",
     "connect": {
       "about": "A variant is DECLARED here, named, with its source and evidence false; a run selects one by name with the run var select_var (a scenario env value), and empty selects the default. Its options go into the kernel's fabrics connect string under the kernel's option names, in the order of options (the runner connects through /dev/nvme-fabrics, not nvme-cli, whose flags are --ctrl-loss-tmo, --reconnect-delay, --fast_io_fail_tmo, --keep-alive-tmo). A variant's option names may be written with _ or -; an unknown name, a value that is not an integer, or a name given twice refuses the description at load. A variant is named 'guest connect variant: <values>' in the run header and in every attach, is never release evidence, and no checker changes with it.",
       "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],

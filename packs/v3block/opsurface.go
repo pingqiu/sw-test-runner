@@ -8,14 +8,14 @@ package v3block
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 // run runs one command and returns stdout, stderr, the exit code and
@@ -61,19 +61,9 @@ func readStatus(ctx context.Context, node runner, statusAddr, vol string) (vsSta
 }
 
 // nvmeConnect connects the kernel NVMe/TCP host to nqn at host:port through
-// the kernel's fabrics interface, the call nvme-cli makes (no tool needed).
+// the kernel's fabrics interface (declared.NVMeConnect).
 func nvmeConnect(ctx context.Context, node runner, host, port, nqn, extra string) string {
-	if !regexp.MustCompile(`^[0-9.]+$`).MatchString(host) || !regexp.MustCompile(`^[0-9]+$`).MatchString(port) || !regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`).MatchString(nqn) {
-		return "nvme connect: malformed address or nqn"
-	}
-	if !regexp.MustCompile(`^(,[a-z_]+=-?[0-9]+)*$`).MatchString(extra) {
-		return "nvme connect: malformed options " + extra
-	}
-	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s%s", host, port, nqn, extra)
-	if _, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("printf %%s %s > /dev/nvme-fabrics", shellQuote(opts))); err != nil || code != 0 {
-		return "nvme connect: " + firstLine(stderr)
-	}
-	return ""
+	return declared.NVMeConnect(ctx, node, host, port, nqn, extra)
 }
 
 // nvmeDisconnect deletes every kernel controller of subsystem nqn through
@@ -120,68 +110,26 @@ func nvmeConfirmGone(ctx context.Context, node runner, nqn string) string {
 	}
 }
 
-// What a scan of the kernel's NVMe controllers says about one subsystem.
+// What a scan of the kernel's NVMe controllers says about one subsystem
+// (declared.NVMeScan).
 const (
-	nvmeAbsent     = "absent"     // no controller of the subsystem: a scan that read everything
-	nvmeOne        = "one"        // one controller with exactly one namespace: its device
-	nvmeIncomplete = "incomplete" // a controller without exactly one namespace (still coming up, or not ours)
-	nvmeUnreadable = "unreadable" // the scan failed: nothing may be concluded
+	nvmeAbsent     = declared.NVMeAbsent
+	nvmeOne        = declared.NVMeOne
+	nvmeIncomplete = declared.NVMeIncomplete
+	nvmeUnreadable = declared.NVMeUnreadable
 )
 
 // nvmeScan reads every controller's subsystem NQN and the namespaces of the
-// ones that match. A read error, or a command that fails, is unreadable:
-// absent and present are concluded only from a scan that completed.
+// ones that match (declared.NVMeScan).
 func nvmeScan(ctx context.Context, node runner, nqn string) (state, dev, why string) {
-	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo "ctrl $(basename "$d")"; for n in "$d"/nvme*n*; do [ -e "$n" ] && echo "ns $(basename "$n")"; done; done; echo end`, shellQuote(nqn))
-	stdout, stderr, code, err := node.Run(ctx, cmd)
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	if err != nil || code != 0 || len(lines) == 0 || lines[len(lines)-1] != "end" {
-		return nvmeUnreadable, "", fmt.Sprintf("sysfs scan exit %d: %s", code, firstLine(stderr))
-	}
-	var ctrls, nss []string
-	for _, l := range lines[:len(lines)-1] {
-		switch {
-		case strings.HasPrefix(l, "ctrl "):
-			ctrls = append(ctrls, l[5:])
-		case strings.HasPrefix(l, "ns "):
-			nss = append(nss, regexp.MustCompile(`c[0-9]+n`).ReplaceAllString(l[3:], "n"))
-		default:
-			return nvmeUnreadable, "", "sysfs scan printed " + firstLine(l)
-		}
-	}
-	switch {
-	case len(ctrls) == 0:
-		return nvmeAbsent, "", ""
-	case len(ctrls) == 1 && len(nss) == 1:
-		return nvmeOne, "/dev/" + nss[0], ""
-	}
-	return nvmeIncomplete, "", fmt.Sprintf("subsystem %s: %d controllers, %d namespaces", nqn, len(ctrls), len(nss))
+	return declared.NVMeScan(ctx, node, nqn)
 }
 
 // deviceOf waits until the subsystem has exactly one controller with one
-// namespace and returns its device. An unreadable scan or a subsystem that
-// never becomes exactly one device refuses: no I/O goes to an identity the
-// runner could not establish.
+// namespace and returns its device (declared.NVMeDevice): no I/O goes to an
+// identity the runner could not establish.
 func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration) (string, string) {
-	end := time.Now().Add(bound)
-	for {
-		state, dev, why := nvmeScan(ctx, node, nqn)
-		if state == nvmeOne {
-			return dev, ""
-		}
-		if state == nvmeUnreadable {
-			return "", why
-		}
-		if time.Now().After(end) {
-			if state == nvmeAbsent {
-				return "", "no controller of " + nqn
-			}
-			return "", why
-		}
-		if !pause(ctx, 250*time.Millisecond) {
-			return "", "no single device of " + nqn + " by the runner deadline"
-		}
-	}
+	return declared.NVMeDevice(ctx, node, nqn, bound)
 }
 
 // listenerPIDs maps each port to the pids holding a TCP listener on it, from
@@ -217,14 +165,6 @@ func listenerPIDs(ctx context.Context, node runner, ports []string) (map[string]
 		}
 	}
 	return out, nil
-}
-
-// blockSHA is the sha256 of the block a write of tag puts down, computed here
-// so a write whose outcome is unknown still names the value it attempted.
-func blockSHA(tag string) string {
-	b := []byte(strings.Repeat(tag, 4096/len(tag)+1))[:4096]
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 // A process the runner started is identified by its pid AND its start time

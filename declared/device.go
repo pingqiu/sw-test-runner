@@ -65,10 +65,10 @@ type IO struct {
 	Cite                  string `json:"cite"`
 	OKStdout              string `json:"ok_stdout,omitempty"`
 	Failure               string `json:"failure"`
-	// Result is recorded on ok; ResultAbandoned is added to the result of
-	// an I/O its deadline ended.
-	Result          map[string]string `json:"result,omitempty"`
-	ResultAbandoned map[string]string `json:"result_abandoned,omitempty"`
+	// Result is recorded on ok; ResultUnanswered is added to the result of
+	// an I/O that gave no answer (its deadline ended it, or it could not run).
+	Result           map[string]string `json:"result,omitempty"`
+	ResultUnanswered map[string]string `json:"result_unanswered,omitempty"`
 }
 
 // What a scan of the kernel's NVMe controllers says about one subsystem.
@@ -246,7 +246,7 @@ func (a *Action) checkDevice(defined func(map[string]bool) func(string) error, s
 	if err := checkWords(io.Command, defined(names)); err != nil {
 		return fmt.Errorf("io: %w", err)
 	}
-	for _, t := range io.ResultAbandoned {
+	for _, t := range io.ResultUnanswered {
 		if err := defined(names)(t); err != nil {
 			return fmt.Errorf("io: %w", err)
 		}
@@ -367,16 +367,18 @@ func (x *Executor) deviceIO(s *scope, ctx context.Context, a *Action) (string, m
 		deadline = x.Deadline(deadline)
 	}
 	stdout, stderr, code, err := RunDetached(ctx, s.node, io.AsRoot, dir, cmd, deadline, x.poll())
-	if t, ok := AsDetached(err); ok {
-		res := Abandon(ctx, t)
-		for k, tpl := range io.ResultAbandoned {
+	if err != nil {
+		// No answer: its deadline ended it (what survived is abandoned and
+		// watched), or it could not be run.
+		res := map[string]any{"detail": err.Error()}
+		if t, ok := AsDetached(err); ok {
+			res = Abandon(ctx, t)
+		}
+		for k, tpl := range io.ResultUnanswered {
 			v, _ := s.expand(tpl)
 			res[k] = v
 		}
 		return tr.OutcomeUnknown, res
-	}
-	if err != nil {
-		return tr.OutcomeUnknown, map[string]any{"detail": err.Error()}
 	}
 	s.vals["exit"], s.vals["stderr_first_line"] = fmt.Sprint(code), FirstLine(stderr)
 	out := strings.TrimSpace(stdout)
