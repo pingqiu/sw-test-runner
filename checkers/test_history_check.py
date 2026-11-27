@@ -1536,8 +1536,10 @@ class C6(unittest.TestCase):
         self.assertIn('past the deadline 110.000 s = max(re-grant: stop + 65 s = 65.000 s, restart completion 80.000 s)', v['findings'][0])
 
     def test_a_restart_without_an_ok_kill_before_it_is_not_judged(self):
-        v = self.assert_c6('PASS', ('healthy', True), RESTART, ('healthy', True))
+        # not judged, and nothing else judged: not exercised (never a PASS on 0)
+        v = self.assert_c6('FAIL', ('healthy', True), RESTART, ('healthy', True), contains='C6 not exercised')
         self.assertTrue(any('the stop is not known' in x for x in v['findings']), v)
+        self.assertEqual(v['judged'], 0)
 
     def test_red_a_holder_restart_never_healthy_again(self):
         # healthy=true only before the restart; the run then ends unhealthy too
@@ -1546,12 +1548,16 @@ class C6(unittest.TestCase):
     def test_a_master_restart_is_not_judged_for_recovery(self):
         mkill = ('kill', '', {'process': 'blockmaster', 'pid': 7, 'signal': 'KILL'}, 'ok', {})
         mrestart = ('restart', '', {'process': 'blockmaster'}, 'ok', {})
+        # not judged; with nothing else judged the verdict is not exercised, not a failure of the rule
         v = self.healthy_after(300, mkill, mrestart, ('healthy', True))
-        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
+        self.assertFalse(any('recovery bound' in x or 'past the deadline' in x for x in v['findings']), v)
         self.assertTrue(any('recovery not judged: restart seq 3 blockmaster' in x for x in v['findings']), v)
         # a holder restart a master fault overlaps is not judged either
         v = self.healthy_after(300, KILL, mkill, mrestart, RESTART, ('healthy', True))
-        self.assertEqual(v['verdict'], 'PASS', v)
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
         self.assertTrue(any('blockmaster kill seq 3 before its healthy point' in x for x in v['findings']), v)
 
     def test_a_healthy_record_with_an_operation_in_flight_is_no_point(self):
@@ -1730,6 +1736,94 @@ class MO(unittest.TestCase):
         self.assertEqual(v['verdict'], 'FAIL', v)
         self.assertIn('MO not exercised', v['findings'][0])
 
+
+
+class Judged(unittest.TestCase):
+    """Every checker reports its own count, "judged": the items it actually
+    judged. A PASS with judged 0 is impossible: such a checker says "not
+    exercised" itself. Checked on each checker's raw verdict (not through
+    check(), whose own guard would hide a checker that forgot)."""
+
+    def corpus(self):
+        both = [('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A})]
+        return {
+            'm0 fixture': load(),
+            'm0 with a fault': with_fault(load()),
+            'only the end': synth(),
+            'one write': synth(('write', 'v1', {'lba': 0, 'sha256': A}, 'ok', {})),
+            'restored': synth(*RESTORED, ('write', 'v1', {'lba': 0, 'sha256': S}, 'ok', {}),
+                              ('read', 'v2', {'lba': 0}, 'ok', {'sha256': A}),
+                              ('write', 'v2', {'lba': 0, 'sha256': T}, 'ok', {}),
+                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': S})),
+            'C5 refusal': history(*(BASE + (('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS)))),
+            'C6 unknown resolved': m2(*both),
+            'C6 healthy only': m2(('healthy', True)),
+            'C6 recovery timed': m2(KILL, RESTART, ('healthy', True)),
+            'DUR kill': synth(w(0, A), w(0, B, flush=False), HKILL, rd(0, A)),
+            'DUR no kill': synth(w(0, A, flush=False), rd(0, A)),
+            'MO outage': mo_history(MO.GOOD),
+        }
+
+    def test_no_checker_passes_on_nothing(self):
+        passed = {name: [] for name in hc.CHECKERS}
+        for label, recs in self.corpus().items():
+            rs = hc.read_history(dump(recs))
+            for name, fn in hc.CHECKERS.items():
+                try:
+                    v = fn(rs)
+                except (KeyError, TypeError):
+                    continue
+                if v['verdict'] == 'PASS':
+                    self.assertIn('judged', v, (label, name, v))
+                    self.assertGreater(v['judged'], 0, (label, name, v))
+                    passed[name].append(label)
+        # the test means something only if every checker PASSes somewhere here
+        self.assertEqual([n for n, labels in passed.items() if not labels], [], passed)
+
+    def test_every_verdict_carries_its_count(self):
+        for label, recs in self.corpus().items():
+            for name, v in hc.check(dump(recs)).items():
+                self.assertIsInstance(v.get('judged'), int, (label, name, v))
+        for lines in ([], dump(load())[:-1], ['not json']):
+            for name, v in hc.check(lines).items():
+                self.assertEqual(v['judged'], 0, (name, v))
+
+    def test_the_counts_are_what_each_checker_judged(self):
+        v = hc.check(dump(load()))
+        rs = hc.read_history(dump(load()))
+        ops_ = hc.operations(rs)
+        self.assertEqual(v['C0']['judged'], sum(1 for _, c in ops_ if c is not None and c['outcome'] != 'unknown'))
+        self.assertEqual(v['C1']['judged'], sum(1 for i, c in ops_ if i['verb'] == 'read' and c and c['outcome'] == 'ok'))
+        self.assertEqual(v['C7']['judged'], 2, 'v1 and v2 deleted and observed')
+        self.assertEqual(hc.check(dump(mo_history(MO.GOOD)))['MO']['judged'], 1)
+        c6 = hc.check(dump(m2(('write', 'v1', {'lba': 0, 'sha256': A}, 'unknown', {}), KILL, RESTART, ('healthy', True),
+                              ('read', 'v1', {'lba': 0}, 'ok', {'sha256': A}))))['C6']
+        self.assertEqual(c6['judged'], 2, c6)   # one unknown resolved + the holder's recovery timed
+
+    def test_red_a_c6_with_healthy_points_only_is_not_exercised(self):
+        v = hc.check(dump(m2(('healthy', True))))['C6']
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('C6 not exercised', v['findings'][0])
+
+    def test_red_check_guards_a_checker_that_passes_on_nothing(self):
+        with mock.patch.dict(hc.CHECKERS, {'ZZ': lambda recs: {'verdict': 'PASS', 'findings': []}}):
+            v = hc.check(dump(load()))['ZZ']
+        self.assertEqual((v['verdict'], v['judged']), ('FAIL', 0), v)
+        self.assertIn('PASS with nothing judged: ZZ not exercised', v['findings'][0])
+
+    def test_the_json_output_carries_judged(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            hist, out = Path(d) / 'h.jsonl', Path(d) / 'v.json'
+            hist.write_text('\n'.join(dump(load())) + '\n', encoding='utf-8')
+            with mock.patch('sys.stdout'):
+                hc.main([str(hist), '--json', str(out)])
+            got = json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(set(got), set(hc.CHECKERS))
+        for name, v in got.items():
+            self.assertIsInstance(v['judged'], int, (name, v))
+        self.assertGreater(got['C1']['judged'], 0)
 
 if __name__ == '__main__':
     unittest.main()
