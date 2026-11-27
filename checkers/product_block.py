@@ -41,16 +41,19 @@ NEEDS_BASELINE = ('snapshot',)
 NOTED = ('snapshot',)   # the note names which rule (names or roots) judged it
 
 _master = None
-_lease_steps = frozenset()   # (earlier, later) lease states time alone may step through
+# checks.json observation.time_derived: {field: (fact, validity, steps)}, a
+# workspace fact derived from another fact and the clock, and the (earlier,
+# later) values time alone may step it through.
+_time_derived = {}
 
 
 def bind(checks):
     """Take the product facts this module reads from checks.json."""
-    global _master, _lease_steps
+    global _master, _time_derived
     masters = [t['name'] for t in checks.get('fault_targets', []) if t.get('role') == 'master']
     _master = masters[0] if masters else None
-    steps = (checks.get('observation') or {}).get('lease_time_steps') or {}
-    _lease_steps = frozenset(tuple(s) for s in steps.get('steps', []))
+    rows = (checks.get('observation') or {}).get('time_derived') or []
+    _time_derived = {r['field']: (r['fact'], r['validity'], frozenset(tuple(x) for x in r['steps'])) for r in rows}
 
 
 # --- observation -----------------------------------------------------------
@@ -91,6 +94,24 @@ WORKSPACE_DROPPED = {'lease expiry_ns': re.compile(r'lease expiry_ns: -?\d+; hos
 WORKSPACE_DROPPED_FIELDS = ('lease expiry_ns', 'host validity_ns at query')
 
 
+class Workspace(tuple):
+    """A workspace answer's compared value, (exit, facts): equal as that tuple.
+    `clock` carries what is kept but not compared: the dropped fields, by
+    name, and the observation's reading window (from_ns, at_ns); a
+    time_derived step reads them (same_part)."""
+    clock = None
+
+
+def workspace_clock(text):
+    """The dropped line's fields {name: int}, or {} when it is absent."""
+    lines = text.splitlines() if isinstance(text, str) else text
+    for line in lines or ():
+        if isinstance(line, str) and WORKSPACE_DROPPED['lease expiry_ns'].fullmatch(line):
+            nums = re.findall(r'-?\d+', line)
+            return dict(zip(WORKSPACE_DROPPED_FIELDS, map(int, nums)))
+    return {}
+
+
 def workspace_facts(text):
     """The stable facts of a workspace answer printed with exit 0: a tuple of
     (key, value) per line, in order, without the dropped line; or None when
@@ -127,7 +148,9 @@ def _workspace(res):
     facts = workspace_facts(ws.get('text'))
     if facts is None:
         return 'bad', 'workspace text not in its "key: value" shape: %r' % (ws.get('text'),)
-    return 'ok', (0, facts)
+    v = Workspace((0, facts))
+    v.clock = workspace_clock(ws.get('text'))
+    return 'ok', v
 
 
 def _listing(part, err):
@@ -155,22 +178,41 @@ def observed_state(obs, parts):
         got = READERS[part](res)
         if got is None:
             continue
+        if isinstance(got[1], Workspace):
+            frm, at = obs.get('from_mono_ns'), obs.get('mono_ns')
+            got[1].clock = dict(got[1].clock, from_ns=frm if isinstance(frm, int) else None,
+                                at_ns=at if isinstance(at, int) else None)
         (state if got[0] == 'ok' else bad)[part] = got[1]
     return state, bad
 
 
-LEASE_STATE = 'lease state'
+def time_explains(key, bv, av, before, after):
+    """Whether time alone steps a time_derived fact from bv to av: a listed
+    step, its fact equal in both observations, and the earlier validity not
+    larger than the longest time between the two readings (the later
+    observation's end minus the earlier one's start)."""
+    if key not in _time_derived:
+        return False
+    fact, validity, steps = _time_derived[key]
+    if (bv, av) not in steps:
+        return False
+    bc, ac = before.clock or {}, after.clock or {}
+    if bc.get(fact) is None or bc.get(fact) != ac.get(fact):
+        return False
+    if bc.get(validity) is None or bc.get('from_ns') is None or ac.get('at_ns') is None:
+        return False
+    return bc[validity] <= ac['at_ns'] - bc['from_ns']
 
 
 def same_part(part, before, after):
     """Whether the later value of a part shows the same state as the earlier
     one. Equal values are; so is a workspace answer whose only difference is
-    a lease state step time alone makes (checks.json lease_time_steps: the
-    lease state is the host validity at query time), every other kept fact
-    equal. Direction matters: `before` is the earlier observation."""
+    one step of a time_derived fact that time alone explains (checks.json
+    observation.time_derived), every other kept fact equal. Direction
+    matters: `before` is the earlier observation."""
     if before == after:
         return True
-    if part != 'workspace' or not _lease_steps:
+    if part != 'workspace' or not isinstance(before, Workspace) or not isinstance(after, Workspace):
         return False
     (bx, bf), (ax, af) = before, after
     if bx != 0 or ax != 0 or len(bf) != len(af):
@@ -179,7 +221,7 @@ def same_part(part, before, after):
     for (bk, bv), (ak, av) in zip(bf, af):
         if (bk, bv) == (ak, av):
             continue
-        if bk == ak == LEASE_STATE and (bv, av) in _lease_steps and not stepped:
+        if bk == ak and not stepped and time_explains(bk, bv, av, before, after):
             stepped = True
             continue
         return False

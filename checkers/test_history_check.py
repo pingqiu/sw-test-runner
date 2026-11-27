@@ -612,7 +612,8 @@ def history(*steps):
                 res['files'] = list(files)
             else:
                 res['listing_error'] = 'filer down'
-            recs.append({'seq': n + 1, 'kind': 'observe', 'verb': 'observe', 'volume': vol, 'mono_ns': n + 1, 'result': res})
+            # The reading began at the clock n (from_mono_ns) and was stamped at n + 1.
+            recs.append({'seq': n + 1, 'kind': 'observe', 'verb': 'observe', 'volume': vol, 'from_mono_ns': n, 'mono_ns': n + 1, 'result': res})
             continue
         verb, vol, args, outcome = st
         recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol, 'args': args, 'mono_ns': n + 1})
@@ -749,12 +750,20 @@ class C5(unittest.TestCase):
         self.assertNotEqual(sa, sb)
 
     def test_a_lease_running_out_by_time_is_no_baseline_change(self):
-        # From a host run: revoking -> expired on a stopped volume, nothing in between.
+        # From host runs: revoking -> expired on a stopped volume, granted ->
+        # expired on a killed holder's volume, nothing in between. The two
+        # readings lie within clock 0..2 (the first began at 0, the second was
+        # stamped at 2), so a validity up to 2 can run out between them.
         lease = lambda state, n: {'workspace': {'exit': 0, 'text': ws_text(state=state, validity=n)}, 'dirs': WS['dirs'], 'snapshots': []}
-        steps = lambda a, b: (('obs', 'v0', 1, FILES, lease(a, 5)), ('obs', 'v0', 1, FILES, lease(b, 0)),
-                              ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
-        v = self.c5(*steps('revoking', 'expired'), base=False)
-        self.assertEqual(v['verdict'], 'PASS', v)
+        steps = lambda a, b, n=2: (('obs', 'v0', 1, FILES, lease(a, n)), ('obs', 'v0', 1, FILES, lease(b, 0)),
+                                   ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
+        for a in ('revoking', 'granted'):
+            v = self.c5(*steps(a, 'expired'), base=False)
+            self.assertEqual(v['verdict'], 'PASS', (a, v))
+            # red control: a validity longer than the readings' window did not run out by time
+            v = self.c5(*steps(a, 'expired', 3), base=False)
+            self.assertEqual(v['verdict'], 'UNKNOWN', (a, v))
+            self.assertIn('baseline: v0 changed with no operation on it (workspace;', v['findings'][0])
         # red control: the reverse is a change
         v = self.c5(*steps('expired', 'revoking'), base=False)
         self.assertEqual(v['verdict'], 'UNKNOWN', v)

@@ -210,43 +210,82 @@ class Workspace(unittest.TestCase):
         self.assertEqual(self.part([''], 1), ((1, ('',)), None))
         self.assertNotEqual(self.part([''], 1)[0], self.part([''], 3)[0])
 
-    def lease(self, state, **swap):
+    # From the rc.2 night (seed 2): v01's holder killed, its lease never
+    # renewed; one observation began at FROM1 and was stamped at AT1 with
+    # validity V1, the next, stamped at AT2, shows expired, the expiry unchanged.
+    EXPIRY, V1, FROM1, AT1, AT2 = 1795738167151366324, 1857068441, 51400000000, 51499141249, 53428294450
+
+    def lease(self, state, validity=None, expiry=None, frm=None, at=None, **swap):
         lines = [('lease state: %s' % state) if x.startswith('lease state: ') else x for x in REAL_WS]
+        line = 'lease expiry_ns: %d; host validity_ns at query: %d' % (expiry or self.EXPIRY, self.V1 if validity is None else validity)
+        lines = [line if x.startswith('lease expiry_ns: ') else x for x in lines]
         for old, new in swap.items():
             lines = [x.replace(old, new) for x in lines]
-        return hc.observed_state(ws_obs(lines))
+        obs = ws_obs(lines)
+        if frm is not None:
+            obs['from_mono_ns'] = frm
+        if at is not None:
+            obs['mono_ns'] = at
+        return hc.observed_state(obs)
+
+    def before(self, state='granted', **kw):
+        return self.lease(state, **dict(dict(frm=self.FROM1, at=self.AT1), **kw))
+
+    def after(self, state='expired', **kw):
+        return self.lease(state, **dict(dict(validity=0, frm=self.AT1 + 1000, at=self.AT2), **kw))
 
     def same(self, a, b):
         diff, _ = hc.state_diff(a, b)
         self.assertIsNotNone(diff)
         return diff == []
 
-    def test_revoking_to_expired_by_time_compares_equal(self):
-        # From a host run: a stopped volume's lease ran out, validity reaching 0.
-        expired = self.lease('expired', **{'host validity_ns at query: 14849887534': 'host validity_ns at query: 0'})
-        self.assertTrue(self.same(self.lease('revoking'), expired))
+    def test_a_lease_running_out_by_time_compares_equal(self):
+        for state in ('granted', 'revoking'):
+            self.assertTrue(self.same(self.before(state), self.after()), state)
 
-    def test_red_other_lease_steps_compare_unequal(self):
-        for a, b in (('expired', 'revoking'), ('granted', 'revoking'), ('revoking', 'granted'),
-                     ('granted', 'expired'), ('expired', 'granted')):
-            self.assertFalse(self.same(self.lease(a), self.lease(b)), (a, b))
+    def test_the_window_is_the_later_end_minus_the_earlier_start(self):
+        # A validity larger than the gap between the two stamps, but not than
+        # the readings' window: each reading lies inside its observation.
+        gap = self.AT2 - self.AT1
+        self.assertTrue(self.same(self.before(validity=gap + 1), self.after()))
+        self.assertTrue(self.same(self.before(validity=self.AT2 - self.FROM1), self.after()))
 
-    def test_red_revoking_to_expired_with_another_change_compares_unequal(self):
-        before = self.lease('revoking')
+    def test_red_a_validity_longer_than_the_window_is_a_change(self):
+        # a forced expiry: the lease had time left that no clock could use up
+        for state in ('granted', 'revoking'):
+            self.assertFalse(self.same(self.before(state, validity=self.AT2 - self.FROM1 + 1), self.after()), state)
+
+    def test_red_a_changed_expiry_is_a_change(self):
+        for state in ('granted', 'revoking'):
+            self.assertFalse(self.same(self.before(state), self.after(expiry=self.EXPIRY + 1)), state)
+
+    def test_red_time_does_not_run_backwards(self):
+        # expired -> granted with the expiry unchanged, and every other unlisted step
+        for a, b in (('expired', 'granted'), ('expired', 'revoking'), ('granted', 'revoking'), ('revoking', 'granted')):
+            self.assertFalse(self.same(self.before(a, validity=0), self.after(b, validity=self.V1)), (a, b))
+
+    def test_red_an_observation_without_its_start_gives_no_bound(self):
+        self.assertFalse(self.same(self.lease('granted', at=self.AT1), self.after()))
+        self.assertFalse(self.same(self.before(), self.lease('expired', validity=0, frm=self.AT1 + 1000)))
+
+    def test_red_a_time_step_with_another_change_is_a_change(self):
+        before = self.before('revoking')
         for swap in ({'epoch: 1': 'epoch: 2'}, {'holder: r1@1': 'holder: r2@1'}, {'replica: r1': 'replica: r2'},
                      {'recorded ACK: none': 'recorded ACK: r1@1 HEAD generation 4'}):
-            self.assertFalse(self.same(before, self.lease('expired', **swap)), swap)
-        moved = hc.observed_state(ws_obs([x.replace('granted', 'expired') for x in REAL_WS] + ['binding: host=b data=d ctrl=c retired=false']))
-        self.assertFalse(self.same(before, moved))
+            self.assertFalse(self.same(before, self.after(**swap)), swap)
+        lines = [x.replace('granted', 'expired') for x in REAL_WS] + ['binding: host=b data=d ctrl=c retired=false']
+        moved = dict(ws_obs(lines), from_mono_ns=self.AT1 + 1000, mono_ns=self.AT2)
+        self.assertFalse(self.same(before, hc.observed_state(moved)))
 
-    def test_the_allowed_steps_are_the_data(self):
+    def test_the_time_derived_fields_are_the_data(self):
         checks = json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
-        row = checks['observation']['lease_time_steps']
-        self.assertEqual(row['steps'], [['revoking', 'expired']])
-        self.assertEqual(row['cite'], 'docs/volume-lifecycle.md:35')
-        # with no step in the data, the same pair is a change
-        with mock.patch.object(hc.PRODUCT, '_lease_steps', frozenset()):
-            self.assertFalse(self.same(self.lease('revoking'), self.lease('expired')))
+        rows = checks['observation']['time_derived']
+        self.assertEqual([(r['field'], r['fact'], r['validity'], r['steps']) for r in rows],
+                         [('lease state', 'lease expiry_ns', 'host validity_ns at query', [['granted', 'expired'], ['revoking', 'expired']])])
+        self.assertIn('cmd/sw-block/workspace_show.go:54-58', rows[0]['cite'])
+        # with no row in the data, the same pair is a change
+        with mock.patch.object(hc.PRODUCT, '_time_derived', {}):
+            self.assertFalse(self.same(self.before(), self.after()))
 
     def test_the_dropped_fields_are_listed_as_ignored(self):
         checks = json.loads((PRODUCT / 'checks.json').read_text(encoding='utf-8'))
