@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -44,9 +45,9 @@ type Runner struct {
 	Node     string
 	Driver   Driver
 	Handlers map[string]tr.ActionHandlerFunc
-	// Header holds the pack's own entries for the run's gen_header (for
-	// example, an emulated process unit and the policy it read).
-	Header map[string]any
+	// Header, when set, adds the product's run settings to the run's
+	// header (get reads the run's parameters); it may refuse the run.
+	Header func(get func(string) string) (map[string]any, error)
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.
@@ -184,22 +185,31 @@ func ParseConfig(name string, get func(string) string) (Config, error) {
 	return c, nil
 }
 
+// checkerSet is the form of a run's required checker set: names separated by
+// commas, as the checkers' own --checkers takes them.
+var checkerSet = regexp.MustCompile(`^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$`)
+
 // Run drives generator g to its end. get reads the run's own parameters
 // beyond the config: nightly_seed (the nightly seed the run's seed was drawn
-// from) and fault_healthy_wait (the seconds the healthy action polls).
+// from), fault_healthy_wait (the seconds the healthy action polls) and
+// checkers (the scenario's required checker set, the same list its judge
+// passes to --checkers; recorded in the header for the nightly judge).
 func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, get func(string) string) (map[string]string, error) {
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", r.Name)
 	}
 	header := g.Header()
-	for k, v := range r.Header {
-		header[k] = v
-	}
 	if ns := get("nightly_seed"); ns != "" {
 		if _, err := strconv.ParseUint(ns, 10, 64); err != nil {
 			return nil, fmt.Errorf("%s: nightly_seed: %w", r.Name, err)
 		}
 		header["nightly_seed"] = ns
+	}
+	if cs := get("checkers"); cs != "" {
+		if !checkerSet.MatchString(cs) {
+			return nil, fmt.Errorf("%s: checkers %q is not a comma-separated list of checker names", r.Name, cs)
+		}
+		header["checkers"] = cs
 	}
 	// In the header, so a replay waits the same.
 	if w := get("fault_healthy_wait"); w != "" && g.Faulty() {
@@ -207,6 +217,18 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: fault_healthy_wait %q", r.Name, w)
 		}
 		header["fault_healthy_wait"] = w
+	}
+	if r.Header != nil {
+		extra, err := r.Header(get)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
+		for k, v := range extra {
+			if _, taken := header[k]; taken {
+				return nil, fmt.Errorf("%s: the product's header field %q is the generator's", r.Name, k)
+			}
+			header[k] = v
+		}
 	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_header", Result: header}); err != nil {
 		return nil, err
@@ -486,7 +508,7 @@ func (f *faultRun) healthy(ctx context.Context, actx *tr.ActionContext) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", o.Action, err)
 	}
-	if out["healthy"] != "true" {
+	if out[HealthyKey] != HealthyTrue {
 		return nil // not a healthy point: unknowns stay pending
 	}
 	return f.resolve(ctx, actx)

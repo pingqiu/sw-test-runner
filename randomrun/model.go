@@ -48,7 +48,8 @@ type Driver interface {
 	Fault(e FaultEvent) Op
 	// Healthy is the operation that asks for a healthy point (wait: the
 	// seconds it may poll, "" for its default). Its handler records an
-	// observation with verb "healthy" and answers healthy="true" at one.
+	// observation with verb "healthy" and answers healthy="true" at one (the
+	// handler verb contract: doc.go).
 	Healthy(wait string) Op
 	// ValidProcess says whether a fault schedule may name process p.
 	ValidProcess(p string) bool

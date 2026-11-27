@@ -192,3 +192,68 @@ func TestGenRunStopsOnARunnerErrorNotOnAProductAnswer(t *testing.T) {
 		}
 	}
 }
+
+// The scenario's required checker set is recorded in the header; a value
+// that is no checker list is refused before anything runs.
+func TestGenRunRecordsTheCheckerSetInTheHeader(t *testing.T) {
+	f := &fakeProduct{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	a := genAct("20")
+	a.Params["checkers"] = "C0,C1,C5,MO"
+	if _, err := v3GenRun(context.Background(), actx, a); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	if h := records(t, p)[0]; h.Verb != "gen_header" || h.Result["checkers"] != "C0,C1,C5,MO" {
+		t.Fatalf("header %+v", h)
+	}
+	for _, bad := range []string{"C0, C1", "C0,,C1", "C0;C1", "{{ checkers }}"} {
+		actx2, p2 := genRunCtx(t)
+		a.Params["checkers"] = bad
+		if _, err := v3GenRun(context.Background(), actx2, a); err == nil {
+			t.Errorf("checkers %q accepted", bad)
+		}
+		_ = actx2.History.Close()
+		if n := len(records(t, p2)); n != 1 { // the end record only
+			t.Errorf("checkers %q: %d records written", bad, n)
+		}
+	}
+}
+
+// One source for the checker set: each random scenario's env checkers is
+// what v3_gen_run records and what its judge passes to --checkers.
+func TestRandomScenariosPassOneCheckerSet(t *testing.T) {
+	for file, want := range map[string]string{
+		"../../scenarios/v3block/m1-random.yaml": "C0,C1,C2,C3,C5,C7",
+		"../../scenarios/v3block/m2-faults.yaml": "C0,C1,C2,C3,C5,C6,C7,DUR,MO",
+	} {
+		s, err := tr.ParseFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Env["checkers"] != want {
+			t.Errorf("%s: env checkers %q, want %q", file, s.Env["checkers"], want)
+		}
+		gen, judge := 0, 0
+		for _, ph := range s.Phases {
+			for _, a := range ph.Actions {
+				if a.Action == "v3_gen_run" {
+					gen++
+					if a.Params["checkers"] != "{{ checkers }}" {
+						t.Errorf("%s: v3_gen_run checkers %q", file, a.Params["checkers"])
+					}
+				}
+				if cmd := a.Params["cmd"]; strings.Contains(cmd, "history_check.py") || strings.Contains(cmd, "--checkers") {
+					judge++
+					if !strings.Contains(cmd, `--checkers "{{ checkers }}"`) {
+						t.Errorf("%s: judge %q", file, cmd)
+					}
+				}
+			}
+		}
+		if gen != 1 || judge != 1 {
+			t.Errorf("%s: %d v3_gen_run, %d judge lines", file, gen, judge)
+		}
+	}
+}

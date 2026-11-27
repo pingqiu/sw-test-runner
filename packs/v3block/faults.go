@@ -204,7 +204,7 @@ func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, pr
 		n, _ := strconv.Atoi(p.PID)
 		args["pid"] = n
 	}
-	return record(actx, e, "kill", "", args, func() (string, map[string]any) {
+	return recordBounded(ctx, actx, e, "kill", "", args, func(ctx context.Context) (string, map[string]any) {
 		switch {
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}
@@ -253,7 +253,7 @@ func (e opEnv) kill(ctx context.Context, actx *tr.ActionContext, node runner, pr
 // call that answers.
 func (e opEnv) restart(ctx context.Context, actx *tr.ActionContext, node runner, process string, bound time.Duration) (map[string]string, error) {
 	p, why := resolveProc(ctx, actx, node, e, process)
-	out, err := record(actx, e, "restart", "", p.args(process), func() (string, map[string]any) {
+	out, err := recordBounded(ctx, actx, e, "restart", "", p.args(process), func(ctx context.Context) (string, map[string]any) {
 		switch {
 		case why != "":
 			return tr.OutcomeRefused, map[string]any{"detail": why}
@@ -341,7 +341,10 @@ func (e opEnv) restartMaster(ctx context.Context, actx *tr.ActionContext, node r
 			res["detail"] = fmt.Sprintf("the master does not answer within %s", bound)
 			return tr.OutcomeUnknown, res
 		}
-		time.Sleep(500 * time.Millisecond)
+		if !pause(ctx, 500*time.Millisecond) {
+			res["detail"] = "the master does not answer by the runner deadline"
+			return tr.OutcomeUnknown, res
+		}
 	}
 }
 
@@ -469,10 +472,9 @@ func (e opEnv) healthy(ctx context.Context, actx *tr.ActionContext, node runner,
 			return nil, err
 		}
 		res["attempts"] = attempts
-		if ok || time.Since(start) >= wait || ctx.Err() != nil {
+		if ok || time.Since(start) >= wait || !pause(ctx, 500*time.Millisecond) {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
 	}
 	res["elapsed_ms"] = time.Since(start).Milliseconds()
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: res}); err != nil {

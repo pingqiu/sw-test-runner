@@ -60,11 +60,14 @@ func readStatus(ctx context.Context, node runner, statusAddr, vol string) (vsSta
 
 // nvmeConnect connects the kernel NVMe/TCP host to nqn at host:port through
 // the kernel's fabrics interface, the call nvme-cli makes (no tool needed).
-func nvmeConnect(ctx context.Context, node runner, host, port, nqn string) string {
+func nvmeConnect(ctx context.Context, node runner, host, port, nqn, extra string) string {
 	if !regexp.MustCompile(`^[0-9.]+$`).MatchString(host) || !regexp.MustCompile(`^[0-9]+$`).MatchString(port) || !regexp.MustCompile(`^[A-Za-z0-9.:_-]+$`).MatchString(nqn) {
 		return "nvme connect: malformed address or nqn"
 	}
-	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s", host, port, nqn)
+	if !regexp.MustCompile(`^(,[a-z_]+=[0-9]+)*$`).MatchString(extra) {
+		return "nvme connect: malformed options " + extra
+	}
+	opts := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s%s", host, port, nqn, extra)
 	if _, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("printf %%s %s > /dev/nvme-fabrics", shellQuote(opts))); err != nil || code != 0 {
 		return "nvme connect: " + firstLine(stderr)
 	}
@@ -91,7 +94,9 @@ func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
 		case time.Now().After(end):
 			return "nvme disconnect: a controller of " + nqn + " remains"
 		}
-		time.Sleep(250 * time.Millisecond)
+		if !pause(ctx, 250*time.Millisecond) {
+			return "nvme disconnect: a controller of " + nqn + " remains at the runner deadline"
+		}
 	}
 }
 
@@ -153,7 +158,9 @@ func deviceOf(ctx context.Context, node runner, nqn string, bound time.Duration)
 			}
 			return "", why
 		}
-		time.Sleep(250 * time.Millisecond)
+		if !pause(ctx, 250*time.Millisecond) {
+			return "", "no single device of " + nqn + " by the runner deadline"
+		}
 	}
 }
 
@@ -273,7 +280,9 @@ func waitGone(ctx context.Context, node runner, pid, start string, bound time.Du
 			}
 			return fmt.Sprintf("pid %s still running after %s", pid, bound)
 		}
-		time.Sleep(250 * time.Millisecond)
+		if !pause(ctx, 250*time.Millisecond) {
+			return fmt.Sprintf("pid %s: not gone by the runner deadline", pid)
+		}
 	}
 }
 

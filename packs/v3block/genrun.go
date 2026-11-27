@@ -22,18 +22,18 @@ import (
 )
 
 var genHandlers = map[string]tr.ActionHandlerFunc{
-	"v3_op_create": v3OpCreate, "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
-	"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,
-	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete, "v3_op_observe": v3OpObserve,
+	"v3_op_create": blockActions.Handler("v3_op_create"), "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
+	"v3_op_snapshot": blockActions.Handler("v3_op_snapshot"), "v3_op_snapshot_delete": blockActions.Handler("v3_op_snapshot_delete"), "v3_op_restore": blockActions.Handler("v3_op_restore"),
+	"v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": blockActions.Handler("v3_op_delete"), "v3_op_observe": v3OpObserve,
 	"v3_op_kill": v3OpKill, "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	"v3_op_flush":   v3OpFlush,
-	"v3_op_release": v3OpRelease,
+	"v3_op_release": blockActions.Handler("v3_op_release"),
 }
 
 // genRunner executes through the block handlers (read when called, so a
 // test's installed handlers count).
 func genRunner(name, node string, m *blockModel) randomrun.Runner {
-	return randomrun.Runner{Name: name, Node: node, Driver: m, Handlers: genHandlers}
+	return randomrun.Runner{Name: name, Node: node, Driver: m, Handlers: genHandlers, Header: guestHeader}
 }
 
 // genExec runs one proposal through its handler (a write one lba per call);
@@ -84,7 +84,28 @@ func v3GenRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		if err != nil {
 			return nil, fmt.Errorf("v3_gen_run: %w", err)
 		}
-		r.Header = map[string]any{"unit": unitHeader(pol)}
+		base := r.Header
+		r.Header = func(get func(string) string) (map[string]any, error) {
+			h, err := base(get)
+			if h == nil {
+				h = map[string]any{}
+			}
+			h["unit"] = unitHeader(pol)
+			return h, err
+		}
 	}
 	return r.Run(ctx, actx, g.Generator, func(k string) string { return opParam(act, actx, k) })
+}
+
+// guestHeader names a declared guest connect variant in the run's header,
+// "guest connect variant: <values>": its results never stand in for the
+// plain connect's. The plain connect (the product's, the only release
+// evidence) adds nothing, so a plain run's header is unchanged; every
+// attach records the connect in effect either way.
+func guestHeader(get func(string) string) (map[string]any, error) {
+	c, err := selectConnect(get(guest.Connect.SelectVar))
+	if err != nil || c.Options == "" {
+		return nil, err
+	}
+	return map[string]any{"guest_connect": c.Label}, nil
 }
