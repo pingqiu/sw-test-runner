@@ -1179,16 +1179,7 @@ func pairGaps(ops []GenOp) []string {
 						if common && !crossed[s+"|"+t+"|"+side] {
 							bad = append(bad, fmt.Sprintf("op %d %s %s: no write on %s read back across", o.No, o.Action, v, side))
 						}
-						for b := range content[s] {
-							if !read[s+"|"+t+"|"+side][b] {
-								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, s, b, side))
-							}
-						}
-						for b := range content[t] {
-							if !read[s+"|"+t+"|"+side][b] {
-								bad = append(bad, fmt.Sprintf("op %d %s %s: %s lba %s unread on %s", o.No, o.Action, v, t, b, side))
-							}
-						}
+
 					}
 				}
 			}
@@ -1226,34 +1217,52 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 	if inherited == 0 || pairs == 0 {
 		t.Fatalf("%d inherited reads, %d pair reads", inherited, pairs)
 	}
-	// The generator's own state: the inherited lbas come first after the
-	// first attach; the pair window covers both sides.
+	// The generator's own state: after the restore the target's first attach
+	// is due (its placement host), then its inherited lbas; neither side is
+	// stopped, moved or deleted before the window, which comes pairDelay
+	// drawn operations after both serve.
 	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
 	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
-		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
-		op("v3_op_attach", "g2", "host", "0"))
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"))
+	drive(g, g.m.Due()...) // the move's attach-check reads
+	drive(g, g.m.Due()...)
+	drive(g, op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+	if d := g.m.Due(); len(d) != 1 || d[0].Action != "v3_op_attach" || d[0].Volume != "g2" || d[0].Params["host"] != "0" || d[0].Forced != "pair-attach" {
+		t.Fatalf("due after the restore: %+v", d)
+	}
+	drive(g, d0(g))
 	if d := g.m.Due(); len(d) != 1 || d[0].Volume != "g2" || d[0].Params["lbas"] != "2 6" || d[0].Forced != "inherited" {
 		t.Fatalf("due after the target's first attach: %+v", d)
 	}
 	drive(g, d0(g))
 	drive(g, op("v3_op_write", "g2", "lbas", "5", "round", "r2"))
-	b := g.m.Before(op("v3_op_stop", "g1"))
+	for i := 0; i < pairDelay-1; i++ { // the write above was the first drawn one
+		if has(g.ordinary(), "v3_op_stop", "g1", "") || has(g.ordinary(), "v3_op_stop", "g2", "") || has(g.ordinary(), "v3_op_move", "g1", "") {
+			t.Fatal("a side of a pending pair offered a stop or move")
+		}
+		if !has(g.negatives(), "v3_op_delete", "g1", limDeleteAttached) {
+			t.Fatal("negatives on a pending pair are held too")
+		}
+		if d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair" {
+			t.Fatalf("the window before pairDelay: %d", i)
+		}
+		drive(g, op("v3_op_read", "g1", "lbas", "2"))
+	}
 	var got []string
-	for _, o := range b {
+	for d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair"; d = g.m.Due() {
+		o := d[0]
 		got = append(got, o.Forced+" "+strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Volume+" "+o.Params["lbas"])
+		drive(g, o)
 	}
 	// Across first (an inherited lba written on one side, read on the other,
 	// both ways), then the same lbas read on both.
 	want := []string{"pair write g1 2", "pair read g2 2", "pair write g2 6", "pair read g1 6", "pair read g1 2 5 6", "pair read g2 2 5 6"}
 	if !slices.Equal(got, want) {
-		t.Fatalf("before a stop of the source:\n%q\nwant\n%q", got, want)
+		t.Fatalf("the pair window:\n%q\nwant\n%q", got, want)
 	}
-	drive(g, b...)
-	drive(g, op("v3_op_write", "g2", "lbas", "7", "round", "r3"))
-	if again := g.m.Before(op("v3_op_stop", "g2")); len(again) != 1 || again[0].Forced != "readback" || again[0].Params["lbas"] != "7" {
-		t.Fatalf("the pair window ran twice, or the readback is wrong: %+v", again)
-	}
-	// Red controls for the checker: a target written before its inherited
+	if !has(g.ordinary(), "v3_op_stop", "g1", "") || !has(g.ordinary(), "v3_op_stop", "g2", "") {
+		t.Fatal("the hold not released after the window")
+	} // Red controls for the checker: a target written before its inherited
 	// read, a source stopped with its target unread at the source's write.
 	w := func(v, lbas string) GenOp { return op("v3_op_write", v, "lbas", lbas, "round", "r") }
 	r := func(v, lbas string) GenOp { return op("v3_op_read", v, "lbas", lbas) }
@@ -1441,5 +1450,154 @@ func TestRetryHorizonOnlyOnTheSourceDeleteNegative(t *testing.T) {
 	}
 	if src == 0 || attached == 0 {
 		t.Fatalf("%d source deletes, %d attached deletes", src, attached)
+	}
+}
+
+// pairsUnexercised lists the restore pairs of a proposal list (answered as
+// answer() answers) that never got, in each direction, a write on one side
+// after the restore to a block the other side holds and then a read of it on
+// the other side, and that the notes do not excuse: a note is accepted only
+// for a side lost to the run (unknown, unsettled, killed, reserved), never
+// for a side that simply left (stopped, moved, deleted).
+func pairsUnexercised(ops []GenOp, notes []string) []string {
+	type pair struct{ s, t string }
+	holds := map[string]map[string]bool{}
+	snapc := map[string]map[string]bool{}
+	set := func(v string) map[string]bool {
+		if holds[v] == nil {
+			holds[v] = map[string]bool{}
+		}
+		return holds[v]
+	}
+	var pairs []pair
+	wrote := map[string]map[string]bool{} // "s|t|side" -> lbas written on side the other held
+	crossed := map[string]bool{}
+	for _, o := range ops {
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		v := o.Volume
+		switch o.Action {
+		case "v3_op_snapshot":
+			snapc[v+"|"+o.Params["name"]] = maps.Clone(set(v))
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			holds[t] = maps.Clone(snapc[v+"|"+o.Params["snapshot"]])
+			pairs = append(pairs, pair{v, t})
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for _, p := range pairs {
+					other := map[string]string{p.s: p.t, p.t: p.s}[v]
+					if other != "" && holds[other][b] {
+						k := p.s + "|" + p.t + "|" + v
+						if wrote[k] == nil {
+							wrote[k] = map[string]bool{}
+						}
+						wrote[k][b] = true
+					}
+				}
+				set(v)[b] = true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for _, p := range pairs {
+					if other := map[string]string{p.s: p.t, p.t: p.s}[v]; other != "" && wrote[p.s+"|"+p.t+"|"+other][b] {
+						crossed[p.s+"|"+p.t+"|"+other] = true
+					}
+				}
+			}
+		}
+	}
+	var bad []string
+	for _, p := range pairs {
+		key := p.s + "|" + p.t
+		if crossed[key+"|"+p.s] && crossed[key+"|"+p.t] {
+			continue
+		}
+		excused := false
+		for _, n := range notes {
+			if strings.Contains(n, key+":") {
+				excused = strings.Contains(n, "unknown") || strings.Contains(n, "unsettled") || strings.Contains(n, "killed") || strings.Contains(n, "reserved")
+			}
+		}
+		if !excused {
+			bad = append(bad, key)
+		}
+	}
+	return bad
+}
+
+// Every restore pair whose sides stay in the run gets its window: cross
+// writes and reads in both directions; a pair whose side was lost is noted
+// in coverage with why.
+func TestEveryRestorePairGetsItsWindow(t *testing.T) {
+	pairs, noted := 0, 0
+	for seed := uint64(1); seed <= 30; seed++ {
+		ops, g := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		for o, ok := g.Tail(); ok; o, ok = g.Tail() { // the run's tail: pending windows run there
+			ops = append(ops, o)
+			g.Learn(o, answer(o))
+			if o.Action == "v3_op_observe" {
+				g.m.Observed(leaseRec(o.Volume, "expired"))
+			}
+		}
+		notes, _ := g.Coverage()["notes"].([]string)
+		if bad := pairsUnexercised(ops, notes); len(bad) != 0 {
+			t.Fatalf("seed %d: pairs not exercised %v (notes %v)", seed, bad, notes)
+		}
+		for _, o := range ops {
+			pairs += btoi(o.Action == "v3_op_restore" && o.Negative == "")
+		}
+		noted += len(notes)
+	}
+	if pairs == 0 {
+		t.Fatal("no restore pair in the sweep")
+	}
+	t.Logf("%d pairs, %d noted not exercised", pairs, noted)
+	// Red control for the check: a source stopped before any cross write.
+	red := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_stop", "g1"), op("v3_op_attach", "g2", "host", "0"))
+	if len(pairsUnexercised(red, []string{"pair not exercised: g1|g2: g1: stopped"})) == 0 {
+		t.Fatal("red control: a source stopped before its window passed")
+	}
+}
+
+// C2 in fault runs: a target whose first attach was unknown gets its
+// inherited reads once a settled record places it held; a target killed
+// after its attach keeps them owed and gets them once it serves again.
+func TestInheritedReadsSurviveAnUnsettledOrKilledTarget(t *testing.T) {
+	restored := func() *Generator {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "3", "round", "r"),
+			op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+		return g
+	}
+	inheritedDue := func(g *Generator) bool {
+		d := g.m.Due()
+		return len(d) == 1 && d[0].Volume == "g2" && d[0].Forced == "inherited" && d[0].Params["lbas"] == "3"
+	}
+	// Unsettled first attach.
+	g := restored()
+	at := d0(g)
+	g.Learn(at, tr.OutcomeUnknown)
+	if inheritedDue(g) {
+		t.Fatal("inherited reads due while the target is unsettled")
+	}
+	g.m.Observed(settledRec("g2", "held"))
+	if !inheritedDue(g) {
+		t.Fatalf("no inherited read after the attach settled held: %+v", g.m.Due())
+	}
+	// Killed after its attach (g2 is blockvolume:1, the pool's second name).
+	g = restored()
+	drive(g, d0(g))
+	g.m.FaultRan(FaultKill, "blockvolume:1", tr.OutcomeOK)
+	if d := g.m.Due(); len(d) > 0 && d[0].Volume == "g2" {
+		t.Fatalf("an owed read of a killed target: %+v", d)
+	}
+	g.m.FaultRan(FaultRestart, "blockvolume:1", tr.OutcomeOK)
+	g.m.Observed(healthyRec(nil))
+	if !inheritedDue(g) {
+		t.Fatalf("no inherited read once the target serves again: %+v", g.m.Due())
 	}
 }

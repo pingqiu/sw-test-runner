@@ -424,5 +424,8 @@ func (g *Generator) Coverage() map[string]any {
 	if fcells != nil {
 		cov["fault_cells"] = fcells
 	}
+	if notes := g.m.Notes(); len(notes) > 0 {
+		cov["notes"] = notes
+	}
 	return cov
 }

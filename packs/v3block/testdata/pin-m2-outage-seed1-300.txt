@@ -1,4 +1,4 @@
-observe gen gen_header   null {"blocks":8,"fault_master_outage":0.05,"fault_processes":["blockvolume:0"],"fault_restart_within":20,"faults":0.05,"generator":"m2-gen/7","negative":0.1,"ops":300,"pool":["g1","g2","g3","g4","g5","g6","g7","g8","g9","g10","g11","g12","g13","g14","g15","g16","g17","g18","g19","g20","g21","g22","g23","g24","g25","g26","g27","g28","g29","g30","g31","g32","g33","g34","g35","g36","g37","g38","g39","g40","g41","g42","g43","g44","g45","g46","g47","g48","g49","g50","g51","g52","g53","g54","g55","g56","g57","g58","g59","g60","g61","g62","g63","g64","g65","g66","g67","g68","g69","g70","g71","g72","g73","g74","g75","g76","g77","g78","g79","g80","g81","g82","g83","g84","g85","g86","g87","g88","g89","g90","g91","g92","g93","g94","g95","g96","g97","g98","g99","g100"],"seed":"1","unit":{"cite":" at ","emulated":true,"note":"a unit-emulated run is not evidence for the unit's own behaviour","policy":{"commit":"","file":"","restart":"on-failure","restart_prevent_exit_status":[78],"restart_sec":5,"timeout_stop_sec":30}},"weights":{"v3_op_attach":10,"v3_op_create":6,"v3_op_delete":8,"v3_op_move":6,"v3_op_read":20,"v3_op_restore":6,"v3_op_snapshot":8,"v3_op_snapshot_delete":5,"v3_op_stop":6,"v3_op_write":25}}
+observe gen gen_header   null {"blocks":8,"fault_master_outage":0.05,"fault_processes":["blockvolume:0"],"fault_restart_within":20,"faults":0.05,"generator":"m2-gen/8","negative":0.1,"ops":300,"pool":["g1","g2","g3","g4","g5","g6","g7","g8","g9","g10","g11","g12","g13","g14","g15","g16","g17","g18","g19","g20","g21","g22","g23","g24","g25","g26","g27","g28","g29","g30","g31","g32","g33","g34","g35","g36","g37","g38","g39","g40","g41","g42","g43","g44","g45","g46","g47","g48","g49","g50","g51","g52","g53","g54","g55","g56","g57","g58","g59","g60","g61","g62","g63","g64","g65","g66","g67","g68","g69","g70","g71","g72","g73","g74","g75","g76","g77","g78","g79","g80","g81","g82","g83","g84","g85","g86","g87","g88","g89","g90","g91","g92","g93","g94","g95","g96","g97","g98","g99","g100"],"seed":"1","unit":{"cite":" at ","emulated":true,"note":"a unit-emulated run is not evidence for the unit's own behaviour","policy":{"commit":"","file":"","restart":"on-failure","restart_prevent_exit_status":[78],"restart_sec":5,"timeout_stop_sec":30}},"weights":{"v3_op_attach":10,"v3_op_create":6,"v3_op_delete":8,"v3_op_move":6,"v3_op_read":20,"v3_op_restore":6,"v3_op_snapshot":8,"v3_op_snapshot_delete":5,"v3_op_stop":6,"v3_op_write":25}}
 observe gen fault_schedule   null {"events":[{"action":"kill","after_op":4,"process":"blockvolume:0"},{"action":"restart","after_op":20,"process":"blockvolume:0"},{"action":"kill","after_op":28,"process":"blockvolume:0"},{"action":"restart","after_op":31,"process":"blockvolume:0"},{"action":"kill","after_op":38,"process":"blockvolume:0"},{"action":"restart","after_op":56,"process":"blockvolume:0"},{"action":"master_outage","after_op":78,"process":"blockmaster"},{"action":"kill","after_op":82,"process":"blockvolume:0"},{"action":"restart","after_op":84,"process":"blockvolume:0"},{"action":"kill","after_op":85,"process":"blockvolume:0"},{"action":"restart","after_op":89,"process":"blockvolume:0"},{"action":"master_outage","after_op":99,"process":"blockmaster"},{"action":"kill","after_op":102,"process":"blockvolume:0"},{"action":"restart","after_op":107,"process":"blockvolume:0"},{"action":"master_outage","after_op":115,"process":"blockmaster"},{"action":"master_outage","after_op":122,"process":"blockmaster"},{"action":"kill","after_op":129,"process":"blockvolume:0"},{"action":"restart","after_op":147,"process":"blockvolume:0"},{"action":"master_outage","after_op":152,"process":"blockmaster"},{"action":"master_outage","after_op":160,"process":"blockmaster"},{"action":"kill","after_op":170,"process":"blockvolume:0"},{"action":"restart","after_op":172,"process":"blockvolume:0"},{"action":"kill","after_op":196,"process":"blockvolume:0"},{"action":"restart","after_op":216,"process":"blockvolume:0"},{"action":"kill","after_op":228,"process":"blockvolume:0"},{"action":"restart","after_op":240,"process":"blockvolume:0"},{"action":"master_outage","after_op":245,"process":"blockmaster"},{"action":"master_outage","after_op":280,"process":"blockmaster"}],"seed":"1"}
 observe gen gen_step g1  null {"action":"v3_op_create","opno":1,"params":{"volume":"g1"}}
 invoke  create g1  null null
@@ -907,207 +907,192 @@ complete  read g35 ok null null
 observe gen gen_step g35  null {"action":"v3_op_restore","opno":180,"params":{"snapshot":"g35-s2","target_volume":"g65","volume":"g35"}}
 invoke  restore g35  null null
 complete  restore g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":181,"params":{"lbas":"4 7 5 2","round":"g181","volume":"g35"}}
+observe gen gen_step g65  null {"action":"v3_op_attach","forced":"pair-attach","opno":181,"params":{"host":"0","volume":"g65"}}
+invoke  attach g65  null null
+complete  attach g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","forced":"inherited","opno":182,"params":{"lbas":"0 1 2 3","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","forced":"inherited","opno":183,"params":{"lbas":"4 5 6 7","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","opno":184,"params":{"lbas":"0 4 6 7","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":185,"params":{"lbas":"6","round":"g185","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":182,"params":{"lbas":"6","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","opno":186,"params":{"lbas":"0 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_delete","negative":"delete while attached","opno":183,"params":{"expect":"refused","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_snapshot_delete","opno":187,"params":{"name":"g35-s3","volume":"g35"}}
+invoke  snapshot_delete g35  null null
+complete  snapshot_delete g35 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","opno":188,"params":{"lbas":"2 4 7","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":189,"params":{"lbas":"2 4 7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":190,"params":{"lbas":"2 6","round":"g190","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_release","negative":"release a live restore target","opno":191,"params":{"expect":"refused","target_volume":"g65","volume":"g35"}}
+observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  release g35  null null
+complete  release g35 refused null null
+observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g66  null {"action":"v3_op_create","opno":192,"params":{"volume":"g66"}}
+invoke  create g66  null null
+complete  create g66 ok null null
+observe gen gen_step g35  null {"action":"v3_op_delete","negative":"delete while attached","opno":193,"params":{"expect":"refused","volume":"g35"}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  delete g35  null null
 complete  delete g35 refused null null
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g35  null {"action":"v3_op_write","opno":184,"params":{"lbas":"7 1 0","round":"g184","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_write","forced":"pair","opno":194,"params":{"lbas":"0","round":"p-g35-g65-1","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":185,"params":{"lbas":"3","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":186,"params":{"lbas":"0 2 5 6","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":187,"params":{"lbas":"7 2","round":"g187","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g66  null {"action":"v3_op_create","opno":188,"params":{"volume":"g66"}}
-invoke  create g66  null null
-complete  create g66 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":189,"params":{"lbas":"0 2 4 6","round":"g189","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g67  null {"action":"v3_op_create","opno":190,"params":{"volume":"g67"}}
-invoke  create g67  null null
-complete  create g67 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":191,"params":{"lbas":"1 3 5 7","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_snapshot_delete","opno":192,"params":{"name":"g35-s3","volume":"g35"}}
-invoke  snapshot_delete g35  null null
-complete  snapshot_delete g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":193,"params":{"lbas":"5 2","round":"g193","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":194,"params":{"lbas":"5 4 3","round":"g194","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":195,"params":{"lbas":"3 5 6","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":196,"params":{"lbas":"7 0 1 5","round":"g196","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","forced":"pair","opno":195,"params":{"lbas":"0","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_write","forced":"pair","opno":196,"params":{"lbas":"7","round":"p-g35-g65-2","volume":"g65"}}
+invoke  write g65  null null
+complete  write g65 ok null null
 observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{},"look":"single","not_serving":[]}
 observe gen fault_kill   null {"after_op":196,"down":[],"process":"blockvolume:34","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:34"} null
 complete  kill  ok null null
-observe gen gen_step g66  null {"action":"v3_op_attach","opno":197,"params":{"host":"0","volume":"g66"}}
+observe gen gen_step g65  null {"action":"v3_op_read","forced":"pair","opno":197,"params":{"lbas":"0 1 2 3","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_read","forced":"pair","opno":198,"params":{"lbas":"4 5 6 7","volume":"g65"}}
+invoke  read g65  null null
+complete  read g65 ok null null
+observe gen gen_step g65  null {"action":"v3_op_write","opno":199,"params":{"lbas":"7 3","round":"g199","volume":"g65"}}
+invoke  write g65  null null
+complete  write g65 unknown null null
+invoke  write g65  null null
+complete  write g65 unknown null null
+observe gen gen_step g65  null {"action":"v3_op_delete","negative":"delete while attached","opno":200,"params":{"expect":"refused","volume":"g65"}}
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  delete g65  null null
+complete  delete g65 refused null null
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g65  null {"action":"v3_op_write","opno":201,"params":{"lbas":"4","round":"g201","volume":"g65"}}
+invoke  write g65  null null
+complete  write g65 unknown null null
+observe gen gen_step g65  null {"action":"v3_op_write","opno":202,"params":{"lbas":"7 3 6 4","round":"g202","volume":"g65"}}
+invoke  write g65  null null
+complete  write g65 unknown null null
+invoke  write g65  null null
+complete  write g65 unknown null null
+invoke  write g65  null null
+complete  write g65 unknown null null
+invoke  write g65  null null
+complete  write g65 unknown null null
+observe gen gen_step g65  null {"action":"v3_op_snapshot","opno":203,"params":{"name":"g65-s1","volume":"g65"}}
+invoke  snapshot g65  null null
+complete  snapshot g65 unknown null null
+observe gen gen_step g66  null {"action":"v3_op_attach","opno":204,"params":{"host":"0","volume":"g66"}}
 invoke  attach g66  null null
 complete  attach g66 unknown null null
-observe gen gen_step g68  null {"action":"v3_op_create","opno":198,"params":{"volume":"g68"}}
+observe gen gen_step g67  null {"action":"v3_op_create","opno":205,"params":{"volume":"g67"}}
+invoke  create g67  null null
+complete  create g67 unknown null null
+observe gen gen_step g68  null {"action":"v3_op_create","opno":206,"params":{"volume":"g68"}}
 invoke  create g68  null null
 complete  create g68 unknown null null
-observe gen gen_step g18  null {"action":"v3_op_delete","opno":199,"params":{"volume":"g18"}}
-invoke  delete g18  null null
-complete  delete g18 unknown null null
-observe gen gen_step g69  null {"action":"v3_op_create","opno":200,"params":{"volume":"g69"}}
+observe gen gen_step g69  null {"action":"v3_op_create","opno":207,"params":{"volume":"g69"}}
 invoke  create g69  null null
 complete  create g69 unknown null null
-observe gen gen_step g70  null {"action":"v3_op_create","opno":201,"params":{"volume":"g70"}}
+observe gen gen_step g70  null {"action":"v3_op_create","opno":208,"params":{"volume":"g70"}}
 invoke  create g70  null null
 complete  create g70 unknown null null
-observe gen gen_step g71  null {"action":"v3_op_create","opno":202,"params":{"volume":"g71"}}
+observe gen gen_step g71  null {"action":"v3_op_create","opno":209,"params":{"volume":"g71"}}
 invoke  create g71  null null
 complete  create g71 unknown null null
-observe gen gen_step g72  null {"action":"v3_op_create","opno":203,"params":{"volume":"g72"}}
+observe gen gen_step g72  null {"action":"v3_op_create","opno":210,"params":{"volume":"g72"}}
 invoke  create g72  null null
 complete  create g72 unknown null null
-observe gen gen_step g73  null {"action":"v3_op_create","opno":204,"params":{"volume":"g73"}}
+observe gen gen_step g73  null {"action":"v3_op_create","opno":211,"params":{"volume":"g73"}}
 invoke  create g73  null null
 complete  create g73 unknown null null
-observe gen gen_step g74  null {"action":"v3_op_create","opno":205,"params":{"volume":"g74"}}
+observe gen gen_step g74  null {"action":"v3_op_create","opno":212,"params":{"volume":"g74"}}
 invoke  create g74  null null
 complete  create g74 unknown null null
-observe gen gen_step g67  null {"action":"v3_op_attach","opno":206,"params":{"host":"0","volume":"g67"}}
-invoke  attach g67  null null
-complete  attach g67 unknown null null
-observe gen gen_step g75  null {"action":"v3_op_create","opno":207,"params":{"volume":"g75"}}
+observe gen gen_step g75  null {"action":"v3_op_create","opno":213,"params":{"volume":"g75"}}
 invoke  create g75  null null
 complete  create g75 unknown null null
-observe gen gen_step g76  null {"action":"v3_op_create","opno":208,"params":{"volume":"g76"}}
+observe gen gen_step g76  null {"action":"v3_op_create","opno":214,"params":{"volume":"g76"}}
 invoke  create g76  null null
 complete  create g76 unknown null null
-observe gen gen_step g65  null {"action":"v3_op_attach","opno":209,"params":{"host":"0","volume":"g65"}}
-invoke  attach g65  null null
-complete  attach g65 unknown null null
-observe gen gen_step g77  null {"action":"v3_op_create","opno":210,"params":{"volume":"g77"}}
+observe gen gen_step g77  null {"action":"v3_op_create","opno":215,"params":{"volume":"g77"}}
 invoke  create g77  null null
 complete  create g77 unknown null null
-observe gen gen_step g78  null {"action":"v3_op_create","opno":211,"params":{"volume":"g78"}}
+observe gen gen_step g78  null {"action":"v3_op_create","opno":216,"params":{"volume":"g78"}}
 invoke  create g78  null null
 complete  create g78 unknown null null
-observe gen gen_step g79  null {"action":"v3_op_create","opno":212,"params":{"volume":"g79"}}
-invoke  create g79  null null
-complete  create g79 unknown null null
-observe gen gen_step g80  null {"action":"v3_op_create","opno":213,"params":{"volume":"g80"}}
-invoke  create g80  null null
-complete  create g80 unknown null null
-observe gen gen_step g81  null {"action":"v3_op_create","opno":214,"params":{"volume":"g81"}}
-invoke  create g81  null null
-complete  create g81 unknown null null
-observe gen gen_step g82  null {"action":"v3_op_create","opno":215,"params":{"volume":"g82"}}
-invoke  create g82  null null
-complete  create g82 unknown null null
-observe gen gen_step g83  null {"action":"v3_op_create","opno":216,"params":{"volume":"g83"}}
-invoke  create g83  null null
-complete  create g83 unknown null null
 invoke  restart   {"process":"blockvolume:34"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+invoke  read g65  null null
+complete  read g65 ok null null
+invoke  read g65  null null
+complete  read g65 ok null null
+invoke  read g65  null null
+complete  read g65 ok null null
+observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g66  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g67  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g68  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g18  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g69  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g70  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g71  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g72  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g73  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g74  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g67  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g75  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g76  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g77  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g78  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g79  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g80  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g81  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g82  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g83  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g35  null {"action":"v3_op_read","opno":217,"params":{"lbas":"1 2 4","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":217,"params":{"lbas":"7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_snapshot","opno":218,"params":{"name":"g35-s4","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":218,"params":{"lbas":"0 1 2 3","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":219,"params":{"lbas":"4 5 6 7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":220,"params":{"lbas":"0 5 7","round":"g220","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":221,"params":{"lbas":"0 7 2 4","round":"g221","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_snapshot","opno":222,"params":{"name":"g35-s4","volume":"g35"}}
 invoke  snapshot g35  null null
 complete  snapshot g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":219,"params":{"lbas":"1 4 2 5","round":"g219","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":220,"params":{"lbas":"0","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":221,"params":{"lbas":"2 3 4 6","volume":"g35"}}
-invoke  read g35  null null
-complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":222,"params":{"lbas":"1 6 5 0","round":"g222","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":223,"params":{"lbas":"0 1","round":"g223","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":223,"params":{"lbas":"1","round":"g223","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
 observe gen gen_step g35  null {"action":"v3_op_read","opno":224,"params":{"lbas":"2 4","volume":"g35"}}
@@ -1139,57 +1124,57 @@ observe runner healthy   null {"attempts":1,"down":[],"healthy":true,"holders":{
 observe gen fault_kill   null {"after_op":228,"down":[],"process":"blockvolume:34","scheduled":"blockvolume:0","skipped":false}
 invoke  kill   {"process":"blockvolume:34"} null
 complete  kill  ok null null
-observe gen gen_step g84  null {"action":"v3_op_create","opno":229,"params":{"volume":"g84"}}
+observe gen gen_step g18  null {"action":"v3_op_delete","opno":229,"params":{"volume":"g18"}}
+invoke  delete g18  null null
+complete  delete g18 unknown null null
+observe gen gen_step g79  null {"action":"v3_op_create","opno":230,"params":{"volume":"g79"}}
+invoke  create g79  null null
+complete  create g79 unknown null null
+observe gen gen_step g80  null {"action":"v3_op_create","opno":231,"params":{"volume":"g80"}}
+invoke  create g80  null null
+complete  create g80 unknown null null
+observe gen gen_step g81  null {"action":"v3_op_create","opno":232,"params":{"volume":"g81"}}
+invoke  create g81  null null
+complete  create g81 unknown null null
+observe gen gen_step g82  null {"action":"v3_op_create","opno":233,"params":{"volume":"g82"}}
+invoke  create g82  null null
+complete  create g82 unknown null null
+observe gen gen_step g83  null {"action":"v3_op_create","opno":234,"params":{"volume":"g83"}}
+invoke  create g83  null null
+complete  create g83 unknown null null
+observe gen gen_step g84  null {"action":"v3_op_create","opno":235,"params":{"volume":"g84"}}
 invoke  create g84  null null
 complete  create g84 unknown null null
-observe gen gen_step g85  null {"action":"v3_op_create","opno":230,"params":{"volume":"g85"}}
+observe gen gen_step g85  null {"action":"v3_op_create","opno":236,"params":{"volume":"g85"}}
 invoke  create g85  null null
 complete  create g85 unknown null null
-observe gen gen_step g86  null {"action":"v3_op_create","opno":231,"params":{"volume":"g86"}}
+observe gen gen_step g86  null {"action":"v3_op_create","opno":237,"params":{"volume":"g86"}}
 invoke  create g86  null null
 complete  create g86 unknown null null
-observe gen gen_step g87  null {"action":"v3_op_create","opno":232,"params":{"volume":"g87"}}
+observe gen gen_step g87  null {"action":"v3_op_create","opno":238,"params":{"volume":"g87"}}
 invoke  create g87  null null
 complete  create g87 unknown null null
-observe gen gen_step g88  null {"action":"v3_op_create","opno":233,"params":{"volume":"g88"}}
+observe gen gen_step g88  null {"action":"v3_op_create","opno":239,"params":{"volume":"g88"}}
 invoke  create g88  null null
 complete  create g88 unknown null null
-observe gen gen_step g89  null {"action":"v3_op_create","opno":234,"params":{"volume":"g89"}}
+observe gen gen_step g89  null {"action":"v3_op_create","opno":240,"params":{"volume":"g89"}}
 invoke  create g89  null null
 complete  create g89 unknown null null
-observe gen gen_step g90  null {"action":"v3_op_create","opno":235,"params":{"volume":"g90"}}
-invoke  create g90  null null
-complete  create g90 unknown null null
-observe gen gen_step g91  null {"action":"v3_op_create","opno":236,"params":{"volume":"g91"}}
-invoke  create g91  null null
-complete  create g91 unknown null null
-observe gen gen_step g92  null {"action":"v3_op_create","opno":237,"params":{"volume":"g92"}}
-invoke  create g92  null null
-complete  create g92 unknown null null
-observe gen gen_step g93  null {"action":"v3_op_create","opno":238,"params":{"volume":"g93"}}
-invoke  create g93  null null
-complete  create g93 unknown null null
-observe gen gen_step g94  null {"action":"v3_op_create","opno":239,"params":{"volume":"g94"}}
-invoke  create g94  null null
-complete  create g94 unknown null null
-observe gen gen_step g95  null {"action":"v3_op_create","opno":240,"params":{"volume":"g95"}}
-invoke  create g95  null null
-complete  create g95 unknown null null
 invoke  restart   {"process":"blockvolume:34"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+observe  observe g18  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g79  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g80  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g81  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g82  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g83  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g84  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g85  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g86  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g87  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g88  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g89  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g91  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g92  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g94  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g95  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_step g35  null {"action":"v3_op_write","opno":241,"params":{"lbas":"0 3 2","round":"g241","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
@@ -1229,9 +1214,9 @@ complete  read g35 ok null null
 observe gen gen_step g35  null {"action":"v3_op_snapshot","opno":247,"params":{"name":"g35-s5","volume":"g35"}}
 invoke  snapshot g35  null null
 complete  snapshot g35 ok null null
-observe gen gen_step g96  null {"action":"v3_op_create","opno":248,"params":{"volume":"g96"}}
-invoke  create g96  null null
-complete  create g96 ok null null
+observe gen gen_step g90  null {"action":"v3_op_create","opno":248,"params":{"volume":"g90"}}
+invoke  create g90  null null
+complete  create g90 ok null null
 observe gen gen_step g35  null {"action":"v3_op_snapshot","opno":249,"params":{"name":"g35-s6","volume":"g35"}}
 invoke  snapshot g35  null null
 complete  snapshot g35 ok null null
@@ -1259,9 +1244,9 @@ complete  write g35 ok null null
 observe gen gen_step g35  null {"action":"v3_op_snapshot_delete","opno":254,"params":{"name":"g35-s4","volume":"g35"}}
 invoke  snapshot_delete g35  null null
 complete  snapshot_delete g35 ok null null
-observe gen gen_step g97  null {"action":"v3_op_create","opno":255,"params":{"volume":"g97"}}
-invoke  create g97  null null
-complete  create g97 ok null null
+observe gen gen_step g91  null {"action":"v3_op_create","opno":255,"params":{"volume":"g91"}}
+invoke  create g91  null null
+complete  create g91 ok null null
 observe gen gen_step g35  null {"action":"v3_op_read","opno":256,"params":{"lbas":"4 6 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
@@ -1294,15 +1279,15 @@ observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"
 invoke  snapshot_delete g35  null null
 complete  snapshot_delete g35 refused null null
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g35  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":263,"params":{"expect":"refused","snapshot":"g35-s2","target_volume":"g96","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":263,"params":{"expect":"refused","snapshot":"g35-s2","target_volume":"g90","volume":"g35"}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 invoke  restore g35  null null
 complete  restore g35 refused null null
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe gen gen_step g35  null {"action":"v3_op_read","opno":264,"params":{"lbas":"1 2 5","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
@@ -1335,203 +1320,318 @@ complete  write g35 ok null null
 observe gen gen_step g35  null {"action":"v3_op_read","opno":271,"params":{"lbas":"3 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_restore","opno":272,"params":{"snapshot":"g35-s5","target_volume":"g98","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_restore","opno":272,"params":{"snapshot":"g35-s5","target_volume":"g92","volume":"g35"}}
 invoke  restore g35  null null
 complete  restore g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_attach","opno":273,"params":{"host":"0","volume":"g98"}}
-invoke  attach g98  null null
-complete  attach g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_read","forced":"inherited","opno":274,"params":{"lbas":"0 1 2 3","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_read","forced":"inherited","opno":275,"params":{"lbas":"4 5 6 7","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":276,"params":{"lbas":"1","volume":"g35"}}
+observe gen gen_step g92  null {"action":"v3_op_attach","forced":"pair-attach","opno":273,"params":{"host":"0","volume":"g92"}}
+invoke  attach g92  null null
+complete  attach g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","forced":"inherited","opno":274,"params":{"lbas":"0 1 2 3","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","forced":"inherited","opno":275,"params":{"lbas":"4 5 6 7","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":276,"params":{"lbas":"2 0","round":"g276","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":277,"params":{"lbas":"2 7","round":"g277","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":278,"params":{"lbas":"1 3 5 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":277,"params":{"lbas":"2","round":"g277","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":278,"params":{"lbas":"7 1","round":"g278","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":279,"params":{"lbas":"5 0 7","round":"g279","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":280,"params":{"lbas":"1 5 6 7","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","opno":279,"params":{"lbas":"1","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen master_outage   null {"after_op":280,"max_seconds":10,"process":"blockmaster","writes":[{"action":"v3_op_write","params":{"lbas":"0","round":"o280","volume":"g35"},"volume":"g35"},{"action":"v3_op_write","params":{"lbas":"0","round":"o280","volume":"g98"},"volume":"g98"}]}
+observe gen gen_step g35  null {"action":"v3_op_write","opno":280,"params":{"lbas":"4 7 2","round":"g280","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen master_outage   null {"after_op":280,"max_seconds":10,"process":"blockmaster","writes":[{"action":"v3_op_write","params":{"lbas":"0","round":"o280","volume":"g35"},"volume":"g35"},{"action":"v3_op_write","params":{"lbas":"0","round":"o280","volume":"g92"},"volume":"g92"}]}
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
 invoke  kill   {"process":"blockmaster"} null
 complete  kill  ok null null
 observe runner healthy   null {"attempts":1,"down":["blockmaster"],"healthy":false,"holders":{},"look":"single","not_serving":[]}
 invoke  write g35  null null
 complete  write g35 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
 observe runner healthy   null {"attempts":1,"down":["blockmaster"],"healthy":false,"holders":{},"look":"single","not_serving":[]}
 invoke  restart   {"process":"blockmaster"} null
 complete  restart  ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
-observe gen gen_step g98  null {"action":"v3_op_read","opno":281,"params":{"lbas":"1 2 6","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":282,"params":{"lbas":"7 4","round":"g282","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":283,"params":{"lbas":"4","round":"g283","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_read","opno":284,"params":{"lbas":"4","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_restore","negative":"restore into an existing name","opno":285,"params":{"expect":"refused","snapshot":"g35-s2","target_volume":"g96","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","opno":281,"params":{"lbas":"0 1 4","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":282,"params":{"lbas":"7 3 2 1","round":"g282","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":283,"params":{"lbas":"1 5","round":"g283","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","forced":"pair","opno":284,"params":{"lbas":"0","round":"p-g35-g92-1","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","forced":"pair","opno":285,"params":{"lbas":"0","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","forced":"pair","opno":286,"params":{"lbas":"7","round":"p-g35-g92-2","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":287,"params":{"lbas":"7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":288,"params":{"lbas":"0 1 2 3","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":289,"params":{"lbas":"4 5 6 7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","forced":"pair","opno":290,"params":{"lbas":"0 1 2 3","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","forced":"pair","opno":291,"params":{"lbas":"4 5 6 7","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","opno":292,"params":{"lbas":"0 3 5 6","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_snapshot_delete","opno":293,"params":{"name":"g35-s6","volume":"g35"}}
+invoke  snapshot_delete g35  null null
+complete  snapshot_delete g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":294,"params":{"lbas":"0 3 5 7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_snapshot_delete","negative":"delete a snapshot that has a restore target","opno":295,"params":{"expect":"refused","name":"g35-s5","volume":"g35"}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  snapshot_delete g35  null null
+complete  snapshot_delete g35 refused null null
+observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g35  null {"action":"v3_op_write","opno":296,"params":{"lbas":"3 5 6","round":"g296","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":297,"params":{"lbas":"2 1","round":"g297","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":298,"params":{"lbas":"2 5","round":"g298","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_restore","opno":299,"params":{"snapshot":"g35-s7","target_volume":"g93","volume":"g35"}}
 invoke  restore g35  null null
-complete  restore g35 refused null null
-observe  observe g35  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g98  null {"action":"v3_op_read","opno":286,"params":{"lbas":"0 3 5 7","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":287,"params":{"lbas":"0 6","volume":"g35"}}
+complete  restore g35 ok null null
+observe gen gen_step g93  null {"action":"v3_op_attach","forced":"pair-attach","opno":300,"params":{"host":"0","volume":"g93"}}
+invoke  attach g93  null null
+complete  attach g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_read","forced":"inherited","opno":301,"params":{"lbas":"0 1 2 3","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_read","forced":"inherited","opno":302,"params":{"lbas":"4 5 6 7","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_write","opno":303,"params":{"lbas":"5 6","round":"g303","volume":"g93"}}
+invoke  write g93  null null
+complete  write g93 ok null null
+invoke  write g93  null null
+complete  write g93 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","opno":304,"params":{"lbas":"1 3","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":305,"params":{"lbas":"5","round":"g305","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":306,"params":{"lbas":"1 2 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":288,"params":{"lbas":"1","round":"g288","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":289,"params":{"lbas":"6 5","round":"g289","volume":"g35"}}
+observe gen gen_step g92  null {"action":"v3_op_write","opno":307,"params":{"lbas":"4 3 1","round":"g307","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g93  null {"action":"v3_op_write","opno":308,"params":{"lbas":"7 1 0","round":"g308","volume":"g93"}}
+invoke  write g93  null null
+complete  write g93 ok null null
+invoke  write g93  null null
+complete  write g93 ok null null
+invoke  write g93  null null
+complete  write g93 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":309,"params":{"lbas":"0 1","round":"g309","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
 invoke  write g35  null null
 complete  write g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":290,"params":{"lbas":"0 1 2","volume":"g35"}}
+observe gen gen_step g93  null {"action":"v3_op_write","opno":310,"params":{"lbas":"4 2","round":"g310","volume":"g93"}}
+invoke  write g93  null null
+complete  write g93 ok null null
+invoke  write g93  null null
+complete  write g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_read","opno":311,"params":{"lbas":"2 3 5 6","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_write","opno":312,"params":{"lbas":"4","round":"g312","volume":"g93"}}
+invoke  write g93  null null
+complete  write g93 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","forced":"pair","opno":313,"params":{"lbas":"0","round":"p-g35-g93-1","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g93  null {"action":"v3_op_read","forced":"pair","opno":314,"params":{"lbas":"0","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_write","forced":"pair","opno":315,"params":{"lbas":"7","round":"p-g35-g93-2","volume":"g93"}}
+invoke  write g93  null null
+complete  write g93 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":316,"params":{"lbas":"7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":291,"params":{"lbas":"7 1 6 0","round":"g291","volume":"g35"}}
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-invoke  write g35  null null
-complete  write g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":292,"params":{"lbas":"5 6","round":"g292","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_read","opno":293,"params":{"lbas":"1 3","volume":"g98"}}
-invoke  read g98  null null
-complete  read g98 ok null null
-observe gen gen_step g99  null {"action":"v3_op_create","opno":294,"params":{"volume":"g99"}}
-invoke  create g99  null null
-complete  create g99 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":295,"params":{"lbas":"4 5 2 0","round":"g295","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g98  null {"action":"v3_op_delete","negative":"delete while attached","opno":296,"params":{"expect":"refused","volume":"g98"}}
-observe  observe g98  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g98  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-invoke  delete g98  null null
-complete  delete g98 refused null null
-observe  observe g98  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g98  null {"action":"v3_op_write","opno":297,"params":{"lbas":"1","round":"g297","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g99  null {"action":"v3_op_attach","opno":298,"params":{"host":"0","volume":"g99"}}
-invoke  attach g99  null null
-complete  attach g99 ok null null
-observe gen gen_step g99  null {"action":"v3_op_write","opno":299,"params":{"lbas":"7 2 3 1","round":"g299","volume":"g99"}}
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
-observe gen gen_step g99  null {"action":"v3_op_read","opno":300,"params":{"lbas":"1 2 3 7","volume":"g99"}}
-invoke  read g99  null null
-complete  read g99 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":301,"params":{"lbas":"6 7 2","round":"g301","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":302,"params":{"lbas":"1 2 6","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":317,"params":{"lbas":"0 1 2 3","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":303,"params":{"lbas":"1 6","round":"g303","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g35  null {"action":"v3_op_read","opno":304,"params":{"lbas":"0 4","volume":"g35"}}
+observe gen gen_step g35  null {"action":"v3_op_read","forced":"pair","opno":318,"params":{"lbas":"4 5 6 7","volume":"g35"}}
 invoke  read g35  null null
 complete  read g35 ok null null
-observe gen gen_step g99  null {"action":"v3_op_read","opno":305,"params":{"lbas":"2 3 7","volume":"g99"}}
-invoke  read g99  null null
-complete  read g99 ok null null
-observe gen gen_step g99  null {"action":"v3_op_read","opno":306,"params":{"lbas":"2","volume":"g99"}}
-invoke  read g99  null null
-complete  read g99 ok null null
-observe gen gen_step g35  null {"action":"v3_op_write","opno":307,"params":{"lbas":"1","round":"g307","volume":"g35"}}
+observe gen gen_step g93  null {"action":"v3_op_read","forced":"pair","opno":319,"params":{"lbas":"0 1 2 3","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g93  null {"action":"v3_op_read","forced":"pair","opno":320,"params":{"lbas":"4 5 6 7","volume":"g93"}}
+invoke  read g93  null null
+complete  read g93 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":321,"params":{"lbas":"0 2 6","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":322,"params":{"lbas":"3","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g93  null {"action":"v3_op_delete","negative":"delete while attached","opno":323,"params":{"expect":"refused","volume":"g93"}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  delete g93  null null
+complete  delete g93 refused null null
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g93  null {"action":"v3_op_delete","negative":"delete while attached","opno":324,"params":{"expect":"refused","volume":"g93"}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  delete g93  null null
+complete  delete g93 refused null null
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g93  null {"action":"v3_op_delete","negative":"delete while attached","opno":325,"params":{"expect":"refused","volume":"g93"}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  delete g93  null null
+complete  delete g93 refused null null
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g35  null {"action":"v3_op_read","opno":326,"params":{"lbas":"1 2 5 7","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":327,"params":{"lbas":"7","round":"g327","volume":"g35"}}
 invoke  write g35  null null
 complete  write g35 ok null null
-observe gen gen_step g98  null {"action":"v3_op_write","opno":308,"params":{"lbas":"0 1 5 3","round":"g308","volume":"g98"}}
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-invoke  write g98  null null
-complete  write g98 ok null null
-observe gen gen_step g99  null {"action":"v3_op_write","opno":309,"params":{"lbas":"3 4 5 7","round":"g309","volume":"g99"}}
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
-invoke  write g99  null null
-complete  write g99 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":328,"params":{"lbas":"5 2","round":"g328","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":329,"params":{"lbas":"1","round":"g329","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_snapshot","opno":330,"params":{"name":"g92-s1","volume":"g92"}}
+invoke  snapshot g92  null null
+complete  snapshot g92 ok null null
+observe gen gen_step g93  null {"action":"v3_op_stop","opno":331,"params":{"volume":"g93"}}
+invoke  stop g93  null null
+complete  stop g93 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":332,"params":{"lbas":"4 6 1","round":"g332","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_write","opno":333,"params":{"lbas":"7","round":"g333","volume":"g92"}}
+invoke  write g92  null null
+complete  write g92 ok null null
+observe gen gen_step g92  null {"action":"v3_op_read","opno":334,"params":{"lbas":"1 2 4 6","volume":"g92"}}
+invoke  read g92  null null
+complete  read g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":335,"params":{"lbas":"7","round":"g335","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g92  null {"action":"v3_op_snapshot_delete","opno":336,"params":{"name":"g92-s1","volume":"g92"}}
+invoke  snapshot_delete g92  null null
+complete  snapshot_delete g92 ok null null
+observe gen gen_step g35  null {"action":"v3_op_read","opno":337,"params":{"lbas":"6","volume":"g35"}}
+invoke  read g35  null null
+complete  read g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":338,"params":{"lbas":"3 4 6 0","round":"g338","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":339,"params":{"lbas":"6 1 7","round":"g339","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+observe gen gen_step g35  null {"action":"v3_op_write","opno":340,"params":{"lbas":"1 4 3 5","round":"g340","volume":"g35"}}
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
+invoke  write g35  null null
+complete  write g35 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
-observe gen gen_step g96  null {"action":"v3_op_delete","forced":"tail","opno":310,"params":{"volume":"g96"}}
-invoke  delete g96  null null
-complete  delete g96 ok null null
-observe gen gen_step g96  null {"action":"v3_op_observe","forced":"tail","opno":311,"params":{"volume":"g96"}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_step g96  null {"action":"v3_op_create","forced":"tail","negative":"create a deleted name","opno":312,"params":{"expect":"refused","volume":"g96"}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-invoke  create g96  null null
-complete  create g96 refused null null
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g3"},"volume":"g3"},{"action":"v3_op_observe","params":{"volume":"g19"},"volume":"g19"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g35"},"volume":"g35"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g35"},"volume":"g35"},{"action":"v3_op_observe","params":{"volume":"g35"},"volume":"g35"},{"action":"v3_op_observe","params":{"volume":"g36"},"volume":"g36"},{"action":"v3_op_observe","params":{"volume":"g40"},"volume":"g40"},{"action":"v3_op_observe","params":{"volume":"g45"},"volume":"g45"},{"action":"v3_op_observe","params":{"volume":"g46"},"volume":"g46"},{"action":"v3_op_observe","params":{"volume":"g63"},"volume":"g63"},{"action":"v3_op_observe","params":{"volume":"g65"},"volume":"g65"},{"action":"v3_op_observe","params":{"volume":"g66"},"volume":"g66"},{"action":"v3_op_observe","params":{"volume":"g67"},"volume":"g67"},{"action":"v3_op_observe","params":{"volume":"g96"},"volume":"g96"},{"action":"v3_op_observe","params":{"volume":"g97"},"volume":"g97"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g98"},"volume":"g98"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g98"},"volume":"g98"},{"action":"v3_op_observe","params":{"volume":"g98"},"volume":"g98"},{"action":"v3_op_read","params":{"lbas":"1 2 3 4","volume":"g99"},"volume":"g99"},{"action":"v3_op_read","params":{"lbas":"5 7","volume":"g99"},"volume":"g99"},{"action":"v3_op_observe","params":{"volume":"g99"},"volume":"g99"}]}
+observe gen gen_step g90  null {"action":"v3_op_delete","forced":"tail","opno":341,"params":{"volume":"g90"}}
+invoke  delete g90  null null
+complete  delete g90 ok null null
+observe gen gen_step g93  null {"action":"v3_op_observe","forced":"tail","opno":342,"params":{"volume":"g93"}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g93  null {"action":"v3_op_delete","forced":"tail","opno":343,"params":{"volume":"g93"}}
+invoke  delete g93  null null
+complete  delete g93 ok null null
+observe gen gen_step g90  null {"action":"v3_op_observe","forced":"tail","opno":344,"params":{"volume":"g90"}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g93  null {"action":"v3_op_observe","forced":"tail","opno":345,"params":{"volume":"g93"}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_step g90  null {"action":"v3_op_create","forced":"tail","negative":"create a deleted name","opno":346,"params":{"expect":"refused","volume":"g90"}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  create g90  null null
+complete  create g90 refused null null
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g2"},"volume":"g2"},{"action":"v3_op_observe","params":{"volume":"g3"},"volume":"g3"},{"action":"v3_op_observe","params":{"volume":"g19"},"volume":"g19"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g35"},"volume":"g35"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g35"},"volume":"g35"},{"action":"v3_op_observe","params":{"volume":"g35"},"volume":"g35"},{"action":"v3_op_observe","params":{"volume":"g36"},"volume":"g36"},{"action":"v3_op_observe","params":{"volume":"g40"},"volume":"g40"},{"action":"v3_op_observe","params":{"volume":"g45"},"volume":"g45"},{"action":"v3_op_observe","params":{"volume":"g46"},"volume":"g46"},{"action":"v3_op_observe","params":{"volume":"g63"},"volume":"g63"},{"action":"v3_op_observe","params":{"volume":"g66"},"volume":"g66"},{"action":"v3_op_observe","params":{"volume":"g90"},"volume":"g90"},{"action":"v3_op_observe","params":{"volume":"g91"},"volume":"g91"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g92"},"volume":"g92"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g92"},"volume":"g92"},{"action":"v3_op_observe","params":{"volume":"g92"},"volume":"g92"},{"action":"v3_op_observe","params":{"volume":"g93"},"volume":"g93"}]}
 observe  observe g2  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g3  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g19  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
@@ -1545,20 +1645,14 @@ observe  observe g40  null {"workspace":{"exit":0,"text":["lease state: expired"
 observe  observe g45  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g46  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g63  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g65  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
 observe  observe g66  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g67  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g96  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe  observe g97  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-invoke  read g98  null null
-complete  read g98 ok null null
-invoke  read g98  null null
-complete  read g98 ok null null
-observe  observe g98  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-invoke  read g99  null null
-complete  read g99 ok null null
-invoke  read g99  null null
-complete  read g99 ok null null
-observe  observe g99  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
-observe gen gen_coverage   null {"actions":{"v3_op_attach":17,"v3_op_create":98,"v3_op_delete":17,"v3_op_move":1,"v3_op_observe":3,"v3_op_read":68,"v3_op_restore":5,"v3_op_snapshot":11,"v3_op_snapshot_delete":6,"v3_op_stop":2,"v3_op_write":84},"cells":{"v3_op_attach|created":16,"v3_op_attach|moved":1,"v3_op_create|deleted":1,"v3_op_create|unborn":97,"v3_op_delete|created":1,"v3_op_delete|serving":14,"v3_op_delete|stopped":2,"v3_op_move|serving":1,"v3_op_observe|deleted":1,"v3_op_observe|stopped":2,"v3_op_read|serving":68,"v3_op_restore|serving":5,"v3_op_snapshot_delete|serving":6,"v3_op_snapshot|serving":11,"v3_op_stop|serving":2,"v3_op_write|serving":84},"cells_never_reached":["v3_op_delete|moved","v3_op_delete|reserved","v3_op_release|serving","v3_op_release|stopped","v3_op_snapshot_delete|stopped","while_down|v3_op_move","while_down|v3_op_read","while_down|v3_op_release","while_down|v3_op_restore","while_down|v3_op_snapshot","while_down|v3_op_snapshot_delete","while_down|v3_op_stop","while_down|v3_op_write"],"drawn":300,"ended":"ops","estimated_ops_per_hour":673,"fault_cells":{"kill|blockvolume:0":8,"master_outage|blockmaster":8,"restart|blockvolume:0":8,"while_down|v3_op_attach":11,"while_down|v3_op_create":81,"while_down|v3_op_delete":2,"while_down|v3_op_observe":1},"forced":15,"ordinary_never_ran":[],"proposed":312}
+observe  observe g90  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g91  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+invoke  read g92  null null
+complete  read g92 ok null null
+invoke  read g92  null null
+complete  read g92 ok null null
+observe  observe g92  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe  observe g93  null {"workspace":{"exit":0,"text":["lease state: expired"]}}
+observe gen gen_coverage   null {"actions":{"v3_op_attach":16,"v3_op_create":91,"v3_op_delete":21,"v3_op_move":1,"v3_op_observe":5,"v3_op_read":86,"v3_op_release":1,"v3_op_restore":5,"v3_op_snapshot":13,"v3_op_snapshot_delete":9,"v3_op_stop":3,"v3_op_write":95},"cells":{"v3_op_attach|created":15,"v3_op_attach|moved":1,"v3_op_create|deleted":1,"v3_op_create|unborn":90,"v3_op_delete|created":1,"v3_op_delete|serving":17,"v3_op_delete|stopped":3,"v3_op_move|serving":1,"v3_op_observe|deleted":2,"v3_op_observe|stopped":3,"v3_op_read|serving":86,"v3_op_release|serving":1,"v3_op_restore|serving":5,"v3_op_snapshot_delete|serving":9,"v3_op_snapshot|serving":13,"v3_op_stop|serving":3,"v3_op_write|serving":95},"cells_never_reached":["v3_op_delete|moved","v3_op_delete|reserved","v3_op_release|stopped","v3_op_snapshot_delete|stopped","while_down|v3_op_move","while_down|v3_op_release","while_down|v3_op_restore","while_down|v3_op_snapshot_delete","while_down|v3_op_stop"],"drawn":300,"ended":"ops","estimated_ops_per_hour":638,"fault_cells":{"kill|blockvolume:0":8,"master_outage|blockmaster":8,"restart|blockvolume:0":8,"while_down|v3_op_attach":9,"while_down|v3_op_create":76,"while_down|v3_op_delete":3,"while_down|v3_op_observe":1,"while_down|v3_op_read":2,"while_down|v3_op_snapshot":1,"while_down|v3_op_write":3},"forced":49,"ordinary_never_ran":[],"proposed":346}
 end     null {"open_invocations":0}

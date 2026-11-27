@@ -133,6 +133,9 @@ type Model interface {
 	// OutageWrites lists the writes of a short master outage after operation
 	// after: one on every serving subject. Learnt like any outcome.
 	OutageWrites(after int) []Op
+	// Notes are the model's coverage notes (for example, why a planned
+	// window was never exercised), reported in coverage as "notes".
+	Notes() []string
 	// Tail is the next operation of the coverage tail, run after the last
 	// operation (and a fault run's final healthy point) and before the sweep:
 	// deterministic from the state, each learnt before the next is asked

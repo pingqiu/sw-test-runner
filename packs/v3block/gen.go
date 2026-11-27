@@ -51,15 +51,19 @@ import (
 // m1-gen/6: the source-delete negative carries retry_horizon. m1-gen/7
 // (host runs 5 and M2-2): the pair window writes across, and a volume whose
 // holder the runner killed is offered nothing until it serves again.
-const GenVersion = "m1-gen/7"
+// m1-gen/8 (host runs 6): every restore pair gets its window: the target's
+// first attach is forced, neither side leaves before the window, a lost
+// side is noted in coverage.
+const GenVersion = "m1-gen/8"
 
 // GenVersionFaults is the generator version recorded in the header when a
 // fault schedule is active; a run without faults keeps GenVersion, so an M1
 // history replays as before. m2-gen/2: as m1-gen/3. m2-gen/3: no ordinary
 // kill of the master; it also learns as m1-gen/4.
 // m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6. m2-gen/6: a master outage
-// with nothing serving is skipped. m2-gen/7: as m1-gen/7.
-const GenVersionFaults = "m2-gen/7"
+// with nothing serving is skipped. m2-gen/7: as m1-gen/7. m2-gen/8: as
+// m1-gen/8.
+const GenVersionFaults = "m2-gen/8"
 
 //go:embed product/operations.json
 var operationsJSON []byte
@@ -194,8 +198,7 @@ type genVol struct {
 	// moved: moved since its last attach; its next attach (on the new host)
 	// is followed by a read of its whole content (due).
 	moved bool
-	// due: forced operations owed on this volume, in order (Due).
-	due []GenOp
+
 	// killed: the run killed its holder (kill ok or unknown); offered
 	// nothing but observation (no negative either: they assume a live
 	// holder) until its restart answers ok (restarted) and a healthy record
@@ -228,7 +231,16 @@ type blockModel struct {
 	order  []string // pool order
 	drawn  int      // drawn (not forced) operations learnt
 	tail   tailState
+	due    []GenOp  // forced operations owed, in order (Due)
+	notes  []string // coverage notes (Notes)
+	// pairReady: the drawn count when both sides of a pending pair first
+	// served.
+	pairReady map[string]int
 }
+
+// pairDelay is how many drawn operations a pair window waits once both
+// sides serve.
+const pairDelay = 10
 
 // tailState is where the coverage tail stands (Tail).
 type tailState struct {
@@ -246,7 +258,7 @@ func (m *blockModel) Begin(pool []string, faults bool) error {
 	if m.blocks <= 0 {
 		return fmt.Errorf("blocks are required")
 	}
-	m.faulty, m.vols, m.order = faults, map[string]*genVol{}, nil
+	m.faulty, m.vols, m.order, m.pairReady = faults, map[string]*genVol{}, nil, map[string]int{}
 	for _, n := range pool {
 		m.vols[n] = &genVol{name: n, state: stUnborn, targets: map[string]string{}, lbas: map[int]bool{}, snapLBAs: map[string][]int{},
 			snapRewrote: map[string]bool{}, dirty: map[int]bool{}, pairDone: map[string]bool{}}
@@ -335,7 +347,14 @@ func (m *blockModel) firstName(ok func(v *genVol) bool) string {
 // that the operator pages do not say is refused.
 func (m *blockModel) Ordinary(r *rand.Rand, next int) []GenOp {
 	var cs []GenOp
-	add := func(o GenOp) { cs = append(cs, o) }
+	add := func(o GenOp) {
+		// A side of a pending restore pair is not stopped, moved or deleted
+		// before its pair window (C3).
+		if (o.Action == "v3_op_stop" || o.Action == "v3_op_move" || o.Action == "v3_op_delete") && m.pending(m.vols[o.Volume]) {
+			return
+		}
+		cs = append(cs, o)
+	}
 	unborn := m.firstName(func(v *genVol) bool { return v.state == stUnborn })
 	if unborn != "" {
 		add(op("v3_op_create", unborn))
@@ -513,8 +532,11 @@ func (m *blockModel) Negatives() []GenOp {
 // read at a healthy point resolves it.
 func (m *blockModel) Learn(o GenOp, outcome string) {
 	v := m.vols[o.Volume]
-	if o.Forced != "" && v != nil && len(v.due) > 0 && sameOp(v.due[0], o) {
-		v.due = v.due[1:] // learnt, whatever its outcome: no longer due
+	if o.Forced != "" {
+		// learnt, whatever its outcome: no longer due
+		if i := slices.IndexFunc(m.due, func(d GenOp) bool { return sameOp(d, o) }); i >= 0 {
+			m.due = slices.Delete(m.due, i, i+1)
+		}
 	}
 	if o.Forced == "" {
 		m.drawn++
@@ -596,14 +618,14 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		if v.source != "" && !v.attached && len(v.inheritedLBAs) > 0 {
 			// C2: a restore target's first reads are its inherited lbas,
 			// before anything writes them.
-			v.due = append(v.due, m.readsOf(v, v.inheritedLBAs, "inherited")...)
+			m.due = append(m.due, m.readsOf(v, v.inheritedLBAs, "inherited")...)
 		}
 		v.attached = true
 		if v.moved {
 			// The move's own data check: every acknowledged lba read once on
 			// the new host.
 			v.moved = false
-			v.due = append(v.due, m.readsOf(v, sortedLBAs(v.lbas), "attach-check")...)
+			m.due = append(m.due, m.readsOf(v, sortedLBAs(v.lbas), "attach-check")...)
 		}
 	case "v3_op_write":
 		for _, f := range strings.Fields(o.Params["lbas"]) {
@@ -633,6 +655,10 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		}
 		t.inherited, t.rewrote = len(v.snapLBAs[o.Params["snapshot"]]) > 0, false
 		t.inheritedLBAs = slices.Clone(v.snapLBAs[o.Params["snapshot"]])
+		// The target's first attach, forced soon, while the source serves.
+		at := op("v3_op_attach", t.name, "host", strconv.Itoa(placementHost))
+		at.Forced = "pair-attach"
+		m.due = append(m.due, at)
 		v.targets[o.Params["snapshot"]] = t.name
 	case "v3_op_stop":
 		v.state, v.leaseLapsed, v.leaseObsAt = stStopped, false, m.drawn
@@ -695,77 +721,190 @@ func sameOp(a, b GenOp) bool {
 	return a.Action == b.Action && a.Volume == b.Volume && a.Forced == b.Forced && maps.Equal(a.Params, b.Params)
 }
 
-// Before an ordinary stop or move (not on a fenced volume: it cannot be
-// read):
-//   - C3, the pair window: when the volume is the source of a live target,
-//     or the target of a live source, and both serve, the same lbas (the
-//     content of either) are read on both, once per pair, so both
-//     directions are exercised before one side leaves;
-//   - C1: the volume's dirty lbas are read back.
+// Before an ordinary stop or move (not on a fenced or killed volume: it
+// cannot be read), C1: the volume's dirty lbas are read back.
 func (m *blockModel) Before(o GenOp) []GenOp {
 	v := m.vols[o.Volume]
 	if o.Negative != "" || v == nil || v.fenced || v.killed || (o.Action != "v3_op_stop" && o.Action != "v3_op_move") {
 		return nil
 	}
-	var out []GenOp
-	pending := maps.Clone(v.dirty) // the dirty lbas no pair read covers
-	pair := func(src, tgt *genVol) {
-		key := src.name + "|" + tgt.name
-		if src.pairDone[key] || src.state != stServing || tgt.state != stServing || src.fenced || tgt.fenced || src.killed || tgt.killed {
-			return
-		}
-		src.pairDone[key] = true
-		// C3 needs, in each direction, a write on one side after the restore
-		// to a block the other side also holds, then a read of that block on
-		// the other side (which must still show its own value): an inherited
-		// lba written on the source and read on the target, another (the
-		// same, if it inherited one) written on the target and read on the
-		// source. A target that inherited nothing uses a block both hold.
-		in := tgt.inheritedLBAs
-		if len(in) == 0 { // inherited nothing: a block both hold now
-			for _, b := range sortedLBAs(src.lbas) {
-				if tgt.lbas[b] {
-					in = append(in, b)
-				}
-			}
-		}
-		if len(in) > 0 {
-			a, b := in[0], in[len(in)-1]
-			out = append(out, m.pairWrite(src, a, key+"-1"))
-			out = append(out, m.readsOf(tgt, []int{a}, "pair")...)
-			out = append(out, m.pairWrite(tgt, b, key+"-2"))
-			out = append(out, m.readsOf(src, []int{b}, "pair")...)
-		}
-		u := maps.Clone(src.lbas)
-		maps.Copy(u, tgt.lbas)
-		lbas := sortedLBAs(u)
-		out = append(out, m.readsOf(src, lbas, "pair")...)
-		out = append(out, m.readsOf(tgt, lbas, "pair")...)
-		for b := range u {
-			delete(pending, b)
-		}
-	}
-	for _, s := range slices.Sorted(maps.Keys(v.targets)) {
-		pair(v, m.vols[v.targets[s]])
-	}
-	if v.source != "" {
-		if src := m.vols[v.source]; src != nil && src.targets[v.fromSnap] == v.name {
-			pair(src, v)
-		}
-	}
-	return append(out, m.readsOf(v, sortedLBAs(pending), "readback")...)
+	return m.readsOf(v, sortedLBAs(v.dirty), "readback")
 }
 
-// Due is the first owed operation of a volume, in pool order. Owed reads of
-// a volume that no longer serves (or is fenced) are dropped.
-func (m *blockModel) Due() []GenOp {
+// A restore pair (source, target) is pending until its pair window ran or a
+// side was lost. While it is pending neither side is offered an ordinary
+// stop, move or delete (negatives are), the target's first attach is forced
+// right after the restore (on its placement host, while the source still
+// serves), and the window is queued as soon as both serve.
+
+// pairKey names a pair.
+func pairKey(src, tgt *genVol) string { return src.name + "|" + tgt.name }
+
+// pairs lists the live restore pairs, in a stable order.
+func (m *blockModel) pairs() [][2]*genVol {
+	var out [][2]*genVol
 	for _, n := range m.order {
 		v := m.vols[n]
-		if len(v.due) > 0 && v.due[0].Action == "v3_op_read" && (v.state != stServing || v.fenced || v.killed) {
-			v.due = nil
+		for _, s := range slices.Sorted(maps.Keys(v.targets)) {
+			out = append(out, [2]*genVol{v, m.vols[v.targets[s]]})
 		}
-		if len(v.due) > 0 {
-			return []GenOp{v.due[0]}
+	}
+	return out
+}
+
+// pairLost says why a pair can no longer get its window ("" while it can):
+// a side out of the run, unsettled, whose holder was killed, or otherwise
+// not in the state the window needs (the source serving, the target created
+// or serving).
+func pairLost(src, tgt *genVol) string {
+	for _, v := range []*genVol{src, tgt} {
+		switch {
+		case v.killed:
+			return v.name + ": holder killed"
+		case v.state == stUnknown:
+			return v.name + ": out of the run (an unknown outcome)"
+		case v.state == stUnsettled:
+			return v.name + ": unsettled"
+		}
+	}
+	if src.state != stServing {
+		return src.name + ": " + src.state
+	}
+	if tgt.state != stCreated && tgt.state != stServing {
+		return tgt.name + ": " + tgt.state
+	}
+	return ""
+}
+
+// pending says v is a side of a pair whose window has not run.
+func (m *blockModel) pending(v *genVol) bool {
+	for _, t := range v.targets {
+		if !v.pairDone[pairKey(v, m.vols[t])] {
+			return true
+		}
+	}
+	if v.source != "" {
+		if src := m.vols[v.source]; src != nil && src.targets[v.fromSnap] == v.name && !src.pairDone[pairKey(src, v)] {
+			return true
+		}
+	}
+	return false
+}
+
+// pairCheck settles the pending pairs: one with a lost side is dropped and
+// noted ("pair not exercised: <reason>"); one whose sides both serve gets
+// its window queued.
+func (m *blockModel) pairCheck() { m.settlePairs(false) }
+
+// settlePairs is pairCheck; now queues the window of a pair whose sides
+// both serve without waiting pairDelay (the run's end).
+func (m *blockModel) settlePairs(now bool) {
+	for _, p := range m.pairs() {
+		src, tgt := p[0], p[1]
+		key := pairKey(src, tgt)
+		if src.pairDone[key] {
+			continue
+		}
+		if why := pairLost(src, tgt); why != "" {
+			src.pairDone[key] = true
+			m.notes = append(m.notes, "pair not exercised: "+key+": "+why)
+			continue
+		}
+		if src.state == stServing && tgt.state == stServing && !src.fenced && !tgt.fenced {
+			// The window waits pairDelay drawn operations once both serve (the
+			// hold keeps both): the unwritten target is what "release a live
+			// restore target" and a restore from the target's snapshot probe,
+			// and the window writes it.
+			ready, seen := m.pairReady[key]
+			if !seen {
+				m.pairReady[key], ready = m.drawn, m.drawn
+			}
+			if now || m.drawn-ready >= pairDelay {
+				src.pairDone[key] = true
+				m.due = append(m.due, m.window(src, tgt)...)
+			}
+		}
+	}
+}
+
+// window is a pair's window (C3): in each direction a write on one side
+// after the restore to a block the other side also holds, then a read of it
+// on the other side (which must still show its own value): an inherited lba
+// written on the source and read on the target, another (the same, if it
+// inherited one) written on the target and read on the source (a target
+// that inherited nothing uses a block both hold, and with none the target
+// first writes one so that it holds it); then the same lbas (the union of
+// both contents) read on both.
+func (m *blockModel) window(src, tgt *genVol) []GenOp {
+	var out []GenOp
+	key := pairKey(src, tgt)
+	in := tgt.inheritedLBAs
+	if len(in) == 0 {
+		for _, b := range sortedLBAs(src.lbas) {
+			if tgt.lbas[b] {
+				in = append(in, b)
+			}
+		}
+	}
+	u := maps.Clone(src.lbas)
+	maps.Copy(u, tgt.lbas)
+	if len(in) == 0 {
+		// No block in common: the target writes one first, so it holds it.
+		x := 0
+		if s := sortedLBAs(src.lbas); len(s) > 0 {
+			x = s[0]
+		}
+		out = append(out, m.pairWrite(tgt, x, key+"-0"))
+		in = []int{x}
+	}
+	{
+		a, b := in[0], in[len(in)-1]
+		out = append(out, m.pairWrite(src, a, key+"-1"))
+		out = append(out, m.readsOf(tgt, []int{a}, "pair")...)
+		out = append(out, m.pairWrite(tgt, b, key+"-2"))
+		out = append(out, m.readsOf(src, []int{b}, "pair")...)
+		u[a], u[b] = true, true
+	}
+	lbas := sortedLBAs(u)
+	out = append(out, m.readsOf(src, lbas, "pair")...)
+	return append(out, m.readsOf(tgt, lbas, "pair")...)
+}
+
+// dueState says whether an owed operation runs now ("go"), waits for its
+// volume to come back ("wait": fenced, killed, unsettled), or is dropped
+// ("drop": its volume left for good, or a forced attach whose pair no
+// longer allows it).
+func (m *blockModel) dueState(o GenOp) string {
+	v := m.vols[o.Volume]
+	if o.Action == "v3_op_attach" {
+		src := m.vols[v.source]
+		if v.state == stCreated && !v.held[v.host] && src != nil && src.state == stServing && !src.killed {
+			return "go"
+		}
+		return "drop"
+	}
+	switch {
+	case v.state == stUnsettled, v.state == stServing && (v.fenced || v.killed):
+		return "wait"
+	case v.state == stServing:
+		return "go"
+	}
+	return "drop"
+}
+
+// Due is the first owed operation that can run now (the pairs settled
+// first): owed operations wait while their volume is fenced, killed or
+// unsettled, and are dropped when it left for good. Then the lease
+// observations.
+func (m *blockModel) Due() []GenOp {
+	m.pairCheck()
+	for i := 0; i < len(m.due); i++ {
+		switch m.dueState(m.due[i]) {
+		case "go":
+			return []GenOp{m.due[i]}
+		case "drop":
+			m.due = slices.Delete(m.due, i, i+1)
+			i--
 		}
 	}
 	// The lease horizon is learnt from observations, never from the clock: a
@@ -781,6 +920,9 @@ func (m *blockModel) Due() []GenOp {
 	}
 	return nil
 }
+
+// Notes are the model's coverage notes: the pairs not exercised, and why.
+func (m *blockModel) Notes() []string { return slices.Clone(m.notes) }
 
 // Sweep is the end-of-run sweep (C1, C2/C3, C7 need it): for every serving
 // volume, reads of every lba with acknowledged content (written, or inherited
@@ -847,6 +989,11 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 		case "held":
 			v.state, v.fenced = stServing, false
 			v.held[v.host] = true
+			if v.source != "" && !v.attached && len(v.inheritedLBAs) > 0 {
+				// C2: an attach settled held is its first attach.
+				m.due = append(m.due, m.readsOf(v, v.inheritedLBAs, "inherited")...)
+			}
+			v.attached = true
 		case "not_held":
 			v.state = stStopped
 		}
@@ -887,7 +1034,8 @@ func (m *blockModel) Observed(r tr.HistoryRecord) {
 const VerbHealthyRecord = randomrun.VerbHealthy
 
 // Tail is the coverage tail (C7), deterministic from the state, one
-// operation at a time:
+// operation at a time (first what is still owed, the pending pair windows
+// included):
 //  1. delete one created volume that was never attached (pool order), if any;
 //  2. delete one stopped volume without targets whose observation shows its
 //     lease expired; when none does yet, observe the first candidate once
@@ -896,6 +1044,21 @@ const VerbHealthyRecord = randomrun.VerbHealthy
 //  4. create a deleted name (the first in pool order): a negative, refused.
 func (m *blockModel) Tail() (GenOp, bool) {
 	t := &m.tail
+	// First the owed operations, with every pending pair window queued now
+	// (the budget is spent: no drawn operation will start the delay's end).
+	m.settlePairs(true)
+	for i := 0; i < len(m.due); i++ {
+		switch m.dueState(m.due[i]) {
+		case "go":
+			o := m.due[i]
+			m.due = slices.Delete(m.due, i, i+1)
+			o.Forced = "tail"
+			return o, true
+		case "drop":
+			m.due = slices.Delete(m.due, i, i+1)
+			i--
+		}
+	}
 	for {
 		switch t.stage {
 		case 0:

@@ -76,6 +76,15 @@ type faultFake struct {
 	refuseRestart bool
 }
 
+// lookNotServing is what a single look shows not serving: the pool while
+// the fenceAll records are in force (a look sees what a healthy record does).
+func (f *faultFake) lookNotServing() []string {
+	if f.healthyCall >= 1 && f.healthyCall <= f.fenceAll {
+		return f.pool
+	}
+	return []string{}
+}
+
 func (f *faultFake) install(t *testing.T) {
 	f.fakeProduct.install(t)
 	for name, inner := range genHandlers {
@@ -126,7 +135,7 @@ func (f *faultFake) install(t *testing.T) {
 			f.inOutage = f.inOutage || f.down == "blockmaster"
 			f.log = append(f.log, "look")
 			_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "healthy", Result: map[string]any{
-				"healthy": f.down == "" && f.alsoDown == "", "down": strings.Fields(f.down + " " + f.alsoDown), "not_serving": []string{}, "holders": map[string]any{}, "look": "single", "attempts": 1}})
+				"healthy": f.down == "" && f.alsoDown == "", "down": strings.Fields(f.down + " " + f.alsoDown), "not_serving": f.lookNotServing(), "holders": map[string]any{}, "look": "single", "attempts": 1}})
 			return map[string]string{"value": tr.OutcomeOK, "healthy": fmt.Sprint(f.down == "" && f.alsoDown == ""), "down": strings.TrimSpace(f.down + " " + f.alsoDown)}, nil
 		}
 		f.healthyCall++
