@@ -532,7 +532,7 @@ func TestDeclaredDeleteRefusedEffect(t *testing.T) {
 	})
 	r := runEq(t, blockActions.Handler("v3_op_delete"), cases[0], true)
 	to, _ := asRead["to"].(map[string]any)
-	if r.ret["value"] != tr.OutcomeRefusedEffect || to["exit"] != float64(1) || to["stderr_contains"] != "workspace: volume is being deleted" {
+	if r.ret["value"] != tr.OutcomeRefusedEffect || to["exit"] != float64(1) || to["stderr_contains"] != "volume is being deleted" {
 		t.Fatalf("%v effect %v", r.ret, asRead)
 	}
 }

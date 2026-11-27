@@ -64,8 +64,9 @@ func TestOperationsTableKeepsTheGeneratorsValues(t *testing.T) {
 		if want != [2]string{l.Name, l.Action} || l.IsProposed() != proposed || (!proposed && l.Why == "") {
 			t.Errorf("limit %+v", l)
 		}
-		if l.VerifiedAt != "14dff69" {
-			t.Errorf("limit %s: cite not verified at 14dff69", l.ID)
+		// Re-read at the pin: verified_at is read_at's commit, abbreviated.
+		if pin := strings.TrimPrefix(genTable.ReadAt, "seaweed-block "); len(pin) < 7 || l.VerifiedAt != pin[:7] {
+			t.Errorf("limit %s: cite verified at %q, not at the pin %s", l.ID, l.VerifiedAt, genTable.ReadAt)
 		}
 		for _, c := range strings.Split(l.Cite, ", ") {
 			if !strings.HasPrefix(c, "docs/") || !strings.Contains(c, ".md:") {

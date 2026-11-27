@@ -1,6 +1,6 @@
 {
   "product": "block",
-  "read_at": "seaweed-block 14dff69b0f7cc139f9bde7849dec6ab34063c947",
+  "read_at": "seaweed-block d69447eff3c2a1bcc58ee925a7c01f2169579b00",
   "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (name, nqn, layout_id, status_addr: the current host's status address, holder_alive: the recorded holder runs), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The exceptions are the actions that stay Go handlers, each with its reason.",
   "config": {
     "keys": [
@@ -66,7 +66,7 @@
           "name": "holder", "when": {"field": "volume.holder_alive", "equals": "true"},
           "command": ["curl", "-s", "-m", "60", "-X", "POST", "-H", "Content-Type: application/json", "--data", {"json": {"volumeID": "{{volume.name}}", "name": "{{name}}"}}, "-w", "\\n%{http_code}", "http://{{volume.status_addr}}/chunk/snapshot/delete"],
           "runner_deadline_seconds": 90,
-          "cite": "core/host/volume/chunk_control.go:241 (route), :529-549 (POST, body volumeID and name, 200 on success, the error body otherwise)",
+          "cite": "core/host/volume/chunk_control.go:241 (route), :533-553 (POST, body volumeID and name, 200 on success, the error body otherwise)",
           "decode": {"kind": "error_body", "path": "POST /chunk/snapshot/delete", "answer": "http_status_last_line", "transport_failure": "holder not answering (curl exit {{exit}})"}
         },
         {
@@ -336,14 +336,14 @@
       "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
       "select_var": "guest_connect_variant",
       "default": {"name": "plain", "evidence": true,
-        "cite": "the product's own connects carry no timeout option: core/csi/linux_util.go:318 (nvme connect -t -a -s -n), docs/standalone-deployment.md:408; only this connect's results count as release evidence"},
+        "cite": "the product's CSI driver connects with no timeout option: core/csi/linux_util.go:318 (nvme connect -t -a -s -n). Since product change #662 the documented manual connect carries the host connect settings (docs/standalone-deployment.md:463-464, docs/operator-guide.md:252-265): which connect counts as release evidence awaits a ruling"},
       "variants": [
         {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
          "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
          "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."},
         {"name": "host_connect_settings", "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2}, "evidence": false,
-         "source": "the product's proposed 'Host connect settings' documentation (product docs change #662; not yet shipped): ctrl-loss-tmo 180, reconnect-delay 2, fast_io_fail_tmo not set",
-         "why": "measures what those documented values give a guest while its holder is away (scenarios/v3block/connect-settings.yaml); not release evidence until the product ships them as its connect"}
+         "source": "docs/operator-guide.md:252-265 (Host connect settings: ctrl-loss-tmo 180, reconnect-delay 2, fast_io_fail_tmo left off), docs/standalone-deployment.md:463-464 (product change #662, shipped)",
+         "why": "measures what those documented values give a guest while its holder is away (scenarios/v3block/connect-settings.yaml); the product's documented connect since #662; it stays evidence false until the ruling on which connect is release evidence"}
       ]
     }
   }
