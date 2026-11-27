@@ -307,14 +307,16 @@ func (x *Executor) observe(s *scope, actx *tr.ActionContext, a *Action, vol stri
 		}
 		stdout, stderr, code, runErr := RunDetached(s.ctx, s.node, a.AsRoot, dir, cmd, deadline, poll)
 		if t, ok := AsDetached(runErr); ok {
-			abandoned = append(abandoned, t.Abandoned...)
+			if got, _ := Abandon(s.ctx, t)[AbandonedKey].([]Proc); got != nil {
+				abandoned = append(abandoned, got...)
+			}
 		}
 		if err := s.read(res, st.Read, stdout, stderr, code, runErr); err != nil {
 			return nil, fmt.Errorf("%s: step %s: %w", a.Action, st.Name, err)
 		}
 	}
 	if len(abandoned) > 0 {
-		res["abandoned"] = abandoned
+		res[AbandonedKey] = abandoned
 	}
 	return map[string]string{"value": "observed"}, actx.History.Observe(tr.HistoryObserve,
 		tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Volume: vol, Verb: a.Verb, Result: res})

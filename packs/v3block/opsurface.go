@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
 // run runs one command and returns stdout, stderr, the exit code and
 // whether the command could not be run at all.
 type runner interface {
@@ -79,10 +81,28 @@ func nvmeConnect(ctx context.Context, node runner, host, port, nqn, extra string
 // from a successful scan that finds no controller of nqn: a failed delete, or
 // a scan that cannot read sysfs, is not "disconnected".
 func nvmeDisconnect(ctx context.Context, node runner, nqn string) string {
-	cmd := fmt.Sprintf(`for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo 1 > "$d/delete_controller" || exit 4; done`, shellQuote(nqn))
-	if _, stderr, code, err := node.RunRoot(ctx, cmd); err != nil || code != 0 {
-		return fmt.Sprintf("nvme disconnect: exit %d: %s", code, firstLine(stderr))
+	_, why := nvmeDisconnectCount(ctx, node, nqn)
+	return why
+}
+
+// nvmeDisconnectCount is nvmeDisconnect, also answering how many
+// controllers it deleted (-1 when that is not known).
+func nvmeDisconnectCount(ctx context.Context, node runner, nqn string) (int, string) {
+	cmd := fmt.Sprintf(`n=0; for d in /sys/class/nvme/nvme*; do [ -e "$d" ] || continue; q=$(cat "$d/subsysnqn") || exit 3; [ "$q" = %s ] || continue; echo 1 > "$d/delete_controller" || exit 4; n=$((n+1)); done; echo "deleted $n"`, shellQuote(nqn))
+	stdout, stderr, code, err := node.RunRoot(ctx, cmd)
+	if err != nil || code != 0 {
+		return -1, fmt.Sprintf("nvme disconnect: exit %d: %s", code, firstLine(stderr))
 	}
+	n := -1
+	if f := strings.Fields(stdout); len(f) == 2 && f[0] == "deleted" {
+		n, _ = strconv.Atoi(f[1])
+	}
+	why := nvmeConfirmGone(ctx, node, nqn)
+	return n, why
+}
+
+// nvmeConfirmGone waits until a scan finds no controller of nqn.
+func nvmeConfirmGone(ctx context.Context, node runner, nqn string) string {
 	end := time.Now().Add(5 * time.Second)
 	for {
 		state, _, why := nvmeScan(ctx, node, nqn)
@@ -306,4 +326,3 @@ func parseDetach(stdout, stderr, vol string, epoch uint64) (uint64, error) {
 	}
 	return a.HeadGen, nil
 }
-

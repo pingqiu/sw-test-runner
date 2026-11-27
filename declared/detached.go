@@ -65,6 +65,9 @@ func Call(ctx context.Context, run func(context.Context, string) (string, string
 type Detached struct {
 	Deadline  time.Duration
 	Abandoned []Proc
+	// Dir is the command's exchange directory on the node, which keeps
+	// its rc (written when the command's process is reaped) and cpid.
+	Dir string
 }
 
 func (d *Detached) Error() string {
@@ -96,7 +99,13 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 	end := time.Now().Add(deadline)
 	d := fmt.Sprintf("%s/%d-%d", strings.TrimRight(dir, "/"), time.Now().UnixNano(), seq.Add(1))
 	q := ShellQuote
-	inner := fmt.Sprintf("bash -c %s >%s 2>%s </dev/null; echo $? >%s; mv %s %s", q(cmd), q(d+"/out"), q(d+"/err"), q(d+"/rc.tmp"), q(d+"/rc.tmp"), q(d+"/rc"))
+	// The waiter (this session) starts the command in a session of its own
+	// and waits for it: a kill at the deadline ends the command's session
+	// only, so the waiter lives on and writes the exit status of the
+	// command's process (cpid) to rc when it is reaped, however late. The
+	// abandoned-child watcher reads it.
+	inner := fmt.Sprintf("(exec setsid bash -c %s >%s 2>%s </dev/null) & c=$!; echo $c >%s; wait $c; echo $? >%s; mv %s %s",
+		q(cmd), q(d+"/out"), q(d+"/err"), q(d+"/cpid"), q(d+"/rc.tmp"), q(d+"/rc.tmp"), q(d+"/rc"))
 	launch := fmt.Sprintf(": runner-io launch %s %s; mkdir -p %s || exit 1; setsid bash -c %s >/dev/null 2>&1 </dev/null & p=$!; %s",
 		q(d), base64.StdEncoding.EncodeToString([]byte(cmd)), q(d), q(inner), procStartShell("launched", "$p"))
 	out, errOut, code, err := short(launch)
@@ -112,8 +121,8 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 	if _, err := strconv.Atoi(pid); err != nil {
 		return "", "", -1, fmt.Errorf("launch answered pid %q", pid)
 	}
-	fetch := fmt.Sprintf(": runner-io poll %s; if [ -e %s ]; then echo done; cat %s; base64 -w0 %s; echo; base64 -w0 %s; echo; rm -f %s %s %s; rmdir %s 2>/dev/null; exit 0; else echo running; fi",
-		q(d), q(d+"/rc"), q(d+"/rc"), q(d+"/out"), q(d+"/err"), q(d+"/rc"), q(d+"/out"), q(d+"/err"), q(d))
+	fetch := fmt.Sprintf(": runner-io poll %s; if [ -e %s ]; then echo done; cat %s; base64 -w0 %s; echo; base64 -w0 %s; echo; rm -f %s %s %s %s; rmdir %s 2>/dev/null; exit 0; else echo running; fi",
+		q(d), q(d+"/rc"), q(d+"/rc"), q(d+"/out"), q(d+"/err"), q(d+"/rc"), q(d+"/out"), q(d+"/err"), q(d+"/cpid"), q(d))
 	for {
 		if o, _, c, err := short(fetch); err == nil && c == 0 {
 			if done, so, se, rc, ok := parseFetch(o); ok && done {
@@ -130,8 +139,10 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 	}
 	// The deadline: kill the session unless it finished meanwhile; what
 	// survives the kill is abandoned.
-	kill := fmt.Sprintf(": runner-io kill %s %s; if [ -e %s ]; then echo done; exit 0; fi; env kill -KILL -- -%s 2>/dev/null; sleep 1; for q in $(pgrep -g %s 2>/dev/null); do %s; done; echo killed",
-		q(d), pid, q(d+"/rc"), pid, pid, procStartShell("left", "$q"))
+	// The kill ends the command's own session (cpid; the waiter's, when
+	// the waiter has not started it yet) and lists what survives it.
+	kill := fmt.Sprintf(": runner-io kill %s %s; if [ -e %s ]; then echo done; exit 0; fi; c=$(cat %s 2>/dev/null); [ -n \"$c\" ] || c=%s; env kill -KILL -- -$c 2>/dev/null; sleep 1; for q in $(pgrep -s $c 2>/dev/null); do %s; done; echo killed",
+		q(d), pid, q(d+"/rc"), q(d+"/cpid"), pid, procStartShell("left", "$q"))
 	o, _, _, kerr := short(kill)
 	if kerr == nil && strings.TrimSpace(o) == "done" {
 		if fo, _, c, err := short(fetch); err == nil && c == 0 {
@@ -140,7 +151,7 @@ func RunDetached(ctx context.Context, node Runner, asRoot bool, dir, cmd string,
 			}
 		}
 	}
-	t := &Detached{Deadline: deadline}
+	t := &Detached{Deadline: deadline, Dir: d}
 	killed := false
 	for _, l := range strings.Split(o, "\n") {
 		lf := strings.Fields(l)

@@ -807,6 +807,10 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
+		if err := Check(s.ctx, node, actx.History, false); err != nil {
+			return nil, err
+		}
+		s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Volume: vol})
 		return x.observe(s, actx, a, vol)
 	}
 	var v *Variant
@@ -856,10 +860,14 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	if expect != "" {
 		args["expect"] = expect
 	}
+	if err := Check(s.ctx, node, actx.History, false); err != nil {
+		return nil, err
+	}
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Op: a.Op, Verb: a.Verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err
 	}
+	s.ctx = WithOp(s.ctx, OpRef{History: actx.History, Seq: seq, Volume: vol})
 	outcome, result := x.run(s, a, v, cmd, expect)
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
@@ -924,7 +932,7 @@ func (x *Executor) once(s *scope, a *Action, v *Variant, cmd string) (string, ma
 	}
 	stdout, stderr, code, err := RunDetached(s.ctx, s.node, a.AsRoot, dir, cmd, deadline, poll)
 	if t, ok := AsDetached(err); ok {
-		return tr.OutcomeUnknown, TimeoutResult(t), true
+		return tr.OutcomeUnknown, Abandon(s.ctx, t), true
 	}
 	d := v.Decode
 	switch d.Kind {
@@ -1127,14 +1135,4 @@ func FirstLine(s string) string {
 		s = s[:200]
 	}
 	return s
-}
-
-// TimeoutResult is the result of an operation its runner deadline ended:
-// the detail, and the processes that survived the kill, if any.
-func TimeoutResult(t *Detached) map[string]any {
-	res := map[string]any{"detail": t.Error()}
-	if len(t.Abandoned) > 0 {
-		res["abandoned"] = t.Abandoned
-	}
-	return res
 }
