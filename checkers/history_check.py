@@ -112,6 +112,17 @@ code is 0 only when every checker passes.
       on an unknown no clean observation places (none after the point, or the
       volume or block changed in between), on a run whose last healthy
       record is not healthy, and on a kill with no healthy point after it.
+      A volume's intended state (product LIFECYCLE): held after an ok attach
+      or move, not held after an ok stop or delete, unsettled after one of
+      them answered unknown. An unknown lifecycle operation is resolved by
+      a `settled` observation of its volume (counted once) within the
+      recovery deadline max(the latest kill reaching the volume before its
+      end + regrant, its end) + start_wait, or its end + regrant +
+      start_wait with no kill; none in time FAILS ("unsettled"). Another
+      lifecycle operation of the volume invoked first, inside the deadline,
+      supersedes it (noted; the verb's own rule then places it). A verb
+      with an observation rule (delete, move) is still checked by it for a
+      third state. Any `third_state` entry of a healthy record FAILS.
       A read changes nothing and needs no placing; an unknown of another
       verb has no rule and makes the verdict UNKNOWN. Every judged verdict
       carries the finding "unknowns resolved: <n>" (a run with healthy
@@ -1167,6 +1178,44 @@ def recovery_findings(recs, ops_, healthy):
     return f, notes
 
 
+def _settle(recs, ops_, inv, comp):
+    """An unknown lifecycle operation leaves its volume unsettled until a
+    settled record of the volume places it, within the recovery deadline:
+    max(the latest completed, not refused kill reaching the volume before the operation's end +
+    regrant, the operation's end) + start_wait; with no such kill, the end +
+    regrant + start_wait. Returns ('resolved', why), ('fail', why), or
+    ('superseded', why) when another lifecycle operation of the volume was
+    invoked first, inside the deadline (its own answer sets the intent)."""
+    vol = inv.get('volume')
+    end = inv if comp is None else comp
+    regrant, rwhere = RECOVERY['regrant']
+    wait, wwhere = RECOVERY['start_wait']
+    s = 10**9
+    kills = [c2 for i2, c2 in ops_ if killed(i2, c2) and c2 is not None and i2['seq'] < end['seq']
+             and (lambda sc: sc is None or vol in sc)(kill_scope(i2))]
+    if kills:
+        deadline = max(kills[-1]['mono_ns'] + regrant * s, end['mono_ns']) + wait * s
+        terms = 'max(kill seq %d + %g s, the end) + %g s' % (kills[-1]['of'], regrant, wait)
+    else:
+        deadline = end['mono_ns'] + (regrant + wait) * s
+        terms = 'the end + %g s + %g s (no kill)' % (regrant, wait)
+    terms += ' (%s; %s)' % (rwhere, wwhere)
+    late = lambda ns: (ns - end['mono_ns']) / 1e9
+    for r in recs:
+        if r['seq'] <= end['seq']:
+            continue
+        if r['kind'] == 'invoke' and r.get('volume') == vol and r['verb'] in PRODUCT.LIFECYCLE:
+            if r['mono_ns'] <= deadline:
+                return 'superseded', 'seq %d %s invoked before it settled' % (r['seq'], r['verb'])
+            break
+        got = PRODUCT.settled(r)
+        if got is not None and got[0] == vol:
+            if r['mono_ns'] <= deadline:
+                return 'resolved', 'settled %s (seq %d, %.3f s after its end)' % (got[1], r['seq'], late(r['mono_ns']))
+            return 'fail', 'settled only at seq %d, %.3f s after its end, past the deadline %.3f s = %s' % (r['seq'], late(r['mono_ns']), late(deadline), terms)
+    return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
+
+
 @unknown_on_overlap
 def c6(recs):
     """Bounds and "none stays unknown" (see the module docstring)."""
@@ -1209,9 +1258,29 @@ def c6(recs):
     f_rec, n_rec = recovery_findings(recs, ops_, healthy)
     f += f_rec
     notes += n_rec
+    # A volume in neither consistent state, as the healthy record shows it.
+    for r in healthy:
+        for vol, why in PRODUCT.third_state(r):
+            f.append('third state: %s at healthy seq %d: %s' % (vol, r['seq'], why))
     # None stays unknown.
     for inv, comp in unknowns:
         name = 'seq %d %s %s' % (inv['seq'], inv['verb'], inv.get('volume', ''))
+        settled_ok = False
+        if inv['verb'] in PRODUCT.LIFECYCLE:
+            # An unknown lifecycle operation is resolved by the settled record;
+            # a verb with its own placement rule is still checked by it below
+            # for a third state.
+            how, why = _settle(recs, ops_, inv, comp)
+            if how == 'fail':
+                f.append('unsettled: %s: %s' % (name, why))
+                continue
+            if how == 'resolved':
+                resolved += 1
+                settled_ok = True
+                if inv['verb'] not in PLACED_BY_OBSERVATION:
+                    continue
+            else:
+                notes.append('not settled: %s: %s; placed by its own rule' % (name, why))
         if inv['verb'] not in PLACED_BY_OBSERVATION:
             unruled.append(name)
             continue
@@ -1234,10 +1303,11 @@ def c6(recs):
             else:
                 how, why = PRODUCT.place_by_status(inv, obs, base)
         if how is None:
-            f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
+            if not settled_ok:   # the settled record already resolved it
+                f.append('unknown not resolved: %s (due at %s): %s' % (name, at, why))
         elif how == 'third':
             f.append('unknown in a third state: %s (due at %s): %s' % (name, at, why))
-        else:
+        elif not settled_ok:
             resolved += 1
             if inv['verb'] in PRODUCT.NOTED:
                 notes.append('%s placed %s: %s' % (name, how, why))   # names which rule judged it
