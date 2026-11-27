@@ -1816,7 +1816,14 @@ class Judged(unittest.TestCase):
             'DUR kill': synth(w(0, A), w(0, B, flush=False), HKILL, rd(0, A)),
             'DUR no kill': synth(w(0, A, flush=False), rd(0, A)),
             'MO outage': mo_history(MO.GOOD),
+            **self.m3_corpus(),
         }
+
+    def m3_corpus(self):
+        """The M3 checkers' own green histories (C4 a hand-over), imported
+        late: test_c4 imports this module."""
+        import test_c4 as t4
+        return {'C4 hand-over': t4.history(t4.ACK, *t4.HANDOVER, ('r', 'v1', 'b-v1', 'r2', 2, 2, 'ok'))}
 
     def test_no_checker_passes_on_nothing(self):
         passed = {name: [] for name in hc.CHECKERS}

@@ -14,7 +14,8 @@ the number of items it actually judged (C0 operations with a known outcome,
 C1 reads compared, C2 restored blocks compared, C3 cross reads compared, C5
 refusals judged, C6 unknowns resolved plus recoveries timed, C7 deleted
 volumes observed, DUR reads judged after a kill (without a holder kill, the
-reads judged by C1's rule), MO outages judged); --json carries it. A PASS
+reads judged by C1's rule), MO outages judged, C4 acknowledged writes judged
+(with holder and epoch samples), LIN pieces judged, passed or failed); --json carries it. A PASS
 with judged 0 cannot happen: a checker that judged nothing says "not
 exercised", and check() fails any verdict that would. A history that
 does not parse, or breaks the writer's own rules, is UNKNOWN for every
@@ -1536,7 +1537,7 @@ def lin(recs):
     exercised."""
     u = unknown_environment(recs)
     if u is not None:
-        return {'verdict': 'UNKNOWN', 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
+        return {'verdict': 'UNKNOWN', 'judged': 0, 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
     blocks, closed, kills = _lin_blocks(recs)
     if not any(o.kind == 'read' for ops_ in blocks.values() for o in ops_):
         return verdict(['no read in the history: LIN judges nothing'])
@@ -1572,11 +1573,14 @@ def lin(recs):
         notes.append('kill(s) naming no volume, applied to every volume: seq %s' % ', '.join(str(k['seq']) for k in kills if k['scope'] is None))
     if len(unjudged) > LIN_FEW:
         notes.append("%d pieces not judged: the scenario's concurrency per block is too high for the checker; the scenario changes, not the checker" % len(unjudged))
+    judged = npieces - len(unjudged)   # judged: pieces judged (passed or failed), per block
     if f:
-        return {'verdict': 'FAIL', 'findings': f + unjudged + notes}
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': f + unjudged + notes}
     if unjudged:
-        return {'verdict': 'UNKNOWN', 'findings': unjudged + notes}
-    return {'verdict': 'PASS', 'findings': notes}
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': unjudged + notes}
+    if not judged:
+        return {'verdict': 'FAIL', 'judged': 0, 'findings': ['no piece judged: LIN not exercised'] + notes}
+    return {'verdict': 'PASS', 'judged': judged, 'findings': notes}
 
 
 # C6 latency bounds (BOUNDS) and recovery terms (RECOVERY) come from the
@@ -2152,9 +2156,10 @@ def c4(recs):
         unexercised.append('no acknowledged write carries holder and epoch samples (args.holder, result.holder): C4 not exercised')
     elif not changes:
         unexercised.append('no line changed epoch with acknowledged writes on both sides of the change: C4 not exercised')
+    # judged: the acknowledged writes judged (holder and epoch samples)
     if f or unexercised:
-        return {'verdict': 'FAIL', 'findings': f + unexercised + stale + notes + counts}
-    return {'verdict': 'PASS', 'findings': stale + notes + counts}
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': f + unexercised + stale + notes + counts}
+    return {'verdict': 'PASS', 'judged': judged, 'findings': stale + notes + counts}
 
 
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C4': c4, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur, 'MO': mo, 'LIN': lin}
