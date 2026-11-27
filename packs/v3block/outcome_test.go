@@ -2,6 +2,13 @@ package v3block
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +79,8 @@ func TestChunkOutcomePerOperation(t *testing.T) {
 	// and the HEAD update refused after the reservation committed.
 	const beforeReservation = "layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: workspace: deletion refused before persistence: workspace delete: live until 2026-11-26T10:00:00Z: lease live"
 	const afterReservation = "layout: a holder is acting on the volume: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = workspace delete: live until 2026-11-26T10:00:00Z: lease live"
-	all := []string{chunkDetach, chunkSnapshot, chunkSnapDelHolder, chunkSnapDelStore, chunkRestore, chunkRelease, chunkVolumeDelete}
-	refused := map[string]map[string]string{ // code -> op -> message, for the refused cells
+	all := []opPath{chunkDetach, chunkSnapshot, chunkSnapDelHolder, chunkSnapDelStore, chunkRestore, chunkRelease, chunkVolumeDelete}
+	refused := map[string]map[opPath]string{ // code -> op -> message, for the refused cells
 		"layout_refused":          {chunkSnapDelHolder: "layout: a snapshot has dependents"},
 		"snapshot_has_dependents": {chunkSnapDelStore: "layout: a snapshot has dependents"},
 		"volume_deleting":         {chunkSnapDelStore: "layout: volume is being deleted"},
@@ -91,21 +98,31 @@ func TestChunkOutcomePerOperation(t *testing.T) {
 			if msg == "" {
 				msg, want = "x", tr.OutcomeUnknown
 			}
+			// The one refusal with a documented effect: the delete of a
+			// source whose snapshot has a restore target leaves the name
+			// reserved (outcomes.json, its effect).
+			if code == "snapshot_has_dependents" && op == chunkVolumeDelete {
+				want = tr.OutcomeRefusedEffect
+			}
 			if got, _ := chunkOutcome(op, body(code, msg), 1); got != want {
 				t.Errorf("%s from %s: %s, want %s", code, op, got, want)
 			}
 		}
 	}
 	// Red controls named by the side effect they guard against.
-	for _, c := range []struct{ name, op, out, want string }{
+	for _, c := range []struct {
+		name      string
+		op        opPath
+		out, want string
+	}{
 		{"delete refused after its reservation committed", chunkVolumeDelete, body("not_admitted", afterReservation), tr.OutcomeUnknown},
-		{"delete: dependents found after the reservation", chunkVolumeDelete, body("snapshot_has_dependents", "layout: a snapshot has dependents"), tr.OutcomeUnknown},
+		{"delete: dependents found after the reservation", chunkVolumeDelete, body("snapshot_has_dependents", "layout: a snapshot has dependents"), tr.OutcomeRefusedEffect}, // the name stays reserved: outcomes.json effect
 		{"delete: HEAD update lost after the reservation", chunkVolumeDelete, body("conflict", "layout: HEAD generation moved"), tr.OutcomeUnknown},
 		{"restore not admitted: the target name may stay bound", chunkRestore, body("not_admitted", "restore target: layout: snapshot names another volume's chunks"), tr.OutcomeUnknown},
 		{"release lost its update after the tombstone", chunkRelease, body("conflict", "layout: HEAD generation moved"), tr.OutcomeUnknown},
 		{"eleventh snapshot: the cut committed", chunkSnapshot, body("internal", "layout: at most 10 per volume"), tr.OutcomeUnknown},
 		{"snapshot answered layout_refused: the cut may have committed", chunkSnapshot, body("layout_refused", "x"), tr.OutcomeUnknown},
-		{"an unnamed operation gets the common codes only", "", body("target_exists", "x"), tr.OutcomeUnknown},
+		{"an unnamed operation gets the common codes only", opPath{}, body("target_exists", "x"), tr.OutcomeUnknown},
 		{"the sentinel under another code", chunkVolumeDelete, body("internal", beforeReservation), tr.OutcomeUnknown},
 		{"the sentinel from another operation", chunkRestore, body("not_admitted", beforeReservation), tr.OutcomeUnknown},
 		{"a refused code with exit 0 is ok", chunkRestore, body("target_exists", "x"), tr.OutcomeOK},
@@ -121,10 +138,12 @@ func TestChunkOutcomePerOperation(t *testing.T) {
 }
 
 // A negative delete (expect=refused) is one call; any other delete reruns
-// while the answer is not_admitted.
+// while the answer is not_admitted. It runs the frozen copy of the Go
+// handler; the declared delete is held equal to it by
+// TestDeclaredDeleteEquivalent.
 func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
-	defer func(d time.Duration) { deleteRetryEvery = d }(deleteRetryEvery)
-	deleteRetryEvery = time.Millisecond
+	defer func(d time.Duration) { deleteRetryEveryFrozen = d }(deleteRetryEveryFrozen)
+	deleteRetryEveryFrozen = time.Millisecond
 	live := `{"code":"not_admitted","message":"layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: workspace: deletion refused before persistence: workspace delete: live until T","retryable":false}`
 	horizon := `{"code":"not_admitted","message":"layout: a holder is acting on the volume: workspace delete: live until T","retryable":false}`
 	deleted := `{"volume":"v1","state":"deleted"}`
@@ -142,26 +161,26 @@ func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
 	neg := e
 	neg.expect = tr.OutcomeRefused
 	f := (&fakeNode{}).on("volume-delete", fakeAnswer{out: live, code: 1}, ok(deleted))
-	if out, res := neg.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeRefused || count(f) != 1 {
+	if out, res := neg.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeRefused || count(f) != 1 {
 		t.Fatalf("negative delete: %s after %d calls %v; want refused after 1", out, count(f), res)
 	}
 	// A negative whose answer is the post-reservation not_admitted is still
 	// one call, and unknown.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: horizon, code: 1}, ok(deleted))
-	if out, _ := neg.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeUnknown || count(f) != 1 {
+	if out, _ := neg.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute); out != tr.OutcomeUnknown || count(f) != 1 {
 		t.Fatalf("negative delete after the reservation: %s after %d calls; want unknown after 1", out, count(f))
 	}
 
 	// Red control: an ordinary delete still reruns through not_admitted,
 	// whichever of the two it is, and ends with the last answer.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: live, code: 1}, fakeAnswer{out: horizon, code: 1}, ok(deleted))
-	out, res := e.deleteVolume(context.Background(), f, v, "delete-v1", time.Minute)
+	out, res := e.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", time.Minute)
 	if out != tr.OutcomeOK || count(f) != 3 || len(res["attempts"].([]string)) != 3 {
 		t.Fatalf("ordinary delete: %s after %d calls %v; want ok after 3", out, count(f), res)
 	}
 	// And stops at the bound with the last answer.
 	f = (&fakeNode{}).on("volume-delete", fakeAnswer{out: horizon, code: 1})
-	if out, _ := e.deleteVolume(context.Background(), f, v, "delete-v1", 20*time.Millisecond); out != tr.OutcomeUnknown || count(f) < 2 {
+	if out, _ := e.deleteVolumeFrozen(context.Background(), f, v, "delete-v1", 20*time.Millisecond); out != tr.OutcomeUnknown || count(f) < 2 {
 		t.Fatalf("ordinary delete at its bound: %s after %d calls; want unknown after at least 2", out, count(f))
 	}
 }
@@ -171,9 +190,11 @@ func TestDeleteRetriesNotAdmittedUnlessNegative(t *testing.T) {
 func TestWsOutcome(t *testing.T) {
 	want := map[int]string{0: "ok", 1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 5: "unknown", 9: "unknown", -1: "unknown"}
 	for _, op := range []string{wsStop, wsMove, "", "other"} {
-		for code, w := range want {
-			if got := wsOutcome(op, code); got != w {
-				t.Errorf("%q exit %d: %s, want %s", op, code, got, w)
+		for _, path := range []string{wsRevoke, wsMoveClean, ""} {
+			for code, w := range want {
+				if got := wsOutcome(op, path, code); got != w {
+					t.Errorf("%q %q exit %d: %s, want %s", op, path, code, got, w)
+				}
 			}
 		}
 	}
@@ -182,6 +203,8 @@ func TestWsOutcome(t *testing.T) {
 // The delete sentinel fails safe: any change to the product's text makes the
 // answer unknown, never refused.
 func TestDeleteSentinelFailsSafe(t *testing.T) {
+	// The product's text, pinned here independently of the table's row.
+	const refusedBeforeChange = "workspace: deletion refused before persistence"
 	const prefix = "layout: delete reservation: chunkstore: volume delete not admitted: rpc error: code = FailedPrecondition desc = reserve volume deletion: "
 	body := func(msg string) string { return `{"code":"not_admitted","message":"` + msg + `","retryable":false}` }
 	if got, _ := chunkOutcome(chunkVolumeDelete, body(prefix+refusedBeforeChange+": live until T"), 1); got != tr.OutcomeRefused {
@@ -201,21 +224,47 @@ func TestDeleteSentinelFailsSafe(t *testing.T) {
 	}
 }
 
-func TestParseDetach(t *testing.T) {
-	good := `{"volumeID":"v001","headGen":7,"headEpoch":2,"cutLSN":3,"lastWrittenLSN":3}`
-	if g, err := parseDetach(good, "sealed HEAD generation: 7\n", "v001", 2); err != nil || g != 7 {
-		t.Fatalf("good detach: %d %v", g, err)
+// The declared stop reads the sealed generation of its plain detach: the
+// JSON answer on stdout and exactly "sealed HEAD generation: G" on stderr,
+// both naming the same generation, for this volume at this epoch; G feeds
+// the revoke. Red controls: any other answer ends the stop unknown before
+// the revoke.
+func TestStopReadsTheSealedGeneration(t *testing.T) {
+	stop := func(out, errOut string) (string, map[string]any, *fakeNode) {
+		f := (&fakeNode{}).on("delete_controller", ok("deleted 1\n")).on("subsysnqn", ok("end\n")).
+			on("ops chunk detach", fakeAnswer{out: out, errOut: errOut}).on("ops workspace revoke", ok("")).
+			on("/proc/4242", ok("absent\n")).on("ops workspace show", ok("recorded ACK: r1@2 HEAD generation 7\n"))
+		actx, p := deadlineCtx(t, f)
+		v, _ := loadVolume(actx, "v1")
+		v.Epoch = 2
+		saveVolume(actx, v)
+		got, err := blockActions.Handler("v3_op_stop")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		for _, r := range historyRecords(t, p) {
+			if r.Kind == tr.HistoryComplete {
+				return got["value"], r.Result, f
+			}
+		}
+		t.Fatal("no complete record")
+		return "", nil, nil
+	}
+	good := `{"volumeID":"v1","headGen":7,"headEpoch":2,"cutLSN":3,"lastWrittenLSN":3}`
+	if out, res, f := stop(good, "sealed HEAD generation: 7\n"); out != tr.OutcomeOK || res["sealed_gen"] != float64(7) || !f.issued("--sealed-gen 7 ") {
+		t.Fatalf("good detach: %s %v %v", out, res, f.calls)
 	}
 	for name, c := range map[string][2]string{
 		"stderr names another generation": {good, "sealed HEAD generation: 8"},
 		"stderr has more":                 {good, "sealed HEAD generation: 7\nwarning"},
-		"another volume":                  {strings.Replace(good, "v001", "v002", 1), "sealed HEAD generation: 7"},
+		"another volume":                  {strings.Replace(good, `"v1"`, `"v2"`, 1), "sealed HEAD generation: 7"},
 		"another epoch":                   {strings.Replace(good, `"headEpoch":2`, `"headEpoch":3`, 1), "sealed HEAD generation: 7"},
 		"no generation":                   {strings.Replace(good, `"headGen":7`, `"headGen":0`, 1), "sealed HEAD generation: 0"},
 		"not JSON":                        {"sealed", "sealed HEAD generation: 7"},
 	} {
-		if _, err := parseDetach(c[0], c[1], "v001", 2); err == nil {
-			t.Errorf("%s: accepted", name)
+		if out, res, f := stop(c[0], c[1]); out != tr.OutcomeUnknown || f.issued("ops workspace revoke") || res["sealed_gen"] != nil {
+			t.Errorf("%s: %s %v", name, out, res)
 		}
 	}
 }
@@ -253,5 +302,244 @@ func TestServing(t *testing.T) {
 		if st.serving("v001") {
 			t.Errorf("%s: serving", name)
 		}
+	}
+}
+
+// The table's own rules, on the embedded table: every row has a cite and a
+// known outcome; no duplicate (action, path, code); no code refused for a
+// call that a row keeps unknown. Each rule has a mutant that must fail it.
+func TestOutcomeTableRules(t *testing.T) {
+	if _, err := loadOutcomes(outcomesJSON); err != nil {
+		t.Fatalf("the embedded table: %v", err)
+	}
+	if len(outcomes.Rows) == 0 || !strings.HasPrefix(outcomes.ReadAt, "seaweed-block ") {
+		t.Fatalf("the embedded table has %d rows, read_at %q", len(outcomes.Rows), outcomes.ReadAt)
+	}
+	for i, r := range outcomes.Rows {
+		if strings.TrimSpace(r.Cite) == "" || (r.Outcome != tr.OutcomeRefused && r.Outcome != tr.OutcomeRefusedEffect && r.Outcome != tr.OutcomeUnknown) {
+			t.Errorf("row %d %+v: needs a cite and a refused, refused_effect or unknown outcome", i, r)
+		}
+	}
+	row := func(action, path, code, outcome, cite string) outcomeRow {
+		return outcomeRow{Action: action, Path: path, Code: code, Outcome: outcome, Cite: cite}
+	}
+	for name, rows := range map[string][]outcomeRow{
+		"a row without a cite":   {row("restore", "ops chunk restore", "target_exists", "refused", " ")},
+		"an outcome outside two": {row("restore", "ops chunk restore", "target_exists", "ok", "x.go:1")},
+		"a duplicate row": {
+			row("restore", "ops chunk restore", "target_exists", "refused", "x.go:1"),
+			row("restore", "ops chunk restore", "target_exists", "refused", "x.go:2"),
+		},
+		"refused and unknown for one call": {
+			row("release", "ops chunk release", "conflict", "refused", "x.go:1"),
+			row("release", "*", "conflict", "unknown", "x.go:2"),
+		},
+		"refused for every action, unknown for one": {
+			row("*", "*", "conflict", "refused", "x.go:1"),
+			row("release", "ops chunk release", "conflict", "unknown", "x.go:2"),
+		},
+		"a message rule on an unknown row": {
+			{Action: "delete", Path: "ops chunk volume-delete", Code: "not_admitted", Outcome: "unknown", MessageContains: "x", Cite: "x.go:1"},
+		},
+	} {
+		if _, err := loadOutcomes(mutant(t, func(tab *outcomeTable) { tab.Rows = rows })); err == nil {
+			t.Errorf("mutant %q loaded", name)
+		}
+	}
+}
+
+// mutant returns the embedded table, changed by f, as JSON.
+func mutant(t *testing.T, f func(*outcomeTable)) []byte {
+	t.Helper()
+	tab, err := loadOutcomes(outcomesJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab.Rows = append([]outcomeRow(nil), tab.Rows...)
+	f(&tab)
+	b, err := json.Marshal(tab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// restoreNotAdmitted is the behaviour a table must give: restore's
+// not_admitted can follow the target's record, so it is unknown.
+func restoreNotAdmitted(tab outcomeTable) string {
+	r, _ := chunkOutcomeIn(tab, chunkRestore, `{"code":"not_admitted","message":"restore target: layout: snapshot names another volume's chunks","retryable":false}`, 1)
+	return r
+}
+
+// Red control: a table that maps restore's not_admitted to refused, by
+// changing its row or by adding one, fails.
+func TestOutcomeTableRedControlRestoreNotAdmitted(t *testing.T) {
+	if got := restoreNotAdmitted(outcomes); got != tr.OutcomeUnknown {
+		t.Fatalf("the embedded table: restore not_admitted %s, want unknown", got)
+	}
+	changed := mutant(t, func(tab *outcomeTable) {
+		for i, r := range tab.Rows {
+			if r.Action == "restore" && r.Code == "not_admitted" {
+				tab.Rows[i].Outcome = tr.OutcomeRefused
+			}
+		}
+	})
+	tab, err := loadOutcomes(changed)
+	if err != nil {
+		t.Fatalf("the changed table should load (its rules hold) and fail on behaviour: %v", err)
+	}
+	// The check the embedded table passes above fails on the mutant.
+	if got := restoreNotAdmitted(tab); got == tr.OutcomeUnknown {
+		t.Fatalf("the mutant table passes the restore not_admitted check: %s", got)
+	}
+	added := mutant(t, func(tab *outcomeTable) {
+		tab.Rows = append(tab.Rows, outcomeRow{Action: "restore", Path: "ops chunk restore", Code: "not_admitted", Outcome: "refused", Cite: "x.go:1"})
+	})
+	if _, err := loadOutcomes(added); err == nil {
+		t.Fatal("a refused row added beside restore's unknown not_admitted row loaded")
+	}
+}
+
+// The lookup alone: an unknown row wins over a refused one, a message rule
+// must hold, and a call the table does not name gets the "*" rows only.
+func TestOutcomeLookup(t *testing.T) {
+	tab := outcomeTable{Rows: []outcomeRow{
+		{Action: "*", Path: "*", Code: "a", Outcome: "refused"},
+		{Action: "x", Path: "p", Code: "b", Outcome: "refused", MessageContains: "nothing changed"},
+		{Action: "x", Path: "p", Code: "c", Outcome: "refused"},
+		{Action: "x", Path: "*", Code: "c", Outcome: "unknown"},
+	}}
+	for _, c := range []struct {
+		op        opPath
+		code, msg string
+		want      string
+	}{
+		{opPath{}, "a", "", "refused"},
+		{opPath{"y", "q"}, "a", "", "refused"},
+		{opPath{"x", "p"}, "b", "so nothing changed here", "refused"},
+		{opPath{"x", "p"}, "b", "Nothing changed", "unknown"},
+		{opPath{"x", "q"}, "b", "nothing changed", "unknown"},
+		{opPath{"x", "p"}, "c", "", "unknown"},
+		{opPath{"x", "p"}, "d", "", "unknown"},
+	} {
+		if got := tab.lookup(c.op, c.code, c.msg); got != c.want {
+			t.Errorf("%v %s %q: %s, want %s", c.op, c.code, c.msg, got, c.want)
+		}
+	}
+}
+
+// v3ctlRefusals reads v3ctl's compiled refusal list from its source (v3ctl
+// builds inside the product checkout, so the runner cannot import it): one
+// "command code contains" entry per refusal, sorted.
+func v3ctlRefusals(t *testing.T) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "v3ctl/main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	str := func(e ast.Expr) string {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			t.Fatalf("v3ctl refusals: %T is not a string literal", e)
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	var out []string
+	for _, d := range f.Decls {
+		g, ok := d.(*ast.GenDecl)
+		if !ok || g.Tok != token.VAR {
+			continue
+		}
+		for _, sp := range g.Specs {
+			vs := sp.(*ast.ValueSpec)
+			if len(vs.Names) != 1 || vs.Names[0].Name != "refusals" {
+				continue
+			}
+			for _, kv := range vs.Values[0].(*ast.CompositeLit).Elts {
+				kv := kv.(*ast.KeyValueExpr)
+				cmd := str(kv.Key)
+				for _, e := range kv.Value.(*ast.CompositeLit).Elts {
+					r := e.(*ast.CompositeLit)
+					sel, ok := r.Elts[0].(*ast.SelectorExpr)
+					if len(r.Elts) != 2 || !ok || sel.X.(*ast.Ident).Name != "codes" {
+						t.Fatalf("v3ctl refusals: %s entry is not {codes.X, \"text\"}", cmd)
+					}
+					out = append(out, fmt.Sprintf("%s %s %q", cmd, sel.Sel.Name, str(r.Elts[1])))
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("v3ctl/main.go: no refusals found")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tableV3ctlRefusals is the same list from the table's refused rows on a
+// "v3ctl <command>" path; a row whose action is not that command is an error.
+func tableV3ctlRefusals(tab outcomeTable) ([]string, error) {
+	var out []string
+	for _, r := range tab.Rows {
+		cmd, ok := strings.CutPrefix(r.Path, "v3ctl ")
+		if !ok {
+			continue
+		}
+		if r.Action != cmd {
+			return nil, fmt.Errorf("row %s %q: the action must be the v3ctl command", r.Action, r.Path)
+		}
+		if r.Outcome == tr.OutcomeRefused {
+			out = append(out, fmt.Sprintf("%s %s %q", cmd, r.Code, r.MessageContains))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// v3ctl's compiled refusals and the table's v3ctl rows agree.
+func TestV3ctlRefusalsMatchTheTable(t *testing.T) {
+	compiled := v3ctlRefusals(t)
+	rows, err := tableV3ctlRefusals(outcomes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(compiled, "\n") != strings.Join(rows, "\n") {
+		t.Fatalf("v3ctl/main.go refuses\n  %s\nthe table refuses\n  %s", strings.Join(compiled, "\n  "), strings.Join(rows, "\n  "))
+	}
+	// Red control: a table that refuses create's NotFound disagrees.
+	tab, err := loadOutcomes(mutant(t, func(tab *outcomeTable) {
+		for i, r := range tab.Rows {
+			if r.Path == "v3ctl create" && r.Code == "NotFound" {
+				tab.Rows[i].Outcome = tr.OutcomeRefused
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := tableV3ctlRefusals(tab); strings.Join(m, "\n") == strings.Join(compiled, "\n") {
+		t.Fatal("a table refusing create NotFound agrees with v3ctl")
+	}
+}
+
+// The create answers v3ctl cannot show come before any write are unknown in
+// its exit protocol: NotFound is not refused, and FailedPrecondition only
+// with the reserved-name text (the same code follows the record write).
+func TestV3ctlCreateKeepsUnshownCodesUnknown(t *testing.T) {
+	for _, e := range v3ctlRefusals(t) {
+		if strings.HasPrefix(e, "create NotFound ") || e == `create FailedPrecondition ""` {
+			t.Errorf("v3ctl create refuses %s", e)
+		}
+	}
+	found := false
+	for _, e := range v3ctlRefusals(t) {
+		found = found || e == `create FailedPrecondition "is being deleted or was deleted; its id is never reused"`
+	}
+	if !found {
+		t.Error("v3ctl create does not refuse the reserved name (a checker requires that refusal)")
 	}
 }

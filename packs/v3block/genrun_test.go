@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,11 @@ import (
 // that declares expect=refused, ok otherwise; failWrite makes one lba's write
 // unknown, boom makes one action a runner error.
 type fakeProduct struct {
-	calls     []tr.Action
-	failWrite string
-	boom      string
+	calls      []tr.Action
+	failWrite  string
+	boom       string
+	effect     string // this action answers refused_effect
+	refusedFor string // this action answers refused
 }
 
 func (f *fakeProduct) install(t *testing.T) {
@@ -41,9 +44,17 @@ func (f *fakeProduct) install(t *testing.T) {
 			if name == "v3_op_write" && act.Params["lbas"] == f.failWrite {
 				out = tr.OutcomeUnknown
 			}
+			if name == f.effect {
+				out = tr.OutcomeRefusedEffect
+			}
+			if name == f.refusedFor {
+				out = tr.OutcomeRefused
+			}
 			verb := strings.TrimPrefix(name, "v3_op_")
 			if name == "v3_op_observe" {
-				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"]})
+				// The product past the lease horizon: every observation shows it.
+				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"],
+					Result: map[string]any{"workspace": map[string]any{"exit": 0, "text": []any{"lease state: expired"}}}})
 				return map[string]string{"value": "observed"}, nil // as v3OpObserve: an observation, not an outcome
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + verb, Verb: verb, Volume: act.Params["volume"]})
@@ -81,7 +92,14 @@ func genRunCtx(t *testing.T) (*tr.ActionContext, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() }) // an open file blocks the temp dir's removal on Windows
-	return &tr.ActionContext{History: h, Bundle: &tr.RunBundle{Dir: dir}, Vars: map[string]string{}, Log: func(string, ...interface{}) {}}, p
+	// A fault run reads the holder unit's policy from the product tree; here
+	// it is the fixture's, as if already read.
+	pol, err := parseUnit(testUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(pol)
+	return &tr.ActionContext{History: h, Bundle: &tr.RunBundle{Dir: dir}, Vars: map[string]string{unitPolicyVar: string(b)}, Log: func(string, ...interface{}) {}}, p
 }
 
 func genAct(ops string) tr.Action {
@@ -108,38 +126,70 @@ func TestGenRunRecordsHeaderStepsObservationsAndCoverage(t *testing.T) {
 			last = r
 		}
 	}
-	if last.Verb != "gen_coverage" || out["proposed"] != "300" {
+	if last.Verb != "gen_coverage" || last.Result["drawn"] != float64(300) || out["proposed"] != fmt.Sprint(last.Result["proposed"]) {
 		t.Fatalf("last record %+v, out %v", last, out)
 	}
 	if _, err := os.Stat(filepath.Join(actx.Bundle.Dir, "gen-coverage.json")); err != nil {
 		t.Fatal(err)
 	}
 	// Every operation record follows its gen_step; a negative is preceded by two
-	// observations of its volume (C5's baseline pair) and followed by one.
-	steps, refusals := 0, 0
+	// observations of each volume it names (C5's baseline pair; a restore or a
+	// release names its source and its target) and followed by one of each.
+	// An action whose unknown the driver can place (a snapshot) is preceded by
+	// one more observation of its volume: the "before" of its first attempt.
+	steps, refusals, pairs := 0, 0, 0
 	for i, r := range recs {
 		if r.Verb != "gen_step" {
 			continue
 		}
-		steps++
+		if r.Result["forced"] == nil {
+			steps++
+		}
 		next := recs[i+1]
+		placeable := blockActions.Placeable(fmt.Sprint(r.Result["action"]))
+		if placeable && r.Result["negative"] == nil {
+			if next.Verb != "observe" || next.Volume != r.Volume {
+				t.Fatalf("step %v: not observed before its first attempt: %+v", r.Result, next)
+			}
+			next = recs[i+2]
+		}
 		if r.Result["negative"] != nil {
-			for _, o := range recs[i+1 : i+3] {
-				if o.Verb != "observe" || o.Volume != r.Volume {
-					t.Fatalf("negative step %v not observed twice before: %+v", r.Result, o)
+			subjects := []string{r.Volume}
+			if a := r.Result["action"]; a == "v3_op_restore" || a == "v3_op_release" {
+				subjects = append(subjects, r.Result["params"].(map[string]any)["target_volume"].(string))
+				pairs++
+			}
+			j := i + 1
+			for _, s := range subjects {
+				for k := 0; k < 2; k++ {
+					if o := recs[j]; o.Verb != "observe" || o.Volume != s {
+						t.Fatalf("negative step %v: %s not observed twice before: %+v", r.Result, s, o)
+					}
+					j++
 				}
 			}
 			refusals++
-			// invoke, complete(refused), then the observation after it
-			if recs[i+3].Kind != tr.HistoryInvoke || recs[i+4].Outcome != tr.OutcomeRefused || recs[i+5].Verb != "observe" || recs[i+5].Volume != r.Volume {
-				t.Fatalf("refusal at step %v not observed after", r.Result)
+			if placeable { // the driver's "before" of the first attempt
+				if o := recs[j]; o.Verb != "observe" || o.Volume != r.Volume {
+					t.Fatalf("negative step %v: not observed before its first attempt: %+v", r.Result, o)
+				}
+				j++
 			}
-		} else if next.Kind != tr.HistoryInvoke {
+			// invoke, complete(refused), then the observations after it
+			if recs[j].Kind != tr.HistoryInvoke || recs[j+1].Outcome != tr.OutcomeRefused {
+				t.Fatalf("negative step %v: %+v %+v", r.Result, recs[j], recs[j+1])
+			}
+			for k, s := range subjects {
+				if o := recs[j+2+k]; o.Verb != "observe" || o.Volume != s {
+					t.Fatalf("refusal at step %v: %s not observed after: %+v", r.Result, s, o)
+				}
+			}
+		} else if next.Kind != tr.HistoryInvoke && r.Result["action"] != "v3_op_observe" {
 			t.Fatalf("step %v not followed by its invocation: %+v", r.Result, next)
 		}
 	}
-	if steps != 300 || refusals == 0 {
-		t.Fatalf("%d steps, %d refusals", steps, refusals)
+	if steps != 300 || refusals == 0 || pairs == 0 {
+		t.Fatalf("%d steps, %d refusals, %d of them on a pair", steps, refusals, pairs)
 	}
 }
 
@@ -183,5 +233,100 @@ func TestGenRunStopsOnARunnerErrorNotOnAProductAnswer(t *testing.T) {
 		if _, err := v3GenRun(context.Background(), actx2, act); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// The scenario's required checker set is recorded in the header; a value
+// that is no checker list is refused before anything runs.
+func TestGenRunRecordsTheCheckerSetInTheHeader(t *testing.T) {
+	f := &fakeProduct{}
+	f.install(t)
+	actx, p := genRunCtx(t)
+	a := genAct("20")
+	a.Params["checkers"] = "C0,C1,C5,MO"
+	if _, err := v3GenRun(context.Background(), actx, a); err != nil {
+		t.Fatal(err)
+	}
+	_ = actx.History.Close()
+	if h := records(t, p)[0]; h.Verb != "gen_header" || h.Result["checkers"] != "C0,C1,C5,MO" {
+		t.Fatalf("header %+v", h)
+	}
+	for _, bad := range []string{"C0, C1", "C0,,C1", "C0;C1", "{{ checkers }}"} {
+		actx2, p2 := genRunCtx(t)
+		a.Params["checkers"] = bad
+		if _, err := v3GenRun(context.Background(), actx2, a); err == nil {
+			t.Errorf("checkers %q accepted", bad)
+		}
+		_ = actx2.History.Close()
+		if n := len(records(t, p2)); n != 1 { // the end record only
+			t.Errorf("checkers %q: %d records written", bad, n)
+		}
+	}
+}
+
+// One source for the checker set: each random scenario's env checkers is
+// what v3_gen_run records and what its judge passes to --checkers.
+func TestRandomScenariosPassOneCheckerSet(t *testing.T) {
+	for file, want := range map[string]string{
+		"../../scenarios/v3block/m1-random.yaml": "C0,C1,C2,C3,C5,C7",
+		"../../scenarios/v3block/m2-faults.yaml": "C0,C1,C2,C3,C5,C6,C7,DUR,MO",
+	} {
+		s, err := tr.ParseFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Env["checkers"] != want {
+			t.Errorf("%s: env checkers %q, want %q", file, s.Env["checkers"], want)
+		}
+		gen, judge := 0, 0
+		for _, ph := range s.Phases {
+			for _, a := range ph.Actions {
+				if a.Action == "v3_gen_run" {
+					gen++
+					if a.Params["checkers"] != "{{ checkers }}" {
+						t.Errorf("%s: v3_gen_run checkers %q", file, a.Params["checkers"])
+					}
+				}
+				if cmd := a.Params["cmd"]; strings.Contains(cmd, "history_check.py") || strings.Contains(cmd, "--checkers") {
+					judge++
+					if !strings.Contains(cmd, `--checkers "{{ checkers }}"`) {
+						t.Errorf("%s: judge %q", file, cmd)
+					}
+				}
+			}
+		}
+		if gen != 1 || judge != 1 {
+			t.Errorf("%s: %d v3_gen_run, %d judge lines", file, gen, judge)
+		}
+	}
+}
+
+// refused_effect: a refusal with a documented effect. The step is observed
+// after it as after a refusal, and a replay compares it exactly.
+func TestGenRunObservesAfterARefusedEffectAndReplayComparesIt(t *testing.T) {
+	f := &fakeProduct{effect: "v3_op_snapshot"}
+	f.install(t)
+	a := recordRun(t, "120")
+	recs := records(t, a)
+	n := 0
+	for i, r := range recs {
+		if r.Kind == tr.HistoryComplete && r.Outcome == tr.OutcomeRefusedEffect {
+			n++
+			if o := recs[i+1]; o.Verb != "observe" || o.Volume != r.Volume {
+				t.Fatalf("refused_effect at seq %d not observed after: %+v", r.Seq, o)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no refused_effect in the run")
+	}
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+		t.Fatalf("replay: %v %v", out, err)
+	}
+	// Red control: a product answering a plain refusal instead differs.
+	f.effect = ""
+	f.refusedFor = "v3_op_snapshot"
+	if _, _, err := replayInto(t, a); err == nil || !strings.Contains(err.Error(), "replayed refused") {
+		t.Fatalf("a plain refusal matched a recorded refused_effect: %v", err)
 	}
 }

@@ -2,10 +2,14 @@ package v3block
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	tr "github.com/pingqiu/sw-test-runner"
 )
 
 func pool(n int) []string {
@@ -47,8 +51,19 @@ func run(t *testing.T, cfg GenConfig) ([]GenOp, *Generator) {
 		}
 		ops = append(ops, o)
 		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			// The product past the lease horizon: an observation shows it.
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
 	}
 	return ops, g
+}
+
+// leaseRec is a volume observation whose workspace part shows its lease
+// state.
+func leaseRec(vol, state string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Volume: vol, Result: map[string]any{
+		"workspace": map[string]any{"exit": 0, "text": []any{"volume: " + vol, "lease state: " + state}}}}
 }
 
 func TestGeneratorSameSeedSameRunAnotherSeedAnotherRun(t *testing.T) {
@@ -80,12 +95,19 @@ type oracle struct {
 	held     map[string]map[int]bool    // hosts that served the volume once (a local root lies there)
 	content  map[string]map[string]bool // vol -> lbas with acknowledged content
 	snapCont map[string]map[string]bool // "vol|snapshot" -> lbas with content when it was taken
+	// A restore target names a source chunk while it has not rewritten it:
+	// inherited (the source snapshot had content), wrote (an ok write since
+	// its restore), snapWrote ("vol|snapshot": wrote when it was taken).
+	inherited map[string]bool
+	wrote     map[string]bool
+	snapWrote map[string]bool
 }
 
 func newOracle() *oracle {
 	return &oracle{state: map[string]string{}, snaps: map[string]map[string]bool{},
 		targets: map[string]map[string]bool{}, target: map[string]string{}, fromSn: map[string]string{}, host: map[string]int{},
-		held: map[string]map[int]bool{}, content: map[string]map[string]bool{}, snapCont: map[string]map[string]bool{}}
+		held: map[string]map[int]bool{}, content: map[string]map[string]bool{}, snapCont: map[string]map[string]bool{},
+		inherited: map[string]bool{}, wrote: map[string]bool{}, snapWrote: map[string]bool{}}
 }
 
 func (o *oracle) init(v string) {
@@ -126,7 +148,12 @@ func (o *oracle) allowed(op GenOp) bool {
 		// earlier root lies, always on the volume's own host and geometry.
 		h, _ := strconv.Atoi(op.Params["host"])
 		return (st == "created" || st == "moved") && op.Params["host"] == fmt.Sprint(o.host[v]) && !o.held[v][h] && op.Params["blocks"] == ""
+	case "v3_op_observe":
+		return true // an observation changes nothing
 	case "v3_op_read":
+		if op.Forced != "" { // a forced read names the lbas its reason needs (C2, C3)
+			return st == "serving"
+		}
 		return st == "serving" && o.readOK(v, op.Params["lbas"])
 	case "v3_op_write", "v3_op_stop":
 		return st == "serving"
@@ -185,12 +212,16 @@ func (o *oracle) refusal(op GenOp) string {
 			return "restore into a deleted name"
 		case ts != "" && ts != "unknown" && !(o.target[t] == v && o.fromSn[t] == s):
 			return "restore into an existing name"
-		case ts == "" && o.target[v] != "":
+		case ts == "" && o.target[v] != "" && o.inherited[v] && !o.snapWrote[v+"|"+s]:
+			// Refused only while the snapshot names a source chunk
+			// (layout/snapshots.go:102-107).
 			return "restore from a snapshot of a restore target"
 		}
 	case "v3_op_release":
 		t := op.Params["target_volume"]
-		if ts := o.state[t]; o.target[t] == v && (ts == "created" || ts == "serving" || ts == "stopped") {
+		// Refused only while a root of the target names a source chunk
+		// (layout/delete.go:250-257).
+		if ts := o.state[t]; o.target[t] == v && (ts == "created" || ts == "serving" || ts == "stopped") && o.inherited[t] && !o.wrote[t] {
 			return "release a live restore target"
 		}
 	}
@@ -211,8 +242,10 @@ func (o *oracle) apply(op GenOp) {
 		for _, b := range strings.Fields(op.Params["lbas"]) {
 			o.content[v][b] = true
 		}
+		o.wrote[v] = true
 	case "v3_op_snapshot":
 		o.snaps[v][op.Params["name"]] = true
+		o.snapWrote[v+"|"+op.Params["name"]] = o.wrote[v]
 		c := map[string]bool{}
 		for b := range o.content[v] {
 			c[b] = true
@@ -223,11 +256,12 @@ func (o *oracle) apply(op GenOp) {
 	case "v3_op_restore":
 		t := op.Params["target_volume"]
 		o.init(t)
-		o.state[t], o.target[t], o.fromSn[t], o.host[t] = "created", v, op.Params["snapshot"], o.host[v]
+		o.state[t], o.target[t], o.fromSn[t], o.host[t] = "created", v, op.Params["snapshot"], 0 // its placement host
 		o.targets[v][op.Params["snapshot"]] = true
 		for b := range o.snapCont[v+"|"+op.Params["snapshot"]] {
 			o.content[t][b] = true
 		}
+		o.inherited[t], o.wrote[t] = len(o.snapCont[v+"|"+op.Params["snapshot"]]) > 0, false
 	case "v3_op_stop":
 		o.state[v] = "stopped"
 	case "v3_op_move":
@@ -377,7 +411,11 @@ func TestGeneratorReadsNameTheirLBAs(t *testing.T) {
 
 func TestGeneratorEndsOnTheBudgetOrAnExhaustedPool(t *testing.T) {
 	ops, g := run(t, GenConfig{Seed: 3, Ops: 50, Pool: pool(40), Blocks: 4})
-	if len(ops) != 50 || g.Ended() != "ops" {
+	drawn := 0
+	for _, o := range ops {
+		drawn += btoi(o.Forced == "")
+	}
+	if drawn != 50 || g.Ended() != "ops" {
 		t.Fatalf("%d ops, ended %q", len(ops), g.Ended())
 	}
 	// A tiny pool, weights that only create and delete: every name is used once
@@ -437,7 +475,7 @@ func TestGeneratorWeightsByTimeAndReportsCoverage(t *testing.T) {
 		t.Errorf("deletes starved: %d deletes, %d writes", count["v3_op_delete"], count["v3_op_write"])
 	}
 	cov := g.Coverage()
-	if cov["proposed"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
+	if cov["drawn"] != 10000 || cov["estimated_ops_per_hour"].(int) <= 0 {
 		t.Fatalf("coverage %v", cov)
 	}
 	h := g.Header()
@@ -552,6 +590,36 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 			red:   append(withTarget(), op("v3_op_release", "g1", "target_volume", "g2")),
 			green: append(withTarget(), neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
 		},
+		"a target released after it wrote": {
+			// v11 at run 3: a target that rewrote the source's chunk no longer
+			// names it, and its release is admitted.
+			red: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
+			green: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_read", "g2", "lbas", "3"),
+				neg(op("v3_op_release", "g1", "target_volume", "g2"), "release a live restore target")),
+		},
+		"a restore from a target's snapshot taken after it wrote": {
+			// v09 at run 3: its snapshot named only its own chunk, and the
+			// restore was admitted.
+			red: append(withTarget(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				op("v3_op_snapshot", "g2", "name", "g2-s1"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")),
+			green: append(targetServes(), op("v3_op_write", "g2", "lbas", "1", "round", "r2"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")),
+		},
+		"a restore from a target that inherited nothing": {
+			red: []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_snapshot", "g1", "name", "g1-s1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0"),
+				op("v3_op_snapshot", "g2", "name", "g2-s1"),
+				neg(op("v3_op_restore", "g2", "snapshot", "g2-s1", "target_volume", "g3"), "restore from a snapshot of a restore target")},
+			green: row8(),
+		},
+		"a restore target attached on its moved source's host": {
+			red: append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "1")),
+			green: append(base(), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+				op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0")),
+		},
 		"a read of the written set": {
 			red:   append(base(), op("v3_op_read", "g1", "lbas", "written")),
 			green: append(base(), op("v3_op_read", "g1", "lbas", "3 5")),
@@ -580,6 +648,30 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 		if err := oracleCheck(seq(c.red...)); err == nil {
 			t.Errorf("%s: red control accepted", name)
 		}
+	}
+}
+
+// The end-of-run sweep: every acknowledged lba of a serving volume read back
+// (its own writes and a restore target's inherited content), in reads of at
+// most four, one observation of every volume that exists or was deleted, and
+// nothing on a name never used.
+func TestGeneratorSweepReadsEveryAcknowledgedBlockAndObservesEachVolume(t *testing.T) {
+	g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(5), Blocks: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "7 1 3", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_write", "g1", "lbas", "5 6", "round", "r2"),
+		op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0"),
+		op("v3_op_create", "g3"), op("v3_op_delete", "g3"), op("v3_op_create", "g4"))
+	var got []string
+	for _, o := range g.m.Sweep() {
+		got = append(got, o.Action+" "+o.Volume+" "+o.Params["lbas"])
+	}
+	want := []string{"v3_op_read g1 1 3 5 6", "v3_op_read g1 7", "v3_op_observe g1 ", "v3_op_read g2 1 3 7", "v3_op_observe g2 ",
+		"v3_op_observe g3 ", "v3_op_observe g4 "}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sweep\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -632,8 +724,16 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 	if has(g.ordinary(), "v3_op_attach", "g1", "") || has(g.negatives(), "v3_op_attach", "g1", "") {
 		t.Error("attach proposed after a stop")
 	}
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted within its lease horizon (no observation shows it expired)")
+	}
+	g.m.Observed(leaseRec("g1", "revoking"))
+	if has(g.ordinary(), "v3_op_delete", "g1", "") {
+		t.Error("a stopped volume is deleted while its lease is revoking")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.ordinary(), "v3_op_delete", "g1", "") {
-		t.Error("a stopped volume without targets is not deleted")
+		t.Error("a stopped volume without targets past its lease is not deleted")
 	}
 
 	// Reads: the target inherits the snapshot's lbas (2, 6), not the later 7.
@@ -677,6 +777,10 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 
 	g = newG()
 	drive(g, append(src(), op("v3_op_stop", "g1"))...)
+	if has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) {
+		t.Error("a source delete probed within the lease horizon (the horizon refuses first)")
+	}
+	g.m.Observed(leaseRec("g1", "expired"))
 	if !has(g.negatives(), "v3_op_delete", "g1", limDeleteSource) || !has(g.negatives(), "v3_op_snapshot_delete", "g1", limDeleteSnapDep) {
 		t.Error("no negative source delete or store-direct snapshot delete for a stopped source with a target")
 	}
@@ -725,10 +829,833 @@ func TestGeneratorShadowFollowsTheDocumentedRefusals(t *testing.T) {
 		}
 	}
 
+	// A target names the source's chunk until it writes: then its release is
+	// no negative, and only its snapshots taken before the write are.
+	g = newG()
+	drive(g, append(src(), op("v3_op_attach", "g2", "host", "0"), op("v3_op_snapshot", "g2", "name", "g2-s1"))...)
+	if !has(g.negatives(), "v3_op_release", "g1", limReleaseLive, "target_volume", "g2") {
+		t.Error("no negative release of a target that never wrote")
+	}
+	drive(g, op("v3_op_write", "g2", "lbas", "4", "round", "r3"), op("v3_op_snapshot", "g2", "name", "g2-s2"))
+	if has(g.negatives(), "v3_op_release", "g1", limReleaseLive) {
+		t.Error("a target that wrote since its restore is released as a negative")
+	}
+	if !has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget, "snapshot", "g2-s1") || has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget, "snapshot", "g2-s2") {
+		t.Error("the restore negative does not use the target's snapshot taken before its write")
+	}
+	drive(g, op("v3_op_snapshot_delete", "g2", "name", "g2-s1"))
+	if has(g.negatives(), "v3_op_restore", "g2", limRestoreTarget) {
+		t.Error("a restore negative from a snapshot taken after the target wrote")
+	}
+	// A restore target starts on its placement host, not its source's (v16 at
+	// run 3: its source had moved to host 1, the target was started there and
+	// never got an assignment).
+	g = newG()
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"),
+		op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+	if !has(g.ordinary(), "v3_op_attach", "g2", "", "host", "0") || has(g.ordinary(), "v3_op_attach", "g2", "", "host", "1") {
+		t.Error("a restore target of a moved source is not attached on its placement host 0")
+	}
+
+	// An unknown write in a fault run may have persisted: no release negative.
+	gf, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
+	drive(gf, append(src(), op("v3_op_attach", "g2", "host", "0"))...)
+	gf.Learn(op("v3_op_write", "g2", "lbas", "4", "round", "r3"), "unknown")
+	if has(gf.negatives(), "v3_op_release", "g1", limReleaseLive) {
+		t.Error("a target whose write was unknown is released as a negative")
+	}
+
 	g = newG()
 	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"))
 	g.Learn(neg(op("v3_op_delete", "g1"), limDeleteAttached), "ok")
 	if g.vols["g1"].state != stUnknown {
 		t.Error("a negative answered ok left the volume in the run")
+	}
+}
+
+// settledRec and healthyRec are the records the faults write: the model
+// learns from them, not from the invokes.
+func settledRec(vol, state string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "settled", Result: map[string]any{"volume": vol, "state": state, "evidence": "test"}}
+}
+
+func healthyRec(notServing []string, third ...string) tr.HistoryRecord {
+	ns := []any{}
+	for _, s := range notServing {
+		ns = append(ns, s)
+	}
+	res := map[string]any{"healthy": len(notServing) == 0, "down": []any{}, "not_serving": ns}
+	if len(third) > 0 {
+		var ts []any
+		for _, v := range third {
+			ts = append(ts, map[string]any{"volume": v, "why": "test"})
+		}
+		res["third_state"] = ts
+	}
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "healthy", Result: res}
+}
+
+// offered lists the actions offered for vol, ordinary and negative.
+func offered(g *Generator, vol string) map[string]bool {
+	out := map[string]bool{}
+	for _, c := range append(g.ordinary(), g.negatives()...) {
+		if c.op.Volume == vol {
+			out[c.op.Action] = true
+		}
+	}
+	return out
+}
+
+// F9 and the settled record: an unknown attach or stop leaves the volume
+// unsettled, offered nothing but observation, until a settled record places
+// it: held serves again, not_held is stopped. A healthy record's not_serving
+// fences a volume from reads and writes until a later one leaves it out;
+// third_state takes it out of the run.
+func TestModelLearnsFromSettledAndHealthyRecords(t *testing.T) {
+	newG := func() *Generator {
+		g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	// An unknown attach: unsettled, nothing offered, observed by the sweep.
+	g := newG()
+	drive(g, op("v3_op_create", "g1"))
+	g.Learn(op("v3_op_attach", "g1", "host", "0"), "unknown")
+	if g.vols["g1"].state != stUnsettled || len(offered(g, "g1")) != 0 {
+		t.Fatalf("an unknown attach: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	var sw []string
+	for _, o := range g.m.Sweep() {
+		if o.Volume == "g1" {
+			sw = append(sw, o.Action)
+		}
+	}
+	if !slices.Equal(sw, []string{"v3_op_observe"}) {
+		t.Fatalf("sweep of an unsettled volume %v", sw)
+	}
+	// The invoke alone settles nothing; another volume's record neither.
+	g.m.Observed(settledRec("g2", "held"))
+	if g.vols["g1"].state != stUnsettled || g.vols["g2"].state != stUnborn {
+		t.Fatal("a settled record of another volume moved one")
+	}
+	g.m.Observed(settledRec("g1", "held"))
+	if g.vols["g1"].state != stServing || !offered(g, "g1")["v3_op_write"] || !offered(g, "g1")["v3_op_read"] {
+		t.Fatalf("settled held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	// An unknown stop settled not_held is stopped.
+	g.Learn(op("v3_op_stop", "g1"), "unknown")
+	if g.vols["g1"].state != stUnsettled {
+		t.Fatal("an unknown stop is not unsettled")
+	}
+	g.m.Observed(settledRec("g1", "not_held"))
+	g.m.Observed(leaseRec("g1", "expired"))
+	if g.vols["g1"].state != stStopped || !offered(g, "g1")["v3_op_delete"] || offered(g, "g1")["v3_op_write"] {
+		t.Fatalf("settled not_held: state %q, offered %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+	// A settled record for a volume that is not unsettled changes nothing.
+	g.m.Observed(settledRec("g1", "held"))
+	if g.vols["g1"].state != stStopped {
+		t.Fatal("a settled record moved a stopped volume")
+	}
+
+	// not_serving fences reads and writes until a healthy record leaves it out.
+	g = newG()
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"))
+	g.m.Observed(healthyRec([]string{"g1"}))
+	if a := offered(g, "g1"); a["v3_op_write"] || a["v3_op_read"] || !offered(g, "g2")["v3_op_write"] {
+		t.Fatalf("fenced g1 offered %v, g2 %v", a, offered(g, "g2"))
+	}
+	for _, o := range g.m.Sweep() {
+		if o.Volume == "g1" && o.Action == "v3_op_read" {
+			t.Fatal("the sweep reads a fenced volume")
+		}
+	}
+	g.m.Observed(tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Result: map[string]any{"not_serving": []any{}}})
+	if offered(g, "g1")["v3_op_write"] {
+		t.Fatal("a record that is not a healthy record unfenced g1")
+	}
+	g.m.Observed(healthyRec(nil))
+	if !offered(g, "g1")["v3_op_write"] {
+		t.Fatal("g1 still fenced after a healthy record without it")
+	}
+	// third_state: out of the run.
+	g.m.Observed(healthyRec(nil, "g2"))
+	if g.vols["g2"].state != stUnknown || len(offered(g, "g2")) != 0 {
+		t.Fatalf("third state: %q %v", g.vols["g2"].state, offered(g, "g2"))
+	}
+}
+
+// unreadAtRelease states C1's need on a proposal list answered as answer()
+// answers: at every ordinary stop or move, no lba of the volume written ok
+// since its last ok read; after an attach of a moved volume, its whole
+// content read before any other operation on it. It returns the violations.
+func unreadAtRelease(ops []GenOp) []string {
+	dirty := map[string]map[string]bool{}
+	content := map[string]map[string]bool{}
+	moved := map[string]bool{}
+	owed := map[string]map[string]bool{} // lbas still to read after an attach on a new host
+	var bad []string
+	for _, o := range ops {
+		v := o.Volume
+		if dirty[v] == nil {
+			dirty[v], content[v] = map[string]bool{}, map[string]bool{}
+		}
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if len(owed[v]) > 0 && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its content was read after the attach on a new host", o.No, o.Action, v))
+			delete(owed, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				dirty[v][b], content[v][b] = true, true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				delete(dirty[v], b)
+				delete(owed[v], b)
+			}
+		case "v3_op_stop", "v3_op_move":
+			if len(dirty[v]) > 0 {
+				bad = append(bad, fmt.Sprintf("op %d %s %s with %d lbas unread", o.No, o.Action, v, len(dirty[v])))
+			}
+			moved[v] = o.Action == "v3_op_move"
+		case "v3_op_attach":
+			if moved[v] {
+				owed[v] = maps.Clone(content[v])
+				moved[v] = false
+			}
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			if content[t] == nil {
+				dirty[t], content[t] = map[string]bool{}, map[string]bool{}
+			}
+		}
+	}
+	return bad
+}
+
+// C1: before an ordinary stop or move, the volume's dirty lbas are read
+// back (forced reads, outside the budget); after an attach on a new host,
+// its whole content is read once.
+func TestGeneratorReadsBackBeforeAStopOrMove(t *testing.T) {
+	forced := 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if bad := unreadAtRelease(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			if o.Forced == "readback" || o.Forced == "attach-check" {
+				forced++
+				if o.Action != "v3_op_read" || len(strings.Fields(o.Params["lbas"])) > 4 {
+					t.Fatalf("forced %+v", o)
+				}
+			}
+		}
+	}
+	if forced == 0 {
+		t.Fatal("no read was forced")
+	}
+	// Red controls: a stop after an unread write, and an attach on a new host
+	// followed by another operation, are caught; their green twins pass.
+	w := func(lbas string) GenOp { return op("v3_op_write", "g1", "lbas", lbas, "round", "r") }
+	base := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("1 2")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"stop with an unread write": {
+			red:   append(slices.Clone(base), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_stop", "g1")),
+		},
+		"move, attach, write before the content is read": {
+			red: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), w("3")),
+			green: append(slices.Clone(base), op("v3_op_read", "g1", "lbas", "1 2"), op("v3_op_move", "g1"),
+				op("v3_op_attach", "g1", "host", "1"), op("v3_op_read", "g1", "lbas", "1 2"), w("3")),
+		},
+	} {
+		if bad := unreadAtRelease(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := unreadAtRelease(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
+	}
+}
+
+// pairGaps states C2's and C3's needs on a proposal list answered as
+// answer() answers: a restore target's first operations after its first
+// attach read every inherited lba; and before an ordinary stop or move of a
+// source or target whose pair both serve, both sides read the same lbas
+// (the union of their contents) since the restore. It returns the gaps.
+func pairGaps(ops []GenOp) []string {
+	content := map[string]map[string]bool{}
+	serving := map[string]bool{}
+	source := map[string]string{}    // target -> source (live pair)
+	inherit := map[string][]string{} // target -> inherited lbas, until read
+	attached := map[string]bool{}
+	read := map[string]map[string]bool{}  // "src|tgt|vol" -> lbas read on vol since the restore
+	snapc := map[string]map[string]bool{} // "vol|snapshot" -> its content
+	// crossW: "src|tgt|side" -> lbas written on side since the restore that
+	// the other side also holds; crossed: "src|tgt|side" -> such a write was
+	// then read on the other side.
+	crossW, crossed := map[string]map[string]bool{}, map[string]bool{}
+	var bad []string
+	set := func(v string) map[string]bool {
+		if content[v] == nil {
+			content[v] = map[string]bool{}
+		}
+		return content[v]
+	}
+	for _, o := range ops {
+		v := o.Volume
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		if in := inherit[v]; len(in) > 0 && attached[v] && o.Action != "v3_op_read" {
+			bad = append(bad, fmt.Sprintf("op %d %s %s before its inherited lbas %v were read", o.No, o.Action, v, in))
+			delete(inherit, v)
+		}
+		switch o.Action {
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for t, s := range source {
+					other := map[string]string{s: t, t: s}[v]
+					if other != "" && content[other][b] {
+						k := s + "|" + t + "|" + v
+						if crossW[k] == nil {
+							crossW[k] = map[string]bool{}
+						}
+						crossW[k][b] = true
+					}
+				}
+				set(v)[b] = true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for t, s := range source {
+					if other := map[string]string{s: t, t: s}[v]; other != "" && crossW[s+"|"+t+"|"+other][b] {
+						crossed[s+"|"+t+"|"+other] = true
+					}
+				}
+				inherit[v] = slices.DeleteFunc(inherit[v], func(x string) bool { return x == b })
+				for t, s := range source {
+					if v == t || v == s {
+						k := s + "|" + t + "|" + v
+						if read[k] == nil {
+							read[k] = map[string]bool{}
+						}
+						read[k][b] = true
+					}
+				}
+			}
+		case "v3_op_attach":
+			serving[v] = true
+			attached[v] = true
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			source[t] = v
+			for b := range snapc[v+"|"+o.Params["snapshot"]] {
+				set(t)[b] = true
+				inherit[t] = append(inherit[t], b)
+			}
+		case "v3_op_snapshot":
+			snapc[v+"|"+o.Params["name"]] = maps.Clone(set(v))
+		case "v3_op_stop", "v3_op_move":
+			for t, s := range source {
+				if (v == s || v == t) && serving[s] && serving[t] {
+					for _, side := range []string{s, t} {
+						common := false
+						for b := range content[t] {
+							common = common || content[s][b]
+						}
+						if common && !crossed[s+"|"+t+"|"+side] {
+							bad = append(bad, fmt.Sprintf("op %d %s %s: no write on %s read back across", o.No, o.Action, v, side))
+						}
+
+					}
+				}
+			}
+			serving[v] = false
+		case "v3_op_delete":
+			delete(source, v)
+		}
+	}
+	return bad
+}
+
+// C2 and C3: a restore target's first reads are its inherited lbas; before
+// a source or target of a live pair leaves while both serve, both sides
+// read the same lbas.
+func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
+	var inherited, pairs int
+	for seed := uint64(1); seed <= 30; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		// The pair needs every content lba read on both sides; content is
+		// tracked here from the shadow's view at restore (the target starts
+		// with the source snapshot's lbas, known to the generator only), so
+		// check inherited reads through the proposals' reasons and the pair
+		// reads through pairGaps on the reads' coverage of written lbas.
+		for _, o := range ops {
+			inherited += btoi(o.Forced == "inherited")
+			pairs += btoi(o.Forced == "pair")
+		}
+		if bad := pairGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+	}
+	if inherited == 0 || pairs == 0 {
+		t.Fatalf("%d inherited reads, %d pair reads", inherited, pairs)
+	}
+	// The generator's own state: after the restore the target's first attach
+	// is due (its placement host), then its inherited lbas; neither side is
+	// stopped, moved or deleted before the window, which comes pairDelay
+	// drawn operations after both serve.
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"))
+	drive(g, g.m.Due()...) // the move's attach-check reads
+	drive(g, g.m.Due()...)
+	drive(g, op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+	if d := g.m.Due(); len(d) != 1 || d[0].Action != "v3_op_attach" || d[0].Volume != "g2" || d[0].Params["host"] != "0" || d[0].Forced != "pair-attach" {
+		t.Fatalf("due after the restore: %+v", d)
+	}
+	drive(g, d0(g))
+	if d := g.m.Due(); len(d) != 1 || d[0].Volume != "g2" || d[0].Params["lbas"] != "2 6" || d[0].Forced != "inherited" {
+		t.Fatalf("due after the target's first attach: %+v", d)
+	}
+	drive(g, d0(g))
+	drive(g, op("v3_op_write", "g2", "lbas", "5", "round", "r2"))
+	for i := 0; i < pairDelay-1; i++ { // the write above was the first drawn one
+		if has(g.ordinary(), "v3_op_stop", "g1", "") || has(g.ordinary(), "v3_op_stop", "g2", "") || has(g.ordinary(), "v3_op_move", "g1", "") {
+			t.Fatal("a side of a pending pair offered a stop or move")
+		}
+		if !has(g.negatives(), "v3_op_delete", "g1", limDeleteAttached) {
+			t.Fatal("negatives on a pending pair are held too")
+		}
+		if d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair" {
+			t.Fatalf("the window before pairDelay: %d", i)
+		}
+		drive(g, op("v3_op_read", "g1", "lbas", "2"))
+	}
+	var got []string
+	for d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair"; d = g.m.Due() {
+		o := d[0]
+		got = append(got, o.Forced+" "+strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Volume+" "+o.Params["lbas"])
+		drive(g, o)
+	}
+	// Across first (an inherited lba written on one side, read on the other,
+	// both ways), then the same lbas read on both.
+	want := []string{"pair write g1 2", "pair read g2 2", "pair write g2 6", "pair read g1 6", "pair read g1 2 5 6", "pair read g2 2 5 6"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("the pair window:\n%q\nwant\n%q", got, want)
+	}
+	if !has(g.ordinary(), "v3_op_stop", "g1", "") || !has(g.ordinary(), "v3_op_stop", "g2", "") {
+		t.Fatal("the hold not released after the window")
+	} // Red controls for the checker: a target written before its inherited
+	// read, a source stopped with its target unread at the source's write.
+	w := func(v, lbas string) GenOp { return op("v3_op_write", v, "lbas", lbas, "round", "r") }
+	r := func(v, lbas string) GenOp { return op("v3_op_read", v, "lbas", lbas) }
+	pairBase := []GenOp{op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), w("g1", "1"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_attach", "g2", "host", "0")}
+	for name, c := range map[string]struct{ red, green []GenOp }{
+		"a target written before its inherited read": {
+			red:   append(slices.Clone(pairBase), w("g2", "1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g2", "1")),
+		},
+		"a source stopped before the pair read": {
+			red: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "3"), r("g1", "1 3"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "1"), r("g2", "1"), w("g2", "1"), r("g1", "1"),
+				w("g1", "3"), r("g1", "1 3"), r("g2", "1 3"), op("v3_op_stop", "g1")),
+		},
+		"a pair split with no write read across": {
+			red:   append(slices.Clone(pairBase), r("g2", "1"), r("g1", "1"), r("g2", "1"), op("v3_op_stop", "g1")),
+			green: append(slices.Clone(pairBase), r("g2", "1"), w("g1", "1"), r("g2", "1"), w("g2", "1"), r("g1", "1"), op("v3_op_stop", "g1")),
+		},
+	} {
+		if bad := pairGaps(seq(c.green...)); len(bad) != 0 {
+			t.Errorf("%s: green twin rejected: %v", name, bad)
+		}
+		if bad := pairGaps(seq(c.red...)); len(bad) == 0 {
+			t.Errorf("%s: red control accepted", name)
+		}
+	}
+	_ = want
+}
+
+// d0 is the first due operation of g.
+func d0(g *Generator) GenOp { return g.m.Due()[0] }
+
+// horizonGaps: an ordinary delete of a stopped volume, or the negative
+// "delete a source whose snapshot has a restore target", proposed with no
+// observation of the volume since its stop (the lease horizon is learnt
+// from observations only).
+func horizonGaps(ops []GenOp) []string {
+	stoppedUnseen := map[string]bool{}
+	var bad []string
+	for _, o := range ops {
+		switch {
+		case o.Action == "v3_op_stop" && o.Negative == "" && answer(o) == "ok":
+			stoppedUnseen[o.Volume] = true
+		case o.Action == "v3_op_observe":
+			delete(stoppedUnseen, o.Volume)
+		case o.Action == "v3_op_delete" && (o.Negative == "" || o.Negative == "delete a source whose snapshot has a restore target") && stoppedUnseen[o.Volume]:
+			bad = append(bad, fmt.Sprintf("op %d delete %s (%q) with no observation since its stop", o.No, o.Volume, o.Negative))
+		}
+	}
+	return bad
+}
+
+// The lease horizon: a delete after a stop (ordinary, or the source
+// negative) waits for an observation that shows the lease expired; the
+// model observes a stopped volume every leaseObserveEvery drawn operations.
+func TestGeneratorWaitsForTheLeaseHorizonFromObservations(t *testing.T) {
+	deletes, observed := 0, 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 600, Pool: pool(30), Blocks: 8, Negative: 0.3})
+		if bad := horizonGaps(ops); len(bad) != 0 {
+			t.Fatalf("seed %d: %v", seed, bad)
+		}
+		if err := oracleCheck(ops); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, o := range ops {
+			observed += btoi(o.Forced == "lease")
+			deletes += btoi(o.Action == "v3_op_delete" && o.Negative == "")
+		}
+	}
+	if observed == 0 || deletes == 0 {
+		t.Fatalf("%d lease observations, %d ordinary deletes", observed, deletes)
+	}
+	red := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_delete", "g1"))
+	green := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"), op("v3_op_observe", "g1"), op("v3_op_delete", "g1"))
+	if len(horizonGaps(red)) == 0 || len(horizonGaps(green)) != 0 {
+		t.Fatal("the horizon check's red control")
+	}
+}
+
+// C7's coverage tail: a created volume never attached deleted, a stopped
+// volume past its lease deleted, both observed, then a create of a deleted
+// name, refused. Deterministic from the state.
+func TestCoverageTailDeletesObservesAndProbesADeletedName(t *testing.T) {
+	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(5), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_create", "g2"), op("v3_op_attach", "g2", "host", "0"), op("v3_op_stop", "g2"),
+		op("v3_op_create", "g3"), op("v3_op_attach", "g3", "host", "0"))
+	var got []string
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, fmt.Sprintf("%s %s %s %s", o.Forced, o.Action, o.Volume, o.Negative))
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "expired"))
+		}
+	}
+	want := []string{"tail v3_op_delete g1 ", "tail v3_op_observe g2 ", "tail v3_op_delete g2 ",
+		"tail v3_op_observe g1 ", "tail v3_op_observe g2 ", "tail v3_op_create g1 create a deleted name"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tail\n%q\nwant\n%q", got, want)
+	}
+
+	// A stopped volume whose observation does not show the lease expired is
+	// not deleted; nothing deleted, no create probe.
+	g, _ = NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(2), Blocks: 8})
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_stop", "g1"))
+	got = nil
+	for {
+		o, ok := g.Tail()
+		if !ok {
+			break
+		}
+		got = append(got, o.Action+" "+o.Volume)
+		g.Learn(o, answer(o))
+		if o.Action == "v3_op_observe" {
+			g.m.Observed(leaseRec(o.Volume, "revoking"))
+		}
+	}
+	if !slices.Equal(got, []string{"v3_op_observe g1"}) {
+		t.Fatalf("tail with the lease live: %q", got)
+	}
+	// Coverage names the ordinary actions that never ran.
+	ops, g2 := run(t, GenConfig{Seed: 3, Ops: 30, Pool: pool(10), Blocks: 4, Weights: map[string]int{"v3_op_create": 1, "v3_op_move": 1}})
+	_ = ops
+	if nr, _ := g2.Coverage()["ordinary_never_ran"].([]string); !slices.Equal(nr, []string{"v3_op_move"}) {
+		t.Fatalf("ordinary_never_ran %v", g2.Coverage()["ordinary_never_ran"])
+	}
+}
+
+// refused_effect: "delete a source whose snapshot has a restore target"
+// refused with its documented effect reserves the volume (as unknown does
+// while the outcome map keeps it unknown); a plain refusal reserves
+// nothing; a refused_effect the shadow does not model takes the volume out.
+func TestModelLearnsARefusedEffect(t *testing.T) {
+	stoppedSource := func() *Generator {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+			op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+			op("v3_op_stop", "g1"))
+		return g
+	}
+	for outcome, want := range map[string]string{tr.OutcomeRefusedEffect: stReserved, tr.OutcomeUnknown: stReserved, tr.OutcomeRefused: stStopped} {
+		g := stoppedSource()
+		g.Learn(neg(op("v3_op_delete", "g1"), limDeleteSource), outcome)
+		if got := g.vols["g1"].state; got != want {
+			t.Errorf("delete source answered %s: %q, want %q", outcome, got, want)
+		}
+	}
+	g := stoppedSource()
+	g.Learn(op("v3_op_snapshot", "g2", "name", "g2-s1"), tr.OutcomeRefusedEffect)
+	if g.vols["g2"].state != stUnknown {
+		t.Errorf("an unmodelled refused_effect left the volume %q", g.vols["g2"].state)
+	}
+}
+
+// retry_horizon rides on the source-delete negative only: the declared
+// delete retries past the lease horizon so the limit is what answers.
+// "Delete while attached" expects the horizon's refusal and never has it.
+func TestRetryHorizonOnlyOnTheSourceDeleteNegative(t *testing.T) {
+	src, attached := 0, 0
+	for seed := uint64(1); seed <= 10; seed++ {
+		ops, _ := run(t, GenConfig{Seed: seed, Ops: 1500, Pool: pool(40), Blocks: 8, Negative: 0.4})
+		for _, o := range ops {
+			has := o.Params["retry_horizon"] == "true"
+			switch {
+			case o.Negative == limDeleteSource:
+				src++
+				if !has {
+					t.Fatalf("seed %d op %d: source delete without retry_horizon: %v", seed, o.No, o.Params)
+				}
+			case o.Negative == limDeleteAttached:
+				attached++
+				fallthrough
+			default:
+				if _, ok := o.Params["retry_horizon"]; ok {
+					t.Fatalf("seed %d op %d: retry_horizon on %s (%q)", seed, o.No, o.Action, o.Negative)
+				}
+			}
+		}
+	}
+	if src == 0 || attached == 0 {
+		t.Fatalf("%d source deletes, %d attached deletes", src, attached)
+	}
+}
+
+// pairsUnexercised lists the restore pairs of a proposal list (answered as
+// answer() answers) that never got, in each direction, a write on one side
+// after the restore to a block the other side holds and then a read of it on
+// the other side, and that the notes do not excuse: a note is accepted only
+// for a side lost to the run (unknown, unsettled, killed, reserved), never
+// for a side that simply left (stopped, moved, deleted).
+func pairsUnexercised(ops []GenOp, notes []string) []string {
+	type pair struct{ s, t string }
+	holds := map[string]map[string]bool{}
+	snapc := map[string]map[string]bool{}
+	set := func(v string) map[string]bool {
+		if holds[v] == nil {
+			holds[v] = map[string]bool{}
+		}
+		return holds[v]
+	}
+	var pairs []pair
+	wrote := map[string]map[string]bool{} // "s|t|side" -> lbas written on side the other held
+	crossed := map[string]bool{}
+	for _, o := range ops {
+		if o.Negative != "" || answer(o) != "ok" {
+			continue
+		}
+		v := o.Volume
+		switch o.Action {
+		case "v3_op_snapshot":
+			snapc[v+"|"+o.Params["name"]] = maps.Clone(set(v))
+		case "v3_op_restore":
+			t := o.Params["target_volume"]
+			holds[t] = maps.Clone(snapc[v+"|"+o.Params["snapshot"]])
+			pairs = append(pairs, pair{v, t})
+		case "v3_op_write":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for _, p := range pairs {
+					other := map[string]string{p.s: p.t, p.t: p.s}[v]
+					if other != "" && holds[other][b] {
+						k := p.s + "|" + p.t + "|" + v
+						if wrote[k] == nil {
+							wrote[k] = map[string]bool{}
+						}
+						wrote[k][b] = true
+					}
+				}
+				set(v)[b] = true
+			}
+		case "v3_op_read":
+			for _, b := range strings.Fields(o.Params["lbas"]) {
+				for _, p := range pairs {
+					if other := map[string]string{p.s: p.t, p.t: p.s}[v]; other != "" && wrote[p.s+"|"+p.t+"|"+other][b] {
+						crossed[p.s+"|"+p.t+"|"+other] = true
+					}
+				}
+			}
+		}
+	}
+	var bad []string
+	for _, p := range pairs {
+		key := p.s + "|" + p.t
+		if crossed[key+"|"+p.s] && crossed[key+"|"+p.t] {
+			continue
+		}
+		excused := false
+		for _, n := range notes {
+			if strings.Contains(n, key+":") {
+				excused = strings.Contains(n, "unknown") || strings.Contains(n, "unsettled") || strings.Contains(n, "killed") || strings.Contains(n, "reserved")
+			}
+		}
+		if !excused {
+			bad = append(bad, key)
+		}
+	}
+	return bad
+}
+
+// Every restore pair whose sides stay in the run gets its window: cross
+// writes and reads in both directions; a pair whose side was lost is noted
+// in coverage with why.
+func TestEveryRestorePairGetsItsWindow(t *testing.T) {
+	pairs, noted := 0, 0
+	for seed := uint64(1); seed <= 30; seed++ {
+		ops, g := run(t, GenConfig{Seed: seed, Ops: 400, Pool: pool(20), Blocks: 8})
+		for o, ok := g.Tail(); ok; o, ok = g.Tail() { // the run's tail: pending windows run there
+			ops = append(ops, o)
+			g.Learn(o, answer(o))
+			if o.Action == "v3_op_observe" {
+				g.m.Observed(leaseRec(o.Volume, "expired"))
+			}
+		}
+		notes, _ := g.Coverage()["notes"].([]string)
+		if bad := pairsUnexercised(ops, notes); len(bad) != 0 {
+			t.Fatalf("seed %d: pairs not exercised %v (notes %v)", seed, bad, notes)
+		}
+		for _, o := range ops {
+			pairs += btoi(o.Action == "v3_op_restore" && o.Negative == "")
+		}
+		noted += len(notes)
+	}
+	if pairs == 0 {
+		t.Fatal("no restore pair in the sweep")
+	}
+	t.Logf("%d pairs, %d noted not exercised", pairs, noted)
+	// Red control for the check: a source stopped before any cross write.
+	red := seq(op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+		op("v3_op_stop", "g1"), op("v3_op_attach", "g2", "host", "0"))
+	if len(pairsUnexercised(red, []string{"pair not exercised: g1|g2: g1: stopped"})) == 0 {
+		t.Fatal("red control: a source stopped before its window passed")
+	}
+}
+
+// C2 in fault runs: a target whose first attach was unknown gets its
+// inherited reads once a settled record places it held; a target killed
+// after its attach keeps them owed and gets them once it serves again.
+func TestInheritedReadsSurviveAnUnsettledOrKilledTarget(t *testing.T) {
+	restored := func() *Generator {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8, Faults: 0.1, FaultProcesses: []string{"blockvolume:0"}})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "3", "round", "r"),
+			op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"))
+		return g
+	}
+	inheritedDue := func(g *Generator) bool {
+		d := g.m.Due()
+		return len(d) == 1 && d[0].Volume == "g2" && d[0].Forced == "inherited" && d[0].Params["lbas"] == "3"
+	}
+	// Unsettled first attach.
+	g := restored()
+	at := d0(g)
+	g.Learn(at, tr.OutcomeUnknown)
+	if inheritedDue(g) {
+		t.Fatal("inherited reads due while the target is unsettled")
+	}
+	g.m.Observed(settledRec("g2", "held"))
+	if !inheritedDue(g) {
+		t.Fatalf("no inherited read after the attach settled held: %+v", g.m.Due())
+	}
+	// Killed after its attach (g2 is blockvolume:1, the pool's second name).
+	g = restored()
+	drive(g, d0(g))
+	g.m.FaultRan(FaultKill, "blockvolume:1", tr.OutcomeOK)
+	if d := g.m.Due(); len(d) > 0 && d[0].Volume == "g2" {
+		t.Fatalf("an owed read of a killed target: %+v", d)
+	}
+	g.m.FaultRan(FaultRestart, "blockvolume:1", tr.OutcomeOK)
+	g.m.Observed(healthyRec(nil))
+	if !inheritedDue(g) {
+		t.Fatalf("no inherited read once the target serves again: %+v", g.m.Due())
+	}
+}
+
+// obsRec is a volume observation: its lease state and HEAD state.
+func obsRec(vol, lease, head string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Volume: vol, Result: map[string]any{
+		"head":      map[string]any{"state": head},
+		"workspace": map[string]any{"exit": 0, "text": []any{"volume: " + vol, "lease state: " + lease}}}}
+}
+
+// M1 run 7: a volume taken out of the run (a snapshot answered unknown) is
+// observed at the end (the sweep, and the tail), and its acknowledged content
+// is read when that observation shows it still serving; never written.
+func TestOutOfRunVolumesAreObservedAndReadIfServing(t *testing.T) {
+	for name, c := range map[string]struct {
+		lease, head string
+		reads       bool
+	}{
+		"still serving": {"granted", "", true},
+		"detached":      {"granted", "detached", false},
+		"lease expired": {"expired", "", false},
+	} {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(3), Blocks: 8})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 5", "round", "r"))
+		g.Learn(op("v3_op_snapshot", "g1", "name", "g1-s1"), tr.OutcomeUnknown)
+		if g.vols["g1"].state != stUnknown {
+			t.Fatal("not out of the run")
+		}
+		observed := false
+		for _, o := range g.m.Sweep() {
+			observed = observed || (o.Volume == "g1" && o.Action == "v3_op_observe")
+		}
+		if !observed {
+			t.Fatalf("%s: the sweep does not observe a volume out of the run", name)
+		}
+		var got []string
+		for o, ok := g.Tail(); ok; o, ok = g.Tail() {
+			if o.Volume == "g1" {
+				got = append(got, strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Params["lbas"])
+				if o.Action == "v3_op_write" {
+					t.Fatalf("%s: a write on a volume out of the run", name)
+				}
+			}
+			g.Learn(o, answer(o))
+			if o.Action == "v3_op_observe" && o.Volume == "g1" {
+				g.m.Observed(obsRec("g1", c.lease, c.head))
+			}
+		}
+		want := []string{"observe "}
+		if c.reads {
+			want = append(want, "read 2 5")
+		}
+		if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+			t.Fatalf("%s: tail on g1 %q, want first %q", name, got, want)
+		}
+		if !c.reads && slices.Contains(got, "read 2 5") {
+			t.Fatalf("%s: read a volume that does not serve: %q", name, got)
+		}
 	}
 }

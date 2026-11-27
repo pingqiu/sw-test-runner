@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -24,6 +26,7 @@ import (
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/actions"
+	"github.com/pingqiu/sw-test-runner/declared"
 )
 
 // opIDs: verb -> the Module.Action recorded as op.
@@ -31,7 +34,8 @@ var opIDs = map[string]string{
 	"create":          "VolumeCreate.MarkReady",
 	"attach":          "HolderInterface.Start",
 	"write":           "HolderInterface.Write",
-	"read":            "Guest.Read", // a read changes no state; no model has an action for it
+	"read":            "Guest.Read",  // a read changes no state; no model has an action for it
+	"flush":           "Guest.Flush", // the guest's fsync of the device; no model has an action for it yet
 	"snapshot":        "SnapshotRemoval.Commit",
 	"snapshot_delete": "SnapshotRemoval.DeleteSnap",
 	"restore":         "RestoreTarget.CreateHead",
@@ -51,6 +55,17 @@ type opEnv struct {
 	// Per step, never per verb: any other refusal still fails the run.
 	expect   string
 	lockDirs bool
+	// The action's runner deadline (actions.json) and the guest's NVMe
+	// connect options.
+	deadline time.Duration
+	connect  guestConnect
+	// node is the bounded node, for the abandoned-child watcher.
+	node runner
+	// connectMismatch is set when a connect's effective values differ from
+	// the declared ones: the operation then fails the run.
+	connectMismatch *string
+	// lastReadback is the latest connect read-back of this operation.
+	lastReadback *map[string]any
 }
 
 func (e opEnv) cli() string   { return e.bin + "/sw-block" }
@@ -120,30 +135,9 @@ func opParam(act tr.Action, actx *tr.ActionContext, k string) string {
 // opBegin reads the shared configuration and the volume, and refuses to run
 // without a history to record into.
 func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv, *opVolume, error) {
-	if actx.History == nil {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
-	}
-	node, err := actions.GetNode(actx, act.Node)
+	node, e, err := opConfig(actx, act, name)
 	if err != nil {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: %w", name, err)
-	}
-	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
-		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
-		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
-		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
-	if e.expect != "" && e.expect != tr.OutcomeRefused {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
-	}
-	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
-		if strings.Contains(f, "{{") {
-			return nil, opEnv{}, nil, fmt.Errorf("%s: unresolved configuration %q", name, f)
-		}
-	}
-	if e.client == "" {
-		e.client = "c1"
-	}
-	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
-		return nil, opEnv{}, nil, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
+		return nil, opEnv{}, nil, err
 	}
 	vol := requireParam(act, actx, "volume")
 	if vol == "" {
@@ -156,19 +150,82 @@ func opBegin(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv,
 	return node, e, v, nil
 }
 
-// record runs one operation between its invoke and complete records.
-func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func() (string, map[string]any)) (map[string]string, error) {
+// opConfig is opBegin without a volume: the node and the shared configuration,
+// for the operations on a process rather than a volume (faults.go).
+func opConfig(actx *tr.ActionContext, act tr.Action, name string) (runner, opEnv, error) {
+	if actx.History == nil {
+		return nil, opEnv{}, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
+	}
+	inner, err := opNode(actx, act.Node)
+	if err != nil {
+		return nil, opEnv{}, fmt.Errorf("%s: %w", name, err)
+	}
+	deadline, err := runnerDeadline(name, act.Params)
+	if err != nil {
+		return nil, opEnv{}, err
+	}
+	conn, err := selectConnect(opParam(act, actx, guest.Connect.SelectVar))
+	if err != nil {
+		return nil, opEnv{}, fmt.Errorf("%s: %w", name, err)
+	}
+	node := boundedNode{inner: inner, bound: deadline}
+	e := opEnv{bin: opParam(act, actx, "bin_dir"), master: opParam(act, actx, "master"), filer: opParam(act, actx, "filer"),
+		chunkPath: opParam(act, actx, "chunk_path"), root: opParam(act, actx, "root"), client: opParam(act, actx, "client"),
+		lockDirs: opParam(act, actx, "lock_dirs_test_only") == "true", expect: optionalParam(act, "expect"),
+		ownScript: opParam(act, actx, "own_script"), work: opParam(act, actx, "work"), owner: opParam(act, actx, "owner")}
+	if e.expect != "" && e.expect != tr.OutcomeRefused {
+		return nil, opEnv{}, fmt.Errorf("%s: expect %q; a step may declare only %q", name, e.expect, tr.OutcomeRefused)
+	}
+	for _, f := range []string{e.bin, e.master, e.filer, e.chunkPath, e.root, e.client} {
+		if strings.Contains(f, "{{") {
+			return nil, opEnv{}, fmt.Errorf("%s: unresolved configuration %q", name, f)
+		}
+	}
+	if e.client == "" {
+		e.client = "c1"
+	}
+	if e.bin == "" || e.master == "" || e.filer == "" || e.chunkPath == "" || e.root == "" {
+		return nil, opEnv{}, fmt.Errorf("%s: bin_dir, master, filer, chunk_path and root are required (params or vars)", name)
+	}
+	e.deadline, e.connect, e.node = deadline, conn, node
+	return node, e, nil
+}
+
+// recordBounded runs one operation between its invoke and complete
+// records, under the action's runner deadline (e.deadline): do gets a
+// context that ends at it. An operation that has not answered ok by then is
+// completed unknown, "timeout after <n>s", its last detail kept as
+// detail_at_deadline; any process abandoned on the way is in its result.
+// The runner never waits past the deadline on the product: every command
+// goes through the bounded node, and every wait loop ends with the context.
+func recordBounded(ctx context.Context, actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]any, do func(context.Context) (string, map[string]any)) (map[string]string, error) {
 	if e.expect != "" {
 		if args == nil {
 			args = map[string]any{}
 		}
 		args["expect"] = e.expect
 	}
+	if err := declared.Check(ctx, e.node, actx.History, false); err != nil {
+		return nil, err
+	}
 	seq, err := actx.History.Invoke(tr.HistoryRecord{Client: e.client, Op: opIDs[verb], Verb: verb, Volume: vol, Args: args})
 	if err != nil {
 		return nil, err
 	}
-	outcome, result := do()
+	octx, cancel := context.WithTimeout(declared.WithOp(ctx, declared.OpRef{History: actx.History, Seq: seq, Volume: vol}), e.deadline)
+	outcome, result := do(octx)
+	timedOut := octx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+	cancel()
+	if timedOut && outcome != tr.OutcomeOK {
+		if result == nil {
+			result = map[string]any{}
+		}
+		if d, ok := result["detail"]; ok {
+			result["detail_at_deadline"] = d
+		}
+		result["detail"] = fmt.Sprintf("timeout after %ds", int(e.deadline/time.Second))
+		outcome = tr.OutcomeUnknown
+	}
 	if err := actx.History.Complete(seq, outcome, result); err != nil {
 		return nil, err
 	}
@@ -176,11 +233,21 @@ func record(actx *tr.ActionContext, e opEnv, verb, vol string, args map[string]a
 	return map[string]string{"value": outcome}, nil
 }
 
+// pause waits d, or less when ctx ends; false when ctx has ended.
+func pause(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return ctx.Err() == nil
+	}
+}
+
 func fail(detail string) (string, map[string]any) {
 	return tr.OutcomeUnknown, map[string]any{"detail": detail}
 }
 
-func fromChunk(op, stdout string, code int, result map[string]any) (string, map[string]any) {
+func fromChunk(op opPath, stdout string, code int, result map[string]any) (string, map[string]any) {
 	r, d := chunkOutcome(op, stdout, code)
 	if result == nil {
 		result = map[string]any{}
@@ -195,9 +262,31 @@ func fromChunk(op, stdout string, code int, result map[string]any) (string, map[
 // later phase of the same run (the checkers) judges a history that says it is
 // whole. Every record after it is refused; the CLI's own close at the end of
 // the run is then a no-op.
-func v3HistoryEnd(_ context.Context, actx *tr.ActionContext, _ tr.Action) (map[string]string, error) {
+func v3HistoryEnd(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
 	if actx.History == nil {
 		return nil, errors.New("v3_history_end: no history (typed operations run only with a run bundle)")
+	}
+	// The run's end: every abandoned child still watched is recorded, gone
+	// or alive.
+	var node declared.Runner
+	if n, err := opNode(actx, act.Node); err == nil {
+		node = n
+	}
+	if err := declared.Check(ctx, node, actx.History, true); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
+	// The run's answer counts per verb (attempts, and each error code's
+	// answers: a snapshot's head_conflicts per snapshot attempted).
+	counts, line := snapshotConflicts(declared.Counts(actx.History))
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "runner", Verb: "answer_counts", Result: counts}); err != nil {
+		return nil, fmt.Errorf("v3_history_end: %w", err)
+	}
+	actx.Log("%s", line)
+	if actx.Bundle != nil && actx.Bundle.Dir != "" {
+		b, _ := json.MarshalIndent(counts, "", "  ")
+		if err := os.WriteFile(filepath.Join(actx.Bundle.Dir, "answer-counts.json"), append(b, byte(10)), 0o644); err != nil {
+			return nil, fmt.Errorf("v3_history_end: answer-counts.json: %w", err)
+		}
 	}
 	open := actx.History.Open()
 	if err := actx.History.Close(); err != nil {
@@ -240,6 +329,8 @@ func v3OpSpec(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		fmt.Fprintf(&vols, "  - id: %s\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", name, v.Hosts[0].Server)
 		saveVolume(actx, v)
 	}
+	// The spec's order: blockvolume:<i> of the process faults is volume i here.
+	actx.Vars[specOrderVar] = strings.Join(names, " ")
 	cmd := fmt.Sprintf("mkdir -p %s && cat > %s <<'V3OP_SPEC_EOF'\nnodes:\n%svolumes:\n%sV3OP_SPEC_EOF\n", shellQuote(dirOf(path)), shellQuote(path), nodes.String(), vols.String())
 	if _, stderr, code, err := node.Run(ctx, cmd); err != nil || code != 0 {
 		return nil, fmt.Errorf("v3_op_spec: write %s: %s %v", path, firstLine(stderr), err)
@@ -272,94 +363,19 @@ func dirOf(p string) string {
 	return "/"
 }
 
-// v3OpCreate: one timed CreateVolume call (VolumeCreate.MarkReady). Param:
-// size_bytes (default 16 MiB).
-func v3OpCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_create")
-	if err != nil {
-		return nil, err
-	}
-	size := actions.ParseInt(optionalParam(act, "size_bytes"), 16<<20)
-	defer saveVolume(actx, v)
-	return record(actx, e, "create", v.Name, map[string]any{"size_bytes": size}, func() (string, map[string]any) {
-		stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("%s create --master %s --volume %s --size %d", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name), size))
-		if err != nil {
-			return fail(err.Error())
-		}
-		a, r := parseV3ctl(stdout, code, v.Name)
-		res := map[string]any{"call_ns": a.CallNs}
-		if r != tr.OutcomeOK {
-			res["detail"] = firstLine(a.Error + " " + stderr)
-			return r, res
-		}
-		v.LayoutID, res["layout_id"] = a.LayoutID, a.LayoutID
-		return r, res
-	})
-}
+func portOf(addr string) string { return declared.PortOf(addr) }
 
-// blockvolume's command line for v on host h, as the product's own
-// real-process tests run it, with the layout id from the master.
-func (e opEnv) volumeArgs(v *opVolume, h vsHost, blocks uint64) []string {
-	args := []string{"--master", e.master, "--server-id", h.Server, "--volume-id", v.Name, "--replica-id", "r1",
-		"--layout-id", v.LayoutID, "--data-addr", h.Data, "--ctrl-addr", h.Ctrl, "--status-addr", h.Status,
-		"--durable-root", e.root + "/" + h.Server, "--durable-impl", "walstore-chunk",
-		"--durable-blocks", strconv.FormatUint(blocks, 10), "--durable-blocksize", "4096",
-		"--chunk-filer", e.filer, "--chunk-path", e.chunkPath, "--chunk-control-endpoint", "--workspace-lease",
-		"--nvme-listen", h.NVMe, "--nvme-subsysnqn", v.NQN, "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
-	if e.lockDirs {
-		args = append([]string{"--volume-lock-dir-test-only", e.root + "/" + h.Server + ".locks"}, args...)
-	}
-	return args
-}
-
-// v3OpAttach starts the holder on the volume's host (param host: 0 first, 1
-// the move target; default the current one), waits until it serves above the
-// recorded epoch, and connects the kernel NVMe/TCP host (HolderInterface.Start).
-// The layout id comes from the master when the runner does not know it.
-// Params: blocks (default 4096), ready_seconds (60).
-func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_attach")
-	if err != nil {
-		return nil, err
-	}
-	if h := optionalParam(act, "host"); h != "" {
-		i, perr := strconv.Atoi(h)
-		if perr != nil || i < 0 || i >= len(v.Hosts) {
-			return nil, fmt.Errorf("v3_op_attach: host %q", h)
-		}
-		v.Cur = i
-	}
-	blocks := uint64(actions.ParseInt(optionalParam(act, "blocks"), 4096))
-	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
-	h := v.Hosts[v.Cur]
-	defer saveVolume(actx, v)
-	return record(actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch}, func() (string, map[string]any) {
-		if v.LayoutID == "" {
-			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
-			if err != nil {
-				return fail(err.Error())
-			}
-			a, r := parseV3ctl(stdout, code, v.Name)
-			if r != tr.OutcomeOK {
-				return r, map[string]any{"detail": "resolve: " + a.Error}
-			}
-			v.LayoutID = a.LayoutID
-		}
-		return e.startHolder(ctx, node, v, h, blocks, bound)
-	})
-}
-
-func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
-
-// startHolder starts blockvolume for v on host h and credits readiness only
-// to that process:
-//   - every endpoint of h must be free before the launch (a listener already
-//     there, another run's or a leftover, refuses the start: nothing launched);
-//   - the child is identified by its pid and start time and recorded as owned;
-//   - it is ready only while that child runs, its status serves above the
-//     recorded epoch, AND the status and NVMe listeners are held by it;
-//   - only then is the kernel host connected, to this run's NQN.
-func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
+// launchHolder starts blockvolume for v on host h with the command line
+// given and credits readiness only to that process, as the declared
+// v3_op_attach and v3_op_restart do: the unit's relaunch of a holder that
+// exited by itself (faults.go supervise, part of the v3_op_healthy
+// exception). Every endpoint of h must be free before the launch; the child
+// is identified by its pid and start time and recorded as owned; it is ready
+// only while that child runs, its status serves above the recorded epoch (a
+// restart: at it or above), AND the status and NVMe listeners are held by
+// it; a restart connects the kernel host only when no controller of the
+// volume's NQN is left.
+func (e opEnv) launchHolder(ctx context.Context, node runner, v *opVolume, h vsHost, argv []string, bound time.Duration, restart bool) (string, map[string]any) {
 	ports := []string{portOf(h.Data), portOf(h.Ctrl), portOf(h.Status), portOf(h.NVMe)}
 	held, err := listenerPIDs(ctx, node, ports)
 	if err != nil {
@@ -378,18 +394,21 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 		return fail("mkdir")
 	}
 	logPath := fmt.Sprintf("%s/%s.%d.log", e.root, h.Server, time.Now().UnixNano())
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("setsid %s %s >%s 2>&1 </dev/null & echo $!", shellQuote(e.bin+"/blockvolume"), strings.Join(quoteAll(e.volumeArgs(v, h, blocks)), " "), shellQuote(logPath)))
+	// Through the unit wrapper (faults.go): the holder keeps its own pid, and
+	// its exit status lands in a per-launch file.
+	stdout, stderr, code, err := node.Run(ctx, holderLaunchCmd(argv, logPath))
 	pid := strings.TrimSpace(stdout)
 	if err != nil || code != 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(pid) {
 		return fail("start: " + firstLine(stderr))
 	}
 	start, state := procStart(ctx, node, pid)
-	res := map[string]any{"pid": pid, "pid_start": start, "log": logPath, "layout_id": v.LayoutID}
+	res := map[string]any{"pid": pid, "pid_start": start, "log": logPath, "layout_id": v.LayoutID, "guest_connect": e.connect.Label}
 	if state != procRunning {
 		res["detail"] = "blockvolume exited at once, or its identity could not be read"
 		return tr.OutcomeUnknown, res
 	}
 	v.PID, v.PIDStart = pid, start
+	setLaunch(v, argv, logPath)
 	if why := e.recordOwned(ctx, node, "blockvolume-"+h.Server, pid); why != "" {
 		res["detail"] = why
 		return tr.OutcomeUnknown, res
@@ -404,20 +423,31 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 			// the reason" (the product's standalone-deployment guide), not
 			// "nothing changed": it is also head_fenced, a fence after the
 			// start (cmd/blockvolume/process_exit.go:166-176), and the reason
-			// is only in that log line (process_exit.go:118-124). The
-			// process is not the runner's child once launched, so its exit
-			// code is not read either.
+			// is only in that log line (process_exit.go:118-124). Its exit
+			// status (the wrapper's file) is the unit's business: the
+			// supervision step in faults.go reads it.
 			res["detail"] = "blockvolume exited before serving"
 			return tr.OutcomeUnknown, res
 		case procRunning:
-			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && st.Epoch > v.Epoch {
+			if st, ok := readStatus(ctx, node, h.Status, v.Name); ok && st.serving(v.Name) && (st.Epoch > v.Epoch || restart && st.Epoch == v.Epoch) {
 				owners, err := listenerPIDs(ctx, node, []string{portOf(h.Status), portOf(h.NVMe)})
 				if err == nil && contains(owners[portOf(h.Status)], pid) && contains(owners[portOf(h.NVMe)], pid) {
 					v.Epoch, res["epoch"] = st.Epoch, st.Epoch
+					connect := true
+					if restart {
+						state, _, why := nvmeScan(ctx, node, v.NQN)
+						if state == nvmeUnreadable {
+							res["detail"] = why
+							return tr.OutcomeUnknown, res
+						}
+						connect = state == nvmeAbsent
+					}
 					host, port, _ := strings.Cut(h.NVMe, ":")
-					if why := nvmeConnect(ctx, node, host, port, v.NQN); why != "" {
-						res["detail"] = why
-						return tr.OutcomeUnknown, res
+					if connect {
+						if why := nvmeConnect(ctx, node, host, port, v.NQN, e.connect.Options); why != "" {
+							res["detail"] = why
+							return tr.OutcomeUnknown, res
+						}
 					}
 					dev, why := deviceOf(ctx, node, v.NQN, 20*time.Second)
 					if why != "" {
@@ -433,7 +463,10 @@ func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHo
 			res["detail"] = fmt.Sprintf("not serving above epoch %d from its own listeners within %s", v.Epoch, bound)
 			return tr.OutcomeUnknown, res
 		}
-		time.Sleep(250 * time.Millisecond)
+		if !pause(ctx, 250*time.Millisecond) {
+			res["detail"] = fmt.Sprintf("not serving above epoch %d from its own listeners by the runner deadline", v.Epoch)
+			return tr.OutcomeUnknown, res
+		}
 	}
 }
 
@@ -460,456 +493,52 @@ func contains(set []string, v string) bool {
 	return false
 }
 
-// blockTag is the content of one written block: a repeated tag naming the
-// volume, the round and the block, so a block from another volume, round or
-// offset cannot match.
-func blockTag(vol, round string, lba uint64) string { return fmt.Sprintf("%s|%s|%d|", vol, round, lba) }
-
-// parseLBAs reads "0 2048 4095" or "written" (every lba a write was attempted
-// on, in order).
-func parseLBAs(v *opVolume, s string) ([]uint64, error) {
-	if s == "written" {
-		var out []uint64
-		for k := range v.Written {
-			n, _ := strconv.ParseUint(k, 10, 64)
-			out = append(out, n)
-		}
-		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
-		return out, nil
-	}
-	var out []uint64
-	for _, f := range strings.Fields(s) {
-		n, err := strconv.ParseUint(f, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("lba %q", f)
-		}
-		out = append(out, n)
-	}
-	if len(out) == 0 {
-		return nil, errors.New("lbas are required")
-	}
-	return out, nil
-}
-
-// v3OpWrite writes one block per lba through the kernel block device (O_DIRECT
-// + fsync: exit 0 is acknowledged and flushed), each its own operation
-// (HolderInterface.Write). The record carries the sha256 of the attempted
-// block; the outcome is ok or unknown. Params: lbas, round.
-func v3OpWrite(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_write")
-	if err != nil {
-		return nil, err
-	}
-	round := requireParam(act, actx, "round")
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`).MatchString(round) {
-		return nil, errors.New("v3_op_write: round (1-16 of [A-Za-z0-9_-]) is required")
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_write: %w", err)
-	}
-	if v.Written == nil {
-		v.Written = map[string]bool{}
-	}
-	defer saveVolume(actx, v)
-	var last map[string]string
-	for _, lba := range lbas {
-		tag := blockTag(v.Name, round, lba)
-		want := blockSHA(tag)
-		// The block is generated and checked BEFORE the invocation: a block
-		// whose hash is not the one recorded would put a content on the device
-		// that the history names nowhere, and the checker would blame the
-		// product. A mismatch is the runner's failure: the run fails, nothing
-		// is written.
-		blk := fmt.Sprintf("%s/.block-%s-%d", e.root, v.Name, lba)
-		gen := fmt.Sprintf(`mkdir -p %s && python3 -c 'import sys;t=sys.argv[1].encode();open(sys.argv[2],"wb").write((t*(4096//len(t)+1))[:4096])' %s %s && sha256sum < %s | cut -c1-64`,
-			shellQuote(e.root), shellQuote(tag), shellQuote(blk), shellQuote(blk))
-		stdout, stderr, code, err := node.Run(ctx, gen)
-		if err != nil || code != 0 || strings.TrimSpace(stdout) != want {
-			return nil, fmt.Errorf("v3_op_write: the block generator made %q (exit %d, %s), not %s: runner failure, nothing written", firstLine(stdout), code, firstLine(stderr), want)
-		}
-		v.Written[strconv.FormatUint(lba, 10)] = true
-		last, err = record(actx, e, "write", v.Name, map[string]any{"lba": lba, "sha256": want, "round": round}, func() (string, map[string]any) {
-			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-			if why != "" {
-				return fail(why)
-			}
-			_, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("dd if=%s of=%s bs=4096 seek=%d count=1 oflag=direct conv=fsync,notrunc status=none", shellQuote(blk), dev, lba))
-			if err != nil || code != 0 {
-				return fail(fmt.Sprintf("dd exit %d: %s", code, firstLine(stderr)))
-			}
-			return tr.OutcomeOK, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// v3OpRead reads one block per lba through the kernel block device and
-// records the sha256 it read; it compares nothing. Params: lbas ("written":
-// every lba a write was attempted on).
-func v3OpRead(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_read")
-	if err != nil {
-		return nil, err
-	}
-	lbas, err := parseLBAs(v, requireParam(act, actx, "lbas"))
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_read: %w", err)
-	}
-	if len(lbas) == 0 {
-		// Nothing to read records no operation and has no outcome: a runner
-		// error, never a silent empty answer.
-		return nil, fmt.Errorf("v3_op_read: no lba to read on %s (lbas %q)", v.Name, requireParam(act, actx, "lbas"))
-	}
-	var last map[string]string
-	for _, lba := range lbas {
-		last, err = record(actx, e, "read", v.Name, map[string]any{"lba": lba}, func() (string, map[string]any) {
-			dev, why := deviceOf(ctx, node, v.NQN, 5*time.Second)
-			if why != "" {
-				return fail(why)
-			}
-			stdout, stderr, code, err := node.RunRoot(ctx, fmt.Sprintf("bash -c %s", shellQuote(fmt.Sprintf("set -o pipefail; dd if=%s bs=4096 skip=%d count=1 iflag=direct status=none | sha256sum | cut -c1-64", dev, lba))))
-			sum := strings.TrimSpace(stdout)
-			if err != nil || code != 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sum) {
-				return fail(fmt.Sprintf("read exit %d: %s", code, firstLine(stderr)))
-			}
-			return tr.OutcomeOK, map[string]any{"sha256": sum}
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return last, nil
-}
-
-// v3OpSnapshot takes a named snapshot through the holder (SnapshotRemoval.Commit).
-// Param: name.
-func v3OpSnapshot(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_snapshot")
-	if err != nil {
-		return nil, err
-	}
-	name := requireParam(act, actx, "name")
-	if name == "" {
-		return nil, errors.New("v3_op_snapshot: name is required")
-	}
-	return record(actx, e, "snapshot", v.Name, map[string]any{"name": name}, func() (string, map[string]any) {
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk snapshot --volume %s --status-addr %s --name %s --request-id %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(v.Hosts[v.Cur].Status), shellQuote(name), shellQuote(v.Name+"-"+name)))
-		if err != nil {
-			return fail(err.Error())
-		}
-		return fromChunk(chunkSnapshot, stdout, code, nil)
-	})
-}
-
-// v3OpSnapshotDelete deletes a named snapshot (SnapshotRemoval.DeleteSnap):
-// through the holder while it serves (the product cleans right after such a
-// delete), store direct with `sw-block ops chunk snapshot-delete` when no
-// holder runs (cleaned at the next periodic pass, the product's guide says).
-// Param: name.
-func v3OpSnapshotDelete(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_snapshot_delete")
-	if err != nil {
-		return nil, err
-	}
-	name := requireParam(act, actx, "name")
-	if name == "" {
-		return nil, errors.New("v3_op_snapshot_delete: name is required")
-	}
-	via := "store"
-	if alive(ctx, node, v.PID, v.PIDStart) {
-		via = "holder"
-	}
-	return record(actx, e, "snapshot_delete", v.Name, map[string]any{"name": name, "via": via}, func() (string, map[string]any) {
-		if via == "holder" {
-			body, _ := json.Marshal(map[string]string{"volumeID": v.Name, "name": name})
-			out, _, code, err := node.Run(ctx, fmt.Sprintf("curl -s -m 60 -X POST -H 'Content-Type: application/json' --data %s -w '\\n%%{http_code}' %s",
-				shellQuote(string(body)), shellQuote("http://"+v.Hosts[v.Cur].Status+"/chunk/snapshot/delete")))
-			if err != nil || code != 0 {
-				return fail(fmt.Sprintf("holder not answering (curl exit %d)", code))
-			}
-			i := strings.LastIndex(strings.TrimRight(out, "\n"), "\n")
-			status := 1
-			if strings.TrimSpace(out[i+1:]) == "200" {
-				status = 0
-			}
-			return fromChunk(chunkSnapDelHolder, out[:max(i, 0)], status, nil)
-		}
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk snapshot-delete --volume %s --name %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
-		if err != nil {
-			return fail(err.Error())
-		}
-		return fromChunk(chunkSnapDelStore, stdout, code, nil)
-	})
-}
-
-// v3OpRestore creates the target volume from a snapshot of this volume
-// through the master (RestoreTarget.CreateHead). Params: snapshot, target_volume ("target" is the parser's iSCSI field).
-func v3OpRestore(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_restore")
-	if err != nil {
-		return nil, err
-	}
-	snap, target := requireParam(act, actx, "snapshot"), requireParam(act, actx, "target_volume")
-	if snap == "" || target == "" {
-		return nil, errors.New("v3_op_restore: snapshot and target_volume are required")
-	}
-	t, err := loadVolume(actx, target)
-	if err != nil {
-		return nil, fmt.Errorf("v3_op_restore: %w", err)
-	}
-	defer saveVolume(actx, t)
-	return record(actx, e, "restore", target, map[string]any{"source": v.Name, "snapshot": snap}, func() (string, map[string]any) {
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk restore --source %s --snapshot %s --target %s --master %s --request-id %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(snap), shellQuote(target), shellQuote(e.master), shellQuote("restore-"+target)))
-		if err != nil {
-			return fail(err.Error())
-		}
-		return fromChunk(chunkRestore, stdout, code, nil)
-	})
-}
-
-// v3OpRelease removes a deleted restore target from this volume's snapshot
-// dependents (RestoreTarget.OpRelease). Param: target_volume.
-func v3OpRelease(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_release")
-	if err != nil {
-		return nil, err
-	}
-	target := requireParam(act, actx, "target_volume")
-	if target == "" {
-		return nil, errors.New("v3_op_release: target_volume is required")
-	}
-	return record(actx, e, "release", v.Name, map[string]any{"target": target}, func() (string, map[string]any) {
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk release --source %s --target %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(target), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
-		if err != nil {
-			return fail(err.Error())
-		}
-		return fromChunk(chunkRelease, stdout, code, nil)
-	})
-}
-
-// handOver runs the planned stop of the holder: disconnect the guest, detach
-// --plain, revoke with the sealed generation, wait for the holder to exit by
-// itself, and wait for the master's recorded ACK of (replica, epoch). It
-// returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
-	res := map[string]any{"epoch": v.Epoch}
-	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
-		return res, why
-	}
-	stdout, stderr, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk detach --plain --volume %s --status-addr %s --timeout 120s", shellQuote(e.cli()), shellQuote(v.Name), shellQuote(v.Hosts[v.Cur].Status)))
-	if err != nil {
-		return res, err.Error()
-	}
-	if r, d := chunkOutcome(chunkDetach, stdout, code); r != tr.OutcomeOK {
-		res["detach"] = r
-		return res, "detach: " + d
-	}
-	gen, perr := parseDetach(stdout, stderr, v.Name, v.Epoch)
-	if perr != nil {
-		return res, perr.Error()
-	}
-	res["sealed_gen"] = gen
-	out, errOut, code, err := e.workspace(ctx, node, v.Name, "revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-	if err != nil || wsOutcome(op, code) != tr.OutcomeOK {
-		res["revoke_exit"] = code
-		return res, "revoke: " + firstLine(out+" "+errOut)
-	}
-	if why := waitGone(ctx, node, v.PID, v.PIDStart, 40*time.Second); why != "" {
-		return res, "the holder did not exit by itself after the revoke: " + why
-	}
-	v.PID, v.PIDStart = "", ""
-	ack := regexp.MustCompile(fmt.Sprintf(`(?m)^recorded ACK: r1@%d HEAD generation (\d+)\r?$`, v.Epoch))
-	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(500 * time.Millisecond) {
-		out, _, c, e2 := e.workspace(ctx, node, v.Name, "show")
-		if m := ack.FindStringSubmatch(out); e2 == nil && c == 0 && m != nil {
-			res["ack_gen"] = m[1] // recorded, not compared
-			return res, ""
-		}
-	}
-	return res, fmt.Sprintf("no recorded ACK of r1@%d", v.Epoch)
-}
-
+// workspace runs one `sw-block ops workspace` command of vol (the master's
+// workspace view: the settle step of faults.go reads its show).
 func (e opEnv) workspace(ctx context.Context, node runner, vol string, args ...string) (string, string, int, error) {
 	return node.Run(ctx, shellQuote(e.cli())+" ops workspace "+strings.Join(quoteAll(append(args, "--master", e.master, "--volume", vol)), " "))
 }
 
-// v3OpStop stops the holder with the planned hand-over and no move
-// (HolderInterface.StopCommit): the volume is then held by no one, as a
-// volume delete requires.
-func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_stop")
-	if err != nil {
-		return nil, err
-	}
-	defer saveVolume(actx, v)
-	return record(actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v, wsStop)
-		if why != "" {
-			res["detail"] = why
-			return tr.OutcomeUnknown, res
-		}
-		return tr.OutcomeOK, res
-	})
-}
-
-var reMovedTo = regexp.MustCompile(`^clean move issued: volume (\S+) request (\S+): r1@(\d+) -> r1@(\d+) on (\S+) \(sealed HEAD gen (\d+), remote LSN (\d+)\)\r?$`)
-
-// v3OpMove is the planned move to the volume's second host
-// (MoveAdmission.IssueClean): the planned stop, then `ops workspace move
-// --clean`. Its outcome is the master's exit code; the answer's new epoch,
-// generation and LSN are recorded. Starting the volume on the target is the
-// next operation (v3_op_attach host=1).
-func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_move")
-	if err != nil {
-		return nil, err
-	}
-	to := 1 - v.Cur
-	dst := v.Hosts[to]
-	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
-	defer saveVolume(actx, v)
-	return record(actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func() (string, map[string]any) {
-		res, why := e.handOver(ctx, node, v, wsMove)
-		if why != "" {
-			res["detail"] = "stop: " + why
-			return tr.OutcomeUnknown, res
-		}
-		out, errOut, code, err := e.workspace(ctx, node, v.Name, "move", "--clean", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10),
-			"--target-host", dst.Server, "--target-data", dst.Data, "--target-ctrl", dst.Ctrl, "--request-id", req)
-		if err != nil {
-			return fail(err.Error())
-		}
-		res["exit"] = code
-		// Never refused: the hand-over above already sealed and revoked
-		// (wsRefusals). The exit is recorded for the reader.
-		if r := wsOutcome(wsMove, code); r != tr.OutcomeOK {
-			res["detail"] = firstLine(out + " " + errOut)
-			return r, res
-		}
-		first, _, _ := strings.Cut(out, "\n")
-		m := reMovedTo.FindStringSubmatch(first)
-		if m == nil || m[1] != v.Name || m[2] != req || m[3] != strconv.FormatUint(v.Epoch, 10) || m[5] != dst.Server {
-			res["detail"] = "the move answer does not name this move: " + firstLine(out)
-			return tr.OutcomeUnknown, res
-		}
-		res["new_epoch"], res["head_gen"], res["remote_lsn"] = m[4], m[6], m[7]
-		v.Cur = to
-		return tr.OutcomeOK, res
-	})
-}
-
-// v3OpDelete deletes the volume through the master's delete authority
-// (MoveAdmission.DelMark, `ops chunk volume-delete`). After a stop the master
-// admits the delete only once the holder's lease horizon plus the clock-skew
-// margin has passed, and answers not_admitted until then; the CLI's own
-// procedure is to rerun with the SAME request id once the cause is cleared.
-// So one operation reruns it while the answer is not_admitted, within
-// admit_seconds (default 120), and records every attempt. Its outcome is the
-// last answer's. A step that declares expect=refused (a negative: the
-// refusal is what it probes) is one call, never rerun: rerunning would wait
-// out the refusal it tests.
-func v3OpDelete(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_delete")
-	if err != nil {
-		return nil, err
-	}
-	bound := time.Duration(actions.ParseInt(optionalParam(act, "admit_seconds"), 120)) * time.Second
-	req := "delete-" + v.Name
-	return record(actx, e, "delete", v.Name, map[string]any{"layout_id": v.LayoutID, "request": req}, func() (string, map[string]any) {
-		return e.deleteVolume(ctx, node, v, req, bound)
-	})
-}
-
-// deleteRetryEvery is the pause between two attempts of one delete.
-var deleteRetryEvery = 3 * time.Second
-
-// deleteVolume runs `ops chunk volume-delete` once, and again while the
-// answer is not_admitted within bound, unless the step declares
-// expect=refused. Its outcome is the last answer's; every attempt is listed.
-func (e opEnv) deleteVolume(ctx context.Context, node runner, v *opVolume, req string, bound time.Duration) (string, map[string]any) {
-	end := time.Now().Add(bound)
-	var attempts []string
-	for {
-		stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk volume-delete --volume %s --master %s --chunk-filer %s --chunk-path %s --request-id %s", shellQuote(e.cli()),
-			shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath), shellQuote(req)))
-		if err != nil {
-			return tr.OutcomeUnknown, map[string]any{"detail": err.Error(), "attempts": attempts}
-		}
-		r, res := fromChunk(chunkVolumeDelete, stdout, code, nil)
-		d, _ := res["detail"].(string)
-		attempts = append(attempts, fmt.Sprintf("%s %s", r, firstLine(d)))
-		res["attempts"] = attempts
-		if r == tr.OutcomeOK || e.expect == tr.OutcomeRefused || !strings.HasPrefix(d, "not_admitted:") || time.Now().After(end) {
-			return r, res
-		}
-		select {
-		case <-ctx.Done():
-			return r, res
-		case <-time.After(deleteRetryEvery):
-		}
-	}
-}
-
-// v3OpObserve records what the product shows of the volume: HEAD from `ops
-// chunk show` (or its error code), the authority line from `ops workspace
-// show`, and every file under the volume's directory in the filer. An
-// observation is a fact for the checkers, never a verdict.
-func v3OpObserve(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
-	node, e, v, err := opBegin(actx, act, "v3_op_observe")
-	if err != nil {
-		return nil, err
-	}
-	res := map[string]any{}
-	stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s ops chunk show --volume %s --master %s --chunk-filer %s --chunk-path %s", shellQuote(e.cli()),
-		shellQuote(v.Name), shellQuote(e.master), shellQuote(e.filer), shellQuote(e.chunkPath)))
-	if err == nil && code == 0 {
-		var body struct {
-			Head *struct {
-				Gen    uint64
-				Epoch  uint64
-				Holder string
-				State  string
-			} `json:"head"`
-		}
-		if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) == nil && body.Head != nil {
-			res["head"] = map[string]any{"gen": body.Head.Gen, "epoch": body.Head.Epoch, "holder": body.Head.Holder, "state": body.Head.State}
-		} else {
-			res["head"] = "unreadable"
-		}
-	} else {
+// observeChunkShow records the answer of `ops chunk show`: HEAD's generation,
+// epoch, holder and state as "head", and the names of HEAD's snapshots map
+// (sorted; empty when HEAD holds none) as "snapshots". The command prints
+// the product's decoded HEAD, whose snapshots map is the volume's snapshot
+// list. Without a readable HEAD there is no list: "snapshots_error" says why.
+func observeChunkShow(res map[string]any, stdout string, code int, err error) {
+	if err != nil || code != 0 {
 		var eb struct {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal([]byte(strings.TrimSpace(stdout)), &eb)
 		res["show_error"] = map[string]any{"exit": code, "code": eb.Code}
-	}
-	if out, _, c, e2 := e.workspace(ctx, node, v.Name, "show"); e2 == nil {
-		res["workspace"] = map[string]any{"exit": c, "text": firstLines(out, 12)}
-	}
-	// The volume's directories in the filer, whatever its layout: a name that
-	// never existed is observed as having none.
-	if dirs, why := listDirs(ctx, node, e.filer, e.chunkPath, v.Name+"-"); why != "" {
-		res["dirs_error"] = why
-	} else {
-		res["dirs"] = dirs
-	}
-	if v.LayoutID != "" {
-		files, why := listFiles(ctx, node, e.filer, e.chunkPath, v.Name+"-"+v.LayoutID[:8])
-		if why != "" {
-			res["listing_error"] = why
+		if err != nil {
+			res["snapshots_error"] = fmt.Sprintf("chunk show: %v", err)
 		} else {
-			res["files"] = files
+			res["snapshots_error"] = fmt.Sprintf("chunk show: exit %d code %q", code, eb.Code)
 		}
+		return
 	}
-	return map[string]string{"value": "observed"}, actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: e.client, Volume: v.Name, Verb: "observe", Result: res})
+	var body struct {
+		Head *struct {
+			Gen       uint64
+			Epoch     uint64
+			Holder    string
+			State     string
+			Snapshots map[string]json.RawMessage
+		} `json:"head"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) != nil || body.Head == nil {
+		res["head"] = "unreadable"
+		res["snapshots_error"] = "chunk show: HEAD unreadable"
+		return
+	}
+	res["head"] = map[string]any{"gen": body.Head.Gen, "epoch": body.Head.Epoch, "holder": body.Head.Holder, "state": body.Head.State}
+	names := make([]string, 0, len(body.Head.Snapshots))
+	for n := range body.Head.Snapshots {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	res["snapshots"] = names
 }
 
 func firstLines(s string, n int) []string {
@@ -989,4 +618,24 @@ print(json.dumps(sorted(out)))`
 		return nil, "listing: " + firstLine(stderr)
 	}
 	return files, ""
+}
+
+// snapshotConflicts adds the release bar's ratio to the run's answer
+// counts, snapshot_head_conflict {conflicts, attempts} (every snapshot
+// attempt counts), and returns the summary line the run prints. A run with
+// no snapshot attempt says so: it cannot pass the bar silently.
+func snapshotConflicts(counts map[string]any) (map[string]any, string) {
+	k, n := 0, 0
+	if snap, ok := counts["snapshot"].(map[string]any); ok {
+		n, _ = snap["attempted"].(int)
+		if codes, ok := snap["codes"].(map[string]any); ok {
+			k, _ = codes["head_conflict"].(int)
+		}
+	}
+	counts["snapshot_head_conflict"] = map[string]any{"conflicts": k, "attempts": n}
+	line := fmt.Sprintf("head_conflict per snapshot attempted: %d/%d", k, n)
+	if n == 0 {
+		line += " (no snapshot attempted)"
+	}
+	return counts, line
 }

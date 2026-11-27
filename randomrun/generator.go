@@ -1,0 +1,431 @@
+package randomrun
+
+// The seeded generator: it proposes one operation at a time, each allowed by
+// the model's precondition, and learns each outcome. A fixed share of
+// operations are NEGATIVE: ones the product must refuse (the model lists
+// them per state). Names come from a finite pool; the model burns a name it
+// can never use again, and an exhausted pool (no operation possible any more)
+// is a normal end.
+//
+// The proposal probability of an operation is its weight divided by its
+// cost, so weights are shares of run TIME: slow operations are not starved
+// and fast ones do not swamp the run.
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/rand/v2"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+
+	tr "github.com/pingqiu/sw-test-runner"
+)
+
+// Config sets a run.
+type Config struct {
+	Seed     uint64
+	Ops      int            // the most operations to propose
+	Pool     []string       // subject names, each a resource the model uses up
+	Negative float64        // share of operations that must be refused (default 0.1)
+	Weights  map[string]int // relative share of TIME per operation; default the table's
+
+	// Process faults (faults.go); off when Faults is 0.
+	Faults         float64  // chance of a kill after each operation while nothing is down
+	FaultProcesses []string // the processes the schedule may kill
+	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
+	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
+}
+
+// Generator proposes operations; Learn feeds back each outcome.
+type Generator struct {
+	cfg    Config
+	m      Model
+	costs  map[string]float64
+	rng    *rand.Rand
+	no     int
+	ended  string
+	cells  map[string]int // "action|state" -> count proposed
+	counts map[string]int // action -> count proposed
+	down   string         // the process a fault holds down now ("" for none)
+	fcells map[string]int // fault cells: "kill|p", "restart|p", "while_down|action"
+	fed    int64          // the history's bytes already handed to the model (feed)
+	drawn  int            // operations drawn (the budget counts these only)
+	forced int            // forced operations proposed (Model.Before, Model.Due, the tail)
+	queue  []queued
+	// ordinary counts the operations proposed as ordinary (not negative,
+	// drawn or forced), per action.
+	ordinary map[string]int
+}
+
+// Tail proposes the next operation of the coverage tail (Model.Tail), or
+// false when it is done. Forced, outside the budget.
+func (g *Generator) Tail() (Op, bool) {
+	o, ok := g.m.Tail()
+	if !ok {
+		return Op{}, false
+	}
+	if o.Forced == "" {
+		o.Forced = "tail"
+	}
+	return g.propose(o), true
+}
+
+// feed hands the model every observe record appended to the history since
+// the last feed. The history is synced on every record, so its file is the
+// run's record as it stands.
+func (g *Generator) feed(h *tr.History) error {
+	if h == nil {
+		return nil
+	}
+	f, err := os.Open(h.Path())
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(g.fed, io.SeekStart); err != nil {
+		return err
+	}
+	rd := bufio.NewReader(f)
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err == io.EOF {
+			return nil // a line without its newline is not whole yet
+		}
+		if err != nil {
+			return err
+		}
+		g.fed += int64(len(line))
+		var r tr.HistoryRecord
+		if json.Unmarshal(line, &r) == nil && r.Kind == tr.HistoryObserve {
+			g.m.Observed(r)
+		}
+	}
+}
+
+// New validates the config and starts a run of model m.
+func New(cfg Config, m Model) (*Generator, error) {
+	if cfg.Ops <= 0 || len(cfg.Pool) == 0 {
+		return nil, fmt.Errorf("generator: ops and a name pool are required")
+	}
+	if cfg.Negative == 0 {
+		cfg.Negative = 0.1
+	}
+	if cfg.Negative < 0 || cfg.Negative > 0.5 {
+		return nil, fmt.Errorf("generator: negative share %v outside 0..0.5", cfg.Negative)
+	}
+	table := m.Operations()
+	costs := table.Costs()
+	if cfg.Weights == nil {
+		cfg.Weights = table.DefaultWeights()
+	}
+	for a, w := range cfg.Weights {
+		if _, ok := costs[a]; !ok || w < 0 {
+			return nil, fmt.Errorf("generator: weight for unknown operation %q or negative", a)
+		}
+	}
+	if cfg.Faults != 0 || cfg.MasterOutage != 0 {
+		if cfg.RestartWithin == 0 {
+			cfg.RestartWithin = DefaultRestartWithin
+		}
+		cfg.FaultProcesses = slices.Clone(cfg.FaultProcesses)
+		slices.Sort(cfg.FaultProcesses)
+		if _, err := schedule(cfg, m); err != nil {
+			return nil, fmt.Errorf("generator: %w", err)
+		}
+	}
+	g := &Generator{cfg: cfg, m: m, costs: costs, rng: rand.New(rand.NewPCG(cfg.Seed, cfg.Seed^0x9e3779b97f4a7c15)),
+		cells: map[string]int{}, counts: map[string]int{}, fcells: map[string]int{}, ordinary: map[string]int{}}
+	seen := map[string]bool{}
+	for _, n := range cfg.Pool {
+		if n == "" || seen[n] || strings.ContainsAny(n, " \t") {
+			return nil, fmt.Errorf("generator: pool name %q empty, repeated or not a token", n)
+		}
+		seen[n] = true
+	}
+	if err := m.Begin(slices.Clone(cfg.Pool), g.Faulty()); err != nil {
+		return nil, fmt.Errorf("generator: %w", err)
+	}
+	return g, nil
+}
+
+// Header is the history's first record: everything a replay must match.
+func (g *Generator) Header() map[string]any {
+	w := map[string]any{}
+	for k, v := range g.cfg.Weights {
+		w[k] = v
+	}
+	h := map[string]any{"generator": g.m.Version(false), "seed": strconv.FormatUint(g.cfg.Seed, 10),
+		"ops": g.cfg.Ops, "pool": slices.Clone(g.cfg.Pool), "negative": g.cfg.Negative, "weights": w}
+	g.m.Header(h)
+	if g.Faulty() {
+		h["generator"] = g.m.Version(true)
+		h["faults"] = g.cfg.Faults
+		h["fault_processes"] = slices.Clone(g.cfg.FaultProcesses)
+		h["fault_restart_within"] = g.cfg.RestartWithin
+		if g.cfg.MasterOutage != 0 {
+			h["fault_master_outage"] = g.cfg.MasterOutage
+		}
+	}
+	return h
+}
+
+// Faulty says a fault schedule is active (process faults or master outages).
+func (g *Generator) Faulty() bool { return g.cfg.Faults != 0 || g.cfg.MasterOutage != 0 }
+
+// schedule derives a config's fault schedule: kills and restarts, then the
+// master outages. An ordinary kill never names the product's master: a
+// restart counted in operations comes long after the holders' serve window,
+// and they fence by design; a short master outage is its own event.
+func schedule(cfg Config, m Model) (FaultSchedule, error) {
+	if master, _, ok := m.MasterOutage(); ok && slices.Contains(cfg.FaultProcesses, master) {
+		return FaultSchedule{}, fmt.Errorf("fault schedule: %s is never killed by an ordinary kill (a short master outage is its own event, fault_master_outage)", master)
+	}
+	s, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess)
+	if err != nil || cfg.MasterOutage == 0 {
+		return s, err
+	}
+	master, _, ok := m.MasterOutage()
+	if !ok {
+		return s, fmt.Errorf("master outages on, but the product states no master outage")
+	}
+	return AddMasterOutages(s, cfg.Ops, master, cfg.MasterOutage, m.ValidProcess)
+}
+
+// Proposed is the number of operations proposed so far.
+func (g *Generator) Proposed() int { return g.no }
+
+// Schedule is the run's fault schedule (empty when faults are off).
+func (g *Generator) Schedule() FaultSchedule {
+	if !g.Faulty() {
+		return FaultSchedule{Seed: g.cfg.Seed, Events: []FaultEvent{}}
+	}
+	s, _ := schedule(g.cfg, g.m)
+	return s
+}
+
+// Fault tells the generator a fault event ran: a kill puts the process down,
+// a restart brings it back. The model's state does not change (a healthy
+// point requires every subject back as it was); operations proposed while a
+// process is down are counted as fault cells.
+func (g *Generator) Fault(action, process string) {
+	g.fcells[action+"|"+process]++
+	if action == FaultKill {
+		g.down = process
+	} else if g.down == process {
+		g.down = ""
+	}
+}
+
+// Resolved tells the model that a subject's unknown operations were resolved
+// by observation at a healthy point.
+func (g *Generator) Resolved(subject string) { g.m.Resolved(subject) }
+
+// Learn applies an operation's outcome to the model's state.
+func (g *Generator) Learn(o Op, outcome string) { g.m.Learn(o, outcome) }
+
+// stop ends the proposals for a reason other than the budget or the pool.
+func (g *Generator) stop(why string) {
+	if g.ended == "" {
+		g.ended = why
+	}
+}
+
+// Ended is why the run stopped proposing ("" while it goes on): "ops" when
+// the operation budget is spent, "pool exhausted" when no operation is
+// possible any more (every name used and nothing left to do with them),
+// "unhealthy" when a healthy point stayed false after its full wait.
+func (g *Generator) Ended() string { return g.ended }
+
+// Candidate is one possible next operation with its weight.
+type Candidate struct {
+	Op     Op
+	Weight float64
+}
+
+// Candidates lists the possible next operations: the model's negatives (each
+// weight 1), or its ordinary operations weighted by time (weight/cost; an
+// operation of weight 0 is left out).
+func (g *Generator) Candidates(negative bool) []Candidate {
+	var cs []Candidate
+	if negative {
+		for _, o := range g.m.Negatives() {
+			cs = append(cs, Candidate{o, 1})
+		}
+		return cs
+	}
+	for _, o := range g.m.Ordinary(g.rng, g.no+1) {
+		if w := g.weight(o.Action); w > 0 {
+			cs = append(cs, Candidate{o, w})
+		}
+	}
+	return cs
+}
+
+func (g *Generator) weight(action string) float64 {
+	return float64(g.cfg.Weights[action]) / g.costs[action]
+}
+
+// Next proposes the next operation, or false when the run ends.
+//
+// Forced operations come first and count against no budget: the queue of
+// operations the model asked for before a drawn one (Model.Before; the
+// drawn operation follows them unless its subject's state changed meanwhile),
+// then the operations the model says are due now (Model.Due). Each carries
+// its reason in Op.Forced, recorded in its gen_step.
+func (g *Generator) Next() (Op, bool) {
+	if g.ended != "" {
+		return Op{}, false
+	}
+	for len(g.queue) > 0 {
+		q := g.queue[0]
+		g.queue = g.queue[1:]
+		if q.op.Forced == "" && g.m.State(q.op.Volume) != q.state {
+			continue // the drawn operation's precondition no longer holds
+		}
+		return g.propose(q.op), true
+	}
+	if g.drawn >= g.cfg.Ops {
+		g.ended = "ops"
+		return Op{}, false
+	}
+	if due := g.m.Due(); len(due) > 0 {
+		return g.propose(due[0]), true
+	}
+	var cs []Candidate
+	if g.rng.Float64() < g.cfg.Negative {
+		cs = g.Candidates(true)
+	}
+	if len(cs) == 0 {
+		cs = g.Candidates(false)
+	}
+	if len(cs) == 0 {
+		g.ended = "pool exhausted"
+		return Op{}, false
+	}
+	total := 0.0
+	for _, c := range cs {
+		total += c.Weight
+	}
+	pick := g.rng.Float64() * total
+	chosen := cs[len(cs)-1]
+	for _, c := range cs {
+		if pick < c.Weight {
+			chosen = c
+			break
+		}
+		pick -= c.Weight
+	}
+	g.drawn++
+	if before := g.m.Before(chosen.Op); len(before) > 0 {
+		for _, b := range before[1:] {
+			g.queue = append(g.queue, queued{op: b})
+		}
+		g.queue = append(g.queue, queued{op: chosen.Op, state: g.m.State(chosen.Op.Volume)})
+		return g.propose(before[0]), true
+	}
+	return g.propose(chosen.Op), true
+}
+
+// queued is an operation waiting in the forced queue; a drawn one keeps its
+// subject's state at the draw.
+type queued struct {
+	op    Op
+	state string
+}
+
+// propose numbers an operation and counts it in the coverage.
+func (g *Generator) propose(o Op) Op {
+	g.no++
+	o.No = g.no
+	g.cells[o.Action+"|"+g.m.State(o.Volume)]++
+	g.counts[o.Action]++
+	if o.Forced != "" {
+		g.forced++
+	}
+	if o.Negative == "" {
+		g.ordinary[o.Action]++
+	}
+	if g.down != "" {
+		g.fcells["while_down|"+o.Action]++
+	}
+	return o
+}
+
+// Coverage is the bundle's coverage report: proposals per action, per
+// (action, state) cell, and the cells that were possible in principle (the
+// model's Cells, and in a fault run each process killed and restarted and
+// each action proposed while a process was down) but never reached.
+func (g *Generator) Coverage() map[string]any {
+	all := g.m.Cells()
+	var missed []string
+	for a, sts := range all {
+		for _, s := range sts {
+			if g.cells[a+"|"+s] == 0 {
+				missed = append(missed, a+"|"+s)
+			}
+		}
+	}
+	var fcells map[string]int
+	if g.Faulty() {
+		fcells = map[string]int{}
+		for k, v := range g.fcells {
+			fcells[k] = v
+		}
+		var want []string
+		if g.cfg.Faults != 0 {
+			for _, p := range g.cfg.FaultProcesses {
+				want = append(want, FaultKill+"|"+p, FaultRestart+"|"+p)
+			}
+		}
+		if master, _, ok := g.m.MasterOutage(); ok && g.cfg.MasterOutage != 0 {
+			want = append(want, FaultMasterOutage+"|"+master)
+		}
+		for a := range all {
+			want = append(want, "while_down|"+a)
+		}
+		for _, c := range want {
+			if g.fcells[c] == 0 {
+				missed = append(missed, c)
+			}
+		}
+	}
+	slices.Sort(missed)
+	cells := map[string]int{}
+	for k, v := range g.cells {
+		cells[k] = v
+	}
+	counts := map[string]int{}
+	for k, v := range g.counts {
+		counts[k] = v
+	}
+	est := 0.0
+	for a, n := range g.counts {
+		est += g.costs[a] * float64(n)
+	}
+	perHour := 0.0
+	if est > 0 {
+		perHour = float64(g.no) * 3600 / est
+	}
+	// The actions of the run's weights never proposed as ordinary (drawn or
+	// forced, not negative).
+	neverRan := []string{}
+	for a, w := range g.cfg.Weights {
+		if w > 0 && g.ordinary[a] == 0 {
+			neverRan = append(neverRan, a)
+		}
+	}
+	slices.Sort(neverRan)
+	cov := map[string]any{"proposed": g.no, "drawn": g.drawn, "forced": g.forced, "ended": g.ended, "actions": counts, "cells": cells,
+		"cells_never_reached": missed, "ordinary_never_ran": neverRan, "estimated_ops_per_hour": int(perHour)}
+	if fcells != nil {
+		cov["fault_cells"] = fcells
+	}
+	if notes := g.m.Notes(); len(notes) > 0 {
+		cov["notes"] = notes
+	}
+	return cov
+}

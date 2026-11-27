@@ -283,30 +283,6 @@ type setRunner interface {
 	RunRoot(ctx context.Context, cmd string) (string, string, int, error)
 }
 
-// v3ctlAnswer is v3ctl's JSON answer.
-type setV3ctlAnswer struct {
-	Outcome    string `json:"outcome"`
-	Volume     string `json:"volume"`
-	LayoutID   string `json:"layout_id"`
-	StoreReady bool   `json:"store_ready"`
-	CallNs     int64  `json:"call_ns"`
-	Error      string `json:"error"`
-}
-
-// parseV3ctl maps v3ctl's exit code and answer to an outcome. The exit code
-// and the answer must agree; anything else is unknown.
-func setParseV3ctl(stdout string, code int, volume string) (setV3ctlAnswer, string) {
-	var a setV3ctlAnswer
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &a); err != nil || a.Volume != volume {
-		return a, "unknown"
-	}
-	want := map[string]int{"ok": 0, "refused": 1, "unknown": 3}[a.Outcome]
-	if a.Outcome == "" || want != code || (a.Outcome == "ok" && len(a.LayoutID) != 32) {
-		return a, "unknown"
-	}
-	return a, a.Outcome
-}
-
 // v3VsCreate creates every volume with one timed CreateVolume call each.
 // The latency is the call alone, as v3ctl measures it.
 func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
@@ -320,7 +296,7 @@ func v3VsCreate(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 		if err != nil {
 			return outcome{Result: "unknown", Detail: err.Error()}
 		}
-		a, r := setParseV3ctl(stdout, code, v.Name)
+		a, r := parseV3ctl(stdout, code, v.Name)
 		if r != "ok" {
 			return outcome{Result: r, Detail: setFirstLine(a.Error + " " + stderr)}
 		}
@@ -508,7 +484,7 @@ func v3VsAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			if err != nil {
 				return outcome{Result: "unknown", Detail: err.Error()}
 			}
-			a, r := setParseV3ctl(stdout, code, v.Name)
+			a, r := parseV3ctl(stdout, code, v.Name)
 			if r != "ok" {
 				return outcome{Result: r, Detail: "resolve: " + a.Error}
 			}
@@ -650,39 +626,12 @@ func setContains(set []string, v string) bool {
 	return false
 }
 
-// chunkRefusals are the `sw-block ops chunk` error codes the product states
-// change nothing. The `retryable` flag is about retrying, not about effect
-// (detach_aborted is retryable and applied nothing; outcome_unknown is
-// retryable and may have applied), so it decides nothing here.
-var setChunkRefusals = map[string]bool{
-	// core/host/volume/chunk_control.go chunkErrorCode, ErrDetachAborted:
-	// "nothing was published and serving resumed here".
-	"detach_aborted": true,
-	// cmd/sw-block/chunk.go: bad usage or a local start check, answered
-	// before the operation is sent (chunkFail with VolumeStatusExitInvalid).
-	"bad_request": true,
-}
-
-// chunkOutcome maps an `sw-block ops chunk` exit and its JSON error body to
-// an outcome: exit 0 ok; a code in chunkRefusals refused; every other answer,
-// outcome_unknown included whatever its flag says, unknown, for a read of the
-// state to decide.
+// setChunkOutcome maps an `sw-block ops chunk` exit and its JSON error body
+// for the volume-set actions. The outcome table (product/outcomes.json) does
+// not name them, so only its rows for every action ("*") apply: exit 0 ok; a
+// code those rows refuse, refused; every other answer unknown.
 func setChunkOutcome(stdout string, code int) (string, string) {
-	if code == 0 {
-		return "ok", ""
-	}
-	var e struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		Retryable bool   `json:"retryable"`
-	}
-	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &e) != nil || e.Code == "" {
-		return "unknown", fmt.Sprintf("exit %d without an error body", code)
-	}
-	if setChunkRefusals[e.Code] {
-		return "refused", e.Code + ": " + e.Message
-	}
-	return "unknown", e.Code + ": " + e.Message
+	return chunkOutcome(opPath{}, stdout, code)
 }
 
 // v3VsSnapshot takes a named snapshot of every volume. Required: name.
@@ -1077,18 +1026,9 @@ func (s *vsSet) headGen(ctx context.Context, node setRunner, vol string) (uint64
 	return body.Head.Gen, ""
 }
 
-// setWsOutcome maps `sw-block ops workspace` exit codes inside v3VsMove, its
-// only caller: 0 ok, anything else unknown. The CLI's 1, 2 and 5 say that
-// one command did nothing (cmd/sw-block/workspace.go:17-22 at the commit
-// pinned in outcome.go), but v3VsMove's revoke and move --clean both come
-// after its detach --plain sealed HEAD, so the move as a whole changed
-// state (see wsRefusals in outcome.go).
-func setWsOutcome(code int) string {
-	if code == 0 {
-		return "ok"
-	}
-	return "unknown"
-}
+// v3VsMove's `sw-block ops workspace` exits map as the move action's in the
+// outcome table (wsOutcome): its revoke and move --clean both come after its
+// detach --plain sealed HEAD, so the move as a whole changed state.
 
 // v3VsMove moves the first n volumes (param first, default 10) to their
 // second host with the planned hand-over: disconnect the guest; detach
@@ -1134,8 +1074,8 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 			return node.Run(ctx, shellQuote(s.cli())+" ops workspace "+strings.Join(quoteAll(append(args, "--master", s.Master, "--volume", v.Name)), " "))
 		}
 		stdout, stderr, code, err = ws("revoke", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10), "--sealed-gen", strconv.FormatUint(gen, 10))
-		if err != nil || setWsOutcome(code) != "ok" || !reRevoke.MatchString(stdout) {
-			return outcome{Result: wsOutcomeOr(err, code), Detail: "revoke: " + setFirstLine(stdout+" "+stderr)}
+		if r := revokeOutcome(err, code, stdout); r != "ok" {
+			return outcome{Result: r, Detail: "revoke: " + setFirstLine(stdout+" "+stderr)}
 		}
 		if why := setWaitGone(ctx, node, v.PID, 40*time.Second); why != "" {
 			return outcome{Result: "unknown", Detail: "the source did not exit by itself after the revoke: " + why}
@@ -1165,8 +1105,8 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		req := v.Name + "-move-1"
 		stdout, stderr, code, err = ws("move", "--clean", "--replica", "r1", "--epoch", strconv.FormatUint(v.Epoch, 10),
 			"--target-host", dst.Server, "--target-data", dst.Data, "--target-ctrl", dst.Ctrl, "--request-id", req)
-		if err != nil || setWsOutcome(code) != "ok" {
-			return outcome{Result: wsOutcomeOr(err, code), Detail: "move: " + setFirstLine(stdout+" "+stderr)}
+		if err != nil || wsOutcome(wsMove, wsMoveClean, code) != "ok" {
+			return outcome{Result: wsOutcomeOr(err, wsMoveClean, code), Detail: "move: " + setFirstLine(stdout+" "+stderr)}
 		}
 		e2, perr := parseMoved(stdout, v.Name, req, v.Epoch, gen, hg, dst.Server)
 		if perr != nil {
@@ -1183,11 +1123,22 @@ func v3VsMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	return report(actx, act, "v3_vs_move", outs)
 }
 
-func wsOutcomeOr(err error, code int) string {
+// revokeOutcome is v3VsMove's revoke: ok only with exit 0 and the CLI's
+// "revocation requested" answer. Exit 0 with any other answer is unknown:
+// the runner cannot say what the product did.
+func revokeOutcome(err error, code int, stdout string) string {
+	r := wsOutcomeOr(err, wsRevoke, code)
+	if r == "ok" && !reRevoke.MatchString(stdout) {
+		return "unknown"
+	}
+	return r
+}
+
+func wsOutcomeOr(err error, path string, code int) string {
 	if err != nil {
 		return "unknown"
 	}
-	return setWsOutcome(code)
+	return wsOutcome(wsMove, path, code)
 }
 
 // v3VsStop disconnects every volume and stops its blockvolume by its

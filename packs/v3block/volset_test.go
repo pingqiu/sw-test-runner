@@ -2,6 +2,7 @@ package v3block
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,8 +32,13 @@ func TestVolumeSetParseV3ctl(t *testing.T) {
 		{"another volume", `{"outcome":"ok","volume":"v002","layout_id":"` + id + `"}`, 0, "unknown"},
 		{"no answer", ``, 0, "unknown"},
 		{"no outcome", `{"volume":"v001"}`, 0, "unknown"},
+		// Red controls: an outcome outside the three is unknown, whatever exit
+		// it comes with.
+		{"an outcome outside the three, exit 0", `{"outcome":"maybe","volume":"v001","layout_id":"` + id + `"}`, 0, "unknown"},
+		{"an outcome outside the three, exit 1", `{"outcome":"maybe","volume":"v001"}`, 1, "unknown"},
+		{"refused answer, unknown's exit", `{"outcome":"refused","volume":"v001"}`, 3, "unknown"},
 	} {
-		if _, got := setParseV3ctl(c.out, c.code, "v001"); got != c.want {
+		if _, got := parseV3ctl(c.out, c.code, "v001"); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
@@ -66,9 +72,36 @@ func TestVolumeSetChunkOutcome(t *testing.T) {
 func TestVolumeSetWsOutcome(t *testing.T) {
 	// Red control: 1, 2 and 5 stay unknown; the move sealed HEAD before them.
 	want := map[int]string{0: "ok", 1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 5: "unknown", 9: "unknown", -1: "unknown"}
-	for code, w := range want {
-		if got := setWsOutcome(code); got != w {
-			t.Errorf("exit %d: %s, want %s", code, got, w)
+	for _, path := range []string{wsRevoke, wsMoveClean} {
+		for code, w := range want {
+			if got := wsOutcomeOr(nil, path, code); got != w {
+				t.Errorf("%s exit %d: %s, want %s", path, code, got, w)
+			}
+		}
+	}
+}
+
+// Red control: a revoke that exits 0 without the CLI's answer is unknown, not
+// ok; the runner cannot say what the product did.
+func TestVolumeSetRevokeOutcome(t *testing.T) {
+	const answer = "revocation requested: volume v001 holder r1@2 expiry_ns 123\n"
+	for _, c := range []struct {
+		name   string
+		err    error
+		code   int
+		stdout string
+		want   string
+	}{
+		{"exit 0 with the answer", nil, 0, answer, "ok"},
+		{"exit 0 without the answer", nil, 0, "", "unknown"},
+		{"exit 0 with another answer", nil, 0, "revocation refused: volume v001\n", "unknown"},
+		{"exit 0, a warning line first", nil, 0, "warning\n" + answer, "unknown"},
+		{"exit 1 with the answer", nil, 1, answer, "unknown"},
+		{"exit 5", nil, 5, "", "unknown"},
+		{"no exit", errors.New("ssh: lost"), 0, answer, "unknown"},
+	} {
+		if got := revokeOutcome(c.err, c.code, c.stdout); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
 	}
 }

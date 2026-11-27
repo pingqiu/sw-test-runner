@@ -71,7 +71,7 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	sa, sb := stepsOf(t, a), stepsOf(t, b)
-	if out["value"] != "match" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) != 300 {
+	if out["value"] != "match" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) < 300 {
 		t.Fatalf("out %v, %d steps", out, len(sa))
 	}
 	if !reflect.DeepEqual(sa, sb) {
@@ -82,12 +82,115 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatalf("replay header %+v", hdr)
 	}
 	rep := lastVerb(t, b, "gen_replay")
-	if rep.Result["steps"] != float64(300) || len(rep.Result["differences"].([]any)) != 0 {
+	if rep.Result["steps"] != float64(len(sa)) || len(rep.Result["differences"].([]any)) != 0 {
 		t.Fatalf("gen_replay %+v", rep.Result)
 	}
 	// A replayed history is itself replayable, judged the same way.
 	if out, c, err := replayInto(t, b); err != nil || out["value"] != "match" || !reflect.DeepEqual(stepsOf(t, c), sa) {
 		t.Fatalf("replay of the replay: %v %v", out, err)
+	}
+}
+
+// sweepOf returns the gen_sweep record's ops and the records after it, up to
+// gen_coverage or gen_replay, as "kind verb volume" lines.
+func sweepOf(t *testing.T, p string) ([]any, []string) {
+	t.Helper()
+	var ops []any
+	var after []string
+	in := false
+	for _, r := range records(t, p) {
+		switch {
+		case r.Verb == "gen_sweep":
+			if in || ops != nil {
+				t.Fatal("two gen_sweep records")
+			}
+			ops, in = r.Result["ops"].([]any), true
+		case r.Verb == "gen_coverage" || r.Verb == "gen_replay" || r.Kind == tr.HistoryEnd:
+			in = false
+		case r.Verb == "gen_step":
+			if in || ops != nil {
+				t.Fatalf("a step after the sweep: %+v", r)
+			}
+		case in:
+			after = append(after, r.Kind+" "+r.Verb+" "+r.Volume)
+		}
+	}
+	if ops == nil {
+		t.Fatalf("%s has no gen_sweep", p)
+	}
+	return ops, after
+}
+
+func TestGenRunSweepsAtTheEndAndTheReplayReExecutesIt(t *testing.T) {
+	f := &fakeProduct{}
+	f.install(t)
+	a := recordRun(t, "300")
+	ops, after := sweepOf(t, a)
+	// Each listed op ran, in order: a read as invoke+complete, an observation
+	// as one observe record.
+	var want []string
+	reads, observes := 0, 0
+	for _, x := range ops {
+		o := x.(map[string]any)
+		v := o["volume"].(string)
+		switch o["action"] {
+		case "v3_op_read":
+			reads++
+			want = append(want, tr.HistoryInvoke+" read "+v, tr.HistoryComplete+" read "+v)
+		case "v3_op_observe":
+			observes++
+			want = append(want, tr.HistoryObserve+" observe "+v)
+		default:
+			t.Fatalf("sweep op %v", o)
+		}
+	}
+	if reads == 0 || observes == 0 || !reflect.DeepEqual(after, want) {
+		t.Fatalf("%d reads, %d observations; records after gen_sweep\n%v\nwant\n%v", reads, observes, after, want)
+	}
+	if lastVerb(t, a, "gen_coverage").Result["drawn"] != float64(300) {
+		t.Fatal("the sweep counted as proposals")
+	}
+	// The coverage tail: its steps come after every drawn one and before the
+	// sweep, and its last is the create of a deleted name.
+	var kinds []string
+	for _, r := range records(t, a) {
+		if r.Verb == "gen_step" {
+			f, _ := r.Result["forced"].(string)
+			kinds = append(kinds, f+"|"+r.Result["action"].(string))
+		}
+		if r.Verb == "gen_sweep" {
+			break
+		}
+	}
+	n := 0
+	for n < len(kinds) && strings.HasPrefix(kinds[len(kinds)-1-n], "tail|") {
+		n++
+	}
+	if n == 0 || kinds[len(kinds)-1] != "tail|v3_op_create" {
+		t.Fatalf("the steps before the sweep end %q", kinds[max(0, len(kinds)-6):])
+	}
+	out, b, err := replayInto(t, a)
+	if err != nil || out["value"] != "match" {
+		t.Fatalf("%v %v", out, err)
+	}
+	ops2, after2 := sweepOf(t, b)
+	if !reflect.DeepEqual(ops, ops2) || !reflect.DeepEqual(after, after2) {
+		t.Fatal("the replay ran another sweep")
+	}
+	// A history without a sweep (an older run) replays without one.
+	p := writeHistory(t, func(h *tr.History) {
+		obs(h, "gen_header", "", map[string]any{"generator": GenVersion, "seed": "1"})
+		obs(h, "gen_step", "g1", map[string]any{"opno": 1, "action": "v3_op_create", "params": map[string]any{"volume": "g1"}})
+		opRec(h, "create", "g1", tr.OutcomeOK)
+	})
+	if _, c, err := replayInto(t, p); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, r := range records(t, c) {
+			if r.Verb == "gen_sweep" {
+				t.Fatal("a sweep replayed from a history that had none")
+			}
+		}
 	}
 }
 
@@ -120,7 +223,7 @@ func TestGenReplayReportsAnOutcomeThatDiffers(t *testing.T) {
 		return inner(ctx, actx, act)
 	}
 	_, b, err := replayInto(t, a)
-	if err == nil || !strings.Contains(err.Error(), "operation "+strconv.Itoa(opno)+" ") || !strings.Contains(err.Error(), "1 of 300") {
+	if err == nil || !strings.Contains(err.Error(), "operation "+strconv.Itoa(opno)+" ") || !strings.Contains(err.Error(), "1 of "+strconv.Itoa(len(stepsOf(t, a)))) {
 		t.Fatalf("the difference at operation %d was not named: %v", opno, err)
 	}
 	diffs := lastVerb(t, b, "gen_replay").Result["differences"].([]any)
@@ -128,7 +231,7 @@ func TestGenReplayReportsAnOutcomeThatDiffers(t *testing.T) {
 	if len(diffs) != 1 || !reflect.DeepEqual(diffs[0], want) {
 		t.Fatalf("differences %v, want [%v]", diffs, want)
 	}
-	if len(stepsOf(t, b)) != 300 {
+	if len(stepsOf(t, b)) != len(stepsOf(t, a)) {
 		t.Fatal("the replay did not go through every step")
 	}
 }
@@ -177,7 +280,7 @@ func TestGenReplayRecordedOutcomeIsTheWorstCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) != 2 || steps[0].recorded != tr.OutcomeUnknown || steps[1].recorded != tr.OutcomeRefused || steps[1].op.Negative != "x" {
+	if len(steps) != 2 || steps[0].Recorded != tr.OutcomeUnknown || steps[1].Recorded != tr.OutcomeRefused || steps[1].Op.Negative != "x" {
 		t.Fatalf("steps %+v", steps)
 	}
 	f := &fakeProduct{failWrite: "3"}
@@ -198,6 +301,16 @@ func TestGenReplayRefusesABadScriptBeforeAnyCall(t *testing.T) {
 		// histories are not replayed.
 		"generator m1-gen/1": func(h *tr.History) {
 			obs(h, "gen_header", "", map[string]any{"generator": "m1-gen/1"})
+			obs(h, "gen_step", "g1", step)
+			opRec(h, "create", "g1", tr.OutcomeOK)
+		},
+		"generator m1-gen/3": func(h *tr.History) {
+			obs(h, "gen_header", "", map[string]any{"generator": "m1-gen/3"})
+			obs(h, "gen_step", "g1", step)
+			opRec(h, "create", "g1", tr.OutcomeOK)
+		},
+		"generator m1-gen/2": func(h *tr.History) {
+			obs(h, "gen_header", "", map[string]any{"generator": "m1-gen/2"})
 			obs(h, "gen_step", "g1", step)
 			opRec(h, "create", "g1", tr.OutcomeOK)
 		},

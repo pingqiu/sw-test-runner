@@ -1,0 +1,75 @@
+{
+  "product": "block",
+  "comment": "Declared workload loops (tier 1: no model). Each step is a registered typed action; the order is fixed, so each step's precondition holds by construction. Schema: randomrun/loop.go.",
+  "loops": {
+    "soak": {
+      "comment": "Create and attach every volume of the pool; each iteration, per volume: write 4 random lbas, read them back, every 10th iteration take a snapshot and delete the snapshot taken three snapshots earlier (at most 4 live, under the limit of 10); after the cycle, read back every written lba and observe every volume; last, stop each volume.",
+      "lbas": 4,
+      "setup": [
+        {"action": "v3_op_create", "params": {"volume": "{subject}"}},
+        {"action": "v3_op_attach", "params": {"volume": "{subject}"}}
+      ],
+      "cycle": [
+        {"action": "v3_op_write", "params": {"volume": "{subject}", "lbas": "{lbas}", "round": "i{iteration}"}, "writes_lbas": true},
+        {"action": "v3_op_read", "params": {"volume": "{subject}", "lbas": "{lbas}"}},
+        {"action": "v3_op_snapshot", "every": 10, "params": {"volume": "{subject}", "name": "{subject}-s{iteration}"}},
+        {"action": "v3_op_snapshot_delete", "every": 10, "back": 30, "params": {"volume": "{subject}", "name": "{subject}-s{iteration}"}}
+      ],
+      "sweep": {"action": "v3_op_read", "params": {"volume": "{subject}", "lbas": "{written}"}},
+      "teardown": [
+        {"action": "v3_op_stop", "params": {"volume": "{subject}"}}
+      ]
+    },
+    "writes": {
+      "comment": "Create and attach every volume of the pool; each iteration, per volume: write 4 random lbas and read them back, with no snapshot, so the only cuts are the product's periodic ones; after the cycle, read back every written lba and observe every volume; last, stop each volume.",
+      "lbas": 4,
+      "setup": [
+       {
+        "action": "v3_op_create",
+        "params": {
+         "volume": "{subject}"
+        }
+       },
+       {
+        "action": "v3_op_attach",
+        "params": {
+         "volume": "{subject}"
+        }
+       }
+      ],
+      "cycle": [
+       {
+        "action": "v3_op_write",
+        "params": {
+         "volume": "{subject}",
+         "lbas": "{lbas}",
+         "round": "i{iteration}"
+        },
+        "writes_lbas": true
+       },
+       {
+        "action": "v3_op_read",
+        "params": {
+         "volume": "{subject}",
+         "lbas": "{lbas}"
+        }
+       }
+      ],
+      "sweep": {
+       "action": "v3_op_read",
+       "params": {
+        "volume": "{subject}",
+        "lbas": "{written}"
+       }
+      },
+      "teardown": [
+       {
+        "action": "v3_op_stop",
+        "params": {
+         "volume": "{subject}"
+        }
+       }
+      ]
+     }
+  }
+}

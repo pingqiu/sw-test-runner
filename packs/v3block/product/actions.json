@@ -1,0 +1,756 @@
+{
+  "product": "block",
+  "read_at": "seaweed-block 032eb1971cfddd6622ddeb46d20e17854d12c205",
+  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below; a computed key is the pack's, from the others), a parameter, <subject param>.<field> (a volume: name, nqn, layout_id, layout8 (its first 8 characters), epoch, pid, pid_start, written; the current host's server, data_addr, ctrl_addr, status_addr, nvme_addr; the move target's next_cur, next_server, next_data_addr, next_ctrl_addr; holder_alive: the recorded holder runs. A process: pid, pid_start, killed_pid, killed_argv, volume, and its volume's fields), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The step kinds (package declared) run one operation under the action's own runner_deadline_seconds: device (I/O through the subject's block device), process (a long-lived process by its recorded identity: start, kill, restart) and sequence (product steps that feed each other; any failure after the first state change is unknown). The exceptions are the actions that stay Go handlers, each with its reason.",
+  "config": {
+    "keys": [
+      {"name": "bin_dir", "required": true},
+      {"name": "master", "required": true},
+      {"name": "filer", "required": true},
+      {"name": "chunk_path", "required": true},
+      {"name": "root", "required": true},
+      {"name": "client", "default": "c1"},
+      {"name": "own_script"},
+      {"name": "work"},
+      {"name": "owner"},
+      {"name": "lock_dirs_test_only"},
+      {"name": "chunk_listing", "computed": "the chunk path in the filer's HTTP listing: http://<filer host>:<filer port - 10000><chunk path without its trailing slashes> (the filer's HTTP port is its gRPC port minus 10000, SeaweedFS's convention); a filer with no such port cannot have one (packs/v3block/declared.go chunkListing)"}
+    ],
+    "client": "client"
+  },
+  "runner_io_dir": "{{config.root}}/.runner-io",
+  "device_resolvers": {
+    "nvme_namespace": {
+      "cite": "core/csi/linux_util.go:318 (the product's connect: nvme connect -t -a -s -n), :554 (a subsystem's NQN in sysfs); run by declared/resolver.go:206-436",
+      "scan": {
+        "command": [
+          {
+            "raw": "for d in /sys/class/nvme/nvme*; do [ -e \"$d\" ] || continue; q=$(cat \"$d/subsysnqn\") || exit 3; [ \"$q\" ="
+          },
+          "{{subsystem}}",
+          {
+            "raw": "] || continue; echo \"ctrl $(basename \"$d\")\"; for n in \"$d\"/nvme*n*; do [ -e \"$n\" ] && echo \"ns $(basename \"$n\")\"; done; done; echo end"
+          }
+        ],
+        "end": "end",
+        "lines": {
+          "ctrl": "^ctrl (.*)$",
+          "ns": "^ns (\\S+?)(?:c[0-9]+)?(n[0-9]+)$"
+        },
+        "absent": {
+          "ctrl": 0
+        },
+        "one": {
+          "ctrl": 1,
+          "ns": 1
+        },
+        "device_line": "ns",
+        "device": "/dev/{{ns.1}}{{ns.2}}",
+        "unreadable": "sysfs scan exit {{exit}}: {{stderr_first_line}}",
+        "bad_line": "sysfs scan printed {{line}}",
+        "incomplete": "subsystem {{subsystem}}: {{count.ctrl}} controllers, {{count.ns}} namespaces",
+        "no_device": "no controller of {{subsystem}}",
+        "no_device_by_deadline": "no single device of {{subsystem}} by the runner deadline",
+        "every_ms": 250
+      },
+      "connect": {
+        "command": [
+          "printf",
+          "%s",
+          "transport=tcp,traddr={{host}},trsvcid={{port}},nqn={{subsystem}}{{options}}",
+          {
+            "raw": ">"
+          },
+          "/dev/nvme-fabrics"
+        ],
+        "as_root": true,
+        "require": [
+          {
+            "value": "{{host}}",
+            "pattern": "^[0-9.]+$",
+            "failure": "nvme connect: malformed address or nqn"
+          },
+          {
+            "value": "{{port}}",
+            "pattern": "^[0-9]+$",
+            "failure": "nvme connect: malformed address or nqn"
+          },
+          {
+            "value": "{{subsystem}}",
+            "pattern": "^[A-Za-z0-9.:_-]+$",
+            "failure": "nvme connect: malformed address or nqn"
+          },
+          {
+            "value": "{{options}}",
+            "pattern": "^(,[a-z_]+=-?[0-9]+)*$",
+            "failure": "nvme connect: malformed options {{options}}"
+          }
+        ],
+        "failure": "nvme connect: {{stderr_first_line}}"
+      },
+      "disconnect": {
+        "command": [
+          {
+            "raw": "n=0; for d in /sys/class/nvme/nvme*; do [ -e \"$d\" ] || continue; q=$(cat \"$d/subsysnqn\") || exit 3; [ \"$q\" ="
+          },
+          "{{subsystem}}",
+          {
+            "raw": "] || continue; echo 1 > \"$d/delete_controller\" || exit 4; n=$((n+1)); done; echo \"deleted $n\""
+          }
+        ],
+        "as_root": true,
+        "count_pattern": "^deleted ([0-9]+)$",
+        "failure": "nvme disconnect: exit {{exit}}: {{stderr_first_line}}",
+        "confirm_within_seconds": 5,
+        "confirm_every_ms": 250,
+        "not_confirmed": "nvme disconnect: cannot confirm: {{why}}",
+        "remains": "nvme disconnect: a controller of {{subsystem}} remains",
+        "remains_by_deadline": "nvme disconnect: a controller of {{subsystem}} remains at the runner deadline"
+      },
+      "readback": {
+        "command": [
+          {
+            "raw": "for d in /sys/class/nvme/nvme*; do [ -e \"$d\" ] || continue; q=$(cat \"$d/subsysnqn\") || exit 3; [ \"$q\" ="
+          },
+          "{{subsystem}}",
+          {
+            "raw": "] || continue; echo \"ctrl $(basename \"$d\")\"; for f in $(echo"
+          },
+          "{{files}}",
+          {
+            "raw": "); do if [ -e \"$d/$f\" ]; then echo \"$f $(cat \"$d/$f\")\"; else echo \"$f -\"; fi; done; done; echo end"
+          }
+        ],
+        "unit_line": "^ctrl (\\S+)$",
+        "value_line": "^(\\S+) (\\S+)$",
+        "not_shown": "-",
+        "text_values": {
+          "off": -1
+        },
+        "unreadable": "readback exit {{exit}}: {{stderr_first_line}}",
+        "not_one": "{{count}} controllers of {{subsystem}}",
+        "unit_key": "ctrl",
+        "mismatch": "guest connect: {{mismatches}}",
+        "mismatch_item": "{{option}} declared {{declared}}, the kernel shows {{shown|q}}"
+      }
+    }
+  },
+  "run_values": [
+    {"name": "guest_connect", "why": "the label of the guest connect the run selected (guest.connect), recorded in every attach"},
+    {"name": "guest_connect_options", "why": "that connect's kernel fabrics options (\",key=value...\"; empty for a plain connect): what the read-back compares the kernel's values with"},
+    {"name": "guest_connect_name", "why": "that connect's name (documented, or a variant's)"},
+    {"name": "guest_connect_evidence", "why": "whether that connect's results are release evidence (true only for the documented connect)"}
+  ],
+  "actions": [
+    {
+      "action": "v3_op_create", "verb": "create", "op": "VolumeCreate.MarkReady", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "size_bytes", "kind": "int", "default": "16777216", "vars": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"size_bytes": {"template": "{{size_bytes}}", "type": "int"}}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/v3ctl", "create", "--master", "{{config.master}}", "--volume", "{{volume.name}}", "--size", "{{size_bytes}}"],
+        "runner_deadline_seconds": 90,
+        "cite": "the runner's client of the master's CreateVolume (core/host/master/services.go:57): packs/v3block/v3ctl/main.go:120-124 (flags), :139-152 (the call), :166-181 (the answer and its exit: ok 0, refused 1, unknown 3); its --timeout is 60s (:124)",
+        "decode": {
+          "kind": "self_reported",
+          "fields": {"outcome": "string", "volume": "string", "layout_id": "string", "store_ready": "bool", "call_ns": "int", "error": "string"},
+          "outcome_field": "outcome",
+          "exits": {"ok": 0, "refused": 1, "unknown": 3},
+          "match": {"volume": "{{volume.name}}"},
+          "ok_length": {"layout_id": 32},
+          "result": {"call_ns": "call_ns"},
+          "result_ok": {"layout_id": "layout_id"},
+          "detail": "{{answer.error}} {{stderr}}"
+        }
+      }],
+      "on_ok_set": {"volume.layout_id": "{{answer.layout_id}}"}
+    },
+    {
+      "action": "v3_op_snapshot", "verb": "snapshot", "op": "SnapshotRemoval.Commit", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "name", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}", "request": "{{volume.name}}-{{name}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "snapshot", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--name", "{{name}}", "--request-id", "{{volume.name}}-{{name}}"],
+        "runner_deadline_seconds": 90,
+        "cite": "cmd/sw-block/chunk.go:81-82 (dispatch), :207-208, :216-219 (--volume, --status-addr, --name, --request-id), :226 (--timeout 60s)",
+        "decode": {"kind": "error_body", "path": "ops chunk snapshot"}
+      }],
+      "retry": {"answers": [{"code": "head_conflict"}, {"code": "internal", "message_contains": "is not in HEAD after its commit"}],
+        "max_attempts": 3, "every_seconds": 1, "request_arg": "request",
+        "page_cite": "docs/operator-guide.md:220-225 (a snapshot can answer head_conflict: retry it with the same name; if that retry answers internal ... is not in HEAD after its commit, retry once more; the name exists only after a request for it succeeds)",
+        "note": "the COUNT is the bound, from the page: the first request, its retry after head_conflict, and one more retry after internal ... is not in HEAD after its commit (docs/operator-guide.md:221-222): 3 attempts. The page gives no period: every_seconds 1 is the runner's, and no wall-clock guard is declared (3 attempts each under the variant's runner deadline). ONLY a refused attempt is re-issued, never an unknown (it may have changed the volume, and the next attempt would have no before): both page answers decode unknown today (outcomes.json, the page does not say what they leave), so no snapshot attempt is re-issued until one decodes refused. The driver re-issues each attempt as its own operation (request, attempt), counted in answer_counts: the head_conflict ratio counts every attempt, a rerun never hides a conflict"}
+    },
+    {
+      "action": "v3_op_snapshot_delete", "verb": "snapshot_delete", "op": "SnapshotRemoval.DeleteSnap", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "name", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"name": "{{name}}", "via": "{{variant}}"}},
+      "variants": [
+        {
+          "name": "holder", "when": {"field": "volume.holder_alive", "equals": "true"},
+          "command": ["curl", "-s", "-m", "60", "-X", "POST", "-H", "Content-Type: application/json", "--data", {"json": {"volumeID": "{{volume.name}}", "name": "{{name}}"}}, "-w", "\\n%{http_code}", "http://{{volume.status_addr}}/chunk/snapshot/delete"],
+          "runner_deadline_seconds": 90,
+          "cite": "core/host/volume/chunk_control.go:241 (route), :533-553 (POST, body volumeID and name, 200 on success, the error body otherwise)",
+          "decode": {"kind": "error_body", "path": "POST /chunk/snapshot/delete", "answer": "http_status_last_line", "transport_failure": "holder not answering (curl exit {{exit}})"}
+        },
+        {
+          "name": "store",
+          "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "snapshot-delete", "--volume", "{{volume.name}}", "--name", "{{name}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}"],
+          "runner_deadline_seconds": 60,
+          "cite": "cmd/sw-block/chunk.go:87-88 (dispatch); cmd/sw-block/chunk_b.go:187-192 (--volume through bindVolume :87-89, --name), :117-122 (--chunk-filer, --chunk-path, --master; --timeout 30s from :188)",
+          "decode": {"kind": "error_body", "path": "ops chunk snapshot-delete"}
+        }
+      ],
+      "note": "through the holder while the recorded holder runs (the product cleans right after such a delete), store direct otherwise"
+    },
+    {
+      "action": "v3_op_restore", "verb": "restore", "op": "RestoreTarget.CreateHead", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "snapshot", "vars": true, "required": true},
+        {"name": "target_volume", "kind": "subject", "vars": true}
+      ],
+      "record": {"volume": "{{target_volume}}", "args": {"source": "{{volume.name}}", "snapshot": "{{snapshot}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "restore", "--source", "{{volume.name}}", "--snapshot", "{{snapshot}}", "--target", "{{target_volume}}", "--master", "{{config.master}}", "--request-id", "restore-{{target_volume}}"],
+        "runner_deadline_seconds": 420,
+        "cite": "cmd/sw-block/chunk.go:101-102 (dispatch); cmd/sw-block/chunk_b.go:253-259 (--source, --target, --snapshot, --request-id; --timeout 6m), :122 (--master)",
+        "decode": {"kind": "error_body", "path": "ops chunk restore"}
+      }]
+    },
+    {
+      "action": "v3_op_release", "verb": "release", "op": "RestoreTarget.OpRelease", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "target_volume", "vars": true, "required": true}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"target": "{{target_volume}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "release", "--source", "{{volume.name}}", "--target", "{{target_volume}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}"],
+        "runner_deadline_seconds": 60,
+        "cite": "cmd/sw-block/chunk.go:93-94 (dispatch); cmd/sw-block/chunk_b.go:305-309 (--source, --target through bindVolume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master)",
+        "decode": {"kind": "error_body", "path": "ops chunk release"}
+      }]
+    },
+    {
+      "action": "v3_op_delete", "verb": "delete", "op": "MoveAdmission.DelMark", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "admit_seconds", "kind": "int", "default": "3813"},
+        {"name": "retry_horizon", "kind": "bool", "default": "false"}
+      ],
+      "record": {"volume": "{{volume.name}}", "args": {"layout_id": "{{volume.layout_id}}", "request": "delete-{{volume.name}}"}},
+      "variants": [{
+        "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "volume-delete", "--volume", "{{volume.name}}", "--master", "{{config.master}}", "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}", "--request-id", "delete-{{volume.name}}"],
+        "runner_deadline_seconds": 90,
+        "cite": "cmd/sw-block/chunk.go:99-100 (dispatch); cmd/sw-block/chunk_volume_delete.go:19-32 (--volume, --request-id; rerun with the same id once the cause is cleared; --timeout 1m), cmd/sw-block/chunk_b.go:117-122 (--chunk-filer, --chunk-path, --master)",
+        "decode": {"kind": "error_body", "path": "ops chunk volume-delete"}
+      }],
+      "retry": {"while_code": "not_admitted", "while_message_contains": "workspace: deletion refused before persistence",
+        "max_attempts": 41, "every_seconds": 3, "within_param": "admit_seconds", "request_arg": "request",
+        "note": "the COUNT is the bound, from the page's horizon and the period: the horizon is about 60 seconds with default flags (docs/volume-lifecycle.md:411, :492); every 3 seconds that is 20 periods; the page states it as approximate, so twice that, 40 periods after the first attempt: 41 attempts, the last about 120 seconds after the first. ONLY a refused attempt is re-issued, never an unknown (it may have changed the volume, and the next attempt would have no before): the sentinel answer decodes refused (outcomes.json); a not_admitted without it decodes unknown and is not re-issued. admit_seconds is only a wall-clock guard, as for the linearizability budget, derived as count x (period + the action's runner deadline) = 41 x (3 + 90) = 3813 seconds: every attempt the count allows fits under it even when each runs to its deadline, so the COUNT ends a normal run; the guard ends the reruns only when the clock passes it, and the driver records that",
+        "page_cite": "docs/volume-lifecycle.md:526 (volume-delete answers not_admitted ... workspace: deletion refused before persistence: workspace delete: live until <time>: run it again after the horizon), docs/volume-lifecycle.md:489-492 (run the same command, the same --request-id, after <time>)",
+        "expected_refusal": {"param": "retry_horizon",
+          "why": "a negative that probes another refusal (a source whose snapshot has a restore target) first waits out the lease-horizon refusal before persistence, so the refusal judged is the one it probes"}},
+      "note": "after a stop the master refuses the reservation while the holder's lease may be live (not_admitted, the sentinel), and the page tells the operator to run the same command again after the horizon: each run is its own operation (request, attempt). A not_admitted after the reservation has no such page line and is not rerun (outcomes.json page_gaps). A step that declares expect=refused is one attempt, unless it sets retry_horizon."
+    },
+    {
+      "action": "v3_op_attach", "verb": "attach", "op": "HolderInterface.Start", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "host"},
+        {"name": "durable_blocks", "kind": "int", "default": "4096", "vars": true},
+        {"name": "chunk_capture_interval", "kind": "enum", "values": ["0", "5m", "15m", "30m", "1h"], "default": "0", "vars": true},
+        {"name": "ready_seconds", "kind": "int", "default": "60"}
+      ],
+      "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
+      "on_invoke_set": {"volume.cur": "{{host}}"},
+      "record": {"volume": "{{volume.name}}", "args": {"server": "{{volume.server}}", "min_epoch": {"template": "{{volume.epoch}}", "type": "int"}, "guest_connect": "{{run.guest_connect}}"}},
+      "process": {
+        "op": "start", "subject": "volume", "name": "blockvolume",
+        "cite": "cmd/blockvolume/main.go:186-198, :201, :214-215, :223-224, :229-231, :237 (the holder's flags as the command line uses them); launched by declared/process.go:235-246 (the wrapper that keeps its pid and writes its exit status)",
+        "before": [
+          {"name": "layout", "kind": "command", "when": {"field": "volume.layout_id", "equals": ""},
+           "command": ["{{config.bin_dir}}/v3ctl", "resolve", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "decode": {"kind": "self_reported", "fields": {"outcome": "string", "volume": "string", "layout_id": "string", "store_ready": "bool", "call_ns": "int", "error": "string"},
+             "outcome_field": "outcome", "exits": {"ok": 0, "refused": 1, "unknown": 3}, "match": {"volume": "{{volume.name}}"}, "ok_length": {"layout_id": 32}, "detail": "resolve: {{answer.error}}"},
+           "on_ok_set": {"volume.layout_id": "{{answer.layout_id}}"},
+           "cite": "packs/v3block/v3ctl/main.go:12 (resolve --master --volume), :153-160 (the answer; the exits as create's): the layout id from the master when the runner does not know it"},
+          {"name": "endpoints", "kind": "ports_free", "addresses": ["{{volume.data_addr}}", "{{volume.ctrl_addr}}", "{{volume.status_addr}}", "{{volume.nvme_addr}}"],
+           "cite": "declared/process.go:252-281 (the listener read): readiness is credited only to the launched process, so a listener already on one of the host's endpoints refuses the start"},
+          {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{volume.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{volume.server}}.locks"]}],
+           "failure": "mkdir", "cite": "cmd/blockvolume/main.go:223 (--durable-root)"}
+        ],
+        "argv": ["{{config.bin_dir}}/blockvolume",
+          {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["--volume-lock-dir-test-only", "{{config.root}}/{{volume.server}}.locks"]},
+          "--master", "{{config.master}}", "--server-id", "{{volume.server}}", "--volume-id", "{{volume.name}}", "--replica-id", "r1",
+          "--layout-id", "{{volume.layout_id}}", "--data-addr", "{{volume.data_addr}}", "--ctrl-addr", "{{volume.ctrl_addr}}", "--status-addr", "{{volume.status_addr}}",
+          "--durable-root", "{{config.root}}/{{volume.server}}", "--durable-impl", "walstore-chunk",
+          "--durable-blocks", "{{durable_blocks}}", "--durable-blocksize", "4096",
+          "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}", "--chunk-control-endpoint", "--workspace-lease",
+          "--nvme-listen", "{{volume.nvme_addr}}", "--nvme-subsysnqn", "{{volume.nqn}}", "--chunk-capture-interval", "{{chunk_capture_interval}}", "--chunk-snapshot-schedule", "off"],
+        "log": "{{config.root}}/{{volume.server}}.{{now_ns}}.log",
+        "result_launched": {"layout_id": "{{volume.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
+        "owned": [
+          {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
+           "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{volume.server}}", "{{launched.pid}}"],
+           "failure": "recording ownership: {{stderr_first_line}}",
+           "cite": "scenarios/v3block/m0-own.sh:94 (record): the run's ledger, so the teardown stops the process by its identity"}
+        ],
+        "ready": {
+          "within_param": "ready_seconds", "every_ms": 250,
+          "probes": [
+            {"name": "status", "kind": "json", "command": ["curl", "-s", "-m", "2", "http://{{volume.status_addr}}/status?volume={{volume.name}}"],
+             "schema": {"VolumeID": "string", "Epoch": "uint", "Healthy": "bool", "AuthorityRole": "string", "FrontendPrimaryReady": "bool"},
+             "holds": [{"path": "VolumeID", "equals": "{{volume.name}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
+               {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "above": "{{volume.epoch}}"}],
+             "capture": {"epoch": "Epoch"},
+             "cite": "core/host/volume/status_server.go:113, 119 (volumeID, epoch), :193-196 (FrontendPrimaryReady), :204-205 (AuthorityRole), :174 (primary), :376 (the /status route)"},
+            {"name": "listeners", "kind": "listeners_held", "addresses": ["{{volume.status_addr}}", "{{volume.nvme_addr}}"],
+             "cite": "declared/process.go:252-281 (the listener read): the status and NVMe listeners are held by the launched pid; cmd/blockvolume/main.go:201, :214 (--status-addr, --nvme-listen)"}
+          ],
+          "not_ready": "not serving above epoch {{volume.epoch}} from its own listeners within {{ready.within}}",
+          "not_ready_by_deadline": "not serving above epoch {{volume.epoch}} from its own listeners by the runner deadline"
+        },
+        "on_ready_set": {"volume.epoch": "{{ready.epoch}}"},
+        "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
+        "after": [
+          {"name": "connect", "kind": "device_connect", "resolver": "nvme_namespace", "address": "{{volume.nvme_addr}}", "subsystem": "{{volume.nqn}}", "options": "{{run.guest_connect_options}}",
+           "cite": "the run's guest connect (guest.connect: the documented connect by default, docs/standalone-deployment.md:463-464), as the product's connect does it (core/csi/linux_util.go:318: nvme connect -t -a -s -n), through the kernel's fabrics interface"},
+          {"name": "device", "kind": "device", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 20, "into": "device",
+           "cite": "declared/resolver.go:206-305 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+          {"name": "readback", "kind": "device_readback", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "expect": "{{run.guest_connect_options}}",
+           "files": {"ctrl_loss_tmo": "ctrl_loss_tmo", "reconnect_delay": "reconnect_delay", "fast_io_fail_tmo": "fast_io_fail_tmo", "keep_alive_tmo": "kato"},
+           "into": "guest_connect_effective", "fail_run": true, "record_verb": "guest_connect",
+           "record_fields": {"name": "{{run.guest_connect_name}}", "label": "{{run.guest_connect}}", "evidence": "{{run.guest_connect_evidence}}"},
+           "cite": "declared/readback.go:51-130 and the resolver's readback (declared/resolver.go:394-436: the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the answer sets the volume's intended state: ok held, unknown unsettled (placed by observation at a healthy look), a refusal nothing"
+    },
+    {
+      "action": "v3_op_kill", "verb": "kill", "op": "Env.Kill", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "process", "kind": "process"},
+        {"name": "kill_seconds", "kind": "int", "default": "20"}
+      ],
+      "runner_deadline_seconds": 60, "plus_param": {"name": "kill_seconds", "default": 20},
+      "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}, "signal": "KILL", "pid": {"template": "{{process.pid}}", "type": "int", "optional": true}}},
+      "process": {"op": "kill", "subject": "process", "name": "process", "within_param": "kill_seconds",
+        "cite": "the process from the run's records (blockmaster: the ownership ledger, scenarios/v3block/m0-own.sh:72 spawn; blockvolume:<i>: the holder v3_op_attach started for volume i of v3_op_spec), killed by its pid and start time"},
+      "note": "a fault touches every volume: the record's volume is empty and its args name the process and, for a holder, its volume"
+    },
+    {
+      "action": "v3_op_restart_holder", "verb": "restart", "op": "Env.Restart", "kind": "process", "runs_on": "step_node",
+      "params": [
+        {"name": "process", "kind": "process"},
+        {"name": "ready_seconds", "kind": "int", "default": "60"}
+      ],
+      "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
+      "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}}},
+      "process": {
+        "op": "restart", "subject": "process", "name": "blockvolume",
+        "cite": "declared/process.go:212-228 (the command line read from /proc before the kill), :234-245 (relaunched under the same wrapper)",
+        "before": [
+          {"name": "endpoints", "kind": "ports_free", "addresses": ["{{process.data_addr}}", "{{process.ctrl_addr}}", "{{process.status_addr}}", "{{process.nvme_addr}}"],
+           "cite": "declared/process.go:252-281 (the listener read): a listener already on one of the host's endpoints refuses the start"},
+          {"name": "dirs", "kind": "command", "command": ["mkdir", "-p", "{{config.root}}/{{process.server}}", {"when": {"field": "config.lock_dirs_test_only", "equals": "true"}, "words": ["{{config.root}}/{{process.server}}.locks"]}],
+           "failure": "mkdir", "cite": "cmd/blockvolume/main.go:223 (--durable-root)"}
+        ],
+        "log": "{{config.root}}/{{process.server}}.{{now_ns}}.log",
+        "result_launched": {"layout_id": "{{process.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
+        "owned": [
+          {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
+           "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{process.server}}", "{{launched.pid}}"],
+           "failure": "recording ownership: {{stderr_first_line}}",
+           "cite": "scenarios/v3block/m0-own.sh:94 (record): a restarted process is in the same ledger, so the teardown stops it like any other"}
+        ],
+        "ready": {
+          "within_param": "ready_seconds", "every_ms": 250,
+          "probes": [
+            {"name": "status", "kind": "json", "command": ["curl", "-s", "-m", "2", "http://{{process.status_addr}}/status?volume={{process.volume}}"],
+             "schema": {"VolumeID": "string", "Epoch": "uint", "Healthy": "bool", "AuthorityRole": "string", "FrontendPrimaryReady": "bool"},
+             "holds": [{"path": "VolumeID", "equals": "{{process.volume}}"}, {"path": "Healthy", "equals": "true"}, {"path": "AuthorityRole", "equals": "primary"},
+               {"path": "FrontendPrimaryReady", "equals": "true"}, {"path": "Epoch", "above": "0"}, {"path": "Epoch", "at_least": "{{process.epoch}}"}],
+             "capture": {"epoch": "Epoch"},
+             "cite": "core/host/volume/status_server.go:113, 119 (volumeID, epoch), :193-196 (FrontendPrimaryReady), :204-205 (AuthorityRole), :174 (primary), :376 (the /status route)"},
+            {"name": "listeners", "kind": "listeners_held", "addresses": ["{{process.status_addr}}", "{{process.nvme_addr}}"],
+             "cite": "declared/process.go:252-281 (the listener read): the status and NVMe listeners are held by the relaunched pid"}
+          ],
+          "not_ready": "not serving above epoch {{process.epoch}} from its own listeners within {{ready.within}}",
+          "not_ready_by_deadline": "not serving above epoch {{process.epoch}} from its own listeners by the runner deadline"
+        },
+        "on_ready_set": {"process.epoch": "{{ready.epoch}}"},
+        "result_ready": {"epoch": {"template": "{{ready.epoch}}", "type": "int"}},
+        "after": [
+          {"name": "connect", "kind": "device_connect", "resolver": "nvme_namespace", "address": "{{process.nvme_addr}}", "subsystem": "{{process.nqn}}", "options": "{{run.guest_connect_options}}", "unless_present": true,
+           "cite": "declared/resolver.go:206-274 (the scan: no controller of the subsystem left), :309-342 (the connect); the run's guest connect (guest.connect), as the product's connect does it (core/csi/linux_util.go:318)"},
+          {"name": "device", "kind": "device", "resolver": "nvme_namespace", "subsystem": "{{process.nqn}}", "within_seconds": 20, "into": "device",
+           "cite": "declared/resolver.go:206-305 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+          {"name": "readback", "kind": "device_readback", "resolver": "nvme_namespace", "subsystem": "{{process.nqn}}", "expect": "{{run.guest_connect_options}}",
+           "files": {"ctrl_loss_tmo": "ctrl_loss_tmo", "reconnect_delay": "reconnect_delay", "fast_io_fail_tmo": "fast_io_fail_tmo", "keep_alive_tmo": "kato"},
+           "into": "guest_connect_effective", "fail_run": true, "record_verb": "guest_connect",
+           "record_fields": {"name": "{{run.guest_connect_name}}", "label": "{{run.guest_connect}}", "evidence": "{{run.guest_connect_evidence}}"},
+           "cite": "declared/readback.go:51-130 and the resolver's readback (declared/resolver.go:394-436: the controller's sysfs files read after the connect): the effective values, compared with the connect's options; a mismatch fails the run before any other operation"}
+        ]
+      },
+      "note": "a restart, by the schedule or the unit, is not a lifecycle operation: it leaves the volume's intended state as it is"
+    },
+    {
+      "action": "v3_op_stop", "verb": "stop", "op": "HolderInterface.StopCommit", "kind": "sequence", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 300,
+      "record": {"volume": "{{volume.name}}", "args": {"server": "{{volume.server}}", "epoch": {"template": "{{volume.epoch}}", "type": "int"}}},
+      "sequence": {
+        "changes_from": "disconnect",
+        "result": {"epoch": {"template": "{{volume.epoch}}", "type": "int"}},
+        "steps": [
+          {"name": "disconnect", "kind": "device_disconnect", "resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}",
+           "observe": {"verb": "disconnect", "subsystem": "nqn", "removed": "controllers"}, "failure": "{{why}}",
+           "cite": "declared/resolver.go:346-388 (delete through sysfs, certified by a scan); cmd/sw-block/workspace.go:46-48 (the planned hand-over order)"},
+          {"name": "detach", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "chunk", "detach", "--plain", "--volume", "{{volume.name}}", "--status-addr", "{{volume.status_addr}}", "--timeout", "120s"],
+           "judge": {"kind": "error_body", "action": "detach", "path": "ops chunk detach"},
+           "failure": "detach: {{detail}}", "not_run": "{{error}}", "result_failure": {"detach": "{{outcome}}"},
+           "answer": {
+             "kind": "json", "schema": {"volumeID": "string", "headGen": "uint", "headEpoch": "uint"},
+             "unreadable": "detach answer is not JSON: {{stdout_first_line|q}}",
+             "checks": [
+               {"holds": [{"path": "volumeID", "equals": "{{volume.name}}"}, {"path": "headGen", "above": "0"}, {"path": "headEpoch", "equals": "{{volume.epoch}}"}],
+                "failure": "detach answer {VolumeID:{{answer.volumeID}} HeadGen:{{answer.headGen}} HeadEpoch:{{answer.headEpoch}}}; want {{volume.name}} at epoch {{volume.epoch}} with a generation"},
+               {"stderr_equals": "sealed HEAD generation: {{answer.headGen}}", "failure": "detach stderr {{stderr_first_line|q}} does not state generation {{answer.headGen}}"}
+             ],
+             "capture": {"gen": "headGen"}
+           },
+           "result": {"sealed_gen": {"template": "{{step.detach.gen}}", "type": "int"}},
+           "cite": "cmd/sw-block/chunk.go:83 (dispatch), :268 (--plain); cmd/sw-block/chunk_plain.go:29-35 (the JSON answer and 'sealed HEAD generation: G' on stderr)"},
+          {"name": "revoke", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "revoke", "--replica", "r1", "--epoch", "{{volume.epoch}}", "--sealed-gen", "{{step.detach.gen}}", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "judge": {"kind": "exit_code", "path": "ops workspace revoke"},
+           "failure": "revoke: {{output_first_line}}",
+           "result_failure": {"revoke_exit": {"template": "{{exit}}", "type": "int"}}, "result_not_run": {"revoke_exit": {"template": "{{exit}}", "type": "int"}},
+           "cite": "cmd/sw-block/workspace.go:30, :91 (revoke), cmd/sw-block/workspace_revoke.go:28 (--sealed-gen from detach --plain); packs/v3block/product/outcomes.json:69-84 (the stop's and the move's revoke rows)"},
+          {"name": "exit", "kind": "wait_gone", "pid": "{{volume.pid}}", "start": "{{volume.pid_start}}", "within_seconds": 40,
+           "failure": "the holder did not exit by itself after the revoke: {{why}}",
+           "on_ok_set": {"volume.pid": "", "volume.pid_start": ""},
+           "cite": "declared/process.go:175-206 (gone by its recorded pid and start time); cmd/sw-block/workspace.go:46-48 (the holder exits after the revoke)"},
+          {"name": "ack", "kind": "poll",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "show", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "pattern": "(?m)^recorded ACK: r1@{{volume.epoch}} HEAD generation (\\d+)\\r?$", "every_ms": 500, "within_seconds": 30,
+           "capture": {"gen": "1"},
+           "result": {"ack_gen": "{{step.ack.gen}}"},
+           "failure": "no recorded ACK of r1@{{volume.epoch}}",
+           "cite": "cmd/sw-block/workspace.go:87 (show), cmd/sw-block/workspace_show.go:64-67 ('recorded ACK: R@E HEAD generation G')"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the planned stop with no move: the volume is then held by no one, as a volume delete requires. Any failure after the disconnect is unknown, whatever the step's own answer, since the earlier steps already changed state (product/outcomes.json, the stop's revoke rows)"
+    },
+    {
+      "action": "v3_op_move", "verb": "move", "op": "MoveAdmission.IssueClean", "kind": "sequence", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 360,
+      "record": {"volume": "{{volume.name}}", "args": {"from": "{{volume.server}}", "to": "{{volume.next_server}}", "epoch": {"template": "{{volume.epoch}}", "type": "int"}, "request": "{{volume.name}}-move-{{volume.epoch}}"}},
+      "sequence": {
+        "steps_of": {"action": "v3_op_stop", "detail_prefix": "stop: "},
+        "changes_from": "disconnect",
+        "result": {"epoch": {"template": "{{volume.epoch}}", "type": "int"}},
+        "steps": [
+          {"name": "move", "kind": "command",
+           "command": ["{{config.bin_dir}}/sw-block", "ops", "workspace", "move", "--clean", "--replica", "r1", "--epoch", "{{volume.epoch}}",
+             "--target-host", "{{volume.next_server}}", "--target-data", "{{volume.next_data_addr}}", "--target-ctrl", "{{volume.next_ctrl_addr}}",
+             "--request-id", "{{volume.name}}-move-{{volume.epoch}}", "--master", "{{config.master}}", "--volume", "{{volume.name}}"],
+           "judge": {"kind": "exit_code", "path": "ops workspace move --clean"},
+           "not_run": "{{error}}", "not_run_drops_result": true,
+           "result_answered": {"exit": {"template": "{{exit}}", "type": "int"}},
+           "failure": "{{output_first_line}}",
+           "answer": {
+             "kind": "first_line",
+             "pattern": "^clean move issued: volume (\\S+) request (\\S+): r1@(\\d+) -> r1@(\\d+) on (\\S+) \\(sealed HEAD gen (\\d+), remote LSN (\\d+)\\)\\r?$",
+             "match": {"1": "{{volume.name}}", "2": "{{volume.name}}-move-{{volume.epoch}}", "3": "{{volume.epoch}}", "5": "{{volume.next_server}}"},
+             "failure": "the move answer does not name this move: {{stdout_first_line}}",
+             "capture": {"new_epoch": "4", "head_gen": "6", "remote_lsn": "7"}
+           },
+           "result": {"new_epoch": "{{step.move.new_epoch}}", "head_gen": "{{step.move.head_gen}}", "remote_lsn": "{{step.move.remote_lsn}}"},
+           "on_ok_set": {"volume.cur": "{{volume.next_cur}}"},
+           "cite": "cmd/sw-block/workspace.go:89 (move), cmd/sw-block/workspace_clean.go:31, :40 (--clean), :57 (the answer line); packs/v3block/product/outcomes.json:87-93 (the move's rows)"}
+        ]
+      },
+      "on_outcome_set": {"ok": {"volume.intent": "not_held"}, "unknown": {"volume.intent": "unsettled"}},
+      "note": "the planned move: the stop's hand-over, then move --clean; a move that answered ok leaves the volume held by no one until the attach on its target (v3_op_attach host=1)"
+    },
+    {
+      "action": "v3_op_write", "verb": "write", "op": "HolderInterface.Write", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "round", "vars": true, "pattern": "^[A-Za-z0-9_-]{1,16}$"},
+        {"name": "flush", "kind": "enum", "values": ["true", "false"], "default": "true"},
+        {"name": "lbas", "kind": "list", "vars": true, "item_pattern": "^(0|[1-9][0-9]{0,18})$", "aliases": {"written": "volume.written"}}
+      ],
+      "derived": {
+        "conv": {"kind": "map", "from": "{{flush}}", "map": {"true": "fsync,notrunc", "false": "notrunc"}, "error": "flush is true or false"},
+        "flush_arg": {"kind": "map", "from": "{{flush}}", "map": {"true": "", "false": "false"}, "error": "flush is true or false"}
+      },
+      "runner_deadline_seconds": 150,
+      "each": "lbas",
+      "input": {
+        "kind": "repeat", "text": "{{volume.name}}|{{round}}|{{item}}|", "bytes": 4096, "path": "{{config.root}}/.block-{{volume.name}}-{{item}}",
+        "command": ["mkdir", "-p", "{{config.root}}", {"raw": "&&"}, "python3", "-c", {"script": "packs/v3block/scripts/block_fill.py"}, "{{input.text}}", "{{input.path}}", {"raw": "&&"}, "sha256sum", {"raw": "<"}, "{{input.path}}", {"raw": "| cut -c1-64"}],
+        "cite": "declared/device.go:87-94 (the runner's sha256 of the repeated tag, recorded before the invoke)"
+      },
+      "on_invoke_set": {"volume.written": "{{item}}"},
+      "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}, "sha256": "{{input.sha256}}", "round": "{{round}}", "flush": {"template": "{{derived.flush_arg}}", "type": "bool", "optional": true}}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:206-305 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "io": {
+        "command": ["dd", "if={{input.path}}", "of={{device}}", "bs=4096", "seek={{item}}", "count=1", "oflag=direct", "conv={{derived.conv}}", "status=none"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); oflag=direct and conv=fsync,notrunc are dd(1)'s",
+        "failure": "dd exit {{exit}}: {{stderr_first_line}}"
+      },
+      "note": "one operation per lba (lbas: a list, or written: every lba a write was attempted on); ok on dd's exit 0, unknown otherwise. flush=false issues the write without the fsync and records flush: false, so it is durable only after a later acknowledged flush. The I/O runner deadline lies above fast_io_fail_tmo of every guest connect variant and below the kernel's default ctrl_loss_tmo (600 s), under which I/O to a dead controller stays blocked"
+    },
+    {
+      "action": "v3_op_read", "verb": "read", "op": "Guest.Read", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true},
+        {"name": "lbas", "kind": "list", "vars": true, "item_pattern": "^(0|[1-9][0-9]{0,18})$", "aliases": {"written": "volume.written"}, "non_empty": true}
+      ],
+      "runner_deadline_seconds": 150,
+      "each": "lbas",
+      "record": {"volume": "{{volume.name}}", "args": {"lba": {"template": "{{item}}", "type": "int"}}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:206-305 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "io": {
+        "command": ["bash", "-c", "set -o pipefail; dd if={{device}} bs=4096 skip={{item}} count=1 iflag=direct status=none | sha256sum | cut -c1-64"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); iflag=direct is dd(1)'s",
+        "ok_stdout": "^[0-9a-f]{64}$",
+        "failure": "read exit {{exit}}: {{stderr_first_line}}",
+        "result": {"sha256": "{{io.stdout}}"}
+      },
+      "note": "one operation per lba; records the sha256 it read and compares nothing. Nothing to read (written, before any write) is the runner's error, never a silent empty answer"
+    },
+    {
+      "action": "v3_op_flush", "verb": "flush", "op": "Guest.Flush", "kind": "device", "runs_on": "step_node",
+      "params": [
+        {"name": "volume", "kind": "subject", "vars": true}
+      ],
+      "runner_deadline_seconds": 150,
+      "record": {"volume": "{{volume.name}}", "args": {}},
+      "device": {"resolver": "nvme_namespace", "subsystem": "{{volume.nqn}}", "within_seconds": 5, "cite": "declared/resolver.go:206-305 (the sysfs scan and the one namespace of the subsystem); the subsystem is the holder's cmd/blockvolume/main.go:215 (--nvme-subsysnqn)"},
+      "io": {
+        "command": ["python3", "-I", "-c", {"script": "packs/v3block/scripts/device_fsync.py"}, "{{device}}"], "as_root": true,
+        "runner_deadline_seconds": 120,
+        "cite": "declared/detached.go:89-174 (the I/O runs detached under its runner deadline); fsync(2) of the block device",
+        "failure": "fsync exit {{exit}}: {{stderr_first_line}}",
+        "result": {"device": "{{device}}"},
+        "result_unanswered": {"device": "{{device}}"}
+      },
+      "note": "an acknowledged flush makes every earlier write of the volume durable; a failed or unanswered fsync may or may not have flushed, and the product has no refusal for it: unknown"
+    },
+    {
+      "action": "v3_op_observe",
+      "verb": "observe",
+      "kind": "observe",
+      "runs_on": "step_node",
+      "params": [
+        {
+          "name": "volume",
+          "kind": "subject",
+          "vars": true
+        }
+      ],
+      "record": {
+        "volume": "{{volume.name}}"
+      },
+      "steps": [
+        {
+          "name": "head",
+          "command": [
+            "{{config.bin_dir}}/sw-block",
+            "ops",
+            "chunk",
+            "show",
+            "--volume",
+            "{{volume.name}}",
+            "--master",
+            "{{config.master}}",
+            "--chunk-filer",
+            "{{config.filer}}",
+            "--chunk-path",
+            "{{config.chunk_path}}"
+          ],
+          "runner_deadline_seconds": 60,
+          "cite": "cmd/sw-block/chunk.go:89-90 (dispatch); cmd/sw-block/chunk_b.go:209-212 (--volume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master); it prints the decoded HEAD, whose snapshots map is the volume's snapshot list",
+          "read": {
+            "kind": "json_object",
+            "schema": {
+              "head": {
+                "Gen": "uint",
+                "Epoch": "uint",
+                "Holder": "string",
+                "State": "string",
+                "Snapshots": "object"
+              }
+            },
+            "require": "head",
+            "fields": {
+              "head": {
+                "object": {
+                  "gen": {
+                    "value": "head.Gen"
+                  },
+                  "epoch": {
+                    "value": "head.Epoch"
+                  },
+                  "holder": {
+                    "value": "head.Holder"
+                  },
+                  "state": {
+                    "value": "head.State"
+                  }
+                }
+              },
+              "snapshots": {
+                "sorted_keys": "head.Snapshots"
+              }
+            },
+            "on_unreadable": {
+              "head": "unreadable",
+              "snapshots_error": "chunk show: HEAD unreadable"
+            },
+            "failure_body": {
+              "code": "string"
+            },
+            "on_failure": {
+              "show_error": {
+                "object": {
+                  "exit": {
+                    "int": "{{exit}}"
+                  },
+                  "code": "{{body.code}}"
+                }
+              },
+              "snapshots_error": "chunk show: exit {{exit}} code {{body.code|q}}"
+            },
+            "on_not_run": {
+              "show_error": {
+                "object": {
+                  "exit": {
+                    "int": "{{exit}}"
+                  },
+                  "code": "{{body.code}}"
+                }
+              },
+              "snapshots_error": "chunk show: {{error}}"
+            }
+          }
+        },
+        {
+          "name": "workspace",
+          "command": [
+            "{{config.bin_dir}}/sw-block",
+            "ops",
+            "workspace",
+            "show",
+            "--master",
+            "{{config.master}}",
+            "--volume",
+            "{{volume.name}}"
+          ],
+          "runner_deadline_seconds": 60,
+          "cite": "cmd/sw-block/workspace.go:87-88 (dispatch), :23 (--timeout 30s); cmd/sw-block/workspace_show.go:21-23 (--master, --volume)",
+          "read": {
+          "kind": "lines",
+          "into": "workspace",
+          "lines": 12,
+          "stderr_lines": 4,
+          "stderr_why": "a failed show answers exit 1 with nothing on stdout; only stderr says why (the master refused a reserved volume, or did not answer), which the checkers need to tell apart. Comparisons ignore it (checkers/product_block.py)"
+        }
+        },
+        {
+          "name": "dirs",
+          "command": [
+            "python3",
+            "-I",
+            "-c",
+            {"script": "packs/v3block/scripts/filer_dirs.py"},
+            "{{config.chunk_listing}}",
+            "{{volume.name}}-"
+          ],
+          "runner_deadline_seconds": 120,
+          "cite": "the volume's directories are <name>-<first 8 hex of its id> under the chunk path: core/frontend/chunkstore/layout/volume.go:55-61; listed through the SeaweedFS filer's HTTP listing, whose port is the gRPC port minus 10000 (SeaweedFS's convention); a name that never existed has none",
+          "read": {
+            "kind": "json_strings",
+            "into": "dirs",
+            "error_into": "dirs_error",
+            "error": "listing: {{stderr_first_line}}"
+          }
+        },
+        {
+          "name": "files",
+          "when": {
+            "field": "volume.layout_id",
+            "not_equals": ""
+          },
+          "command": [
+            "python3",
+            "-I",
+            "-c",
+            {"script": "packs/v3block/scripts/filer_files.py"},
+            "{{config.chunk_listing}}/{{volume.name}}-{{volume.layout8}}"
+          ],
+          "runner_deadline_seconds": 120,
+          "cite": "every file below the volume's directory (core/frontend/chunkstore/layout/volume.go:55-61), through the SeaweedFS filer's HTTP listing; a missing directory is an empty list",
+          "read": {
+            "kind": "json_strings",
+            "into": "files",
+            "error_into": "listing_error",
+            "error": "listing: {{stderr_first_line}}"
+          }
+        }
+      ],
+      "note": "an observation, not an operation: one observe record of the fields below, no outcome; checkers/product_block.py reads this shape"
+    }
+  ],
+  "runner_setup": [
+    {"action": "v3_op_spec", "why": "writes the cluster spec file the blockmaster reads and the runner's own record of each volume (hosts, ports, NQN); it calls no product command or API and records nothing in the history"},
+    {"action": "v3_run_plan", "why": "computes one run's ports, work directory and NQN prefix from port_base and the run's tag and sets them as vars; no command runs and nothing is recorded"},
+    {"action": "v3_history_end", "why": "closes the run's history file (its end record) so a later phase judges a whole history; a runner bookkeeping step with no product call"}
+  ],
+  "exceptions": [
+    {"action": "v3_op_restart", "why": "a fault's repair whose blockmaster case is not declared: the blockmaster relaunches through the ownership script's spawn, which records the new identity in the ledger, the identity is read back from the ledger whatever spawn's exit, it is ready when a master call (a resolve of the first volume) answers ok or refused, and after it the unit's supervision relaunches holders that fenced while the master was down. A holder's restart is declared (v3_op_restart_holder): this handler hands every other process to it, unchanged", "declarable_with": "a process restart whose launcher is a declared command that records the identity itself (read back from a ledger subject), a readiness probe that is a self-reported answer of ok or refused, and a step after the operation that runs the unit's supervision", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
+    {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
+  ],
+  "guest": {
+    "about": "Runner settings for the guest, the kernel NVMe/TCP host the runner connects to a volume. They are not product facts and never checker bounds. A run names its connect with the run var connect.select_var; absent, it is the default. The runner's own bound on one read, write or flush through the kernel block device is each device action's io.runner_deadline_seconds: under the product's plain connect the kernel keeps I/O to a dead controller blocked for ctrl_loss_tmo (600 s by default), so the runner runs the I/O detached, ends the operation as unknown at that deadline and records the abandoned child by pid and start time.",
+    "connect": {
+      "about": "A variant is DECLARED here, named, with its source and evidence false; a run selects one by name with the run var select_var (a scenario env value), and empty selects the default. Its options go into the kernel's fabrics connect string under the kernel's option names, in the order of options (the runner connects through /dev/nvme-fabrics, not nvme-cli, whose flags are --ctrl-loss-tmo, --reconnect-delay, --fast_io_fail_tmo, --keep-alive-tmo). A variant's option names may be written with _ or -; an unknown name, a value that is not an integer, or a name given twice refuses the description at load. A variant is named 'guest connect variant: <values>' in the run header and in every attach, is never release evidence, and no checker changes with it.",
+      "options": ["fast_io_fail_tmo", "ctrl_loss_tmo", "reconnect_delay", "keep_alive_tmo"],
+      "select_var": "guest_connect_variant",
+      "default": {"name": "documented", "evidence": true, "deployment": "standalone",
+        "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2},
+        "cite": "docs/standalone-deployment.md:463-464 (the documented connect: sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n \"$NQN\" --ctrl-loss-tmo=180 --reconnect-delay=2), docs/operator-guide.md:259-272 (Host connect settings: --ctrl-loss-tmo 180, --reconnect-delay 2, --fast_io_fail_tmo left off)",
+        "why": "test what ships: the connect the standalone deployment's own documented procedure performs. A test (the page comparison) keeps these options equal to the page's command at the pin"},
+      "variants": [
+        {"name": "csi_plain", "options": {}, "evidence": false,
+         "source": "core/csi/linux_util.go:318 (the CSI node's nvme connect -t -a -s -n: no timeout option, the kernel's defaults)",
+         "why": "the Kubernetes deployment's connect: the evidence configuration of the CSI row (M4) until the product changes it; in a standalone scenario a declared variant, never evidence"},
+        {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
+         "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
+         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the documented connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."}
+      ]
+    }
+  }
+}

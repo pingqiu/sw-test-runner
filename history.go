@@ -37,19 +37,27 @@ const (
 	OutcomeOK      = "ok"
 	OutcomeRefused = "refused"
 	OutcomeUnknown = "unknown"
+	// OutcomeRefusedEffect is a refusal with a documented effect: the
+	// product refused, and its page states what the refused call changed
+	// anyway (the completion's result.effect names it).
+	OutcomeRefusedEffect = "refused_effect"
 )
 
 // HistoryRecord is one line of the history file.
 type HistoryRecord struct {
-	Seq     uint64         `json:"seq"`
-	Kind    string         `json:"kind"`
-	Of      uint64         `json:"of,omitempty"` // a completion: the seq of its invocation
-	Client  string         `json:"client,omitempty"`
-	Op      string         `json:"op,omitempty"`   // Module.Action of the model-to-code trace
-	Verb    string         `json:"verb,omitempty"` // the operator verb (create, write, ...)
-	Volume  string         `json:"volume,omitempty"`
-	Args    map[string]any `json:"args,omitempty"`
-	MonoNs  int64          `json:"mono_ns"` // this process's monotonic clock since the file opened
+	Seq    uint64         `json:"seq"`
+	Kind   string         `json:"kind"`
+	Of     uint64         `json:"of,omitempty"` // a completion: the seq of its invocation
+	Client string         `json:"client,omitempty"`
+	Op     string         `json:"op,omitempty"`   // Module.Action of the model-to-code trace
+	Verb   string         `json:"verb,omitempty"` // the operator verb (create, write, ...)
+	Volume string         `json:"volume,omitempty"`
+	Args   map[string]any `json:"args,omitempty"`
+	MonoNs int64          `json:"mono_ns"` // this process's monotonic clock since the file opened
+	// FromNs, on an observation: the clock (as MonoNs) when its reading
+	// began. MonoNs stamps the record after the reading, so the reading lies
+	// between FromNs and MonoNs. Absent: the record does not say.
+	FromNs  int64          `json:"from_mono_ns,omitempty"`
 	Outcome string         `json:"outcome,omitempty"`
 	Result  map[string]any `json:"result,omitempty"`
 }
@@ -89,6 +97,9 @@ func (b *RunBundle) OpenHistory() (*History, error) {
 // Path is the history file's path.
 func (h *History) Path() string { return h.path }
 
+// Now reads the history's clock, as a record's MonoNs would be stamped now.
+func (h *History) Now() int64 { return time.Since(h.start).Nanoseconds() }
+
 // Invoke records the start of an operation and returns its seq.
 //
 // The callers' rule: record the invocation BEFORE the command is issued, and
@@ -112,7 +123,7 @@ func (h *History) Invoke(r HistoryRecord) (uint64, error) {
 
 // Complete records the end of invocation of with its outcome and result.
 func (h *History) Complete(of uint64, outcome string, result map[string]any) error {
-	if outcome != OutcomeOK && outcome != OutcomeRefused && outcome != OutcomeUnknown {
+	if outcome != OutcomeOK && outcome != OutcomeRefused && outcome != OutcomeRefusedEffect && outcome != OutcomeUnknown {
 		return fmt.Errorf("history: outcome %q", outcome)
 	}
 	h.mu.Lock()

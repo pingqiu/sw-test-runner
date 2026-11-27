@@ -23,3 +23,6 @@ packs/seaweed/worker/vf_preflight.py whitespace=blank-at-eol,blank-at-eof,space-
 /checkers/*.py text eol=lf
 /checkers/library.json text eol=lf
 /checkers/library.sha256 text eol=lf
+
+# The block pack's declared scripts are executed byte for byte (python3 -c).
+packs/v3block/scripts/*.py text eol=lf

@@ -203,4 +203,4 @@ phases:
         env.HIST: "{{ bundle_dir }}/history.jsonl"
         env.OUT: "{{ artifacts_dir }}/checks.json"
         env.CHECK: "{{ runner_src }}/checkers/history_check.py"
-        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT"
+        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT" --product "{{ runner_src }}/packs/v3block/product" --checkers C0,C1,C2,C3,C7

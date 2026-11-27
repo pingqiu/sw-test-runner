@@ -58,13 +58,18 @@ func RegisterPack(r *tr.Registry) {
 	// The M1 random run (gen.go, genrun.go): proposals through the same typed operations.
 	r.RegisterFunc("v3_gen_run", tr.TierBlock, v3GenRun)
 	r.RegisterFunc("v3_gen_replay", tr.TierBlock, v3GenReplay) // genreplay.go: re-execute a recorded run, compare outcomes
+	// The tier-1 declared workload loop (looprun.go, product/loops.json): no model.
+	r.RegisterFunc("v3_loop_run", tr.TierBlock, v3LoopRun)
+	r.RegisterFunc("v3_loop_replay", tr.TierBlock, v3LoopReplay)
 	// One run's ports, work directory and NQN prefix (runplan.go), for concurrent runs.
 	r.RegisterFunc("v3_run_plan", tr.TierDevOps, v3RunPlan)
 	for name, f := range map[string]tr.ActionHandlerFunc{
-		"v3_op_create": v3OpCreate, "v3_op_attach": v3OpAttach, "v3_op_write": v3OpWrite, "v3_op_read": v3OpRead,
-		"v3_op_snapshot": v3OpSnapshot, "v3_op_snapshot_delete": v3OpSnapshotDelete, "v3_op_restore": v3OpRestore,
-		"v3_op_release": v3OpRelease, "v3_op_stop": v3OpStop, "v3_op_move": v3OpMove, "v3_op_delete": v3OpDelete,
-		"v3_op_observe": v3OpObserve,
+		"v3_op_create": driven("v3_op_create"), "v3_op_attach": driven("v3_op_attach"), "v3_op_write": driven("v3_op_write"), "v3_op_read": driven("v3_op_read"),
+		"v3_op_snapshot": driven("v3_op_snapshot"), "v3_op_snapshot_delete": driven("v3_op_snapshot_delete"), "v3_op_restore": driven("v3_op_restore"),
+		"v3_op_release": driven("v3_op_release"), "v3_op_stop": driven("v3_op_stop"), "v3_op_move": driven("v3_op_move"), "v3_op_delete": driven("v3_op_delete"),
+		"v3_op_observe": driven("v3_op_observe"), "v3_op_flush": driven("v3_op_flush"),
+		// Process faults (faults.go): kill and restart by recorded identity, and the healthy observation.
+		"v3_op_kill": driven("v3_op_kill"), "v3_op_restart": v3OpRestart, "v3_op_restart_holder": driven("v3_op_restart_holder"), "v3_op_healthy": v3OpHealthy,
 	} {
 		r.RegisterFunc(name, tr.TierBlock, f)
 	}
