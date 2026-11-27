@@ -125,6 +125,28 @@ type Derived struct {
 	Error   string `json:"error,omitempty"`
 	Chars   string `json:"chars,omitempty"`
 	Length  int    `json:"length,omitempty"`
+	// Map ("map"): the value is the row of the expanded From; a value with
+	// no row is Error.
+	Map map[string]string `json:"map,omitempty"`
+}
+
+// checkDerived checks derived values: a known kind over defined names.
+func checkDerived(ds map[string]Derived, base func(string) error) error {
+	for k, d := range ds {
+		switch d.Kind {
+		case "port_offset", "trim_right", "prefix":
+		case "map":
+			if len(d.Map) == 0 || d.Error == "" {
+				return fmt.Errorf("derived %s: a map needs its rows and its error", k)
+			}
+		default:
+			return fmt.Errorf("derived %s: kind %q", k, d.Kind)
+		}
+		if err := base(d.From); err != nil {
+			return fmt.Errorf("derived %s: %w", k, err)
+		}
+	}
+	return nil
 }
 
 func (d Derived) compute(s *scope) (string, error) {
@@ -144,6 +166,12 @@ func (d Derived) compute(s *scope) (string, error) {
 		return strings.TrimRight(from, d.Chars), nil
 	case "prefix":
 		return from[:min(d.Length, len(from))], nil
+	case "map":
+		v, ok := d.Map[from]
+		if !ok {
+			return "", errors.New(d.Error)
+		}
+		return v, nil
 	}
 	return "", fmt.Errorf("derived kind %q", d.Kind)
 }
@@ -414,15 +442,8 @@ func (a *Action) checkObserve(defined func(map[string]bool) func(string) error) 
 		return errors.New("an observation has steps only (no variants, retry, on_ok_set or args)")
 	}
 	base := defined(nil)
-	for k, d := range a.Derived {
-		switch d.Kind {
-		case "port_offset", "trim_right", "prefix":
-		default:
-			return fmt.Errorf("derived %s: kind %q", k, d.Kind)
-		}
-		if err := base(d.From); err != nil {
-			return fmt.Errorf("derived %s: %w", k, err)
-		}
+	if err := checkDerived(a.Derived, base); err != nil {
+		return err
 	}
 	readNames := map[string]bool{"exit": true, "stderr": true, "stderr_first_line": true, "error": true}
 	for i, st := range a.Steps {

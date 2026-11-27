@@ -224,21 +224,47 @@ func TestDeleteSentinelFailsSafe(t *testing.T) {
 	}
 }
 
-func TestParseDetach(t *testing.T) {
-	good := `{"volumeID":"v001","headGen":7,"headEpoch":2,"cutLSN":3,"lastWrittenLSN":3}`
-	if g, err := parseDetach(good, "sealed HEAD generation: 7\n", "v001", 2); err != nil || g != 7 {
-		t.Fatalf("good detach: %d %v", g, err)
+// The declared stop reads the sealed generation of its plain detach: the
+// JSON answer on stdout and exactly "sealed HEAD generation: G" on stderr,
+// both naming the same generation, for this volume at this epoch; G feeds
+// the revoke. Red controls: any other answer ends the stop unknown before
+// the revoke.
+func TestStopReadsTheSealedGeneration(t *testing.T) {
+	stop := func(out, errOut string) (string, map[string]any, *fakeNode) {
+		f := (&fakeNode{}).on("delete_controller", ok("deleted 1\n")).on("subsysnqn", ok("end\n")).
+			on("ops chunk detach", fakeAnswer{out: out, errOut: errOut}).on("ops workspace revoke", ok("")).
+			on("/proc/4242", ok("absent\n")).on("ops workspace show", ok("recorded ACK: r1@2 HEAD generation 7\n"))
+		actx, p := deadlineCtx(t, f)
+		v, _ := loadVolume(actx, "v1")
+		v.Epoch = 2
+		saveVolume(actx, v)
+		got, err := blockActions.Handler("v3_op_stop")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		for _, r := range historyRecords(t, p) {
+			if r.Kind == tr.HistoryComplete {
+				return got["value"], r.Result, f
+			}
+		}
+		t.Fatal("no complete record")
+		return "", nil, nil
+	}
+	good := `{"volumeID":"v1","headGen":7,"headEpoch":2,"cutLSN":3,"lastWrittenLSN":3}`
+	if out, res, f := stop(good, "sealed HEAD generation: 7\n"); out != tr.OutcomeOK || res["sealed_gen"] != float64(7) || !f.issued("--sealed-gen 7 ") {
+		t.Fatalf("good detach: %s %v %v", out, res, f.calls)
 	}
 	for name, c := range map[string][2]string{
 		"stderr names another generation": {good, "sealed HEAD generation: 8"},
 		"stderr has more":                 {good, "sealed HEAD generation: 7\nwarning"},
-		"another volume":                  {strings.Replace(good, "v001", "v002", 1), "sealed HEAD generation: 7"},
+		"another volume":                  {strings.Replace(good, `"v1"`, `"v2"`, 1), "sealed HEAD generation: 7"},
 		"another epoch":                   {strings.Replace(good, `"headEpoch":2`, `"headEpoch":3`, 1), "sealed HEAD generation: 7"},
 		"no generation":                   {strings.Replace(good, `"headGen":7`, `"headGen":0`, 1), "sealed HEAD generation: 0"},
 		"not JSON":                        {"sealed", "sealed HEAD generation: 7"},
 	} {
-		if _, err := parseDetach(c[0], c[1], "v001", 2); err == nil {
-			t.Errorf("%s: accepted", name)
+		if out, res, f := stop(c[0], c[1]); out != tr.OutcomeUnknown || f.issued("ops workspace revoke") || res["sealed_gen"] != nil {
+			t.Errorf("%s: %s %v", name, out, res)
 		}
 	}
 }

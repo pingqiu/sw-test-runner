@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,7 +65,9 @@ func closeRecords(t *testing.T, actx *tr.ActionContext, p string) []tr.HistoryRe
 	}
 	var out []tr.HistoryRecord
 	for _, r := range records(t, p) {
-		if r.Kind != tr.HistoryEnd {
+		// The end record, and the run's guest_connect record (the connect
+		// read-back, tested on its own), are set aside.
+		if r.Kind != tr.HistoryEnd && r.Verb != "guest_connect" {
 			out = append(out, r)
 		}
 	}
@@ -577,7 +578,7 @@ func TestFaultActionsRegisteredAndNeedAHistory(t *testing.T) {
 		}
 	}
 	actx := &tr.ActionContext{Vars: map[string]string{}, Log: func(string, ...interface{}) {}}
-	for _, h := range []tr.ActionHandlerFunc{v3OpKill, v3OpRestart, v3OpHealthy} {
+	for _, h := range []tr.ActionHandlerFunc{blockActions.Handler("v3_op_kill"), blockActions.Handler("v3_op_restart"), v3OpHealthy} {
 		if _, err := h(context.Background(), actx, tr.Action{Params: map[string]string{"process": "blockmaster"}}); err == nil || !strings.Contains(err.Error(), "no history") {
 			t.Errorf("ran without a history: %v", err)
 		}
@@ -966,16 +967,23 @@ func TestIntentIsSetByTheAnswer(t *testing.T) {
 			t.Errorf("%s, %s answered %q: intent %q, want %q", c.before, c.target, c.answer, v.Extra["intent"], c.want)
 		}
 	}
-	// The lifecycle operations record their answer through it: attach holds,
-	// stop and move release.
-	src, err := os.ReadFile("ops.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for verb, target := range map[string]string{"attach": "intentHeld", "stop": "intentNotHeld", "move": "intentNotHeld"} {
-		if !strings.Contains(string(src), "lifecycle(v, "+target+")(recordBounded(ctx, actx, e, \""+verb+"\",") {
-			t.Errorf("v3_op_%s does not set the intended state from its answer", verb)
+	// The lifecycle operations (declared) record their answer through the
+	// intended state: attach holds, stop and move release, unknown
+	// unsettles, a refusal nothing.
+	want := map[string]string{"v3_op_attach": intentHeld, "v3_op_stop": intentNotHeld, "v3_op_move": intentNotHeld}
+	for _, a := range blockActions.File.Actions {
+		target, ok := want[a.Action]
+		if !ok {
+			continue
 		}
+		delete(want, a.Action)
+		set := a.OnOutcomeSet
+		if len(set) != 2 || set[tr.OutcomeOK]["volume.intent"] != target || set[tr.OutcomeUnknown]["volume.intent"] != intentUnsettled {
+			t.Errorf("%s does not set the intended state from its answer: %v", a.Action, set)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("not declared: %v", want)
 	}
 }
 func unsettledSetup(t *testing.T) (*tr.ActionContext, string, opEnv) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,48 +31,37 @@ func historyRecords(t *testing.T, path string) []tr.HistoryRecord {
 	return rs
 }
 
+// deviceRun runs one declared device action on a simulated host over f and
+// returns its records.
+func deviceRun(t *testing.T, action string, f *fakeNode, params map[string]string) (map[string]string, []tr.HistoryRecord) {
+	t.Helper()
+	actx, p := deadlineCtx(t, &declared.SimHost{Inner: f})
+	out, err := blockActions.Handler(action)(context.Background(), actx, tr.Action{Params: params})
+	if err != nil {
+		t.Fatalf("%s: %v", action, err)
+	}
+	_ = actx.History.Close()
+	return out, historyRecords(t, p)
+}
+
 // A flushed write is today's command (conv=fsync) and today's record (no
 // flush key); an unflushed one drops only the fsync and says "flush": false.
 func TestWriteFlushVariant(t *testing.T) {
-	flushed := writeCmd("/r/.block-v1-7", "/dev/nvme3n1", 7, true)
-	if flushed != "dd if=/r/.block-v1-7 of=/dev/nvme3n1 bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none" {
-		t.Errorf("flushed write changed: %s", flushed)
+	gen := fakeAnswer{out: blockSHAFrozen("v1|g1|7|") + "\n"}
+	f := (&fakeNode{}).on("python3 -c", gen).on("subsysnqn", ok(oneDevice)).on("dd if=", ok(""))
+	_, rs := deviceRun(t, "v3_op_write", f, map[string]string{"volume": "v1", "round": "g1", "lbas": "7"})
+	if !f.issued("dd if=/w/root/.block-v1-7 of=/dev/nvme3n1 bs=4096 seek=7 count=1 oflag=direct conv=fsync,notrunc status=none") {
+		t.Errorf("flushed write changed: %q", f.calls)
 	}
-	unflushed := writeCmd("/r/.block-v1-7", "/dev/nvme3n1", 7, false)
-	if strings.Contains(unflushed, "fsync") || !strings.Contains(unflushed, "oflag=direct") || !strings.Contains(unflushed, "conv=notrunc") {
-		t.Errorf("unflushed write: %s", unflushed)
-	}
-	if _, has := writeArgs(7, "s", "g1", true)["flush"]; has {
+	if _, has := rs[0].Args["flush"]; has {
 		t.Error("a flushed write's record carries a flush key; today's records must stay as they are")
 	}
-	if f, has := writeArgs(7, "s", "g1", false)["flush"]; !has || f != false {
-		t.Errorf("an unflushed write's record has flush %v", f)
+	f = (&fakeNode{}).on("python3 -c", gen).on("subsysnqn", ok(oneDevice)).on("dd if=", ok(""))
+	out, rs := deviceRun(t, "v3_op_write", f, map[string]string{"volume": "v1", "round": "g1", "lbas": "7", "flush": "false"})
+	if f.issued("fsync") || !f.issued("oflag=direct") || !f.issued("conv=notrunc") {
+		t.Errorf("unflushed write: %q", f.calls)
 	}
-}
-
-// The unflushed write through record(): its invocation on disk carries
-// "flush": false and the device command issued has no fsync.
-func TestUnflushedWriteIsRecordedAsSuch(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "history.jsonl")
-	h, err := tr.OpenHistory(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	actx := &tr.ActionContext{History: h, Log: func(string, ...interface{}) {}}
-	v, _, e := testVolume()
-	f := (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("dd if=", ok(""))
-	out, err := record(actx, e, "write", v.Name, writeArgs(3, "abc", "g1", false), func() (string, map[string]any) {
-		return e.writeBlock(context.Background(), &declared.SimHost{Inner: f}, v, "/r/.block-v1-3", 3, false)
-	})
-	if err != nil || out["value"] != tr.OutcomeOK {
-		t.Fatalf("%v %v", out, err)
-	}
-	if f.issued("fsync") {
-		t.Error("the unflushed write issued an fsync")
-	}
-	rs := historyRecords(t, path)
-	if len(rs) != 2 || rs[0].Verb != "write" || rs[0].Args["flush"] != false {
+	if out["value"] != tr.OutcomeOK || len(rs) != 3 || rs[0].Verb != "write" || rs[0].Args["flush"] != false {
 		t.Fatalf("records %+v", rs)
 	}
 }
@@ -81,21 +69,20 @@ func TestUnflushedWriteIsRecordedAsSuch(t *testing.T) {
 // v3_op_flush: fsync of the device; ok only on exit 0. Red control: a flush
 // whose fsync fails, or whose device cannot be established, is unknown, never ok.
 func TestFlushOutcome(t *testing.T) {
-	ctx := context.Background()
-	v, _, e := testVolume()
 	f := (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("os.fsync", ok(""))
-	if out, res := e.flushDevice(ctx, &declared.SimHost{Inner: f}, v); out != tr.OutcomeOK || res["device"] != "/dev/nvme3n1" {
-		t.Fatalf("good flush: %s %v", out, res)
+	out, rs := deviceRun(t, "v3_op_flush", f, map[string]string{"volume": "v1"})
+	if out["value"] != tr.OutcomeOK || rs[1].Result["device"] != "/dev/nvme3n1" {
+		t.Fatalf("good flush: %v %+v", out, rs)
 	}
-	if !f.issued(flushCmd("/dev/nvme3n1")) {
+	if !f.issued(flushCmdFrozen("/dev/nvme3n1")) {
 		t.Error("the flush command was not issued on the volume's device")
 	}
 	for name, n := range map[string]*fakeNode{
 		"fsync fails": (&fakeNode{}).on("subsysnqn", ok(oneDevice)).on("os.fsync", fakeAnswer{errOut: "OSError: [Errno 5] Input/output error", code: 1}),
 		"no device":   (&fakeNode{}).on("subsysnqn", fakeAnswer{errOut: "boom", code: 3}),
 	} {
-		if out, res := e.flushDevice(ctx, &declared.SimHost{Inner: n}, v); out != tr.OutcomeUnknown || res["detail"] == "" {
-			t.Errorf("%s: %s %v; want unknown", name, out, res)
+		if out, rs := deviceRun(t, "v3_op_flush", n, map[string]string{"volume": "v1"}); out["value"] != tr.OutcomeUnknown || rs[1].Result["detail"] == "" {
+			t.Errorf("%s: %v %+v; want unknown", name, out, rs)
 		}
 	}
 }

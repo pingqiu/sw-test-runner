@@ -12,6 +12,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,23 +55,177 @@ func (s *volumeSubject) Field(ctx context.Context, node declared.Runner, f strin
 			return "", fmt.Errorf("volume %q: no current host %d", v.Name, v.Cur)
 		}
 		return v.Hosts[v.Cur].Status, nil
+	case "server", "data_addr", "ctrl_addr", "nvme_addr":
+		if v.Cur < 0 || v.Cur >= len(v.Hosts) {
+			return "", fmt.Errorf("volume %q: no current host %d", v.Name, v.Cur)
+		}
+		h := v.Hosts[v.Cur]
+		return map[string]string{"server": h.Server, "data_addr": h.Data, "ctrl_addr": h.Ctrl, "nvme_addr": h.NVMe}[f], nil
+	case "next_cur", "next_server", "next_data_addr", "next_ctrl_addr":
+		// The planned move's target: the volume's other host.
+		to := 1 - v.Cur
+		if to < 0 || to >= len(v.Hosts) {
+			return "", fmt.Errorf("volume %q: no move target from host %d", v.Name, v.Cur)
+		}
+		h := v.Hosts[to]
+		return map[string]string{"next_cur": strconv.Itoa(to), "next_server": h.Server, "next_data_addr": h.Data, "next_ctrl_addr": h.Ctrl}[f], nil
+	case "epoch":
+		return strconv.FormatUint(v.Epoch, 10), nil
+	case "pid":
+		return v.PID, nil
+	case "pid_start":
+		return v.PIDStart, nil
 	case "holder_alive":
 		if s.alive == nil {
 			a := alive(ctx, node, v.PID, v.PIDStart)
 			s.alive = &a
 		}
 		return strconv.FormatBool(*s.alive), nil
+	case "written":
+		// Every lba a write was attempted on, in numeric order.
+		var out []uint64
+		for k := range v.Written {
+			n, _ := strconv.ParseUint(k, 10, 64)
+			out = append(out, n)
+		}
+		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+		parts := make([]string, len(out))
+		for i, n := range out {
+			parts[i] = strconv.FormatUint(n, 10)
+		}
+		return strings.Join(parts, " "), nil
 	}
 	return "", fmt.Errorf("volume field %q", f)
 }
 
 func (s *volumeSubject) Set(f, val string) error {
-	if f != "layout_id" {
+	switch f {
+	case "layout_id":
+		s.v.LayoutID = val
+	case "written":
+		// A write attempted on lba val (set before its invoke).
+		if s.v.Written == nil {
+			s.v.Written = map[string]bool{}
+		}
+		s.v.Written[val] = true
+	case "cur":
+		// The host an attach names (0 the first, 1 the move target); empty
+		// keeps the current one.
+		if val == "" {
+			return nil
+		}
+		i, err := strconv.Atoi(val)
+		if err != nil || i < 0 || i >= len(s.v.Hosts) {
+			return fmt.Errorf("host %q", val)
+		}
+		s.v.Cur = i
+	case "pid":
+		s.v.PID = val
+	case "pid_start":
+		s.v.PIDStart = val
+	case "launch_argv", "exit_file":
+		// The running holder's command line and exit-status file (the unit
+		// relaunches from them).
+		if s.v.Extra == nil {
+			s.v.Extra = map[string]string{}
+		}
+		s.v.Extra[f] = val
+	case "epoch":
+		n, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return fmt.Errorf("epoch %q", val)
+		}
+		s.v.Epoch = n
+	case "intent":
+		// The answer of a holder-lifecycle operation (faults.go): unsettled
+		// is stamped with its completion, from which the recovery deadline
+		// counts.
+		if val != intentHeld && val != intentNotHeld && val != intentUnsettled {
+			return fmt.Errorf("intent %q", val)
+		}
+		setIntent(s.v, val)
+		if val == intentUnsettled {
+			s.v.Extra["unsettled_at"] = strconv.FormatInt(nowFn().UnixNano(), 10)
+		}
+	default:
 		return fmt.Errorf("volume field %q is not settable", f)
 	}
-	s.v.LayoutID = val
 	return nil
 }
+
+// processSubject is one process the runner may fault (faults.go
+// resolveProc) as a declared action's process param: the blockmaster from
+// the ledger, or a volume's holder (whose other fields are the volume's).
+type processSubject struct {
+	actx *tr.ActionContext
+	p    *faultProc
+	vol  *volumeSubject // nil for the blockmaster
+}
+
+func (s *processSubject) Field(ctx context.Context, node declared.Runner, f string) (string, error) {
+	switch f {
+	case "pid":
+		return s.p.PID, nil
+	case "pid_start":
+		return s.p.Start, nil
+	case "killed_pid":
+		return s.p.KilledPID, nil
+	case "killed_argv":
+		if len(s.p.Argv) == 0 {
+			return "", nil
+		}
+		b, _ := json.Marshal(s.p.Argv)
+		return string(b), nil
+	case "volume":
+		if s.vol == nil {
+			return "", nil
+		}
+		return s.vol.v.Name, nil
+	}
+	if s.vol == nil {
+		return "", fmt.Errorf("process %s has no field %q", s.p.Name, f)
+	}
+	return s.vol.Field(ctx, node, f)
+}
+
+func (s *processSubject) Set(f, val string) error {
+	switch f {
+	case "pid", "pid_start":
+		if f == "pid" {
+			s.p.PID = val
+		} else {
+			s.p.Start = val
+		}
+		if s.vol != nil {
+			return s.vol.Set(f, val)
+		}
+		return nil
+	case "killed_pid":
+		s.p.KilledPID = val
+		if val != "" && s.vol != nil {
+			// A kill reaching the volume: the recovery deadline counts from it.
+			if s.vol.v.Extra == nil {
+				s.vol.v.Extra = map[string]string{}
+			}
+			s.vol.v.Extra["killed_at"] = strconv.FormatInt(nowFn().UnixNano(), 10)
+		}
+		return nil
+	case "killed_argv":
+		s.p.Argv = nil
+		if val != "" {
+			if err := json.Unmarshal([]byte(val), &s.p.Argv); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if s.vol == nil {
+		return fmt.Errorf("process %s: field %q is not settable", s.p.Name, f)
+	}
+	return s.vol.Set(f, val)
+}
+
+func (s *processSubject) Save() { s.p.save(s.actx) }
 
 func (s *volumeSubject) Save() { saveVolume(s.actx, s.v) }
 
@@ -92,8 +247,46 @@ var blockActions = func() *declared.Executor {
 			return &volumeSubject{actx: actx, v: v}, nil
 		},
 		Lookup: outcomes.lookupFunc(),
+		OpDeadline: func(d time.Duration) time.Duration {
+			if exceptionDeadlineOverride > 0 {
+				return exceptionDeadlineOverride
+			}
+			return d
+		},
 	}
 }()
+
+func init() {
+	// The run values: the guest connect the run selected (its label and its
+	// kernel options), from the description's guest section (set here: the
+	// guest configuration is read from the executor's description).
+	blockActions.Values = func(actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		c, err := selectConnect(opParam(act, actx, guest.Connect.SelectVar))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"guest_connect": c.Label, "guest_connect_options": c.Options,
+			"guest_connect_name": c.Name, "guest_connect_evidence": strconv.FormatBool(c.Evidence)}, nil
+	}
+	// A process param: the runner's record of the process (faults.go). A
+	// name it does not know is a refusal the history records.
+	blockActions.Process = func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node declared.Runner, name string) (declared.Subject, string) {
+		p, why := resolveProc(ctx, actx, node, opEnv{work: opParam(act, actx, "work")}, name)
+		if why != "" {
+			return nil, why
+		}
+		s := &processSubject{actx: actx, p: p}
+		if p.vol != nil {
+			s.vol = &volumeSubject{actx: actx, v: p.vol}
+		}
+		return s, ""
+	}
+	// The cases the description hands to Go handlers (its exceptions).
+	blockActions.Coded = func(name string) (tr.ActionHandlerFunc, bool) {
+		h, ok := map[string]tr.ActionHandlerFunc{"v3_op_restart_master": v3OpRestartMaster}[name]
+		return h, ok
+	}
+}
 
 // boundedNode bounds every command of a Go handler: a command runs at most
 // until its context ends (bound when the context has none), and the runner
@@ -134,6 +327,12 @@ func runnerDeadline(name string, params map[string]string) (time.Duration, error
 	}
 	for _, a := range blockActions.File.Actions {
 		if a.Action == name {
+			if d, ok := a.RunnerDeadline(params); ok {
+				if exceptionDeadlineOverride > 0 {
+					return exceptionDeadlineOverride, nil
+				}
+				return d, nil
+			}
 			var d time.Duration
 			for _, v := range a.Variants {
 				d = max(d, time.Duration(v.RunnerDeadlineSeconds)*time.Second)
@@ -150,10 +349,8 @@ func runnerDeadline(name string, params map[string]string) (time.Duration, error
 // guestConfig is the description's guest configuration: runner settings for
 // the kernel NVMe/TCP host the runner connects, not product facts.
 type guestConfig struct {
-	About                 string `json:"about"`
-	DeviceIODeadlineSecs  int    `json:"device_io_runner_deadline_seconds"`
-	DeviceIODeadlineAbout string `json:"device_io_runner_deadline_about"`
-	Connect               struct {
+	About   string `json:"about"`
+	Connect struct {
 		About     string   `json:"about"`
 		Options   []string `json:"options"`
 		SelectVar string   `json:"select_var"`
@@ -165,11 +362,7 @@ type guestConfig struct {
 			Cite       string          `json:"cite"`
 			Why        string          `json:"why"`
 		} `json:"default"`
-		// Readback maps each option to the controller's sysfs file that
-		// shows its effective value.
-		Readback      map[string]string `json:"readback"`
-		ReadbackAbout string            `json:"readback_about"`
-		Variants      []struct {
+		Variants []struct {
 			Name     string          `json:"name"`
 			Options  json.RawMessage `json:"options"`
 			Evidence bool            `json:"evidence"`
@@ -198,19 +391,14 @@ var guest = func() guestConfig {
 	if err := strictJSON(blockActions.File.Guest, &g); err != nil {
 		panic("v3block: product/actions.json guest: " + err.Error())
 	}
-	if g.DeviceIODeadlineSecs <= 0 || g.Connect.SelectVar == "" || g.Connect.Default.Name == "" || !g.Connect.Default.Evidence {
-		panic("v3block: product/actions.json guest: device_io_runner_deadline_seconds, connect.select_var and an evidence default connect are required")
+	if g.Connect.SelectVar == "" || g.Connect.Default.Name == "" || !g.Connect.Default.Evidence {
+		panic("v3block: product/actions.json guest: connect.select_var and an evidence default connect are required")
 	}
 	def, err := variantOptions(g.Connect.Options, g.Connect.Default.Options)
 	if err != nil || len(g.Connect.Default.Options) == 0 {
 		panic(fmt.Sprintf("v3block: guest connect default: options %v", err))
 	}
 	g.defaultSet = def
-	for _, o := range g.Connect.Options {
-		if g.Connect.Readback[o] == "" || strings.ContainsAny(g.Connect.Readback[o], "/ ") {
-			panic("v3block: guest connect: option " + o + " has no readback file")
-		}
-	}
 	g.variants = map[string]map[string]int{}
 	for _, v := range g.Connect.Variants {
 		opts, err := variantOptions(g.Connect.Options, v.Options)
@@ -227,19 +415,9 @@ var guest = func() guestConfig {
 	return g
 }()
 
-// exceptionDeadlineOverride replaces every Go handler's runner deadline
-// (tests).
+// exceptionDeadlineOverride replaces every operation-level runner deadline:
+// a Go handler's and a declared step kind's (tests).
 var exceptionDeadlineOverride time.Duration
-
-// deviceDeadlineOverride replaces the device I/O runner deadline (tests).
-var deviceDeadlineOverride time.Duration
-
-func deviceDeadline() time.Duration {
-	if deviceDeadlineOverride > 0 {
-		return deviceDeadlineOverride
-	}
-	return time.Duration(guest.DeviceIODeadlineSecs) * time.Second
-}
 
 // selectConnect resolves the run's connect by name: "" or the default's
 // name is the documented connect (release evidence); a declared variant's
