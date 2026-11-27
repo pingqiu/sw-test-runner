@@ -16,6 +16,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -55,18 +56,51 @@ type outcomeRow struct {
 	Action          string `json:"action"`  // runner action, or "*"
 	Path            string `json:"path"`    // product command or route, or "*"
 	Code            string `json:"code"`    // ops chunk error code, or ops workspace exit
-	Outcome         string `json:"outcome"` // refused | unknown
+	Outcome         string `json:"outcome"` // refused | refused_effect | unknown
 	MessageContains string `json:"message_contains,omitempty"`
 	Cite            string `json:"cite"`
 	Why             string `json:"why,omitempty"`
+	// Effect is what a refused_effect call changed anyway, as a page states
+	// it: the observation part, its value after, and the PAGE line.
+	Effect *rowEffect `json:"effect,omitempty"`
+}
+
+type rowEffect struct {
+	Part string         `json:"part"`
+	To   map[string]any `json:"to"`
+	Cite string         `json:"cite"`
+}
+
+func (e *rowEffect) record() map[string]any {
+	return map[string]any{"part": e.Part, "to": e.To, "cite": e.Cite}
+}
+
+// pageGap is a failed answer kept unknown because its effect is stated only
+// in code, not on a page: the rows (action, path, codes), the effect as the
+// code shows it, the code line, the page read and why it does not state it.
+type pageGap struct {
+	Action string   `json:"action"`
+	Path   string   `json:"path"`
+	Codes  []string `json:"codes"`
+	Effect struct {
+		Part string         `json:"part"`
+		To   map[string]any `json:"to"`
+	} `json:"effect"`
+	CodeCite string `json:"code_cite"`
+	PageRead string `json:"page_read"`
+	Why      string `json:"why"`
 }
 
 type outcomeTable struct {
-	Product string       `json:"product"`
-	ReadAt  string       `json:"read_at"`
-	About   string       `json:"about"`
-	Rows    []outcomeRow `json:"rows"`
+	Product  string       `json:"product"`
+	ReadAt   string       `json:"read_at"`
+	About    string       `json:"about"`
+	Rows     []outcomeRow `json:"rows"`
+	PageGaps []pageGap    `json:"page_gaps,omitempty"`
 }
+
+// pageLine is a citation of a product page line: docs/<page>.md:<line>.
+var pageLine = regexp.MustCompile(`^docs/[A-Za-z0-9._/-]+\.md:[0-9]+(-[0-9]+)?\b`)
 
 // opPath names one call: the runner action and the product path it calls.
 // The zero opPath is an action the table does not name: only "*" rows apply.
@@ -97,10 +131,16 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 			return t, fmt.Errorf("%s: action, path and code are required", at)
 		case strings.TrimSpace(r.Cite) == "":
 			return t, fmt.Errorf("%s: no cite", at)
-		case r.Outcome != "refused" && r.Outcome != "unknown":
-			return t, fmt.Errorf("%s: outcome %q is not refused or unknown", at, r.Outcome)
-		case r.MessageContains != "" && r.Outcome != "refused":
+		case r.Outcome != "refused" && r.Outcome != "refused_effect" && r.Outcome != "unknown":
+			return t, fmt.Errorf("%s: outcome %q is not refused, refused_effect or unknown", at, r.Outcome)
+		case r.MessageContains != "" && r.Outcome == "unknown":
 			return t, fmt.Errorf("%s: message_contains narrows a refusal only", at)
+		case (r.Effect != nil) != (r.Outcome == "refused_effect"):
+			return t, fmt.Errorf("%s: an effect exactly when the outcome is refused_effect", at)
+		case r.Effect != nil && (r.Effect.Part == "" || len(r.Effect.To) == 0):
+			return t, fmt.Errorf("%s: the effect needs its part and to", at)
+		case r.Effect != nil && !pageLine.MatchString(r.Effect.Cite):
+			return t, fmt.Errorf("%s: the effect's cite %q is not a page line (docs/<page>.md:<line>): an effect only in code stays unknown and goes to page_gaps", at, r.Effect.Cite)
 		}
 		k := [3]string{r.Action, r.Path, r.Code}
 		if seen[k] {
@@ -109,12 +149,24 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 		seen[k] = true
 	}
 	for i, r := range t.Rows {
-		if r.Outcome != "refused" {
+		if r.Outcome == "unknown" {
 			continue
 		}
 		for j, u := range t.Rows {
-			if u.Outcome == "unknown" && u.Code == r.Code && overlap(r.Action, u.Action) && overlap(r.Path, u.Path) {
-				return t, fmt.Errorf("outcomes rows %d and %d: %s %q %s is both refused and unknown", i, j, r.Action, r.Path, r.Code)
+			if i != j && u.Outcome != r.Outcome && u.Code == r.Code && overlap(r.Action, u.Action) && overlap(r.Path, u.Path) {
+				return t, fmt.Errorf("outcomes rows %d and %d: %s %q %s is both %s and %s", i, j, r.Action, r.Path, r.Code, r.Outcome, u.Outcome)
+			}
+		}
+	}
+	for i, g := range t.PageGaps {
+		at := fmt.Sprintf("outcomes page gap %d (%s %q)", i, g.Action, g.Path)
+		if g.Action == "" || g.Path == "" || len(g.Codes) == 0 || g.Effect.Part == "" || len(g.Effect.To) == 0 ||
+			!strings.Contains(g.CodeCite, ".go:") || strings.TrimSpace(g.PageRead) == "" || strings.TrimSpace(g.Why) == "" {
+			return t, fmt.Errorf("%s: action, path, codes, effect, a code line, the page read and why are required", at)
+		}
+		for _, c := range g.Codes {
+			if got, _ := t.decide(opPath{g.Action, g.Path}, c, ""); got != "unknown" || !t.hasRow(g.Action, g.Path, c, "unknown") {
+				return t, fmt.Errorf("%s: code %s is not kept unknown by its own row", at, c)
 			}
 		}
 	}
@@ -123,25 +175,41 @@ func loadOutcomes(b []byte) (outcomeTable, error) {
 
 func overlap(a, b string) bool { return a == "*" || b == "*" || a == b }
 
-// lookup decides a failed answer: refused only when a matching refused row
-// holds for the message and no matching row says unknown.
+// lookup decides a failed answer (decide without the effect).
 func (t outcomeTable) lookup(p opPath, code, message string) string {
-	refused := false
-	for _, r := range t.Rows {
+	out, _ := t.decide(p, code, message)
+	return out
+}
+
+// decide decides a failed answer: refused (or refused_effect, with its
+// effect) only when a matching row of that outcome holds for the message
+// and no matching row says unknown.
+func (t outcomeTable) decide(p opPath, code, message string) (string, *rowEffect) {
+	var hit *outcomeRow
+	for i, r := range t.Rows {
 		if !r.matches(p, code) {
 			continue
 		}
-		if r.Outcome != "refused" {
-			return "unknown"
+		if r.Outcome == "unknown" {
+			return "unknown", nil
 		}
-		if r.MessageContains == "" || strings.Contains(message, r.MessageContains) {
-			refused = true
+		if hit == nil && (r.MessageContains == "" || strings.Contains(message, r.MessageContains)) {
+			hit = &t.Rows[i]
 		}
 	}
-	if refused {
-		return "refused"
+	if hit != nil {
+		return hit.Outcome, hit.Effect
 	}
-	return "unknown"
+	return "unknown", nil
+}
+
+func (t outcomeTable) hasRow(action, path, code, outcome string) bool {
+	for _, r := range t.Rows {
+		if r.Action == action && r.Path == path && r.Code == code && r.Outcome == outcome {
+			return true
+		}
+	}
+	return false
 }
 
 // outcomes is the embedded table. A table that does not load stops the pack:
@@ -175,9 +243,19 @@ func chunkOutcome(op opPath, stdout string, code int) (string, string) {
 }
 
 func chunkOutcomeIn(t outcomeTable, op opPath, stdout string, code int) (string, string) {
-	return declared.DecodeErrorBody(func(action, path, code, message string) string {
-		return t.lookup(opPath{action, path}, code, message)
-	}, op.action, op.path, stdout, code)
+	out, detail, _ := declared.DecodeErrorBody(t.lookupFunc(), op.action, op.path, stdout, code)
+	return out, detail
+}
+
+// lookupFunc is the table as the executor asks for it.
+func (t outcomeTable) lookupFunc() declared.LookupFunc {
+	return func(action, path, code, message string) (string, map[string]any) {
+		out, effect := t.decide(opPath{action, path}, code, message)
+		if effect == nil {
+			return out, nil
+		}
+		return out, effect.record()
+	}
 }
 
 // The runner actions that issue `sw-block ops workspace` commands, and the
