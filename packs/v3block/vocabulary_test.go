@@ -276,3 +276,63 @@ func mustJSON(t *testing.T, s string) any {
 	}
 	return d
 }
+
+// placementVocabulary is the closed vocabulary of checks.json's placement
+// rows (declared.Placement): the key "placement", each row's keys, the one
+// "by", the four cases and the four outcomes.
+var placementVocabulary = map[string][]string{
+	".placement[]":          {"verb", "by", "part", "arg", "outcomes", "cite", "what"},
+	".placement[].by":       {declared.PlaceByNames},
+	".placement[].outcomes": {"present_before", "others_lost", "present", "absent"},
+	".placement[].outcome":  declared.PlacementOutcomes,
+}
+
+// The placement table loads (one row: the snapshot, by snapshot_names), its
+// keys are the vocabulary's, and a row outside it does not load (red
+// controls: another by, another outcome, a case missing or added, another
+// key).
+func TestPlacementVocabulary(t *testing.T) {
+	rows, err := declared.ParsePlacements(checksJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows["snapshot"] == nil || rows["snapshot"].By != declared.PlaceByNames {
+		t.Fatalf("placement rows %+v", rows)
+	}
+	var d struct {
+		Placement []map[string]any `json:"placement"`
+	}
+	if err := json.Unmarshal(checksJSON, &d); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range d.Placement {
+		for k := range row {
+			if !contains(placementVocabulary[".placement[]"], k) {
+				t.Errorf("placement key %q is not in the vocabulary", k)
+			}
+		}
+		if !contains(placementVocabulary[".placement[].by"], fmt.Sprint(row["by"])) {
+			t.Errorf("placement by %v", row["by"])
+		}
+		for c, o := range row["outcomes"].(map[string]any) {
+			if !contains(placementVocabulary[".placement[].outcomes"], c) || !contains(placementVocabulary[".placement[].outcome"], fmt.Sprint(o)) {
+				t.Errorf("placement case %q -> %v", c, o)
+			}
+		}
+	}
+	for name, c := range map[string][2]string{
+		"another by":      {`"by": "snapshot_names"`, `"by": "root_objects"`},
+		"another outcome": {`"absent": "did_not"`, `"absent": "maybe"`},
+		"a case missing":  {`, "absent": "did_not"`, ``},
+		"a case added":    {`"absent": "did_not"`, `"absent": "did_not", "gone": "third"`},
+		"another key":     {`"arg": "name",`, `"arg": "name", "when": "always",`},
+	} {
+		seeded := strings.Replace(string(checksJSON), c[0], c[1], 1)
+		if seeded == string(checksJSON) {
+			t.Fatalf("%s: the seed did not apply", name)
+		}
+		if _, err := declared.ParsePlacements([]byte(seeded)); err == nil {
+			t.Errorf("red control %s: loaded", name)
+		}
+	}
+}
