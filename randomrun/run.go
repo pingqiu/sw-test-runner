@@ -18,6 +18,10 @@ package randomrun
 //     first pair is the baseline: equal, with nothing between them) and one
 //     after every negative operation and every refusal, so "a refused
 //     operation changed nothing" is judged from the observations around it;
+//   - after the last operation (in a fault run, after the final healthy
+//     point), the end-of-run sweep: an observe record "gen_sweep" listing the
+//     model's sweep operations, then each through Exec (reads of every block
+//     with acknowledged content, and the last observations the checkers need);
 //   - last, an observe record "gen_coverage" (also written to the bundle as
 //     gen-coverage.json).
 // It stops on a runner error (a handler error), never on a product answer.
@@ -226,6 +230,9 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, fmt.Errorf("%s: end of run: %w", r.Name, err)
 		}
 	}
+	if err := r.sweep(ctx, actx, g.m.Sweep()); err != nil {
+		return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)
+	}
 	cov := g.Coverage()
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_coverage", Result: cov}); err != nil {
 		return nil, err
@@ -238,6 +245,63 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 	}
 	actx.Log("  %s: %d operations, ended %s", r.Name, g.no, g.Ended())
 	return map[string]string{"value": g.Ended(), "proposed": strconv.Itoa(g.no)}, nil
+}
+
+// sweep records the gen_sweep marker with the sweep's operations (so a
+// replay re-executes the same sweep from the history alone) and runs each
+// through Exec. The outcomes are facts for the checkers; nothing is judged.
+func (r Runner) sweep(ctx context.Context, actx *tr.ActionContext, ops []Op) error {
+	list := make([]any, 0, len(ops))
+	for _, o := range ops {
+		p := map[string]any{}
+		for k, v := range o.Params {
+			p[k] = v
+		}
+		list = append(list, map[string]any{"action": o.Action, "volume": o.Volume, "params": p})
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_sweep", Result: map[string]any{"ops": list}}); err != nil {
+		return err
+	}
+	for _, o := range ops {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, err := r.Exec(ctx, actx, o); err != nil {
+			return fmt.Errorf("%s %s: %w", o.Action, o.Volume, err)
+		}
+	}
+	return nil
+}
+
+// parseSweep reads the operations of a recorded gen_sweep result.
+func parseSweep(res map[string]any) ([]Op, error) {
+	raw, ok := res["ops"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("gen_sweep: ops %v", res["ops"])
+	}
+	out := make([]Op, 0, len(raw))
+	for i, x := range raw {
+		m, ok := x.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("gen_sweep: op %d is %T", i, x)
+		}
+		a, _ := m["action"].(string)
+		v, _ := m["volume"].(string)
+		ps, ok := m["params"].(map[string]any)
+		if a == "" || !ok {
+			return nil, fmt.Errorf("gen_sweep: op %d %v", i, m)
+		}
+		o := Op{Action: a, Volume: v, Params: map[string]string{}}
+		for k, pv := range ps {
+			s, ok := pv.(string)
+			if !ok {
+				return nil, fmt.Errorf("gen_sweep: op %d param %s is %T", i, k, pv)
+			}
+			o.Params[k] = s
+		}
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // faultRun executes a fault schedule inside a run and a replay (both run it

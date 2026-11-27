@@ -16,8 +16,8 @@ import (
 // readReplayScript reads a recorded history: its gen_header result and its
 // steps with their recorded outcomes.
 func readReplayScript(path string) (map[string]any, []randomrun.ReplayStep, error) {
-	h, steps, _, err := randomrun.ReadScript("v3_gen_replay", path, &blockModel{})
-	return h, steps, err
+	sc, err := randomrun.ReadScript("v3_gen_replay", path, &blockModel{})
+	return sc.Header, sc.Steps, err
 }
 
 func v3GenReplay(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {

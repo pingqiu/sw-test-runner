@@ -627,6 +627,30 @@ func TestGeneratorOracleRedControls(t *testing.T) {
 	}
 }
 
+// The end-of-run sweep: every acknowledged lba of a serving volume read back
+// (its own writes and a restore target's inherited content), in reads of at
+// most four, one observation of every volume that exists or was deleted, and
+// nothing on a name never used.
+func TestGeneratorSweepReadsEveryAcknowledgedBlockAndObservesEachVolume(t *testing.T) {
+	g, err := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(5), Blocks: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "7 1 3", "round", "r"),
+		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_write", "g1", "lbas", "5 6", "round", "r2"),
+		op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"), op("v3_op_attach", "g2", "host", "0"),
+		op("v3_op_create", "g3"), op("v3_op_delete", "g3"), op("v3_op_create", "g4"))
+	var got []string
+	for _, o := range g.m.Sweep() {
+		got = append(got, o.Action+" "+o.Volume+" "+o.Params["lbas"])
+	}
+	want := []string{"v3_op_read g1 1 3 5 6", "v3_op_read g1 7", "v3_op_observe g1 ", "v3_op_read g2 1 3 7", "v3_op_observe g2 ",
+		"v3_op_observe g3 ", "v3_op_observe g4 "}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sweep\n%q\nwant\n%q", got, want)
+	}
+}
+
 // drive feeds a generator a hand-built run, answered as answer() answers.
 func drive(g *Generator, ops ...GenOp) {
 	for _, o := range ops {

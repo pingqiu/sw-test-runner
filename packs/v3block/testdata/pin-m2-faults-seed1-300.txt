@@ -1426,5 +1426,27 @@ observe gen gen_step g52  null {"action":"v3_op_read","opno":300,"params":{"lbas
 invoke  read g52  null null
 complete  read g52 ok null null
 observe runner healthy   null {"down":[],"healthy":true,"not_serving":[]}
+observe gen gen_sweep   null {"ops":[{"action":"v3_op_observe","params":{"volume":"g1"},"volume":"g1"},{"action":"v3_op_observe","params":{"volume":"g24"},"volume":"g24"},{"action":"v3_op_read","params":{"lbas":"0 1 2 3","volume":"g52"},"volume":"g52"},{"action":"v3_op_read","params":{"lbas":"4 5 6 7","volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g52"},"volume":"g52"},{"action":"v3_op_observe","params":{"volume":"g53"},"volume":"g53"},{"action":"v3_op_read","params":{"lbas":"1 4 6","volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g54"},"volume":"g54"},{"action":"v3_op_observe","params":{"volume":"g55"},"volume":"g55"},{"action":"v3_op_read","params":{"lbas":"0 1 3 5","volume":"g56"},"volume":"g56"},{"action":"v3_op_read","params":{"lbas":"6 7","volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g56"},"volume":"g56"},{"action":"v3_op_observe","params":{"volume":"g57"},"volume":"g57"},{"action":"v3_op_observe","params":{"volume":"g58"},"volume":"g58"},{"action":"v3_op_observe","params":{"volume":"g59"},"volume":"g59"},{"action":"v3_op_observe","params":{"volume":"g60"},"volume":"g60"}]}
+observe  observe g1  null null
+observe  observe g24  null null
+invoke  read g52  null null
+complete  read g52 ok null null
+invoke  read g52  null null
+complete  read g52 ok null null
+observe  observe g52  null null
+observe  observe g53  null null
+invoke  read g54  null null
+complete  read g54 ok null null
+observe  observe g54  null null
+observe  observe g55  null null
+invoke  read g56  null null
+complete  read g56 ok null null
+invoke  read g56  null null
+complete  read g56 ok null null
+observe  observe g56  null null
+observe  observe g57  null null
+observe  observe g58  null null
+observe  observe g59  null null
+observe  observe g60  null null
 observe gen gen_coverage   null {"actions":{"v3_op_attach":20,"v3_op_create":58,"v3_op_delete":27,"v3_op_read":76,"v3_op_release":1,"v3_op_restore":10,"v3_op_snapshot":14,"v3_op_snapshot_delete":10,"v3_op_stop":4,"v3_op_write":80},"cells":{"v3_op_attach|created":20,"v3_op_create|deleted":2,"v3_op_create|unborn":56,"v3_op_delete|created":3,"v3_op_delete|serving":15,"v3_op_delete|stopped":9,"v3_op_read|serving":76,"v3_op_release|serving":1,"v3_op_restore|serving":10,"v3_op_snapshot_delete|serving":4,"v3_op_snapshot_delete|stopped":6,"v3_op_snapshot|serving":14,"v3_op_stop|serving":4,"v3_op_write|serving":80},"cells_never_reached":["v3_op_attach|moved","v3_op_delete|moved","v3_op_delete|reserved","v3_op_move|serving","v3_op_release|stopped","while_down|v3_op_move","while_down|v3_op_release"],"ended":"ops","estimated_ops_per_hour":473,"fault_cells":{"kill|blockmaster":4,"kill|blockvolume:0":6,"restart|blockmaster":4,"restart|blockvolume:0":6,"while_down|v3_op_attach":9,"while_down|v3_op_create":32,"while_down|v3_op_delete":8,"while_down|v3_op_read":19,"while_down|v3_op_restore":3,"while_down|v3_op_snapshot":1,"while_down|v3_op_snapshot_delete":4,"while_down|v3_op_stop":1,"while_down|v3_op_write":23},"proposed":300}
 end     null {"open_invocations":0}

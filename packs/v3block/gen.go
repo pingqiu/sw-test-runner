@@ -539,6 +539,37 @@ func (m *blockModel) Cells() map[string][]string {
 	}
 }
 
+// sweepReadSize is the most lbas one sweep read names (a read's size).
+const sweepReadSize = 4
+
+// Sweep is the end-of-run sweep (C1, C2/C3, C7 need it): for every serving
+// volume, reads of every lba with acknowledged content (written, or inherited
+// by a restore target) in batches of a read's size, then one observation; one
+// observation of every other volume that exists or was deleted (created,
+// stopped, moved, reserved, deleted). An unborn or bound name has nothing to
+// see, and a volume whose state is unknown is out of the run.
+func (m *blockModel) Sweep() []GenOp {
+	var out []GenOp
+	for _, n := range m.order {
+		v := m.vols[n]
+		switch v.state {
+		case stServing:
+			have := sortedLBAs(v.lbas)
+			for i := 0; i < len(have); i += sweepReadSize {
+				var f []string
+				for _, b := range have[i:min(i+sweepReadSize, len(have))] {
+					f = append(f, strconv.Itoa(b))
+				}
+				out = append(out, op("v3_op_read", n, "lbas", strings.Join(f, " ")))
+			}
+			out = append(out, m.Observe(n))
+		case stCreated, stStopped, stMoved, stReserved, stDeleted:
+			out = append(out, m.Observe(n))
+		}
+	}
+	return out
+}
+
 // Driver side: how a block proposal is executed.
 
 func (m *blockModel) Version(faults bool) string {

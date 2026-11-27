@@ -12,7 +12,10 @@ package randomrun
 //     volume and negative limit;
 //   - a fault-run history carries its "fault_schedule" right after the
 //     header; the replay re-executes the schedule through the same faultRun
-//     as a run (kills, restarts, healthy points, resolving observations).
+//     as a run (kills, restarts, healthy points, resolving observations);
+//   - a "gen_sweep" observe record lists the end-of-run sweep; its records
+//     belong to no step, and the replay re-executes the same sweep after its
+//     last step (its outcomes are not compared: they are the checkers' facts).
 //
 // The recorded outcome of a step (the rule):
 //
@@ -42,6 +45,14 @@ import (
 	tr "github.com/pingqiu/sw-test-runner"
 )
 
+// Script is a recorded run as a replay reads it.
+type Script struct {
+	Header map[string]any
+	Steps  []ReplayStep
+	Events []FaultEvent // the fault schedule of a fault-run history; nil otherwise
+	Sweep  []Op         // the end-of-run sweep; nil when the history has none
+}
+
 // ReplayStep is one step of a recorded script with its recorded outcome.
 type ReplayStep struct {
 	Op       Op
@@ -64,16 +75,16 @@ type replayDiff struct {
 // event's records (the kill or restart invocation, the healthy observation and
 // the resolving operations after it) end the current step: they are not the
 // step's operation.
-func ReadScript(name, path string, d Driver) (map[string]any, []ReplayStep, []FaultEvent, error) {
+func ReadScript(name, path string, d Driver) (Script, error) {
 	plain, faults := d.Version(false), d.Version(true)
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%s: %w", name, err)
+		return Script{}, fmt.Errorf("%s: %w", name, err)
 	}
 	defer f.Close()
 	var header map[string]any
 	var steps []ReplayStep
-	var events []FaultEvent
+	var events, sweep = []FaultEvent(nil), []Op(nil)
 	faulty, needSchedule := false, false
 	cur := -1 // the index of the step whose records are being read; -1 for none
 	s := bufio.NewScanner(f)
@@ -83,17 +94,17 @@ func ReadScript(name, path string, d Driver) (map[string]any, []ReplayStep, []Fa
 		line++
 		var r tr.HistoryRecord
 		if err := json.Unmarshal(s.Bytes(), &r); err != nil {
-			return nil, nil, nil, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
+			return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 		}
 		switch r.Kind {
 		case tr.HistoryObserve:
 			if header == nil {
 				if r.Verb != "gen_header" {
-					return nil, nil, nil, fmt.Errorf("%s: %s: the first observation is %q, not gen_header", name, path, r.Verb)
+					return Script{}, fmt.Errorf("%s: %s: the first observation is %q, not gen_header", name, path, r.Verb)
 				}
 				g, _ := r.Result["generator"].(string)
 				if g != plain && g != faults {
-					return nil, nil, nil, fmt.Errorf("%s: %s: generator %v, this runner replays %s and %s", name, path, r.Result["generator"], plain, faults)
+					return Script{}, fmt.Errorf("%s: %s: generator %v, this runner replays %s and %s", name, path, r.Result["generator"], plain, faults)
 				}
 				header = r.Result
 				faulty = g == faults
@@ -102,26 +113,34 @@ func ReadScript(name, path string, d Driver) (map[string]any, []ReplayStep, []Fa
 			}
 			if needSchedule {
 				if r.Verb != "fault_schedule" {
-					return nil, nil, nil, fmt.Errorf("%s: %s line %d: a %s history without fault_schedule after its header", name, path, line, faults)
+					return Script{}, fmt.Errorf("%s: %s line %d: a %s history without fault_schedule after its header", name, path, line, faults)
 				}
 				needSchedule = false
 				if events, err = replaySchedule(header, r.Result, d.ValidProcess); err != nil {
-					return nil, nil, nil, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
+					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 				}
 				continue
 			}
 			switch r.Verb {
 			case "gen_header":
-				return nil, nil, nil, fmt.Errorf("%s: %s line %d: a second gen_header (one generator run per history)", name, path, line)
+				return Script{}, fmt.Errorf("%s: %s line %d: a second gen_header (one generator run per history)", name, path, line)
 			case "fault_schedule":
-				return nil, nil, nil, fmt.Errorf("%s: %s line %d: a fault_schedule not right after the header", name, path, line)
+				return Script{}, fmt.Errorf("%s: %s line %d: a fault_schedule not right after the header", name, path, line)
 			case "gen_step":
 				o, err := replayOp(r)
 				if err != nil {
-					return nil, nil, nil, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
+					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
 				}
 				steps = append(steps, ReplayStep{Op: o})
 				cur = len(steps) - 1
+			case "gen_sweep":
+				if sweep != nil {
+					return Script{}, fmt.Errorf("%s: %s line %d: a second gen_sweep", name, path, line)
+				}
+				if sweep, err = parseSweep(r.Result); err != nil {
+					return Script{}, fmt.Errorf("%s: %s line %d: %w", name, path, line, err)
+				}
+				cur = -1
 			case "gen_coverage", "gen_replay", "healthy":
 				cur = -1
 			}
@@ -138,18 +157,18 @@ func ReadScript(name, path string, d Driver) (map[string]any, []ReplayStep, []Fa
 		}
 	}
 	if err := s.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("%s: %s: %w", name, path, err)
+		return Script{}, fmt.Errorf("%s: %s: %w", name, path, err)
 	}
 	if header == nil {
-		return nil, nil, nil, fmt.Errorf("%s: %s: no gen_header", name, path)
+		return Script{}, fmt.Errorf("%s: %s: no gen_header", name, path)
 	}
 	if needSchedule {
-		return nil, nil, nil, fmt.Errorf("%s: %s: a %s history without fault_schedule", name, path, faults)
+		return Script{}, fmt.Errorf("%s: %s: a %s history without fault_schedule", name, path, faults)
 	}
 	if len(steps) == 0 {
-		return nil, nil, nil, fmt.Errorf("%s: %s: no gen_step records", name, path)
+		return Script{}, fmt.Errorf("%s: %s: no gen_step records", name, path)
 	}
-	return header, steps, events, nil
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep}, nil
 }
 
 // replaySchedule reads and checks a recorded fault_schedule against its header.
@@ -206,10 +225,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	if src == "" {
 		return nil, fmt.Errorf("%s: param history (the recorded history.jsonl) is required", r.Name)
 	}
-	header, steps, events, err := ReadScript(r.Name, src, r.Driver)
+	sc, err := ReadScript(r.Name, src, r.Driver)
 	if err != nil {
 		return nil, err
 	}
+	header, steps, events := sc.Header, sc.Steps, sc.Events
 	hdr := map[string]any{}
 	for k, v := range header {
 		hdr[k] = v
@@ -254,6 +274,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	if fr != nil {
 		if err := fr.finish(ctx, actx); err != nil {
 			return nil, fmt.Errorf("%s: end of run: %w", r.Name, err)
+		}
+	}
+	if sc.Sweep != nil {
+		if err := r.sweep(ctx, actx, sc.Sweep); err != nil {
+			return nil, fmt.Errorf("%s: end-of-run sweep: %w", r.Name, err)
 		}
 	}
 	dl := make([]any, 0, len(diffs))
