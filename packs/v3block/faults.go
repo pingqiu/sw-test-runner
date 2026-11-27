@@ -558,13 +558,20 @@ func setIntent(v *opVolume, intent string) {
 	v.Extra["intent"] = intent
 }
 
-// settleIntent records a lifecycle operation's answer: ok sets target,
-// anything else (unknown) leaves the volume UNSETTLED.
-func settleIntent(v *opVolume, ok bool, target string) {
-	if ok {
-		setIntent(v, target)
-	} else {
-		setIntent(v, intentUnsettled)
+// lifecycle records a lifecycle operation's answer as the volume's intended
+// state: ok sets target, unknown leaves it UNSETTLED, a refusal changes
+// nothing. Used as lifecycle(v, target)(record(...)).
+func lifecycle(v *opVolume, target string) func(map[string]string, error) (map[string]string, error) {
+	return func(out map[string]string, err error) (map[string]string, error) {
+		if err == nil {
+			switch out["value"] {
+			case tr.OutcomeOK:
+				setIntent(v, target)
+			case tr.OutcomeUnknown:
+				setIntent(v, intentUnsettled)
+			}
+		}
+		return out, err
 	}
 }
 

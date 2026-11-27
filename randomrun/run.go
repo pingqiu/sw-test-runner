@@ -49,9 +49,6 @@ type Runner struct {
 	// Header, when set, adds the product's run settings to the run's
 	// header (get reads the run's parameters); it may refuse the run.
 	Header func(get func(string) string) (map[string]any, error)
-	// HeaderExtra holds the pack's own entries for the run's gen_header (for
-	// example, an emulated process unit and the policy it read).
-	HeaderExtra map[string]any
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.
@@ -203,9 +200,6 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", r.Name)
 	}
 	header := g.Header()
-	for k, v := range r.HeaderExtra {
-		header[k] = v
-	}
 	if ns := get("nightly_seed"); ns != "" {
 		if _, err := strconv.ParseUint(ns, 10, 64); err != nil {
 			return nil, fmt.Errorf("%s: nightly_seed: %w", r.Name, err)

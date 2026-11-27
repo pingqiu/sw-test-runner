@@ -387,7 +387,8 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 	bound := time.Duration(actions.ParseInt(optionalParam(act, "ready_seconds"), 60)) * time.Second
 	h := v.Hosts[v.Cur]
 	defer saveVolume(actx, v)
-	return recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
+	// The answer sets the volume's intended state (faults.go lifecycle).
+	return lifecycle(v, intentHeld)(recordBounded(ctx, actx, e, "attach", v.Name, map[string]any{"server": h.Server, "min_epoch": v.Epoch, "guest_connect": e.connect.Label}, func(ctx context.Context) (string, map[string]any) {
 		if v.LayoutID == "" {
 			stdout, _, code, err := node.Run(ctx, fmt.Sprintf("%s resolve --master %s --volume %s", shellQuote(e.v3ctl()), shellQuote(e.master), shellQuote(v.Name)))
 			if err != nil {
@@ -400,7 +401,7 @@ func v3OpAttach(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map
 			v.LayoutID = a.LayoutID
 		}
 		return e.startHolder(ctx, node, v, h, blocks, bound)
-	})
+	}))
 }
 
 func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
@@ -414,9 +415,7 @@ func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
 //     recorded epoch, AND the status and NVMe listeners are held by it;
 //   - only then is the kernel host connected, to this run's NQN.
 func (e opEnv) startHolder(ctx context.Context, node runner, v *opVolume, h vsHost, blocks uint64, bound time.Duration) (string, map[string]any) {
-	out, res := e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
-	settleIntent(v, out == tr.OutcomeOK, intentHeld) // the volume's intended state (faults.go)
-	return out, res
+	return e.launchHolder(ctx, node, v, h, append([]string{e.bin + "/blockvolume"}, e.volumeArgs(v, h, blocks)...), bound, false)
 }
 
 // launchHolder is startHolder with the command line given. A restart
@@ -759,9 +758,8 @@ func readCmd(dev string, lba uint64) string {
 // --plain, revoke with the sealed generation, wait for the holder to exit by
 // itself, and wait for the master's recorded ACK of (replica, epoch). It
 // returns the result fields and "" or the reason the stop is not complete.
-func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (res map[string]any, why string) {
-	defer func() { settleIntent(v, why == "", intentNotHeld) }() // the volume's intended state (faults.go)
-	res = map[string]any{"epoch": v.Epoch}
+func (e opEnv) handOver(ctx context.Context, node runner, v *opVolume, op string) (map[string]any, string) {
+	res := map[string]any{"epoch": v.Epoch}
 	if why := nvmeDisconnect(ctx, node, v.NQN); why != "" {
 		return res, why
 	}
@@ -814,14 +812,14 @@ func v3OpStop(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		return nil, err
 	}
 	defer saveVolume(actx, v)
-	return recordBounded(ctx, actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
+	return lifecycle(v, intentNotHeld)(recordBounded(ctx, actx, e, "stop", v.Name, map[string]any{"server": v.Hosts[v.Cur].Server, "epoch": v.Epoch}, func(ctx context.Context) (string, map[string]any) {
 		res, why := e.handOver(ctx, node, v, wsStop)
 		if why != "" {
 			res["detail"] = why
 			return tr.OutcomeUnknown, res
 		}
 		return tr.OutcomeOK, res
-	})
+	}))
 }
 
 var reMovedTo = regexp.MustCompile(`^clean move issued: volume (\S+) request (\S+): r1@(\d+) -> r1@(\d+) on (\S+) \(sealed HEAD gen (\d+), remote LSN (\d+)\)\r?$`)
@@ -840,7 +838,9 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 	dst := v.Hosts[to]
 	req := v.Name + "-move-" + strconv.FormatUint(v.Epoch, 10)
 	defer saveVolume(actx, v)
-	return recordBounded(ctx, actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func(ctx context.Context) (string, map[string]any) {
+	// A move that answered ok leaves the volume held by no one until the
+	// attach on its target (the model's "moved").
+	return lifecycle(v, intentNotHeld)(recordBounded(ctx, actx, e, "move", v.Name, map[string]any{"from": v.Hosts[v.Cur].Server, "to": dst.Server, "epoch": v.Epoch, "request": req}, func(ctx context.Context) (string, map[string]any) {
 		res, why := e.handOver(ctx, node, v, wsMove)
 		if why != "" {
 			res["detail"] = "stop: " + why
@@ -867,7 +867,7 @@ func v3OpMove(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[s
 		res["new_epoch"], res["head_gen"], res["remote_lsn"] = m[4], m[6], m[7]
 		v.Cur = to
 		return tr.OutcomeOK, res
-	})
+	}))
 }
 
 // observeChunkShow records the answer of `ops chunk show`: HEAD's generation,

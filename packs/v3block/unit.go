@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
+	"github.com/pingqiu/sw-test-runner/actions"
 )
 
 const unitPolicyVar = "v3unit_policy"
@@ -208,9 +209,43 @@ func loadUnitPolicy(ctx context.Context, actx *tr.ActionContext, node runner, e 
 }
 
 // unitNotEvidence is the header's sentence for a run that emulated the unit.
-const unitNotEvidence = "This run is not evidence for the unit's own behaviour: the runner emulated the unit."
+const unitNotEvidence = "a unit-emulated run is not evidence for the unit's own behaviour"
 
-// unitHeader is the run header's entry for an emulated unit.
+// unitHeader is the run header's entry for an emulated unit: the policy as
+// read, its cite (the file at the product commit) and the sentence.
 func unitHeader(p unitPolicy) map[string]any {
-	return map[string]any{"emulated": true, "policy": p, "note": unitNotEvidence}
+	return map[string]any{"emulated": true, "policy": p, "cite": p.File + " at " + p.Commit, "note": unitNotEvidence}
+}
+
+// withUnit returns a run header function that adds the unit entry to what
+// base (nil: nothing) adds.
+func withUnit(base func(func(string) string) (map[string]any, error), p unitPolicy) func(func(string) string) (map[string]any, error) {
+	return func(get func(string) string) (map[string]any, error) {
+		h := map[string]any{}
+		if base != nil {
+			b, err := base(get)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range b {
+				h[k] = v
+			}
+		}
+		h["unit"] = unitHeader(p)
+		return h, nil
+	}
+}
+
+// unitForRun reads the policy for a fault run (supervision active), reading
+// the product tree only when the run has not read it yet.
+func unitForRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (unitPolicy, error) {
+	var node runner
+	if actx.Vars[unitPolicyVar] == "" {
+		n, err := actions.GetNode(actx, act.Node)
+		if err != nil {
+			return unitPolicy{}, err
+		}
+		node = n
+	}
+	return loadUnitPolicy(ctx, actx, node, opEnv{work: opParam(act, actx, "work")})
 }

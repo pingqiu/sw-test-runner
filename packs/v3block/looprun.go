@@ -52,7 +52,16 @@ func v3LoopRun(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[
 		return nil, err
 	}
 	c.Name, c.Loop = name, l
-	return loopRunner("v3_loop_run", act.Node).RunLoop(ctx, actx, c)
+	lr := loopRunner("v3_loop_run", act.Node)
+	if c.Faults != 0 {
+		// A fault loop plays the holder's unit too; its header says so.
+		pol, err := unitForRun(ctx, actx, act)
+		if err != nil {
+			return nil, fmt.Errorf("v3_loop_run: %w", err)
+		}
+		lr.Header = withUnit(nil, pol)
+	}
+	return lr.RunLoop(ctx, actx, c)
 }
 
 func v3LoopReplay(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
