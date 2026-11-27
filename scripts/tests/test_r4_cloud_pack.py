@@ -51,7 +51,7 @@ class R4CloudPack(unittest.TestCase):
                                 h["id"]: "ssh-ed25519 TEST-PIN-" + h["id"] for h in self.hosts})
         self.calls = []
 
-    def run_pack(self, first_scenario_exit=0, degraded_status=None, long_exit=2):
+    def run_pack(self, first_scenario_exit=0, degraded_status=None, long_exit=2, on_scenario=None, long_raw=None):
         (self.root / "inventory.json").write_text(json.dumps(dict(
             target="azure", hosts=self.hosts,
             managed_resource_ids=[h["resource_id"] for h in self.hosts])))
@@ -61,8 +61,10 @@ class R4CloudPack(unittest.TestCase):
             self.calls.append(argv)
             if degraded_status is not None and "swtest@192.0.2.3" in argv:
                 if "--format json" in argv[-1]:
-                    return subprocess.CompletedProcess(argv, long_exit, json.dumps(degraded_status).encode(), b"")
+                    return subprocess.CompletedProcess(argv, long_exit, long_raw if long_raw is not None else json.dumps(degraded_status).encode(), b"")
                 return subprocess.CompletedProcess(argv, 2, b"status: done\n", b"")
+            if argv[0] == str(self.root / "swblock") and on_scenario is not None:
+                on_scenario(argv)
             rc = first_scenario_exit if argv[0] == str(self.root / "swblock") else 0
             return subprocess.CompletedProcess(argv, rc, b"", b"")
 
@@ -87,14 +89,30 @@ class R4CloudPack(unittest.TestCase):
 
     def test_accepted_degradation_is_recorded_before_any_scenario_can_fail(self):
         status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
-        self.assertEqual(self.run_pack(first_scenario_exit=7, degraded_status=status), 7)
-        summary = json.loads((self.out / "SUMMARY.json").read_text())
-        node = summary["nodes"]["node-3"]
-        self.assertEqual(node["message"], "provisioning degraded, accepted: " +
-                         status["recoverable_errors"]["WARNING"][0])
-        self.assertEqual(node["status"], status)
-        self.assertEqual(node["cloud_init_wait_exit"], 2)
-        self.assertEqual(node["long_status_exit"], 2)
+        observed = []
+        def inspect_first_scenario(argv):
+            # Assert at the subprocess boundary, before the first RF invocation
+            # returns: writing SUMMARY after that call must not satisfy this test.
+            summary = json.loads((self.out / "SUMMARY.json").read_text())
+            node = summary["nodes"]["node-3"]
+            self.assertEqual(node["message"], "provisioning degraded, accepted: " +
+                             status["recoverable_errors"]["WARNING"][0])
+            self.assertEqual(node["status"], status)
+            self.assertEqual(node["cloud_init_wait_exit"], 2)
+            self.assertEqual(node["long_status_exit"], 2)
+            observed.append(argv)
+        self.assertEqual(self.run_pack(first_scenario_exit=7, degraded_status=status,
+                                       on_scenario=inspect_first_scenario), 7)
+        self.assertEqual(len(observed), 1)
+        self.assertIn("rf=3", observed[0])
+
+    def test_raw_malformed_long_status_never_starts_scenario(self):
+        status = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
+        raw = b'{"status":"done","errors":['
+        with self.assertRaisesRegex(RuntimeError, "node-3 cloud-init readiness failed"):
+            self.run_pack(degraded_status=status, long_raw=raw)
+        self.assertFalse(any(argv[0] == str(self.root / "swblock") for argv in self.calls))
+        self.assertEqual((self.out / "cloud-init-3-long.log").read_bytes(), raw)
 
     def test_degraded_status_with_real_or_unrecognized_error_never_starts_scenario(self):
         captured = json.loads((Path(__file__).parent / "fixtures/cloud-init-imds404.json").read_text())
