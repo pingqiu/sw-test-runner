@@ -68,6 +68,10 @@ func (s *volumeSubject) Field(ctx context.Context, node declared.Runner, f strin
 		return v.NQN, nil
 	case "layout_id":
 		return v.LayoutID, nil
+	case "layout8":
+		// The first 8 characters of the layout id: the volume's directory
+		// is <name>-<layout8> (core/frontend/chunkstore/layout/volume.go:55-61).
+		return v.LayoutID[:min(8, len(v.LayoutID))], nil
 	case "status_addr":
 		if v.Cur < 0 || v.Cur >= len(v.Hosts) {
 			return "", fmt.Errorf("volume %q: no current host %d", v.Name, v.Cur)
@@ -285,6 +289,14 @@ func init() {
 		}
 		return map[string]string{"guest_connect": c.Label, "guest_connect_options": c.Options,
 			"guest_connect_name": c.Name, "guest_connect_evidence": strconv.FormatBool(c.Evidence)}, nil
+	}
+	// The computed configuration: the chunk path's filer listing.
+	blockActions.Compute = func(cfg map[string]string) (map[string]string, map[string]string) {
+		l, why := chunkListing(cfg["filer"], cfg["chunk_path"])
+		if why != "" {
+			return nil, map[string]string{"chunk_listing": why}
+		}
+		return map[string]string{"chunk_listing": l}, nil
 	}
 	// A process param: the runner's record of the process (faults.go). A
 	// name it does not know is a refusal the history records.
@@ -512,4 +524,17 @@ func strictJSON(b []byte, v any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	return d.Decode(v)
+}
+
+// chunkListing is the chunk path in the filer's HTTP listing: the filer's
+// HTTP port is its gRPC port minus 10000 (SeaweedFS's convention), and the
+// chunk path loses its trailing slashes. A filer with no port above 10000
+// has no listing.
+func chunkListing(filer, chunkPath string) (string, string) {
+	host, port, ok := strings.Cut(filer, ":")
+	p, err := strconv.Atoi(port)
+	if !ok || err != nil || p <= 10000 {
+		return "", "filer has no SeaweedFS gRPC port"
+	}
+	return fmt.Sprintf("http://%s:%d%s", host, p-10000, strings.TrimRight(chunkPath, "/")), ""
 }

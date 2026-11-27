@@ -59,7 +59,7 @@ var vocabulary = map[string][]string{
 	"": {"product", "read_at", "about", "config", "runner_io_dir", "run_values", "device_resolvers", "actions",
 		"runner_setup", "exceptions", "guest"},
 	".config":                  {"keys", "client"},
-	".config.keys[]":           {"name", "required", "default"},
+	".config.keys[]":           {"name", "required", "default", "computed"},
 	".run_values[]":            {"name", "why"},
 	".runner_setup[]":          {"action", "why"},
 	".exceptions[]":            {"action", "why", "declarable_with", "runner_deadline_seconds", "plus_param"},
@@ -71,7 +71,7 @@ var vocabulary = map[string][]string{
 	".actions[].record":        {"volume", "args"},
 	".actions[].record.args.*": typed,
 	".actions[].plus_param":    {"name", "default"},
-	".actions[].derived.*":     {"kind", "from", "offset", "min_port", "error", "chars", "length", "map"},
+	".actions[].derived.*":     {"kind", "from", "error", "map"},
 	// Pending: moves to the driver after the rc.2 pin.
 	".actions[].retry": {"while_code", "while_message_contains", "answers", "max_attempts", "every_seconds", "within_param",
 		"request_arg", "page_cite", "expected_refusal", "note"},
@@ -171,6 +171,9 @@ func vocabularyErrors(d any) []string {
 				}
 				return
 			}
+			if place == ".actions[].derived.*" && o["kind"] != "map" {
+				bad = append(bad, fmt.Sprintf("%s: kind %v; a derived value is a map (a lookup table)", place, o["kind"]))
+			}
 			allowed, known := vocabulary[place]
 			if !known && place != ".guest" {
 				bad = append(bad, fmt.Sprintf("%s: a place the vocabulary does not have", place))
@@ -241,6 +244,25 @@ func TestClosedVocabulary(t *testing.T) {
 		if _, err := declaredParse([]byte(seeded)); err == nil {
 			t.Errorf("red control %s: loaded", name)
 		}
+	}
+}
+
+// A derived value is a lookup table: the walk takes kind "map" only, and a
+// function kind does not load (red control).
+func TestDerivedIsAMapOnly(t *testing.T) {
+	seeded := strings.Replace(string(actionsJSON), `"kind": "map", "from": "{{flush}}", "map": {"true": "fsync,notrunc"`,
+		`"kind": "prefix", "from": "{{flush}}", "length": 2, "map": {"true": "fsync,notrunc"`, 1)
+	if seeded == string(actionsJSON) {
+		t.Fatal("the seed did not apply")
+	}
+	if len(vocabularyErrors(mustJSON(t, seeded))) == 0 {
+		t.Error("red control: a function kind passes the walk")
+	}
+	if _, err := declaredParse([]byte(seeded)); err == nil {
+		t.Error("red control: a function kind loaded")
+	}
+	if _, err := declaredParse([]byte(strings.Replace(seeded, `"length": 2, `, "", 1))); err == nil {
+		t.Error("red control: a function kind with map keys only loaded")
 	}
 }
 

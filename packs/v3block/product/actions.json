@@ -1,7 +1,7 @@
 {
   "product": "block",
   "read_at": "seaweed-block 032eb1971cfddd6622ddeb46d20e17854d12c205",
-  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below), a parameter, <subject param>.<field> (a volume: name, nqn, layout_id, epoch, pid, pid_start, written; the current host's server, data_addr, ctrl_addr, status_addr, nvme_addr; the move target's next_cur, next_server, next_data_addr, next_ctrl_addr; holder_alive: the recorded holder runs. A process: pid, pid_start, killed_pid, killed_argv, volume, and its volume's fields), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The step kinds (package declared) run one operation under the action's own runner_deadline_seconds: device (I/O through the subject's block device), process (a long-lived process by its recorded identity: start, kill, restart) and sequence (product steps that feed each other; any failure after the first state change is unknown). The exceptions are the actions that stay Go handlers, each with its reason.",
+  "about": "The block product's declared actions, run by the generic executor (package declared). Each action names where it runs, its parameters, what its invocation records, one or more variants (the first whose condition holds runs), each with its command as a template, a timeout, a decoding of the answer and the citation of the product's command and flags, read at read_at. Every substituted value is one shell-quoted word. Outcomes of error bodies come from outcomes.json, by (decode.action or the verb, decode.path, code). Templates name config.<key> (the shared configuration below; a computed key is the pack's, from the others), a parameter, <subject param>.<field> (a volume: name, nqn, layout_id, layout8 (its first 8 characters), epoch, pid, pid_start, written; the current host's server, data_addr, ctrl_addr, status_addr, nvme_addr; the move target's next_cur, next_server, next_data_addr, next_ctrl_addr; holder_alive: the recorded holder runs. A process: pid, pid_start, killed_pid, killed_argv, volume, and its volume's fields), variant, and in a decoding answer.<field>, stderr or exit. Every action has a runner deadline: the RUNNER's bound on one operation, never a product bound and never a checker's. A declared command runs detached on its node (its output and exit code in files under runner_io_dir, polled), so nothing can hold the runner past the deadline; at it the command's session is killed, the operation completes unknown with the detail 'timeout after <n>s', and any process that survives the kill is recorded under 'abandoned' by pid and start time. A declared deadline lies above the command's own bound, so it ends only a call that does not answer. An exception's deadline grows by its plus_param's seconds (a wait the step may set). The step kinds (package declared) run one operation under the action's own runner_deadline_seconds: device (I/O through the subject's block device), process (a long-lived process by its recorded identity: start, kill, restart) and sequence (product steps that feed each other; any failure after the first state change is unknown). The exceptions are the actions that stay Go handlers, each with its reason.",
   "config": {
     "keys": [
       {"name": "bin_dir", "required": true},
@@ -13,7 +13,8 @@
       {"name": "own_script"},
       {"name": "work"},
       {"name": "owner"},
-      {"name": "lock_dirs_test_only"}
+      {"name": "lock_dirs_test_only"},
+      {"name": "chunk_listing", "computed": "the chunk path in the filer's HTTP listing: http://<filer host>:<filer port - 10000><chunk path without its trailing slashes> (the filer's HTTP port is its gRPC port minus 10000, SeaweedFS's convention); a filer with no such port cannot have one (packs/v3block/declared.go chunkListing)"}
     ],
     "client": "client"
   },
@@ -568,25 +569,6 @@
       "record": {
         "volume": "{{volume.name}}"
       },
-      "derived": {
-        "filer_http": {
-          "kind": "port_offset",
-          "from": "{{config.filer}}",
-          "offset": -10000,
-          "min_port": 10001,
-          "error": "filer has no SeaweedFS gRPC port"
-        },
-        "chunk_path": {
-          "kind": "trim_right",
-          "from": "{{config.chunk_path}}",
-          "chars": "/"
-        },
-        "layout8": {
-          "kind": "prefix",
-          "from": "{{volume.layout_id}}",
-          "length": 8
-        }
-      },
       "steps": [
         {
           "name": "head",
@@ -699,7 +681,7 @@
             "-I",
             "-c",
             {"script": "packs/v3block/scripts/filer_dirs.py"},
-            "http://{{derived.filer_http}}{{derived.chunk_path}}",
+            "{{config.chunk_listing}}",
             "{{volume.name}}-"
           ],
           "runner_deadline_seconds": 120,
@@ -722,7 +704,7 @@
             "-I",
             "-c",
             {"script": "packs/v3block/scripts/filer_files.py"},
-            "http://{{derived.filer_http}}{{derived.chunk_path}}/{{volume.name}}-{{derived.layout8}}"
+            "{{config.chunk_listing}}/{{volume.name}}-{{volume.layout8}}"
           ],
           "runner_deadline_seconds": 120,
           "cite": "every file below the volume's directory (core/frontend/chunkstore/layout/volume.go:55-61), through the SeaweedFS filer's HTTP listing; a missing directory is an empty list",

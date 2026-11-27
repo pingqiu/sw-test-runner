@@ -291,7 +291,7 @@ func TestRunnerDeadlineEndsAHungNode(t *testing.T) {
 // Red controls of an observation's checks.
 func TestParseObserveRedControls(t *testing.T) {
 	good := `"actions": [{"action": "o", "verb": "observe", "kind": "observe", "runs_on": "step_node", "params": [{"name": "volume", "kind": "subject"}],
-	  "record": {"volume": "{{volume.name}}"}, "derived": {"p": {"kind": "prefix", "from": "{{volume.id}}", "length": 2}},
+	  "record": {"volume": "{{volume.name}}"}, "derived": {"p": {"kind": "map", "from": "{{volume.id}}", "map": {"a": "b"}, "error": "no row"}},
 	  "steps": [{"name": "s", "command": ["show", "{{derived.p}}"], "runner_deadline_seconds": 1, "cite": "x.go:1",
 	    "read": {"kind": "json_strings", "into": "l", "error_into": "e", "error": "listing: {{stderr_first_line}}"}}]}], "exceptions": []}`
 	if _, err := Parse([]byte(head + good)); err != nil {
@@ -303,7 +303,9 @@ func TestParseObserveRedControls(t *testing.T) {
 		"an op on an observation":  {`"kind": "observe",`, `"kind": "observe", "op": "M.A",`},
 		"unknown read":             {`"kind": "json_strings"`, `"kind": "grep"`},
 		"undefined derived":        {`{{derived.p}}`, `{{derived.q}}`},
-		"unknown derived kind":     {`"kind": "prefix"`, `"kind": "eval"`},
+		"unknown derived kind":     {`"kind": "map", "from"`, `"kind": "eval", "from"`},
+		"a function derived kind":  {`"kind": "map", "from"`, `"kind": "prefix", "from"`},
+		"a map without its rows":   {`"map": {"a": "b"}, `, ``},
 		"undefined name in a read": {`{{stderr_first_line}}`, `{{stdout_all}}`},
 	} {
 		if !strings.Contains(good, bad[0]) {
@@ -390,5 +392,64 @@ func TestAnswerCounts(t *testing.T) {
 	}
 	if len(Counts(actx.History)) != 0 {
 		t.Fatal("counts kept after they were taken")
+	}
+}
+
+// A computed configuration key is the product's: the executor reads it from
+// Compute, never from the params or vars; a key the product cannot compute
+// puts its why where a step reads it, and the command does not run. Red
+// controls: no Compute, a key Compute does not supply, a computed key with
+// a default.
+func TestComputedConfiguration(t *testing.T) {
+	ch := strings.Replace(head, `{"name": "client", "default": "c1"}`, `{"name": "client", "default": "c1"}, {"name": "listing", "computed": "the bin's listing"}`, 1)
+	good := `"actions": [{"action": "o", "verb": "observe", "kind": "observe", "runs_on": "step_node", "params": [{"name": "volume", "kind": "subject"}],
+	  "record": {"volume": "{{volume.name}}"},
+	  "steps": [{"name": "s", "command": ["show", "{{config.listing}}"], "runner_deadline_seconds": 1, "cite": "x.go:1",
+	    "read": {"kind": "json_strings", "into": "l", "error_into": "e", "error": "listing: {{stderr_first_line}}"}}]}], "exceptions": []}`
+	f, err := Parse([]byte(ch + good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(compute func(map[string]string) (map[string]string, map[string]string)) (*node, map[string]any, error) {
+		n := &node{answers: []answer{{out: `["x"]`}}}
+		p := filepath.Join(t.TempDir(), "h.jsonl")
+		h, err := tr.OpenHistory(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		sub := &subject{f: map[string]string{}}
+		x := &Executor{File: f, Lookup: lookup, Compute: compute,
+			Node:    func(*tr.ActionContext, string) (Runner, error) { return &SimHost{Inner: n}, nil },
+			Subject: func(_ *tr.ActionContext, name string) (Subject, error) { sub.f["name"] = name; return sub, nil }}
+		actx := &tr.ActionContext{History: h, Vars: map[string]string{"bin": "/b", "listing": "from a var"}, Log: func(string, ...interface{}) {}}
+		_, err = x.Handler("o")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}})
+		var res map[string]any
+		if b, _ := os.ReadFile(p); len(b) > 0 {
+			rs := readRecords(t, p)
+			res = rs[len(rs)-1].Result
+		}
+		return n, res, err
+	}
+	n, _, err := run(func(cfg map[string]string) (map[string]string, map[string]string) {
+		return map[string]string{"listing": "L:" + cfg["bin"]}, nil
+	})
+	if err != nil || len(n.calls) != 1 || !strings.HasSuffix(n.calls[0], "show L:/b") {
+		t.Fatalf("green: %v %q", err, n.calls)
+	}
+	n, res, err := run(func(map[string]string) (map[string]string, map[string]string) {
+		return nil, map[string]string{"listing": "no listing for /b"}
+	})
+	if err != nil || len(n.calls) != 0 || res["e"] != "no listing for /b" {
+		t.Fatalf("uncomputed: %v %q %v", err, n.calls, res)
+	}
+	if _, _, err := run(nil); err == nil {
+		t.Error("red control: no Compute ran")
+	}
+	if _, _, err := run(func(map[string]string) (map[string]string, map[string]string) { return nil, nil }); err == nil {
+		t.Error("red control: a key Compute does not supply ran")
+	}
+	if _, err := Parse([]byte(strings.Replace(ch, `"computed": "the bin's listing"`, `"computed": "the bin's listing", "default": "d"`, 1) + good)); err == nil {
+		t.Error("red control: a computed key with a default loaded")
 	}
 }

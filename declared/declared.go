@@ -89,7 +89,8 @@ type File struct {
 
 // Config is the configuration every declared action shares, each key read
 // from the step's params, else from the run's vars (a var naming other vars
-// is expanded). No key may stay unresolved.
+// is expanded). No key may stay unresolved. A Computed key is not read:
+// the product computes it from the other keys (Executor.Compute).
 type Config struct {
 	Keys []ConfigKey `json:"keys"`
 	// Client is the key whose value is the history's client name.
@@ -101,6 +102,9 @@ type ConfigKey struct {
 	Name     string `json:"name"`
 	Required bool   `json:"required,omitempty"`
 	Default  string `json:"default,omitempty"`
+	// Computed says how the product computes the key (and where); such a
+	// key has no default and is not required.
+	Computed string `json:"computed,omitempty"`
 }
 
 // Exception names an action that stays a Go handler, why, and its runner
@@ -542,6 +546,9 @@ func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 	keys := map[string]bool{}
 	for _, k := range f.Config.Keys {
 		keys[k.Name] = true
+		if k.Computed != "" && (k.Required || k.Default != "") {
+			return nil, fmt.Errorf("actions: config key %s is computed: no default, not required", k.Name)
+		}
 	}
 	if f.Config.Client != "" && !keys[f.Config.Client] {
 		return nil, fmt.Errorf("actions: client key %q is not a config key", f.Config.Client)
@@ -939,6 +946,11 @@ type Executor struct {
 	// Values supplies the description's run values (RunValues) for a step
 	// of a step kind; an error stops the step before anything is recorded.
 	Values func(actx *tr.ActionContext, act tr.Action) (map[string]string, error)
+	// Compute supplies the description's computed configuration keys from
+	// the others (by name, without "config."): each key's value, or why it
+	// cannot be computed. A step that names a key that cannot be computed
+	// does not run (as a value it cannot expand).
+	Compute func(config map[string]string) (vals, why map[string]string)
 	// OpDeadline, when set, replaces a step kind's runner deadline (tests).
 	OpDeadline func(declared time.Duration) time.Duration
 	// Process resolves a process param: the process's record as a subject,
@@ -975,7 +987,10 @@ type scope struct {
 	vals     map[string]string
 	subjects map[string]Subject
 	derived  map[string]Derived
-	params   map[string]string // the step's own params
+	// uncomputed: computed configuration the product could not compute,
+	// and why.
+	uncomputed map[string]string
+	params     map[string]string // the step's own params
 	// scripts: the description's script files, by path.
 	scripts map[string]string
 	// unresolved: process params the product could not resolve, and why.
@@ -993,6 +1008,9 @@ func (s *scope) get(n string) (string, error) {
 	}
 	if v, ok := s.vals[n]; ok {
 		return v, nil
+	}
+	if why, ok := s.uncomputed[n]; ok {
+		return "", derivedError{why}
 	}
 	if d, ok := strings.CutPrefix(n, "derived."); ok && s.derived != nil {
 		if spec, ok := s.derived[d]; ok {
@@ -1114,6 +1132,38 @@ func (s *scope) argv(words []Word) ([]string, error) {
 
 var varRef = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
 
+// computeConfig sets the computed configuration keys from the others.
+func (x *Executor) computeConfig(s *scope, computed []string) error {
+	if len(computed) == 0 {
+		return nil
+	}
+	if x.Compute == nil {
+		return errors.New("the description names computed configuration and the product computes none")
+	}
+	cfg := map[string]string{}
+	for k, v := range s.vals {
+		if n, ok := strings.CutPrefix(k, "config."); ok {
+			cfg[n] = v
+		}
+	}
+	vals, whys := x.Compute(cfg)
+	for _, k := range computed {
+		if why, ok := whys[k]; ok {
+			if s.uncomputed == nil {
+				s.uncomputed = map[string]string{}
+			}
+			s.uncomputed["config."+k] = why
+			continue
+		}
+		v, ok := vals[k]
+		if !ok {
+			return fmt.Errorf("computed configuration %q not supplied", k)
+		}
+		s.vals["config."+k] = v
+	}
+	return nil
+}
+
 // configValue is a param, else a var; a var's value may name other vars,
 // expanded here (bounded; an unknown name stays).
 func configValue(act tr.Action, actx *tr.ActionContext, k string) string {
@@ -1162,7 +1212,12 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	}
 	var required []string
 	missing := false
+	var computed []string
 	for _, k := range x.File.Config.Keys {
+		if k.Computed != "" {
+			computed = append(computed, k.Name)
+			continue
+		}
 		v := configValue(act, actx, k.Name)
 		if strings.Contains(v, "{{") {
 			return nil, fmt.Errorf("%s: unresolved configuration %q", name, v)
@@ -1178,6 +1233,9 @@ func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Acti
 	}
 	if missing {
 		return nil, fmt.Errorf("%s: %s are required (params or vars)", name, andList(required))
+	}
+	if err := x.computeConfig(s, computed); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	for _, p := range a.Params {
 		switch p.Kind {
