@@ -39,7 +39,7 @@ func checkProcEquivalentTo(t *testing.T, rep reporter, action string, frozen tr.
 	defer func(f func() time.Time) { nowFn = f }(nowFn)
 	at := time.Unix(1800000000, 0)
 	nowFn = func() time.Time { return at }
-	h := blockActions.Handler(action)
+	h := registered(action)
 	for _, c := range cases {
 		want, got := runEq(t, frozen, c, false), runEq(t, h, c, false)
 		if (want.err == nil) != (got.err == nil) {
@@ -59,6 +59,15 @@ func checkProcEquivalentTo(t *testing.T, rep reporter, action string, frozen tr.
 			}
 		}
 	}
+}
+
+// registered is the handler the pack registers for action (v3_op_restart is
+// a Go handler that runs the declared v3_op_restart_holder for a holder).
+func registered(action string) tr.ActionHandlerFunc {
+	if action == "v3_op_restart" {
+		return v3OpRestart
+	}
+	return blockActions.Handler(action)
 }
 
 func checkProcEquivalent(t *testing.T, action string, frozen tr.ActionHandlerFunc, cases []eqCase) {

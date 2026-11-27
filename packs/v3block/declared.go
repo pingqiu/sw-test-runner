@@ -298,11 +298,7 @@ func init() {
 		}
 		return s, ""
 	}
-	// The cases the description hands to Go handlers (its exceptions).
-	blockActions.Coded = func(name string) (tr.ActionHandlerFunc, bool) {
-		h, ok := map[string]tr.ActionHandlerFunc{"v3_op_restart_master": v3OpRestartMaster}[name]
-		return h, ok
-	}
+
 }
 
 // boundedNode bounds every command of a Go handler: a command runs at most

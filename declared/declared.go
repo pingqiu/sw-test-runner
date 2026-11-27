@@ -187,9 +187,6 @@ type Action struct {
 	// OnOutcomeSet updates subjects' fields after the operation completed
 	// with that outcome: outcome -> "<subject param>.<field>" -> template.
 	OnOutcomeSet map[string]map[string]string `json:"on_outcome_set,omitempty"`
-	// Coded hands one case of the action to a Go handler the description
-	// lists as an exception.
-	Coded *Coded `json:"coded,omitempty"`
 	// Kind "sequence" (sequence.go).
 	Sequence *Sequence `json:"sequence,omitempty"`
 }
@@ -514,17 +511,6 @@ func ParseWith(b []byte, scripts map[string]string) (*File, error) {
 		}
 		seen[x.Action] = true
 	}
-	for _, a := range f.Actions {
-		if c := a.Coded; c != nil {
-			found := false
-			for _, x := range f.Exceptions {
-				found = found || x.Action == c.Handler
-			}
-			if !found {
-				return nil, fmt.Errorf("actions: %s: coded handler %s is not an exception", a.Action, c.Handler)
-			}
-		}
-	}
 	for _, x := range f.RunnerSetup {
 		if x.Action == "" || strings.TrimSpace(x.Why) == "" {
 			return nil, fmt.Errorf("actions: runner setup %q needs its action and why", x.Action)
@@ -552,11 +538,11 @@ func (a *Action) check(keys, run map[string]bool) error {
 		return errors.New("no variant")
 	}
 	if !stepKind && (a.RunnerDeadlineSeconds != 0 || a.PlusParam != nil || a.Each != "" || a.Input != nil || a.Device != nil || a.IO != nil ||
-		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil || a.Sequence != nil) {
-		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and coded belong to the step kinds")
+		len(a.OnInvokeSet) != 0 || a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Sequence != nil) {
+		return errors.New("runner_deadline_seconds, plus_param, each, input, device, io, on_invoke_set, process, on_outcome_set and sequence belong to the step kinds")
 	}
-	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0 || a.Coded != nil) {
-		return errors.New("process, on_outcome_set and coded belong to process actions")
+	if a.Kind == "device" && (a.Process != nil || len(a.OnOutcomeSet) != 0) {
+		return errors.New("process and on_outcome_set do not belong to a device action")
 	}
 	for o := range a.OnOutcomeSet {
 		if o != tr.OutcomeOK && o != tr.OutcomeUnknown {
@@ -656,14 +642,9 @@ func (a *Action) check(keys, run map[string]bool) error {
 				}
 			}
 		}
-		if c := a.Coded; c != nil {
-			if !plain[c.Param] || c.Handler == "" || strings.TrimSpace(c.Why) == "" {
-				return errors.New("coded: a param of the action, a handler and why")
-			}
-		}
 		if a.Kind == "sequence" {
-			if len(a.OnInvokeSet) != 0 || a.Coded != nil {
-				return errors.New("a sequence has no on_invoke_set and no coded case")
+			if len(a.OnInvokeSet) != 0 {
+				return errors.New("a sequence has no on_invoke_set")
 			}
 			for _, v := range a.Record.Args {
 				if err := base(v.Template); err != nil {
@@ -846,8 +827,6 @@ type Executor struct {
 	// Process resolves a process param: the process's record as a subject,
 	// or why the runner knows no such process (the operation is refused).
 	Process func(ctx context.Context, actx *tr.ActionContext, act tr.Action, node Runner, name string) (Subject, string)
-	// Coded is the product's Go handler an action's Coded names.
-	Coded func(name string) (tr.ActionHandlerFunc, bool)
 }
 
 // Handlers returns one handler per declared action, by its name.
@@ -1049,17 +1028,6 @@ func andList(ns []string) string {
 
 func (x *Executor) exec(ctx context.Context, actx *tr.ActionContext, act tr.Action, a *Action) (map[string]string, error) {
 	name := a.Action
-	if c := a.Coded; c != nil && act.Params[c.Param] == c.Equals {
-		var h tr.ActionHandlerFunc
-		ok := false
-		if x.Coded != nil {
-			h, ok = x.Coded(c.Handler)
-		}
-		if !ok {
-			return nil, fmt.Errorf("%s: the product has no handler %s", name, c.Handler)
-		}
-		return h(ctx, actx, act)
-	}
 	if actx.History == nil {
 		return nil, fmt.Errorf("%s: no history (typed operations run only with a run bundle)", name)
 	}

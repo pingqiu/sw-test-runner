@@ -217,14 +217,12 @@
       "note": "a fault touches every volume: the record's volume is empty and its args name the process and, for a holder, its volume"
     },
     {
-      "action": "v3_op_restart", "verb": "restart", "op": "Env.Restart", "kind": "process", "runs_on": "step_node",
+      "action": "v3_op_restart_holder", "verb": "restart", "op": "Env.Restart", "kind": "process", "runs_on": "step_node",
       "params": [
         {"name": "process", "kind": "process"},
         {"name": "ready_seconds", "kind": "int", "default": "60"}
       ],
       "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
-      "coded": {"param": "process", "equals": "blockmaster", "handler": "v3_op_restart_master",
-        "why": "the blockmaster restarts through the ownership script and is ready when a master call answers (see the exception)"},
       "record": {"volume": "", "args": {"process": "{{process}}", "volume": {"template": "{{process.volume}}", "optional": true}}},
       "process": {
         "op": "restart", "subject": "process", "name": "blockvolume",
@@ -613,7 +611,7 @@
     {"action": "v3_history_end", "why": "closes the run's history file (its end record) so a later phase judges a whole history; a runner bookkeeping step with no product call"}
   ],
   "exceptions": [
-    {"action": "v3_op_restart_master", "why": "the blockmaster's restart (v3_op_restart hands it here): it relaunches through the ownership script's spawn, which records the new identity in the ledger, the identity is read back from the ledger whatever spawn's exit, it is ready when a master call (a resolve of the first volume) answers ok or refused, and after it the unit's supervision relaunches holders that fenced while the master was down", "declarable_with": "a process restart whose launcher is a declared command that records the identity itself (read back from a ledger subject), a readiness probe that is a self-reported answer of ok or refused, and a step after the operation that runs the unit's supervision", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
+    {"action": "v3_op_restart", "why": "a fault's repair whose blockmaster case is not declared: the blockmaster relaunches through the ownership script's spawn, which records the new identity in the ledger, the identity is read back from the ledger whatever spawn's exit, it is ready when a master call (a resolve of the first volume) answers ok or refused, and after it the unit's supervision relaunches holders that fenced while the master was down. A holder's restart is declared (v3_op_restart_holder): this handler hands every other process to it, unchanged", "declarable_with": "a process restart whose launcher is a declared command that records the identity itself (read back from a ledger subject), a readiness probe that is a self-reported answer of ok or refused, and a step after the operation that runs the unit's supervision", "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60}},
     {"action": "v3_op_healthy", "why": "an observation of health after faults: polls the master and every live holder within a bound", "declarable_with": "an observation over every subject of a kind (the master and each live holder) polled until a declared health condition holds within a bound", "runner_deadline_seconds": 60, "plus_param": {"name": "wait_seconds", "default": 0}}
   ],
   "guest": {

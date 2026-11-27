@@ -576,7 +576,7 @@ func TestFaultActionsRegisteredAndNeedAHistory(t *testing.T) {
 		}
 	}
 	actx := &tr.ActionContext{Vars: map[string]string{}, Log: func(string, ...interface{}) {}}
-	for _, h := range []tr.ActionHandlerFunc{blockActions.Handler("v3_op_kill"), blockActions.Handler("v3_op_restart"), v3OpHealthy} {
+	for _, h := range []tr.ActionHandlerFunc{blockActions.Handler("v3_op_kill"), v3OpRestart, v3OpHealthy} {
 		if _, err := h(context.Background(), actx, tr.Action{Params: map[string]string{"process": "blockmaster"}}); err == nil || !strings.Contains(err.Error(), "no history") {
 			t.Errorf("ran without a history: %v", err)
 		}

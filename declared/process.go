@@ -282,16 +282,6 @@ func ListenerPIDs(ctx context.Context, node Runner, ports []string) (map[string]
 // PortOf is the port of host:port.
 func PortOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
 
-// Coded hands a step whose param Param equals Equals to the product's Go
-// handler Handler (an exception of the description, with its why): a case
-// of an action the step kind does not declare.
-type Coded struct {
-	Param   string `json:"param"`
-	Equals  string `json:"equals"`
-	Handler string `json:"handler"`
-	Why     string `json:"why"`
-}
-
 // checkProcess checks a process action.
 func (a *Action) checkProcess(defined func(map[string]bool) func(string) error, subjects, ints map[string]bool) error {
 	p := a.Process
