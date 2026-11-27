@@ -267,6 +267,7 @@
         {"name": "volume", "kind": "subject", "vars": true},
         {"name": "host"},
         {"name": "durable_blocks", "kind": "int", "default": "4096", "vars": true},
+        {"name": "chunk_capture_interval", "kind": "enum", "values": ["0", "5m", "15m", "30m", "1h"], "default": "0", "vars": true},
         {"name": "ready_seconds", "kind": "int", "default": "60"}
       ],
       "runner_deadline_seconds": 120, "plus_param": {"name": "ready_seconds", "default": 60},
@@ -294,7 +295,7 @@
           "--durable-root", "{{config.root}}/{{volume.server}}", "--durable-impl", "walstore-chunk",
           "--durable-blocks", "{{durable_blocks}}", "--durable-blocksize", "4096",
           "--chunk-filer", "{{config.filer}}", "--chunk-path", "{{config.chunk_path}}", "--chunk-control-endpoint", "--workspace-lease",
-          "--nvme-listen", "{{volume.nvme_addr}}", "--nvme-subsysnqn", "{{volume.nqn}}", "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"],
+          "--nvme-listen", "{{volume.nvme_addr}}", "--nvme-subsysnqn", "{{volume.nqn}}", "--chunk-capture-interval", "{{chunk_capture_interval}}", "--chunk-snapshot-schedule", "off"],
         "log": "{{config.root}}/{{volume.server}}.{{now_ns}}.log",
         "result_launched": {"layout_id": "{{volume.layout_id}}", "guest_connect": "{{run.guest_connect}}"},
         "owned": [
