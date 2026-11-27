@@ -525,10 +525,13 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 		v.rewrote = true // it may have persisted: the target may no longer name the source
 		return
 	}
-	if outcome == "refused" || outcome == "unknown" {
+	if outcome == tr.OutcomeRefused || outcome == tr.OutcomeRefusedEffect || outcome == tr.OutcomeUnknown {
 		switch o.Negative {
 		case limDeleteSource:
-			if outcome == "unknown" {
+			// refused_effect: the documented effect, the reservation committed
+			// (OG:193-196). While the outcome map has no page-pinned row for it
+			// the answer stays unknown, and unknown applies the same effect.
+			if outcome == tr.OutcomeRefusedEffect || outcome == tr.OutcomeUnknown {
 				v.state = stReserved
 			}
 			return
@@ -537,6 +540,15 @@ func (m *blockModel) Learn(o GenOp, outcome string) {
 			t.state, t.source, t.fromSnap = stBound, o.Volume, o.Params["snapshot"]
 			return
 		}
+	}
+	if outcome == tr.OutcomeRefusedEffect {
+		// A refusal with an effect the shadow does not model: it cannot say
+		// what changed, so the volumes leave the run, as for unknown.
+		v.state = stUnknown
+		if t := o.Params["target_volume"]; t != "" {
+			m.vols[t].state = stUnknown
+		}
+		return
 	}
 	// An attach or stop answered unknown: its volume's intended state is
 	// unsettled until a settled record places it (Observed).

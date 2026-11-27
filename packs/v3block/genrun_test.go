@@ -19,9 +19,11 @@ import (
 // that declares expect=refused, ok otherwise; failWrite makes one lba's write
 // unknown, boom makes one action a runner error.
 type fakeProduct struct {
-	calls     []tr.Action
-	failWrite string
-	boom      string
+	calls      []tr.Action
+	failWrite  string
+	boom       string
+	effect     string // this action answers refused_effect
+	refusedFor string // this action answers refused
 }
 
 func (f *fakeProduct) install(t *testing.T) {
@@ -41,6 +43,12 @@ func (f *fakeProduct) install(t *testing.T) {
 			}
 			if name == "v3_op_write" && act.Params["lbas"] == f.failWrite {
 				out = tr.OutcomeUnknown
+			}
+			if name == f.effect {
+				out = tr.OutcomeRefusedEffect
+			}
+			if name == f.refusedFor {
+				out = tr.OutcomeRefused
 			}
 			verb := strings.TrimPrefix(name, "v3_op_")
 			if name == "v3_op_observe" {
@@ -275,5 +283,35 @@ func TestRandomScenariosPassOneCheckerSet(t *testing.T) {
 		if gen != 1 || judge != 1 {
 			t.Errorf("%s: %d v3_gen_run, %d judge lines", file, gen, judge)
 		}
+	}
+}
+
+// refused_effect: a refusal with a documented effect. The step is observed
+// after it as after a refusal, and a replay compares it exactly.
+func TestGenRunObservesAfterARefusedEffectAndReplayComparesIt(t *testing.T) {
+	f := &fakeProduct{effect: "v3_op_snapshot"}
+	f.install(t)
+	a := recordRun(t, "120")
+	recs := records(t, a)
+	n := 0
+	for i, r := range recs {
+		if r.Kind == tr.HistoryComplete && r.Outcome == tr.OutcomeRefusedEffect {
+			n++
+			if o := recs[i+1]; o.Verb != "observe" || o.Volume != r.Volume {
+				t.Fatalf("refused_effect at seq %d not observed after: %+v", r.Seq, o)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no refused_effect in the run")
+	}
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+		t.Fatalf("replay: %v %v", out, err)
+	}
+	// Red control: a product answering a plain refusal instead differs.
+	f.effect = ""
+	f.refusedFor = "v3_op_snapshot"
+	if _, _, err := replayInto(t, a); err == nil || !strings.Contains(err.Error(), "replayed refused") {
+		t.Fatalf("a plain refusal matched a recorded refused_effect: %v", err)
 	}
 }

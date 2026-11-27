@@ -1354,3 +1354,29 @@ func TestCoverageTailDeletesObservesAndProbesADeletedName(t *testing.T) {
 		t.Fatalf("ordinary_never_ran %v", g2.Coverage()["ordinary_never_ran"])
 	}
 }
+
+// refused_effect: "delete a source whose snapshot has a restore target"
+// refused with its documented effect reserves the volume (as unknown does
+// while the outcome map keeps it unknown); a plain refusal reserves
+// nothing; a refused_effect the shadow does not model takes the volume out.
+func TestModelLearnsARefusedEffect(t *testing.T) {
+	stoppedSource := func() *Generator {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "1", "round", "r"),
+			op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_restore", "g1", "snapshot", "g1-s1", "target_volume", "g2"),
+			op("v3_op_stop", "g1"))
+		return g
+	}
+	for outcome, want := range map[string]string{tr.OutcomeRefusedEffect: stReserved, tr.OutcomeUnknown: stReserved, tr.OutcomeRefused: stStopped} {
+		g := stoppedSource()
+		g.Learn(neg(op("v3_op_delete", "g1"), limDeleteSource), outcome)
+		if got := g.vols["g1"].state; got != want {
+			t.Errorf("delete source answered %s: %q, want %q", outcome, got, want)
+		}
+	}
+	g := stoppedSource()
+	g.Learn(op("v3_op_snapshot", "g2", "name", "g2-s1"), tr.OutcomeRefusedEffect)
+	if g.vols["g2"].state != stUnknown {
+		t.Errorf("an unmodelled refused_effect left the volume %q", g.vols["g2"].state)
+	}
+}

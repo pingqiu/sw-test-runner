@@ -153,7 +153,9 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 	if err != nil {
 		return "", err
 	}
-	if outcome == tr.OutcomeRefused || o.Negative != "" {
+	// After a refusal (with or without a documented effect) or a negative:
+	// one observation of each subject.
+	if outcome == tr.OutcomeRefused || outcome == tr.OutcomeRefusedEffect || o.Negative != "" {
 		if err := observe(); err != nil {
 			return "", err
 		}
