@@ -32,7 +32,9 @@ package randomrun
 // gen_step record, observations and handlers as a run), so a replayed history
 // is itself replayable and judged by the same rule. It goes through every
 // step, and writes last an observe record "gen_replay":
-// {steps, differences: [{opno, action, volume, recorded, replayed}]}.
+// {steps, differences: [{opno, action, volume, recorded, replayed}]}, and
+// notes [{opno, action, volume, note}] when a step's rerun made another
+// number of attempts than recorded (a note, not a difference).
 
 import (
 	"bufio"
@@ -291,6 +293,18 @@ func (f *stepFold) complete(key string, retried bool, outcome string) string {
 	return got
 }
 
+// attemptNote adds to notes the step whose replay made another number of
+// attempts than its record (n): the count rests on the product's answers,
+// so it is a note, never a difference; the step is compared on its
+// requests' last outcomes.
+func attemptNote(notes []any, st ReplayStep, n int) []any {
+	if n == st.Attempts {
+		return notes
+	}
+	return append(notes, map[string]any{"opno": st.Op.No, "action": st.Op.Action, "volume": st.Op.Volume,
+		"note": fmt.Sprintf("attempts: recorded %d, replayed %d", st.Attempts, n)})
+}
+
 // replaySchedule reads and checks a recorded fault_schedule against its header.
 func replaySchedule(header, res map[string]any, d Driver) ([]FaultEvent, error) {
 	events, err := parseFaultEvents(res)
@@ -392,15 +406,17 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		steps = steps[:len(steps)-1]
 	}
 	diffs := []replayDiff{}
+	var notes []any // a rerun's attempt count that differs: a note, not a difference
 	for i, st := range steps {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
 		o := st.Op
-		replayed, err := r.Step(ctx, actx, o)
+		replayed, n, err := r.step(ctx, actx, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
+		notes = attemptNote(notes, st, n)
 		if replayed != st.Recorded {
 			rec := st.Recorded
 			if rec == "" {
@@ -431,10 +447,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	}
 	for _, st := range tail {
 		o := st.Op
-		replayed, err := r.Step(ctx, actx, o)
+		replayed, n, err := r.step(ctx, actx, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: tail operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
+		notes = attemptNote(notes, st, n)
 		if replayed != st.Recorded {
 			rec := st.Recorded
 			if rec == "" {
@@ -453,7 +470,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	for _, d := range diffs {
 		dl = append(dl, map[string]any{"opno": d.OpNo, "action": d.Action, "volume": d.Volume, "recorded": d.Recorded, "replayed": d.Replayed})
 	}
-	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_replay", Result: map[string]any{"steps": len(steps), "differences": dl}}); err != nil {
+	res := map[string]any{"steps": len(steps), "differences": dl}
+	if notes != nil {
+		res["notes"] = notes
+	}
+	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_replay", Result: res}); err != nil {
 		return nil, err
 	}
 	if len(diffs) > 0 {

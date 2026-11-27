@@ -1,0 +1,69 @@
+package randomrun
+
+// The driver's rerun: an action whose description declares one (an operator
+// page tells the operator to run the same command again for an answer) is
+// RE-ISSUED by the driver, never looped inside the action. Each attempt is
+// its own handler call and its own operation in the history (an invoke and a
+// complete with "attempt": n), and after each REFUSED attempt that is
+// re-issued the subject is observed first: that observation is the "after"
+// of attempt n and the "before" of attempt n+1, so the checkers judge every
+// refused attempt as they judge any refusal. The last attempt's outcome is
+// the call's.
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	tr "github.com/pingqiu/sw-test-runner"
+)
+
+// Attempts runs one call act of handler h: one attempt, or, when rr
+// declares a rerun of act.Action (RequestArg not ""), attempt 1 and, while
+// rr.Rerun says so, attempt n+1 after its pause, each with AttemptParam set.
+// observe records the subject's observation; it runs after a refused
+// attempt that is re-issued (none: nothing is observed). It returns the last
+// attempt's output and the number of attempts made (0 for an action with no
+// declared rerun). A step that sets AttemptParam itself is a runner error:
+// only the driver numbers attempts. A context ended during a pause returns
+// the last attempt's output, as an attempt that was not made.
+func Attempts(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandlerFunc, act tr.Action, rr Rerunner, observe func() error) (map[string]string, int, error) {
+	if _, set := act.Params[AttemptParam]; set {
+		return nil, 0, fmt.Errorf("%s: %s is the driver's to set, not a step's", act.Action, AttemptParam)
+	}
+	if rr == nil || rr.RequestArg(act.Action) == "" {
+		out, err := h(ctx, actx, act)
+		return out, 0, err
+	}
+	start := time.Now()
+	for n := 1; ; n++ {
+		p := make(map[string]string, len(act.Params)+1)
+		for k, v := range act.Params {
+			p[k] = v
+		}
+		p[AttemptParam] = fmt.Sprint(n)
+		call := act
+		call.Params = p
+		out, err := h(ctx, actx, call)
+		if err != nil {
+			return nil, n, err
+		}
+		again, pause, why := rr.Rerun(act.Action, act.Params, n, time.Since(start), out)
+		if !again {
+			if why == "guard" {
+				actx.Log("  %s: the wall-clock guard ended the reruns after attempt %d", act.Action, n)
+			}
+			return out, n, nil
+		}
+		if (out["value"] == tr.OutcomeRefused || out["value"] == tr.OutcomeRefusedEffect) && observe != nil {
+			if err := observe(); err != nil {
+				return nil, n, err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return out, n, nil
+		case <-time.After(pause):
+		}
+	}
+}

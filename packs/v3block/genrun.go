@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/randomrun"
@@ -27,6 +28,45 @@ var genHandlers = map[string]tr.ActionHandlerFunc{
 	"v3_op_kill": blockActions.Handler("v3_op_kill"), "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
 	"v3_op_flush":   blockActions.Handler("v3_op_flush"),
 	"v3_op_release": blockActions.Handler("v3_op_release"),
+}
+
+// The block Driver's rerun is the declaration's (product/actions.json,
+// "retry"): the driver re-issues the action, the action never loops.
+func (m *blockModel) RequestArg(action string) string { return blockActions.RequestArg(action) }
+
+func (m *blockModel) Rerun(action string, params map[string]string, n int, since time.Duration, out map[string]string) (bool, time.Duration, string) {
+	return blockActions.Rerun(action, params, n, since, out)
+}
+
+var _ randomrun.Rerunner = (*blockModel)(nil)
+
+// driven is the handler a SCRIPTED step runs (register.go): an action with a
+// declared rerun is re-issued by the same driver function as a random run
+// (randomrun.Attempts), its subject observed after each refused attempt
+// that is re-issued; any other action is its declared handler. The set is
+// the declarations', not a list. The random run's handlers (genHandlers) are
+// the bare ones: its Runner re-issues.
+func driven(name string) tr.ActionHandlerFunc {
+	h := blockActions.Handler(name)
+	if blockActions.RequestArg(name) == "" {
+		return h
+	}
+	m := &blockModel{}
+	observe := blockActions.Handler("v3_op_observe")
+	return func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		act.Action = name
+		o := GenOp{Action: name, Volume: opParam(act, actx, "volume"), Params: act.Params}
+		out, _, err := randomrun.Attempts(ctx, actx, h, act, m, func() error {
+			for _, s := range m.ObserveSubjects(o) {
+				obs := m.Observe(s)
+				if _, err := observe(ctx, actx, tr.Action{Action: obs.Action, Node: act.Node, Params: obs.Params}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		return out, err
+	}
 }
 
 // genRunner executes through the block handlers (read when called, so a

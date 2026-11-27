@@ -508,6 +508,7 @@ func (r LoopRunner) ReplayLoop(ctx context.Context, actx *tr.ActionContext, src 
 		fr = newFaultRun(r.Runner, sc.events, nil, sc.header, nil)
 	}
 	diffs := []any{}
+	var notes []any // a rerun's attempt count that differs: a note, not a difference
 	steps, cycleNo := 0, 0
 	var first string
 	for _, seg := range sc.segments {
@@ -524,10 +525,11 @@ func (r LoopRunner) ReplayLoop(ctx context.Context, actx *tr.ActionContext, src 
 				return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 			}
 			o := st.Op
-			got, err := r.Step(ctx, actx, o)
+			got, n, err := r.step(ctx, actx, o)
 			if err != nil {
 				return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 			}
+			notes = attemptNote(notes, st, n)
 			steps++
 			if got != st.Recorded {
 				rec := st.Recorded
@@ -548,7 +550,11 @@ func (r LoopRunner) ReplayLoop(ctx context.Context, actx *tr.ActionContext, src 
 			}
 		}
 	}
-	if err := r.observe(actx, "loop_replay", map[string]any{"steps": steps, "differences": diffs}); err != nil {
+	res := map[string]any{"steps": steps, "differences": diffs}
+	if notes != nil {
+		res["notes"] = notes
+	}
+	if err := r.observe(actx, "loop_replay", res); err != nil {
 		return nil, err
 	}
 	if len(diffs) > 0 {

@@ -39,7 +39,7 @@ func TestSnapshotHeadConflictRatio(t *testing.T) {
 		actx.Log = func(f string, a ...interface{}) { logs = append(logs, fmt.Sprintf(f, a...)) }
 		actx.Bundle = &tr.RunBundle{Dir: t.TempDir()}
 		for i := 0; i < snapshots(c.answers); i++ {
-			if _, err := blockActions.Handler("v3_op_snapshot")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "name": fmt.Sprintf("s%d", i)}}); err != nil {
+			if _, err := reissued("v3_op_snapshot")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1", "name": fmt.Sprintf("s%d", i)}}); err != nil {
 				t.Fatal(err)
 			}
 		}
