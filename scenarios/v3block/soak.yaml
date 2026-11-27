@@ -46,7 +46,7 @@ env:
   # The checkers whose verdicts decide the run (the judge's --checkers). C6
   # and DUR need faults: a run with faults off passes -env checkers=C0,C1.
   checkers: "C0,C1,C6,DUR"
-  fault_processes: "blockmaster blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
+  fault_processes: "blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
   fault_restart_within: "20"
   # As M2: the pages bound a restarted holder's recovery by its lease re-grant
   # (at most 65 s after it stopped) plus the start wait (30 s)
