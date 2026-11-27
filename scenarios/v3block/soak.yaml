@@ -43,6 +43,9 @@ env:
   # kill with chance faults; its restart 1..fault_restart_within cycle
   # operations later. blockvolume:<i> is the holder of the i-th pool name.
   faults: "0.02"
+  # The checkers whose verdicts decide the run (the judge's --checkers). C6
+  # and DUR need faults: a run with faults off passes -env checkers=C0,C1.
+  checkers: "C0,C1,C6,DUR"
   fault_processes: "blockmaster blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
   fault_restart_within: "20"
   # As M2: the pages bound a restarted holder's recovery by its lease re-grant
@@ -207,4 +210,4 @@ phases:
         env.HIST: "{{ bundle_dir }}/history.jsonl"
         env.OUT: "{{ artifacts_dir }}/checks.json"
         env.CHECK: "{{ runner_src }}/checkers/history_check.py"
-        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT" --product "{{ runner_src }}/packs/v3block/product" --checkers C0,C1,C6,DUR
+        cmd: python3 -I "$CHECK" "$HIST" --json "$OUT" --product "{{ runner_src }}/packs/v3block/product" --checkers "{{ checkers }}"

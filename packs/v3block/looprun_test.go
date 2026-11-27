@@ -147,8 +147,10 @@ func TestSoakScenarioIsM2SetupWithTheLoop(t *testing.T) {
 			t.Fatalf("phase soak: %+v", p.Actions)
 		}
 	}
-	if !strings.Contains(judge, "--checkers C0,C1,C6,DUR") {
-		t.Fatalf("judge %q", judge)
+	// One source: the judge reads env checkers, whose default is the set a
+	// fault soak exercises (a run with faults off passes C0,C1).
+	if !strings.Contains(judge, `--checkers "{{ checkers }}"`) || s.Env["checkers"] != "C0,C1,C6,DUR" {
+		t.Fatalf("judge %q, env checkers %q", judge, s.Env["checkers"])
 	}
 	f, _ := blockLoops()
 	if _, ok := f.Loops[s.Env["loop"]]; !ok {
