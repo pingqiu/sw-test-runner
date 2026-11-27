@@ -149,7 +149,10 @@
       "variants": [
         {"name": "fast_faults", "options": {"fast_io_fail_tmo": 5, "ctrl_loss_tmo": 60}, "evidence": false,
          "source": "scenarios/v3block/r4.sh:376 (the earlier harness's fault-window connect)",
-         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."}
+         "why": "more fault cycles per hour: I/O to a dead controller fails after 5 s and the controller is dropped after 60 s. Its results never stand in for the plain connect's, and no checker changes between the two; the run header and every attach name it as 'guest connect variant: <values>'."},
+        {"name": "host_connect_settings", "options": {"ctrl_loss_tmo": 180, "reconnect_delay": 2}, "evidence": false,
+         "source": "the product's proposed 'Host connect settings' documentation (product docs change #662; not yet shipped): ctrl-loss-tmo 180, reconnect-delay 2, fast_io_fail_tmo not set",
+         "why": "measures what those documented values give a guest while its holder is away (scenarios/v3block/connect-settings.yaml); not release evidence until the product ships them as its connect"}
       ]
     }
   }
