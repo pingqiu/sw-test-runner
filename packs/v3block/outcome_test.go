@@ -3,6 +3,12 @@ package v3block
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -385,5 +391,121 @@ func TestOutcomeLookup(t *testing.T) {
 		if got := tab.lookup(c.op, c.code, c.msg); got != c.want {
 			t.Errorf("%v %s %q: %s, want %s", c.op, c.code, c.msg, got, c.want)
 		}
+	}
+}
+
+// v3ctlRefusals reads v3ctl's compiled refusal list from its source (v3ctl
+// builds inside the product checkout, so the runner cannot import it): one
+// "command code contains" entry per refusal, sorted.
+func v3ctlRefusals(t *testing.T) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "v3ctl/main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	str := func(e ast.Expr) string {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			t.Fatalf("v3ctl refusals: %T is not a string literal", e)
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	var out []string
+	for _, d := range f.Decls {
+		g, ok := d.(*ast.GenDecl)
+		if !ok || g.Tok != token.VAR {
+			continue
+		}
+		for _, sp := range g.Specs {
+			vs := sp.(*ast.ValueSpec)
+			if len(vs.Names) != 1 || vs.Names[0].Name != "refusals" {
+				continue
+			}
+			for _, kv := range vs.Values[0].(*ast.CompositeLit).Elts {
+				kv := kv.(*ast.KeyValueExpr)
+				cmd := str(kv.Key)
+				for _, e := range kv.Value.(*ast.CompositeLit).Elts {
+					r := e.(*ast.CompositeLit)
+					sel, ok := r.Elts[0].(*ast.SelectorExpr)
+					if len(r.Elts) != 2 || !ok || sel.X.(*ast.Ident).Name != "codes" {
+						t.Fatalf("v3ctl refusals: %s entry is not {codes.X, \"text\"}", cmd)
+					}
+					out = append(out, fmt.Sprintf("%s %s %q", cmd, sel.Sel.Name, str(r.Elts[1])))
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("v3ctl/main.go: no refusals found")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tableV3ctlRefusals is the same list from the table's refused rows on a
+// "v3ctl <command>" path; a row whose action is not that command is an error.
+func tableV3ctlRefusals(tab outcomeTable) ([]string, error) {
+	var out []string
+	for _, r := range tab.Rows {
+		cmd, ok := strings.CutPrefix(r.Path, "v3ctl ")
+		if !ok {
+			continue
+		}
+		if r.Action != cmd {
+			return nil, fmt.Errorf("row %s %q: the action must be the v3ctl command", r.Action, r.Path)
+		}
+		if r.Outcome == tr.OutcomeRefused {
+			out = append(out, fmt.Sprintf("%s %s %q", cmd, r.Code, r.MessageContains))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// v3ctl's compiled refusals and the table's v3ctl rows agree.
+func TestV3ctlRefusalsMatchTheTable(t *testing.T) {
+	compiled := v3ctlRefusals(t)
+	rows, err := tableV3ctlRefusals(outcomes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(compiled, "\n") != strings.Join(rows, "\n") {
+		t.Fatalf("v3ctl/main.go refuses\n  %s\nthe table refuses\n  %s", strings.Join(compiled, "\n  "), strings.Join(rows, "\n  "))
+	}
+	// Red control: a table that refuses create's NotFound disagrees.
+	tab, err := loadOutcomes(mutant(t, func(tab *outcomeTable) {
+		for i, r := range tab.Rows {
+			if r.Path == "v3ctl create" && r.Code == "NotFound" {
+				tab.Rows[i].Outcome = tr.OutcomeRefused
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := tableV3ctlRefusals(tab); strings.Join(m, "\n") == strings.Join(compiled, "\n") {
+		t.Fatal("a table refusing create NotFound agrees with v3ctl")
+	}
+}
+
+// The create answers v3ctl cannot show come before any write are unknown in
+// its exit protocol: NotFound is not refused, and FailedPrecondition only
+// with the reserved-name text (the same code follows the record write).
+func TestV3ctlCreateKeepsUnshownCodesUnknown(t *testing.T) {
+	for _, e := range v3ctlRefusals(t) {
+		if strings.HasPrefix(e, "create NotFound ") || e == `create FailedPrecondition ""` {
+			t.Errorf("v3ctl create refuses %s", e)
+		}
+	}
+	found := false
+	for _, e := range v3ctlRefusals(t) {
+		found = found || e == `create FailedPrecondition "is being deleted or was deleted; its id is never reused"`
+	}
+	if !found {
+		t.Error("v3ctl create does not refuse the reserved name (a checker requires that refusal)")
 	}
 }
