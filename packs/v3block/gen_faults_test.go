@@ -272,29 +272,59 @@ func roundTrip(t *testing.T, m map[string]any) map[string]any {
 	return records(t, p)[0].Result
 }
 
-func TestGenRunWithFaultsResolvesAtTheNextHealthyPoint(t *testing.T) {
+// F7: a healthy point still false after its full wait ends the run: the
+// record gen_stop, then finish, the sweep and the end; no operation after
+// it. Nothing is resolved at the false point.
+func TestGenRunEndsAtAHealthyPointStillFalse(t *testing.T) {
 	f := &faultFake{unhealthy: 1}
 	f.install(t)
 	actx, p := genRunCtx(t)
-	if _, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05")); err != nil {
-		t.Fatal(err)
+	out, err := v3GenRun(context.Background(), actx, faultAct("300", "0.05"))
+	if err != nil || out["value"] != "unhealthy" {
+		t.Fatalf("%v %v", out, err)
 	}
 	_ = actx.History.Close()
 	recs := records(t, p)
-	if left := unresolvedUnknowns(recs); len(left) != 0 {
-		t.Fatalf("unknowns not resolved: %v", left)
-	}
-	// Nothing is resolved at the point that was not healthy.
+	stop := -1
 	for i, r := range recs {
-		if r.Verb == "healthy" && r.Result["healthy"] == false {
-			if n := recs[i+1]; n.Verb == "observe" || n.Kind == tr.HistoryInvoke && n.Verb == "read" {
-				t.Fatalf("resolution after an unhealthy point: %+v", n)
+		if stop < 0 && r.Verb == "healthy" && r.Result["look"] == nil && r.Result["healthy"] == false {
+			if n := recs[i+1]; n.Verb != "gen_stop" || n.Result["why"] == nil {
+				t.Fatalf("the false healthy point is followed by %+v, not gen_stop", n)
 			}
-			break
+			stop = i + 1
+		}
+		if stop >= 0 && r.Verb == "gen_step" {
+			t.Fatalf("an operation after the stop: %+v", r.Result)
 		}
 	}
+	if stop < 0 {
+		t.Fatal("no false healthy point")
+	}
+	if left := unresolvedUnknowns(recs); len(left) != 0 {
+		t.Fatalf("unknowns not resolved at the end: %v", left)
+	}
+	if lastVerb(t, p, "gen_sweep").Seq < recs[stop].Seq || lastVerb(t, p, "gen_coverage").Result["ended"] != "unhealthy" {
+		t.Fatal("no sweep after the stop, or coverage does not say unhealthy")
+	}
+	// The replay stops at the same point.
+	f.healthyCall = 0
+	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
+		t.Fatalf("replay: %v %v", out, err)
+	}
+	// Red control: a replay that meets a false healthy point the record did
+	// not is a difference (the steps it no longer runs).
+	f2 := &faultFake{}
+	f2.install(t)
+	actx2, a := genRunCtx(t)
+	if out, err := v3GenRun(context.Background(), actx2, faultAct("300", "0.05")); err != nil || out["value"] != "ops" {
+		t.Fatalf("%v %v", out, err)
+	}
+	_ = actx2.History.Close()
+	f2.unhealthy, f2.healthyCall = 1, 0
+	if _, _, err := replayInto(t, a); err == nil || !strings.Contains(err.Error(), "not run") {
+		t.Fatalf("a replay stopped early matched: %v", err)
+	}
 }
-
 func TestGenRunWithFaultsEndsHealthyWhenTheRunEndsWhileDown(t *testing.T) {
 	f := &faultFake{}
 	f.install(t)

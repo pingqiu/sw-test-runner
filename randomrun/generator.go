@@ -169,9 +169,17 @@ func (g *Generator) Resolved(subject string) { g.m.Resolved(subject) }
 // Learn applies an operation's outcome to the model's state.
 func (g *Generator) Learn(o Op, outcome string) { g.m.Learn(o, outcome) }
 
+// stop ends the proposals for a reason other than the budget or the pool.
+func (g *Generator) stop(why string) {
+	if g.ended == "" {
+		g.ended = why
+	}
+}
+
 // Ended is why the run stopped proposing ("" while it goes on): "ops" when
 // the operation budget is spent, "pool exhausted" when no operation is
-// possible any more (every name used and nothing left to do with them).
+// possible any more (every name used and nothing left to do with them),
+// "unhealthy" when a healthy point stayed false after its full wait.
 func (g *Generator) Ended() string { return g.ended }
 
 // Candidate is one possible next operation with its weight.

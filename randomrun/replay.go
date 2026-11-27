@@ -38,6 +38,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -165,7 +166,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				}
 				outages[int(k)] = w
 				cur = -1
-			case "gen_coverage", "gen_replay", VerbHealthy:
+			case "gen_coverage", "gen_replay", "gen_stop", VerbHealthy:
 				cur = -1
 			}
 		case tr.HistoryInvoke:
@@ -285,9 +286,10 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		}
 		fr = newFaultRun(r, events, nil, header, sc.Outages)
 		fr.kills = sc.Kills
+		fr.stopOnUnhealthy = true
 	}
 	diffs := []replayDiff{}
-	for _, st := range steps {
+	for i, st := range steps {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
@@ -305,7 +307,16 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		}
 		if fr != nil {
 			fr.note(o, replayed)
-			if err := fr.afterOp(ctx, actx, o.No); err != nil {
+			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+				if err := stopRun(actx, o.No); err != nil {
+					return nil, err
+				}
+				// The steps the replay no longer runs differ from the record.
+				for _, rest := range steps[i+1:] {
+					diffs = append(diffs, replayDiff{OpNo: rest.Op.No, Action: rest.Op.Action, Volume: rest.Op.Volume, Recorded: rest.Recorded, Replayed: "not run"})
+				}
+				break
+			} else if err != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, err)
 			}
 		}

@@ -29,6 +29,7 @@ package randomrun
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -225,6 +226,7 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 			return nil, err
 		}
 		fr = newFaultRun(r, s.Events, g, header, nil)
+		fr.stopOnUnhealthy = true
 	}
 	for {
 		if ctx.Err() != nil {
@@ -241,7 +243,15 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		g.Learn(o, outcome)
 		if fr != nil {
 			fr.note(o, outcome)
-			if err := fr.afterOp(ctx, actx, o.No); err != nil {
+			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+				// No more operations against dead subjects: record it, then
+				// finish, sweep and end.
+				if err := stopRun(actx, o.No); err != nil {
+					return nil, err
+				}
+				g.stop("unhealthy")
+				break
+			} else if err != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, err)
 			}
 		}
@@ -347,6 +357,10 @@ func parseOps(res map[string]any, key string) ([]Op, error) {
 //     operation pending for the next healthy point;
 //   - a short master outage after operation k (see outage) runs as one
 //     event, nothing else down meanwhile;
+//   - in a run and its replay, a healthy point still false after its full
+//     wait ends the run: an observe record "gen_stop" {after_op, why}, then
+//     finish, the sweep and the end (no more operations against dead
+//     subjects; Ended "unhealthy");
 //   - at the end of the run a process still down is restarted (its scheduled
 //     restart lay after the last operation), and the run ends on a healthy
 //     point with its resolution, so no unknown is left unobserved.
@@ -367,6 +381,19 @@ type faultRun struct {
 	// restart is skipped too.
 	kills []KillDecision
 	skip  string
+	// stopOnUnhealthy: a healthy point still false after its full wait ends
+	// the run (errUnhealthy) instead of carrying on against dead subjects.
+	stopOnUnhealthy bool
+}
+
+// errUnhealthy is a healthy point still false after its full wait.
+var errUnhealthy = errors.New("a healthy point still false after its full wait")
+
+// stopRun records that the run stops proposing after operation opno because
+// a healthy point stayed false, and why.
+func stopRun(actx *tr.ActionContext, opno int) error {
+	return actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_stop",
+		Result: map[string]any{"after_op": opno, "why": errUnhealthy.Error()}})
 }
 
 // KillDecision is one recorded "fault_kill" record: whether the kill of
@@ -437,10 +464,16 @@ func (f *faultRun) afterOp(ctx context.Context, actx *tr.ActionContext, opno int
 // point); otherwise one last healthy point.
 func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 	f.next = len(f.events) // kills scheduled after the last operation do not run
+	var err error
 	if f.down != "" {
-		return f.run(ctx, actx, FaultEvent{Action: FaultRestart, Process: f.down})
+		err = f.run(ctx, actx, FaultEvent{Action: FaultRestart, Process: f.down})
+	} else {
+		err = f.healthy(ctx, actx)
 	}
-	return f.healthy(ctx, actx)
+	if errors.Is(err, errUnhealthy) {
+		return nil // the run ends here anyway; the record says it
+	}
+	return err
 }
 
 func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
@@ -554,6 +587,9 @@ func (f *faultRun) healthy(ctx context.Context, actx *tr.ActionContext) error {
 		return fmt.Errorf("%s: %w", o.Action, err)
 	}
 	if out[HealthyKey] != HealthyTrue {
+		if f.stopOnUnhealthy {
+			return errUnhealthy
+		}
 		return nil // not a healthy point: unknowns stay pending
 	}
 	return f.resolve(ctx, actx)
