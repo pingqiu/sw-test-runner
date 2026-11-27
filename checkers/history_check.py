@@ -9,7 +9,14 @@ leaves, a kill's scope) from the reader module it names. DIR defaults to the
 block product (packs/v3block/product); the rules below name block's facts as
 the example.
 
-Each checker returns PASS, FAIL or UNKNOWN with its findings. A history that
+Each checker returns PASS, FAIL or UNKNOWN with its findings, and "judged":
+the number of items it actually judged (C0 operations with a known outcome,
+C1 reads compared, C2 restored blocks compared, C3 cross reads compared, C5
+refusals judged, C6 unknowns resolved plus recoveries timed, C7 deleted
+volumes observed, DUR reads judged after a kill (without a holder kill, the
+reads judged by C1's rule), MO outages judged); --json carries it. A PASS
+with judged 0 cannot happen: a checker that judged nothing says "not
+exercised", and check() fails any verdict that would. A history that
 does not parse, or breaks the writer's own rules, is UNKNOWN for every
 checker: nothing is judged from a file that cannot be read whole. The exit
 code is 0 only when every checker passes.
@@ -338,20 +345,24 @@ def unknown_environment(recs):
     return None
 
 
-def verdict(findings, unknown=False):
+def verdict(findings, unknown=False, judged=0):
+    """A checker's verdict object. `judged` is the number of items the
+    checker actually judged (its own count, machine-readable in --json)."""
     if findings:
-        return {'verdict': 'FAIL', 'findings': findings}
-    return {'verdict': 'UNKNOWN' if unknown else 'PASS', 'findings': []}
+        return {'verdict': 'FAIL', 'findings': findings, 'judged': judged}
+    return {'verdict': 'UNKNOWN' if unknown else 'PASS', 'findings': [], 'judged': judged}
 
 
 def c0(recs):
     """A refusal is expected only where its own invocation declares it
     (args.expect == "refused", one step of the scenario), never by verb."""
-    f = []
+    f, judged = [], 0   # judged: operations with a known outcome checked
     if not operations(recs):
         return verdict(['no operation in the history: nothing was exercised'])
     for inv, comp in operations(recs):
         name = '%s %s seq %d' % (inv['verb'], inv.get('volume', ''), inv['seq'])
+        if comp is not None and comp['outcome'] != 'unknown':
+            judged += 1
         if inv['verb'] in FAULT_VERBS:
             if comp is None or comp['outcome'] != 'ok':
                 f.append('RUNNER failure, not a product result: %s %s seq %d %s: the environment is not known: %s' % (
@@ -371,7 +382,7 @@ def c0(recs):
     for key, resource, start, end in fault_windows(recs):
         if end is None:
             f.append('fault left applied: %s on %s (applied at seq %d, no fault_restore completed ok after it)' % (key, resource, start))
-    return verdict(f)
+    return verdict(f, judged=judged)
 
 
 class Shadow:
@@ -427,10 +438,10 @@ def unknown_on_overlap(fn):
     def wrapped(recs):
         u = unknown_environment(recs)
         if u is not None:
-            return {'verdict': 'UNKNOWN', 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
+            return {'verdict': 'UNKNOWN', 'judged': 0, 'findings': ['the environment is not known from seq %d (a fault operation without a known outcome): this checker does not judge' % u]}
         o = overlaps(recs)
         if o:
-            return {'verdict': 'UNKNOWN', 'findings': ['operations overlap on %s: this checker judges only one-at-a-time histories' % ', '.join(sorted(o))]}
+            return {'verdict': 'UNKNOWN', 'judged': 0, 'findings': ['operations overlap on %s: this checker judges only one-at-a-time histories' % ', '.join(sorted(o))]}
         return fn(recs)
     wrapped.__name__, wrapped.__doc__ = fn.__name__, fn.__doc__
     return wrapped
@@ -501,7 +512,7 @@ def replay(recs):
 @unknown_on_overlap
 def c1(recs):
     sh, events, _ = replay(recs)
-    f = []
+    f, judged = [], 0   # judged: reads compared
     last_write = {}   # (vol, lba) -> index of the last write event
     last_read = {}    # (vol, lba) -> index of the last ok read event
     for i, ev in enumerate(events):
@@ -509,6 +520,7 @@ def c1(recs):
         if kind == 'write' and ev[2]['outcome'] in ('ok', 'unknown'):
             last_write[(inv['volume'], inv['args']['lba'])] = i
         elif kind == 'read':
+            judged += 1
             key = (inv['volume'], inv['args']['lba'])
             got = (ev[2].get('result') or {}).get('sha256')
             if got not in ev[3]:
@@ -522,7 +534,7 @@ def c1(recs):
     unread = sorted(k for k, w in last_write.items() if last_read.get(k, -1) < w)
     if unread:
         f.append('written, never read afterwards: %d (%s)' % (len(unread), ', '.join('%s lba %d' % k for k in unread[:8])))
-    return verdict(f)
+    return verdict(f, judged=judged)
 
 
 def restores(recs):
@@ -538,7 +550,7 @@ def restores(recs):
 @unknown_on_overlap
 def c2(recs):
     _, events, images = replay(recs)
-    f = []
+    f, judged = [], 0   # judged: restored blocks compared
     if not restores(recs):
         return verdict(['no restore in the history: C2 judges nothing'])
     for target, source, snap, at in restores(recs):
@@ -562,11 +574,12 @@ def c2(recs):
             f.append('%s: no restored block was read (each was written first, or none was read): C2 judges nothing' % target)
             continue
         for lba, ev in sorted(first.items()):
+            judged += 1
             got = (ev[2].get('result') or {}).get('sha256')
             allowed = image.get(lba, {ZERO})
             if got not in allowed:
                 f.append('%s lba %d: first read %s, not a content of %s/%s (%s)' % (target, lba, got, source, snap, sorted(allowed)))
-    return verdict(f)
+    return verdict(f, judged=judged)
 
 
 @unknown_on_overlap
@@ -581,7 +594,7 @@ def c3(recs):
     refused write, a read before the write, or a read of another block
     exercises nothing. A direction not exercised is a FAIL: C3 judged nothing."""
     _, events, images = replay(recs)
-    f = []
+    f, judged = [], 0   # judged: cross reads compared (a read of a block the other side wrote after the restore)
     if not restores(recs):
         return verdict(['no restore in the history: C3 judges nothing'])
     for target, source, snap, at in restores(recs):
@@ -609,6 +622,8 @@ def c3(recs):
                 own_seq = latest[vol].get(lba, (None, 0))[1]
                 if w_sha is not None and w_seq > own_seq and w_sha not in ev[3]:
                     exercised[other] = True   # acknowledged, unmasked and distinguishable here
+                if written[other].get(lba):
+                    judged += 1
                 foreign = set(written[other].get(lba, {})) - (image.get(lba, set()) if vol == target else set())
                 if got in foreign:
                     if vol == target:
@@ -619,12 +634,12 @@ def c3(recs):
         # volumes at the same block makes them indistinguishable.
         shared = sorted('lba %d' % lba for lba in set(written[source]) & set(written[target]) if set(written[source][lba]) & set(written[target][lba]))
         if shared:
-            return {'verdict': 'UNKNOWN', 'findings': f + ['%s and %s were written the same content at %s: the directions cannot be told apart' % (source, target, ', '.join(shared[:4]))]}
+            return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': f + ['%s and %s were written the same content at %s: the directions cannot be told apart' % (source, target, ', '.join(shared[:4]))]}
         if not exercised[source]:
             f.append('%s -> %s not exercised: no write to the source read back on the target at the same block' % (source, target))
         if not exercised[target]:
             f.append('%s -> %s not exercised: no write to the target read back on the source at the same block' % (target, source))
-    return verdict(f)
+    return verdict(f, judged=judged)
 
 def c7(recs):
     f = []
@@ -662,7 +677,7 @@ def c7(recs):
     never = sorted(set(deleted) - seen)
     if never:
         f.append('deleted but never observed afterwards: %s' % ', '.join(never))
-    return verdict(f)
+    return verdict(f, judged=len(seen))   # judged: deleted volumes observed
 
 
 def touches(inv, vol):
@@ -820,15 +835,16 @@ def c5(recs):
     report = ['limit %s: %d of %d refusal(s) judged' % (lim, j, n) for lim, (n, j) in sorted(per.items())]
     if gaps:
         notes.append('not compared (recorded by no observation): %s' % ', '.join(p for p in STATE_PARTS if p in gaps))
+    judged = sum(j for _, j in per.values())   # judged: refusals judged
     checked, bf = baseline(recs)
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
-        return {'verdict': 'UNKNOWN', 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:
-        return {'verdict': 'FAIL', 'findings': f + report + notes}
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': f + report + notes}
     unjudged = [lim for lim, (n, j) in sorted(per.items()) if not j]
     if unjudged:
-        return {'verdict': 'UNKNOWN', 'findings': ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] + report + notes}
-    return {'verdict': 'PASS', 'findings': report + notes}
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': ['limit(s) with no judged refusal: %s' % ', '.join(unjudged)] + report + notes}
+    return {'verdict': 'PASS', 'judged': judged, 'findings': report + notes}
 
 
 def flushed(args):
@@ -926,7 +942,7 @@ def dur(recs):
     base = {}    # volume -> {lba: set}, a restore target's initial content
     st = {}      # (volume, lba) -> block state
     inv_of = {}
-    f, lost, landed, unread_after_kill, judged_after_kill = [], 0, 0, 0, 0
+    f, lost, landed, unread_after_kill, judged_after_kill, reads_judged = [], 0, 0, 0, 0, 0
     last_write, last_read = {}, {}
 
     def block(vol, lba):
@@ -1037,6 +1053,7 @@ def dur(recs):
             got = (r.get('result') or {}).get('sha256')
             allowed = b['cur'] | b['open']
             k, settled = b['kill'], b['settled']
+            reads_judged += 1
             if got not in allowed:
                 if settled is not None:
                     f.append('read %s lba %d seq %d returned %s, but the read at seq %d after the kill at seq %d%s returned %s, with no write in between: the value changed after the unknowns were settled'
@@ -1094,7 +1111,12 @@ def dur(recs):
         notes.append('kill(s) naming no volume, applied to every volume: seq %s' % ', '.join(str(x) for x in unscoped))
     if unread_after_kill:
         notes.append('acknowledged, not flushed, not read after the kill: %d block(s)' % unread_after_kill)
-    return {'verdict': 'FAIL' if f else 'PASS', 'findings': f + notes}
+    # judged: the reads judged after a kill; in a run without a holder kill,
+    # the reads judged by C1's rule (its unflushed writes are what it tests).
+    judged = judged_after_kill if nkills else reads_judged
+    if not f and not judged:
+        f.append('no read judged: DUR not exercised')
+    return {'verdict': 'FAIL' if f else 'PASS', 'judged': judged, 'findings': f + notes}
 
 
 
@@ -1188,7 +1210,7 @@ def recovery_findings(recs, ops_, healthy):
     restart overlaps (the pages then move the re-grant to after the master's
     restart), a restart without an ok completion, and one with no ok kill of
     the holder before it (no moment to measure from)."""
-    f, notes = [], []
+    f, notes, timed = [], [], 0   # timed: recoveries measured against the deadline
     regrant, rwhere = RECOVERY['regrant']
     wait, wwhere = RECOVERY['start_wait']
     for inv, comp in ops_:
@@ -1224,12 +1246,13 @@ def recovery_findings(recs, ops_, healthy):
         stop = kills[-1][1]['mono_ns']
         regranted = stop + regrant * 10**9
         deadline = max(regranted, comp['mono_ns']) + wait * 10**9
+        timed += 1
         if h['mono_ns'] > deadline:
             s = lambda ns: (ns - stop) / 1e9   # seconds after the stop
             f.append('%s: healthy at %.3f s after the stop (healthy seq %d), past the deadline %.3f s = max(re-grant: stop + %g s = %.3f s, '
                      'restart completion %.3f s) + start wait %g s (%s; %s)'
                      % (name, s(h['mono_ns']), h['seq'], s(deadline), regrant, s(regranted), s(comp['mono_ns']), wait, rwhere, wwhere))
-    return f, notes
+    return f, notes, timed
 
 
 def _settle(recs, ops_, inv, comp):
@@ -1309,7 +1332,7 @@ def c6(recs):
     if healthy and (healthy[-1].get('result') or {}).get('healthy') is not True:
         res = healthy[-1].get('result') or {}
         f.append('the run ended unhealthy: last healthy record seq %d: down %s, not serving %s' % (healthy[-1]['seq'], res.get('down'), res.get('not_serving')))
-    f_rec, n_rec = recovery_findings(recs, ops_, healthy)
+    f_rec, n_rec, timed = recovery_findings(recs, ops_, healthy)
     f += f_rec
     notes += n_rec
     # A volume in neither consistent state, as the healthy record shows it.
@@ -1368,11 +1391,16 @@ def c6(recs):
     # Always reported, in this exact form, so a night can require n > 0 in
     # at least one run; a single run with n = 0 and its healthy points PASSes.
     count = 'unknowns resolved: %d' % resolved
+    judged = resolved + timed   # judged: unknowns resolved plus recoveries timed
     if f:
-        return {'verdict': 'FAIL', 'findings': f + notes + [count]}
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': f + notes + [count]}
     if unruled:
-        return {'verdict': 'UNKNOWN', 'findings': ['no resolution rule for an unknown: %s' % ', '.join(unruled)] + notes + [count]}
-    return {'verdict': 'PASS', 'findings': notes + [count]}
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': ['no resolution rule for an unknown: %s' % ', '.join(unruled)] + notes + [count]}
+    if not judged:
+        # Healthy points alone, with no unknown to resolve and no recovery
+        # to time: nothing was judged, so no PASS.
+        return {'verdict': 'FAIL', 'judged': 0, 'findings': ['no unknown resolved and no recovery timed: C6 not exercised'] + notes + [count]}
+    return {'verdict': 'PASS', 'judged': judged, 'findings': notes + [count]}
 
 
 def master_windows(recs):
@@ -1463,10 +1491,10 @@ def mo(recs):
             notes.append('%s: no write in the window on %s' % (name, ', '.join(unwritten)))
     count = 'short master outages judged: %d' % judged
     if f:
-        return {'verdict': 'FAIL', 'findings': f + unexercised + notes + [count]}
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': f + unexercised + notes + [count]}
     if unexercised or not judged:
-        return {'verdict': 'UNKNOWN', 'findings': unexercised + notes + [count]}
-    return {'verdict': 'PASS', 'findings': notes + [count]}
+        return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': unexercised + notes + [count]}
+    return {'verdict': 'PASS', 'judged': judged, 'findings': notes + [count]}   # judged: outages judged
 
 
 CHECKERS = {'C0': c0, 'C1': c1, 'C2': c2, 'C3': c3, 'C5': c5, 'C6': c6, 'C7': c7, 'DUR': dur, 'MO': mo}
@@ -1478,20 +1506,29 @@ def check(lines):
     try:
         recs = read_history(lines)
     except Malformed as e:
-        return {name: {'verdict': 'UNKNOWN', 'findings': ['history unreadable: %s' % e]} for name in CHECKERS}
+        return {name: {'verdict': 'UNKNOWN', 'judged': 0, 'findings': ['history unreadable: %s' % e]} for name in CHECKERS}
     # Positive evidence first: an empty history, or one that does not end with
     # the writer's end record (a crashed runner, a truncated copy), is not a
     # run; every checker fails it rather than pass on what it never saw.
     if not recs:
-        return {name: {'verdict': 'FAIL', 'findings': ['empty history: no evidence']} for name in CHECKERS}
+        return {name: {'verdict': 'FAIL', 'judged': 0, 'findings': ['empty history: no evidence']} for name in CHECKERS}
     if recs[-1]['kind'] != 'end':
-        return {name: {'verdict': 'FAIL', 'findings': ['the history has no end record: incomplete evidence (seq %d is the last)' % recs[-1]['seq']]} for name in CHECKERS}
+        return {name: {'verdict': 'FAIL', 'judged': 0, 'findings': ['the history has no end record: incomplete evidence (seq %d is the last)' % recs[-1]['seq']]} for name in CHECKERS}
     out = {}
     for name, fn in CHECKERS.items():
         try:
             out[name] = fn(recs)
         except (KeyError, TypeError) as e:
             out[name] = {'verdict': 'UNKNOWN', 'findings': ['record without a field the checker needs: %r' % (e,)]}
+        # Every verdict carries its own count ("judged": the items the checker
+        # actually judged); a verdict that judged nothing says 0.
+        out[name].setdefault('judged', 0)
+        if out[name]['verdict'] == 'PASS' and not out[name]['judged']:
+            # Never reached by a checker (each one says "not exercised"
+            # itself, and a test holds every checker to it); kept so a new
+            # checker cannot PASS on nothing.
+            out[name] = {'verdict': 'FAIL', 'judged': 0,
+                         'findings': ['PASS with nothing judged: %s not exercised' % name] + out[name]['findings']}
     return out
 
 

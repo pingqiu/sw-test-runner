@@ -1601,3 +1601,61 @@ func TestInheritedReadsSurviveAnUnsettledOrKilledTarget(t *testing.T) {
 		t.Fatalf("no inherited read once the target serves again: %+v", g.m.Due())
 	}
 }
+
+// obsRec is a volume observation: its lease state and HEAD state.
+func obsRec(vol, lease, head string) tr.HistoryRecord {
+	return tr.HistoryRecord{Kind: tr.HistoryObserve, Verb: "observe", Volume: vol, Result: map[string]any{
+		"head":      map[string]any{"state": head},
+		"workspace": map[string]any{"exit": 0, "text": []any{"volume: " + vol, "lease state: " + lease}}}}
+}
+
+// M1 run 7: a volume taken out of the run (a snapshot answered unknown) is
+// observed at the end (the sweep, and the tail), and its acknowledged content
+// is read when that observation shows it still serving; never written.
+func TestOutOfRunVolumesAreObservedAndReadIfServing(t *testing.T) {
+	for name, c := range map[string]struct {
+		lease, head string
+		reads       bool
+	}{
+		"still serving": {"granted", "", true},
+		"detached":      {"granted", "detached", false},
+		"lease expired": {"expired", "", false},
+	} {
+		g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(3), Blocks: 8})
+		drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 5", "round", "r"))
+		g.Learn(op("v3_op_snapshot", "g1", "name", "g1-s1"), tr.OutcomeUnknown)
+		if g.vols["g1"].state != stUnknown {
+			t.Fatal("not out of the run")
+		}
+		observed := false
+		for _, o := range g.m.Sweep() {
+			observed = observed || (o.Volume == "g1" && o.Action == "v3_op_observe")
+		}
+		if !observed {
+			t.Fatalf("%s: the sweep does not observe a volume out of the run", name)
+		}
+		var got []string
+		for o, ok := g.Tail(); ok; o, ok = g.Tail() {
+			if o.Volume == "g1" {
+				got = append(got, strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Params["lbas"])
+				if o.Action == "v3_op_write" {
+					t.Fatalf("%s: a write on a volume out of the run", name)
+				}
+			}
+			g.Learn(o, answer(o))
+			if o.Action == "v3_op_observe" && o.Volume == "g1" {
+				g.m.Observed(obsRec("g1", c.lease, c.head))
+			}
+		}
+		want := []string{"observe "}
+		if c.reads {
+			want = append(want, "read 2 5")
+		}
+		if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+			t.Fatalf("%s: tail on g1 %q, want first %q", name, got, want)
+		}
+		if !c.reads && slices.Contains(got, "read 2 5") {
+			t.Fatalf("%s: read a volume that does not serve: %q", name, got)
+		}
+	}
+}
