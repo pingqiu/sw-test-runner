@@ -531,15 +531,24 @@ def _line(row):
 
 
 def child_exit(obs):
-    """(op_seq, 'ok' | 'failed') of an observe record of verb child_exit: the
-    abandoned child of the unknown operation invoked at op_seq exited, and
-    the write landed at or before this record (ok) or never (failed); None
-    for any other record."""
+    """(op_seq, 'ok' | 'failed' | 'unknown') of an observe record of verb
+    child_exit: the abandoned child of the unknown operation invoked at
+    op_seq exited. ok: it finished on its own and the write landed at or
+    before this record; failed: it finished on its own and the write never
+    landed; unknown (the runner killed it, killed true and exit 137, or its
+    exit is not known, exit null): a process blocked in kernel I/O exits
+    only once that I/O has returned, so the write landed at or before this
+    record or never, and cannot land after it. None for any other record,
+    for a child still running at the run's end (alive true: nothing
+    closes), and for a child of no operation (op_seq null: an
+    observation's child)."""
     if obs.get('kind') != 'observe' or obs.get('verb') != 'child_exit':
         return None
     res = obs.get('result') or {}
     op, out = res.get('op_seq'), res.get('outcome')
-    if not isinstance(op, int) or isinstance(op, bool) or out not in ('ok', 'failed'):
+    if not isinstance(op, int) or isinstance(op, bool) or res.get('alive') is True:
+        return None
+    if out not in ('ok', 'failed', 'unknown'):
         return None
     return op, out
 

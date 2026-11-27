@@ -17,6 +17,9 @@ def hist(*events):
     ('c', key, outcome, result)        the completion of the invoke `key`
     ('o', volume, result)              an observation
     ('x', key, outcome)                the abandoned child of `key` exited
+    ('k', key) / ('a', key) / ('n',)   a child_exit the runner killed (outcome
+                                       unknown, exit 137), one still alive at
+                                       the end, one of no operation (op_seq null)
     ('d', volume)                      the guest device of `volume` disconnected
     closed by the writer's end record."""
     recs, at = [], {}
@@ -34,6 +37,10 @@ def hist(*events):
             _, key, outcome = e
             recs.append({'seq': n, 'kind': 'observe', 'verb': 'child_exit', 'volume': '', 'mono_ns': n,
                          'result': {'op_seq': at[key]['seq'], 'pid': 7, 'start': 's7', 'exit': 0 if outcome == 'ok' else 1, 'outcome': outcome}})
+        elif e[0] in ('k', 'a', 'n'):
+            res = {'op_seq': None if e[0] == 'n' else at[e[1]]['seq'], 'pid': 7, 'start': 's7', 'outcome': 'unknown'}
+            res.update({'k': {'killed': True, 'exit': 137, 'alive': False}, 'a': {'exit': None, 'alive': True}, 'n': {'exit': 0}}[e[0]])
+            recs.append({'seq': n, 'kind': 'observe', 'verb': 'child_exit', 'volume': '', 'mono_ns': n, 'result': res})
         elif e[0] == 'd':
             recs.append({'seq': n, 'kind': 'observe', 'verb': 'disconnect', 'volume': e[1], 'mono_ns': n,
                          'result': {'volume': e[1], 'nqn': 'nqn.test:' + e[1]}})
@@ -331,6 +338,50 @@ class OneRuleWithDUR(Base):
         dur, lin_ = self.both(recs)
         self.assert_pass(dur)
         self.assert_pass(lin_)
+
+
+class KilledChild(Base):
+    """A child the runner killed at its deadline (child_exit outcome unknown):
+    its process exits only once the kernel I/O returned, so the write landed
+    at or before the record or never, and cannot land after it. Both checkers."""
+    KILL = (('i', 'k', 'kill', '', HKILL[2]), ok('k'))
+
+    def both(self, *events):
+        v = hc.check(dump(hist(*events)))
+        return v['DUR'], v['LIN']
+
+    def base(self):
+        return (wi('a', A), ok('a'), wi('u', U, flush=False), ('c', 'u', 'unknown', {}))
+
+    def test_a_read_of_its_value_after_the_killed_exit_with_no_earlier_read_passes(self):
+        for dur, lin_ in (self.both(*self.base(), ('k', 'u'), ri('r'), ok('r', U)),
+                          self.both(*self.base(), *self.KILL, ('k', 'u'), ri('r'), ok('r', U))):
+            self.assert_pass(dur)
+            self.assert_pass(lin_)
+
+    def test_red_a_value_first_appearing_after_the_killed_exit(self):
+        # A read after the exit saw A: U did not land by the exit, and cannot after.
+        dur, lin_ = self.both(*self.base(), *self.KILL, ('k', 'u'), ri('r'), ok('r', A), ri('s'), ok('s', U))
+        self.assert_fail(dur, 'the value changed')
+        self.assert_fail(lin_)
+        # Green: A read BEFORE the exit; U may land between that read and the exit.
+        dur, lin_ = self.both(*self.base(), *self.KILL, ri('r'), ok('r', A), ('k', 'u'), ri('s'), ok('s', U))
+        self.assert_pass(dur)
+        self.assert_pass(lin_)
+        # Once a read after the exit fixed U, A does not come back.
+        dur, lin_ = self.both(*self.base(), *self.KILL, ri('r'), ok('r', A), ('k', 'u'), ri('s'), ok('s', U), ri('t'), ok('t', A))
+        self.assert_fail(dur, 'the value changed')
+        self.assert_fail(lin_)
+        self.assert_fail(lin(hist(*self.base(), ('k', 'u'), ri('r'), ok('r', A), ri('s'), ok('s', U))))
+        self.assertIn('unknown writes whose window closed: exited unknown 1',
+                      lin(hist(*self.base(), ('k', 'u'), ri('r'), ok('r', U)))['findings'])
+
+    def test_alive_or_of_no_operation_closes_nothing(self):
+        for ev in (('a', 'u'), ('n',)):
+            # The record before the read of A: had it closed, U could not appear.
+            dur, lin_ = self.both(*self.base(), *self.KILL, ev, ri('r'), ok('r', A), ri('s'), ok('s', U))
+            self.assert_pass(dur)
+            self.assert_pass(lin_)
 
 
 class Notes(Base):

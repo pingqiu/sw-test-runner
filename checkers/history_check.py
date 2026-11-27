@@ -942,7 +942,9 @@ def unknown_windows(recs):
     """When the window of each unknown write closes (kb r3): {invoke seq:
     (close mono, close seq, how)}, how one of 'exited ok' (its abandoned
     child exited and the write landed at or before that record), 'exited
-    failed' (it never landed), 'disconnected' (the guest device of its
+    failed' (it never landed), 'exited unknown' (the child was killed or
+    its exit is not known: it landed at or before that record or never),
+    'disconnected' (the guest device of its
     volume disconnected) or 'line advanced' (the master's line of its volume
     at an epoch above the last one shown before the invoke, master_lines as
     C4 reads it); (inf, None, None) while it never closes. The first of them
@@ -972,7 +974,7 @@ def unknown_windows(recs):
 
         ex = PRODUCT.child_exit(r)
         if ex is not None and ex[0] in out and out[ex[0]][2] is None:
-            close(ex[0], 'exited ok' if ex[1] == 'ok' else 'exited failed')
+            close(ex[0], 'exited ' + ex[1])
         dv = PRODUCT.disconnect(r)
         if dv is not None:
             for useq in sorted(open_.get(dv, ())):
@@ -986,19 +988,24 @@ def unknown_windows(recs):
 
 
 NEVER_LANDED, LANDED, MAY_LAND = 'never landed', 'landed', 'may land'
+LANDED_OR_NOT_BY_EXIT = 'landed or not by the exit'
 
 
 def unknown_effect(window):
     """What an unknown write's window (one value of unknown_windows) says of
     its effect, the one consequence DUR and LIN both apply: NEVER_LANDED
     (its child exited failed: it changed nothing, at any time), LANDED (its
-    child exited ok: it took effect at or before the exit), or MAY_LAND (it
-    may take effect until the window closes, or never)."""
+    child exited ok: it took effect at or before the exit),
+    LANDED_OR_NOT_BY_EXIT (its child was killed or its exit is not known: it
+    took effect at or before the exit or never; the window closes there), or
+    MAY_LAND (it may take effect until the window closes, or never)."""
     how = window[2]
     if how == 'exited failed':
         return NEVER_LANDED
     if how == 'exited ok':
         return LANDED
+    if how == 'exited unknown':
+        return LANDED_OR_NOT_BY_EXIT
     return MAY_LAND
 
 
@@ -1116,7 +1123,7 @@ def dur(recs):
             # first read after the kill; settled: the value that read fixed.
             # open: {invoke seq: value} of the unknown writes whose window is open.
             b = st[(vol, lba)] = {'durable': init, 'volatile': [], 'cur': set(init), 'open': {},
-                                  'produced': set(init), 'kill': None, 'settled': None}
+                                  'produced': set(init), 'kill': None, 'settled': None, 'refix': False}
         return b
 
     def apply_kill(seq, scope):
@@ -1152,6 +1159,12 @@ def dur(recs):
                 if unknown_effect(windows[useq]) == LANDED:   # it landed by now: a write completed here
                     b['cur'].add(sha)
                     b['volatile'].append((sha, False))
+                if b['settled'] is not None:
+                    # It may have landed after the read that fixed the value
+                    # and before this close: the block may hold it now, and
+                    # the next read fixes the value again.
+                    b['cur'].add(sha)
+                    b['refix'] = True
         for k in kill_at.get(r['seq'], ()):
             apply_kill(r['seq'], k['scope'])
         if r['kind'] == 'invoke':
@@ -1168,7 +1181,7 @@ def dur(recs):
             sha, fl = args['sha256'], flushed(args)
             b = block(vol, args['lba'])
             drop_kill(b)
-            b['settled'] = None
+            b['settled'], b['refix'] = None, False
             b['produced'].add(sha)
             if out == 'ok':
                 b['cur'] = {sha}
@@ -1227,8 +1240,8 @@ def dur(recs):
             if k is not None:
                 judged_after_kill += 1
                 b['kill'] = None
-                # Settled: the holder is dead, every unknown took effect or
-                # never will; the block holds the value read until a write.
+                # The block holds the value read until a write, or an unknown
+                # write whose window is open landing (kb r3).
                 b['cur'] = {got}
                 # The next kill may leave only the durable set before this
                 # kill plus the value read: a write lost here, or an unknown
@@ -1238,6 +1251,9 @@ def dur(recs):
                 newer = {s for s, _ in k[2]}   # writes after the durable point
                 b['durable'] = durable_after_kill(k[1], newer, got)
                 b['settled'] = (k[0], inv['seq'], got)
+            elif b['refix'] and got in allowed:
+                b['cur'], b['refix'] = {got}, False
+                b['settled'] = (b['settled'][0], inv['seq'], got)
             last_read[(vol, lba)] = i
     for b in st.values():
         drop_kill(b)
