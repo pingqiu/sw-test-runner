@@ -7,11 +7,19 @@
 #                                             "pid starttime NAME"; wait until every PORT listens
 #                                             and is held by that process (or it exits: fail)
 #   m0-own.sh record WORK TOKEN NAME PID      record a process started elsewhere, with its start time
-#   m0-own.sh pause WORK TOKEN NAME BOUND     stop (SIGSTOP) the recorded process NAME, found by its pid
-#                                             and start time in WORK/owned only, and start a detached
-#                                             continue (SIGCONT) after BOUND seconds (1..600) that runs
-#                                             whatever happens to the caller; print one JSON line
-#                                             {outcome, process, pid, paused_ns, bound_seconds, error}
+#   m0-own.sh pause WORK TOKEN NAME BOUND     pause the recorded process NAME, found by its pid and
+#                                             start time in WORK/owned only, through ONE detached
+#                                             helper: it re-checks the start time, sends SIGSTOP,
+#                                             writes its acknowledgement (the paused time) to a file
+#                                             in WORK, sleeps BOUND seconds (1..600), re-checks the
+#                                             start time and sends SIGCONT, whatever happens to the
+#                                             caller, so no stop comes after its continue. The caller
+#                                             waits for the acknowledgement (OWN_ACK_WAIT seconds,
+#                                             default 5) and prints one JSON line {outcome, process,
+#                                             pid, paused_ns, bound_seconds, error}: ok with it;
+#                                             refused (exit 2) when nothing was stopped (the helper
+#                                             cannot launch, or found the process gone); unknown
+#                                             (exit 1), "pause not acknowledged", when none came
 #   m0-own.sh continue WORK TOKEN NAME        continue (SIGCONT) that process now; print
 #                                             {outcome, process, pid, continued_ns, error}
 #   m0-own.sh teardown WORK TOKEN NQN_PREFIX  only if WORK/.owner holds TOKEN: delete the kernel
@@ -22,8 +30,10 @@
 #
 # Identity is (pid, start time from /proc/PID/stat), never a pid alone. A run
 # that did not acquire WORK (no token, or a token that is not WORK's) changes
-# nothing. NVME_SYSFS (default /sys/class/nvme) and PROC (default /proc) exist
-# for the controls.
+# nothing. NVME_SYSFS (default /sys/class/nvme), PROC (default /proc),
+# OWN_SETSID (default setsid: the pause helper's launcher) and OWN_ACK_DELAY
+# (default 0: seconds the pause waits before reading its acknowledgement)
+# exist for the controls.
 set -u
 SYS=${NVME_SYSFS:-/sys/class/nvme}
 PROC=${PROC:-/proc}
@@ -79,6 +89,12 @@ fail_json() {
   exit 1
 }
 
+# refuse_json PROCESS MESSAGE: a refused answer (nothing changed), exit 2.
+refuse_json() {
+  printf '{"outcome":"refused","process":"%s","pid":0,"error":"%s"}\n' "$1" "$(printf '%s' "$2" | tr -d '"\\')"
+  exit 2
+}
+
 case "${1:-}" in
 pause)
   w=$2 tok=$3 name=$4 bound=$5
@@ -89,12 +105,34 @@ pause)
   pid=${1:-} st=${2:-}
   [ -n "$pid" ] || fail_json "$name" "$name is not in the ownership ledger"
   [ "$(proc_state "$pid" "$st")" = running ] || fail_json "$name" "$name (pid $pid) is not running with its recorded start time"
-  # The bounded continue first, detached: the pause ends by BOUND even if
-  # this script, or the runner, dies right after the stop.
-  setsid bash -c 's=$(cat "$4/$1/stat" 2>/dev/null) || exit 0; sleep "$3"; t=$(cat "$4/$1/stat" 2>/dev/null) || exit 0; t=${t##*) }; set -- $1 $2 $3 $4 $t; [ "${24}" = "$2" ] && kill -CONT "$1"'     _ "$pid" "$st" "$bound" "$PROC" > /dev/null 2>&1 < /dev/null &
-  now=$(date +%s%N)
-  kill -STOP "$pid" || fail_json "$name" "SIGSTOP of pid $pid failed"
-  printf '{"outcome":"ok","process":"%s","pid":%s,"paused_ns":%s,"bound_seconds":%s,"error":""}\n' "$name" "$pid" "$now" "$bound" ;;
+  # ONE detached helper stops and continues, in that order: the pause ends by
+  # BOUND even if this script, or the runner, dies or stalls, and no stop can
+  # come after the continue. Its acknowledgement ("paused NS", or "refused
+  # WHY" when it stopped nothing) is written whole (a rename) to ack.
+  launcher=${OWN_SETSID:-setsid}
+  command -v "$launcher" > /dev/null 2>&1 || refuse_json "$name" "the pause helper cannot launch ($launcher): nothing stopped"
+  ack="$w/.pause-$name-$$-$(date +%s%N).ack"
+  "$launcher" bash -c 'pid=$1 st=$2 bound=$3 proc=$4 ack=$5
+    startof() { local s; s=$(cat "$proc/$pid/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
+    say() { printf "%s\n" "$1" > "$ack.tmp" && mv "$ack.tmp" "$ack"; }
+    [ "$(startof)" = "$st" ] || { say "refused the process is gone or recycled"; exit 0; }
+    kill -STOP "$pid" || { say "refused SIGSTOP of pid $pid failed"; exit 0; }
+    say "paused $(date +%s%N)"
+    sleep "$bound"
+    [ "$(startof)" = "$st" ] && kill -CONT "$pid"' _ "$pid" "$st" "$bound" "$PROC" "$ack" > /dev/null 2>&1 < /dev/null &
+  sleep "${OWN_ACK_DELAY:-0}"
+  i=0
+  while [ ! -e "$ack" ] && [ "$i" -lt $(( ${OWN_ACK_WAIT:-5} * 10 )) ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ack" ] || fail_json "$name" "pause not acknowledged within ${OWN_ACK_WAIT:-5} s: the helper may still stop pid $pid, and it continues it by $bound s"
+  read -r what rest < "$ack"
+  case "$what" in
+  paused) printf '{"outcome":"ok","process":"%s","pid":%s,"paused_ns":%s,"bound_seconds":%s,"error":""}\n' "$name" "$pid" "$rest" "$bound" ;;
+  refused) refuse_json "$name" "$rest: nothing stopped" ;;
+  *) fail_json "$name" "pause acknowledgement unreadable: $what $rest" ;;
+  esac ;;
 continue)
   w=$2 tok=$3 name=$4
   owned "$w" "$tok" || fail_json "$name" "not this run's WORK: nothing continued"

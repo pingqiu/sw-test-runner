@@ -302,7 +302,7 @@
           {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
            "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{volume.server}}", "{{launched.pid}}"],
            "failure": "recording ownership: {{stderr_first_line}}",
-           "cite": "scenarios/v3block/m0-own.sh:94 (record): the run's ledger, so the teardown stops the process by its identity"}
+           "cite": "scenarios/v3block/m0-own.sh:175-180 (record): the run's ledger, so the teardown stops the process by its identity"}
         ],
         "ready": {
           "within_param": "ready_seconds", "every_ms": 250,
@@ -358,9 +358,9 @@
       "variants": [{
         "command": ["bash", "{{config.own_script}}", "pause", "{{config.work}}", "{{config.owner}}", "{{store}}", "{{bound_seconds}}"],
         "runner_deadline_seconds": 30,
-        "cite": "scenarios/v3block/m0-own.sh:83-97 (pause: the store process by its pid and start time from the run's ownership ledger only, the detached continue after bound_seconds started first, then SIGSTOP), randomrun/inop.go:406-434 (the driver pauses it right before the operation's first attempt)",
+        "cite": "scenarios/v3block/m0-own.sh:99-135 (pause: the store process by its pid and start time from the run's ownership ledger only; ONE detached helper re-checks the start time, sends SIGSTOP, acknowledges, sleeps bound_seconds, re-checks and sends SIGCONT; ok only with its acknowledgement, refused when nothing was stopped, unknown when none came), randomrun/inop.go:467-496 (the driver pauses it right before the operation's first attempt)",
         "decode": {"kind": "self_reported", "fields": {"outcome": "string", "process": "string", "pid": "int", "paused_ns": "int", "bound_seconds": "int", "error": "string"},
-          "outcome_field": "outcome", "exits": {"ok": 0, "unknown": 1}, "match": {"process": "{{store}}"},
+          "outcome_field": "outcome", "exits": {"ok": 0, "unknown": 1, "refused": 2}, "match": {"process": "{{store}}"},
           "result": {"pid": "pid", "paused_ns": "paused_ns", "bound_seconds": "bound_seconds"}, "detail": "store pause: {{answer.error}}"}
       }],
       "note": "a store fault (fault_apply), restored by v3_op_fault_restore_store (fault_restore, the same fault_key): the driver pauses the store around one operation (randomrun inop.go store_pause); its bound and the time it paused are in the record; a fault touches every volume: the record's volume is empty"
@@ -374,7 +374,7 @@
       "variants": [{
         "command": ["bash", "{{config.own_script}}", "continue", "{{config.work}}", "{{config.owner}}", "{{store}}"],
         "runner_deadline_seconds": 30,
-        "cite": "scenarios/v3block/m0-own.sh:98-106 (continue: the same ledger process, SIGCONT; one the bounded continue already resumed is continued again, harmlessly), randomrun/inop.go:406-434 (the driver continues it right after the operation's last attempt)",
+        "cite": "scenarios/v3block/m0-own.sh:136-144 (continue: the same ledger process, SIGCONT; one the helper already resumed is continued again, harmlessly, and a later SIGCONT from the helper checks the start time first), randomrun/inop.go:467-496 (the driver continues it right after the operation's last attempt)",
         "decode": {"kind": "self_reported", "fields": {"outcome": "string", "process": "string", "pid": "int", "continued_ns": "int", "error": "string"},
           "outcome_field": "outcome", "exits": {"ok": 0, "unknown": 1}, "match": {"process": "{{store}}"},
           "result": {"pid": "pid", "continued_ns": "continued_ns"}, "detail": "store continue: {{answer.error}}"}
@@ -404,7 +404,7 @@
           {"name": "ledger", "kind": "command", "when": {"field": "config.own_script", "not_equals": ""},
            "command": ["bash", "{{config.own_script}}", "record", "{{config.work}}", "{{config.owner}}", "blockvolume-{{process.server}}", "{{launched.pid}}"],
            "failure": "recording ownership: {{stderr_first_line}}",
-           "cite": "scenarios/v3block/m0-own.sh:94 (record): a restarted process is in the same ledger, so the teardown stops it like any other"}
+           "cite": "scenarios/v3block/m0-own.sh:175-180 (record): a restarted process is in the same ledger, so the teardown stops it like any other"}
         ],
         "ready": {
           "within_param": "ready_seconds", "every_ms": 250,
