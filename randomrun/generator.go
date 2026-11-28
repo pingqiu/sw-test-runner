@@ -38,6 +38,11 @@ type Config struct {
 	FaultProcesses []string // the processes the schedule may kill
 	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
 	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
+	// In-operation faults (inop.go, AddInOpFaults): the actions a kill is
+	// timed into, the store process a store pause pauses around an operation
+	// of StoreAction, and the pause's bound in seconds.
+	InOp       InOpFaults
+	StoreBound int
 }
 
 // Generator proposes operations; Learn feeds back each outcome.
@@ -169,6 +174,14 @@ func (g *Generator) Header() map[string]any {
 		if g.cfg.MasterOutage != 0 {
 			h["fault_master_outage"] = g.cfg.MasterOutage
 		}
+		if len(g.cfg.InOp.During) != 0 {
+			h["fault_during"] = slices.Clone(g.cfg.InOp.During)
+		}
+		if g.cfg.InOp.Store != "" {
+			h["fault_store"] = g.cfg.InOp.Store
+			h["fault_store_action"] = g.cfg.InOp.StoreAction
+			h["fault_store_bound"] = g.cfg.StoreBound
+		}
 	}
 	return h
 }
@@ -184,15 +197,20 @@ func schedule(cfg Config, m Model) (FaultSchedule, error) {
 	if master, _, ok := m.MasterOutage(); ok && slices.Contains(cfg.FaultProcesses, master) {
 		return FaultSchedule{}, fmt.Errorf("fault schedule: %s is never killed by an ordinary kill (a short master outage is its own event, fault_master_outage)", master)
 	}
-	s, err := NewFaultSchedule(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, m.ValidProcess)
-	if err != nil || cfg.MasterOutage == 0 {
+	s, err := NewFaultScheduleIn(cfg.Seed, cfg.Ops, cfg.FaultProcesses, cfg.Faults, cfg.RestartWithin, cfg.InOp, m.ValidProcess)
+	if err != nil {
 		return s, err
 	}
-	master, _, ok := m.MasterOutage()
-	if !ok {
-		return s, fmt.Errorf("master outages on, but the product states no master outage")
+	if cfg.MasterOutage != 0 {
+		master, _, ok := m.MasterOutage()
+		if !ok {
+			return s, fmt.Errorf("master outages on, but the product states no master outage")
+		}
+		if s, err = AddMasterOutages(s, cfg.Ops, master, cfg.MasterOutage, m.ValidProcess); err != nil {
+			return s, err
+		}
 	}
-	return AddMasterOutages(s, cfg.Ops, master, cfg.MasterOutage, m.ValidProcess)
+	return s, nil
 }
 
 // Proposed is the number of operations proposed so far.
@@ -213,11 +231,21 @@ func (g *Generator) Schedule() FaultSchedule {
 // process is down are counted as fault cells.
 func (g *Generator) Fault(action, process string) {
 	g.fcells[action+"|"+process]++
-	if action == FaultKill {
+	if action == FaultKill || action == FaultKillDuring {
 		g.down = process
 	} else if g.down == process {
 		g.down = ""
 	}
+}
+
+// inOp counts an in-operation fault in the fault cells: "<kind>|<action>|hit"
+// or "...|missed" (a MISSED fault never counts as a hit).
+func (g *Generator) inOp(kind, action string, hit bool) {
+	c := kind + "|" + action + "|missed"
+	if hit {
+		c = kind + "|" + action + "|hit"
+	}
+	g.fcells[c]++
 }
 
 // Resolved tells the model that a subject's unknown operations were resolved
@@ -383,6 +411,14 @@ func (g *Generator) Coverage() map[string]any {
 		}
 		if master, _, ok := g.m.MasterOutage(); ok && g.cfg.MasterOutage != 0 {
 			want = append(want, FaultMasterOutage+"|"+master)
+		}
+		// An in-operation fault is reached only by a HIT (a MISSED one is
+		// counted apart and never in its place).
+		for _, a := range g.cfg.InOp.During {
+			want = append(want, FaultKillDuring+"|"+a+"|hit")
+		}
+		if g.cfg.InOp.Store != "" {
+			want = append(want, FaultStorePause+"|"+g.cfg.InOp.StoreAction+"|hit")
 		}
 		for a := range all {
 			want = append(want, "while_down|"+a)

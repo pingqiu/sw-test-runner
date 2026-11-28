@@ -43,6 +43,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 )
@@ -76,27 +77,55 @@ func worseOutcome(a, b string) string {
 // its outcome is its last attempt's, and the subjects are observed right
 // after each refused attempt that is re-issued and right before the next.
 func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string, error) {
-	got, _, err := r.exec(ctx, actx, o)
+	got, _, err := r.exec(ctx, actx, o, nil)
 	return got, err
 }
 
 // exec is Exec, also answering the attempts made (Attempts' count, summed
-// over the parts).
-func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op) (string, int, error) {
+// over the parts); hk, when set, runs around the attempts (BeforeFirst
+// before the first part's first attempt, AfterLast after the last part) and
+// takes the time of its first call. One operation at a time: a second exec on
+// the same history while one runs is refused (opGuard); only a fault may run
+// beside an operation (inop.go).
+func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op, hk *AttemptHooks) (string, int, error) {
 	h, ok := r.Handlers[o.Action]
 	if !ok {
 		return "", 0, fmt.Errorf("%s: no handler for %s", r.Name, o.Action)
 	}
+	if actx.History != nil {
+		leave, ok := enter(&opGuard, actx.History)
+		if !ok {
+			return "", 0, fmt.Errorf("%s: %s %s: %w", r.Name, o.Action, o.Volume, errTwoOperations)
+		}
+		defer leave()
+	}
+	if hk == nil {
+		hk = &AttemptHooks{}
+	}
 	observation := o.Action == r.Driver.Observe(o.Volume).Action
 	worst, attempts := "", 0
 	rr := rerunnerOf(r.Driver)
-	for _, p := range r.Driver.Calls(o) {
-		out, n, err := Attempts(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, o.Volume, func() (map[string]any, error) {
+	calls := r.Driver.Calls(o)
+	hk.Took = 0
+	for i, p := range calls {
+		part := &AttemptHooks{}
+		if i == 0 {
+			part.BeforeFirst = hk.BeforeFirst
+		}
+		if i == len(calls)-1 {
+			part.AfterLast = hk.AfterLast
+		}
+		out, n, err := AttemptsWith(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, o.Volume, func() (map[string]any, error) {
 			if err := r.observeSubjects(ctx, actx, o); err != nil {
 				return nil, err
 			}
 			return LastObservation(actx.History, o.Volume)
-		})
+		}, part)
+		// The time of one call: a kill timed into an operation lands at a
+		// fraction of it, inside the first call, whatever the number of calls.
+		if i == 0 {
+			hk.Took = part.Took
+		}
 		if err != nil {
 			return "", 0, err
 		}
@@ -165,6 +194,16 @@ func (r Runner) Step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 
 // step is Step, also answering the attempts made (exec).
 func (r Runner) step(ctx context.Context, actx *tr.ActionContext, o Op) (string, int, error) {
+	got, n, _, err := r.stepWith(ctx, actx, o, nil)
+	return got, n, err
+}
+
+// stepWith is step with hooks around the operation's attempts (exec), also
+// answering the time its attempts took.
+func (r Runner) stepWith(ctx context.Context, actx *tr.ActionContext, o Op, hk *AttemptHooks) (string, int, time.Duration, error) {
+	if hk == nil {
+		hk = &AttemptHooks{}
+	}
 	subjects := r.subjects(o)
 	step := map[string]any{"opno": o.No, "action": o.Action, "params": o.Params}
 	if o.Negative != "" {
@@ -174,7 +213,7 @@ func (r Runner) step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 		step["forced"] = o.Forced
 	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_step", Volume: o.Volume, Result: step}); err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	// Two observations of each subject before a negative operation: with
 	// nothing between them they must be equal (the product's background work
@@ -185,24 +224,24 @@ func (r Runner) step(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 		for _, s := range subjects {
 			for i := 0; i < 2; i++ {
 				if err := r.observeOne(ctx, actx, s); err != nil {
-					return "", 0, err
+					return "", 0, 0, err
 				}
 			}
 		}
 	}
-	outcome, attempts, err := r.exec(ctx, actx, o)
+	outcome, attempts, err := r.exec(ctx, actx, o, hk)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	// After a refusal (with or without a documented effect) or a negative:
 	// one observation of each subject. (A rerun's earlier refused attempts
 	// were each observed after by exec.)
 	if outcome == tr.OutcomeRefused || outcome == tr.OutcomeRefusedEffect || o.Negative != "" {
 		if err := r.observeSubjects(ctx, actx, o); err != nil {
-			return "", 0, err
+			return "", 0, 0, err
 		}
 	}
-	return outcome, attempts, nil
+	return outcome, attempts, hk.Took, nil
 }
 
 // ParseConfig reads a run's generic parameters through get: seed, ops, pool,
@@ -246,6 +285,20 @@ func ParseConfig(name string, get func(string) string) (Config, error) {
 		}
 	}
 	if c.Faults != 0 || c.MasterOutage != 0 {
+		// In-operation faults (inop.go): fault_during, the actions a kill is
+		// timed into (one each); fault_store, the store process a pause
+		// stops around an operation of fault_store_action, for at most
+		// fault_store_bound seconds (default 75).
+		c.InOp.During = strings.Fields(get("fault_during"))
+		c.InOp.Store, c.InOp.StoreAction = get("fault_store"), get("fault_store_action")
+		if c.InOp.Store != "" {
+			c.StoreBound = 75
+			if s := get("fault_store_bound"); s != "" {
+				if c.StoreBound, err = strconv.Atoi(s); err != nil || c.StoreBound < 1 || c.StoreBound > 600 {
+					return c, fmt.Errorf("%s: fault_store_bound %q: 1..600 seconds", name, s)
+				}
+			}
+		}
 		c.FaultProcesses = strings.Fields(get("fault_processes"))
 		if s := get("fault_restart_within"); s != "" {
 			if c.RestartWithin, err = strconv.Atoi(s); err != nil || c.RestartWithin < 1 {
@@ -321,7 +374,7 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		if !ok {
 			break
 		}
-		outcome, err := r.Step(ctx, actx, o)
+		outcome, err := fr.stepOp(ctx, actx, r, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
@@ -331,6 +384,18 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 		}
 		if fr != nil {
 			fr.note(o, outcome)
+			if err := fr.afterStep(ctx, actx); errors.Is(err, errUnhealthy) {
+				if err := stopRun(actx, o.No); err != nil {
+					return nil, err
+				}
+				g.stop("unhealthy")
+				break
+			} else if err != nil {
+				return nil, fmt.Errorf("%s: operation %d: %w", r.Name, o.No, err)
+			}
+			if err := g.feed(actx.History); err != nil {
+				return nil, fmt.Errorf("%s: %w", r.Name, err)
+			}
 			before := fr.next
 			err := fr.afterOp(ctx, actx, o.No)
 			if fr.next != before {
@@ -338,7 +403,9 @@ func (r Runner) Run(ctx context.Context, actx *tr.ActionContext, g *Generator, g
 				// state the event may have changed (a holder fenced, a volume
 				// settled); the queue is dropped, nothing of it is proposed.
 				g.queue = nil
+				fr.forcing = false
 			}
+			fr.forceTargets(g)
 			if ferr := g.feed(actx.History); ferr != nil {
 				return nil, fmt.Errorf("%s: %w", r.Name, ferr)
 			}
@@ -509,6 +576,47 @@ type faultRun struct {
 	// stopOnUnhealthy: a healthy point still false after its full wait ends
 	// the run (errUnhealthy) instead of carrying on against dead subjects.
 	stopOnUnhealthy bool
+	// The in-operation faults (inop.go): the events armed and waiting for
+	// their target operation; the scheduled processes of the kill_during
+	// events armed (by process) and of those that fired; the measured
+	// durations by action; a replay's records by operation number; the
+	// store pause's bound; what a fired fault leaves for after the step.
+	armed      []FaultEvent
+	duringOf   map[string]bool
+	fired      map[string]bool
+	durations  map[string][]time.Duration
+	inOpRecs   map[int]inOpRecord
+	storeBound int
+	post       func(ctx context.Context, actx *tr.ActionContext) error
+	forcing    bool // a target operation is queued for an armed fault
+	within     int  // the restart bound: an armed store pause's window
+}
+
+// stepOp runs one proposed operation: with the in-operation fault it fires
+// (inop.go), or as an ordinary step, its attempts' time measured. With no
+// fault run (f nil), an ordinary step.
+func (f *faultRun) stepOp(ctx context.Context, actx *tr.ActionContext, r Runner, o Op) (string, error) {
+	got, _, err := f.stepOpN(ctx, actx, r, o)
+	return got, err
+}
+
+// stepOpN is stepOp, also answering the attempts made.
+func (f *faultRun) stepOpN(ctx context.Context, actx *tr.ActionContext, r Runner, o Op) (string, int, error) {
+	if f == nil {
+		return r.step(ctx, actx, o)
+	}
+	if o.Forced == ForcedFault {
+		f.forcing = false
+	}
+	if e := f.inOpFor(o); e != nil {
+		got, n, fired, err := f.stepInOp(ctx, actx, o, *e)
+		if err != nil || fired {
+			return got, n, err
+		}
+	}
+	got, n, took, err := r.stepWith(ctx, actx, o, nil)
+	f.measure(o.Action, took)
+	return got, n, err
 }
 
 // errUnhealthy is a healthy point still false after its full wait.
@@ -588,7 +696,18 @@ func (f *faultRun) killDecision(ctx context.Context, actx *tr.ActionContext, e F
 // newFaultRun takes the header's fault_healthy_wait (absent: "").
 func newFaultRun(r Runner, events []FaultEvent, g *Generator, header map[string]any, outages map[int][]Op) *faultRun {
 	w, _ := header["fault_healthy_wait"].(string)
-	return &faultRun{r: r, events: events, gen: g, wait: w, outages: outages}
+	bound, _ := header["fault_store_bound"].(int)
+	if b, ok := header["fault_store_bound"].(float64); ok {
+		bound = int(b)
+	}
+	within, _ := header["fault_restart_within"].(int)
+	if x, ok := header["fault_restart_within"].(float64); ok {
+		within = int(x)
+	}
+	if within == 0 {
+		within = DefaultRestartWithin
+	}
+	return &faultRun{r: r, events: events, gen: g, wait: w, outages: outages, duringOf: map[string]bool{}, fired: map[string]bool{}, storeBound: bound, within: within}
 }
 
 // note takes an operation's outcome: an unknown is pending resolution,
@@ -602,8 +721,12 @@ func (f *faultRun) note(o Op, outcome string) {
 	}
 }
 
-// afterOp runs the events scheduled after operation opno.
+// afterOp runs the events scheduled after operation opno (and closes the
+// window of an armed store pause).
 func (f *faultRun) afterOp(ctx context.Context, actx *tr.ActionContext, opno int) error {
+	if err := f.expire(actx, opno); err != nil {
+		return err
+	}
 	for f.next < len(f.events) && f.events[f.next].AfterOp <= opno {
 		if err := f.run(ctx, actx, f.events[f.next]); err != nil {
 			return err
@@ -617,6 +740,13 @@ func (f *faultRun) afterOp(ctx context.Context, actx *tr.ActionContext, opno int
 // point); otherwise one last healthy point.
 func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 	f.next = len(f.events) // kills scheduled after the last operation do not run
+	for _, a := range f.armed { // in-operation faults that never found their operation
+		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_during", Result: map[string]any{
+			"after_op": a.AfterOp, "scheduled": a.Process, "action": a.Action, "hit": false, "why": "MISSED: no target operation before the end"}}); err != nil {
+			return err
+		}
+	}
+	f.armed = nil
 	var err error
 	if f.down != "" {
 		err = f.run(ctx, actx, FaultEvent{Action: FaultRestart, Process: f.down})
@@ -632,6 +762,32 @@ func (f *faultRun) finish(ctx context.Context, actx *tr.ActionContext) error {
 func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent) error {
 	if e.Action == FaultMasterOutage {
 		return f.outage(ctx, actx, e)
+	}
+	if e.Action == FaultKillDuring || e.Action == FaultStorePause {
+		if e.Action == FaultKillDuring {
+			f.duringOf[e.Process] = true
+		}
+		f.arm(e)
+		return nil
+	}
+	if e.Action == FaultRestart && f.duringOf[e.Process] {
+		delete(f.duringOf, e.Process)
+		if !f.fired[e.Process] {
+			// The kill during an operation never fired (no target operation
+			// before its restart): MISSED, and nothing to restart.
+			for _, a := range f.armed {
+				if a.Action == FaultKillDuring && a.Process == e.Process {
+					f.disarm(a)
+					break
+				}
+			}
+			if f.gen != nil {
+				f.gen.inOp(FaultKillDuring, "", false)
+			}
+			return actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_during", Result: map[string]any{
+				"after_op": e.AfterOp, "scheduled": e.Process, "hit": false, "why": "MISSED: no target operation before its restart"}})
+		}
+		delete(f.fired, e.Process)
 	}
 	scheduled := e.Process
 	if e.Action == FaultKill && e.AfterOp > 0 { // a scheduled kill (finish restarts with after_op 0)

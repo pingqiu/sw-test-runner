@@ -27,10 +27,10 @@ func TestFaultScheduleSameSeedSameScheduleAndPinned(t *testing.T) {
 	// (m2-gen/10: the kills take the processes in turn, the first three
 	// forced no earlier than after operations 15, 30 and 45.)
 	want := []FaultEvent{
-		{15, FaultKill, "p0"}, {20, FaultRestart, "p0"},
-		{28, FaultKill, "p1"}, {41, FaultRestart, "p1"},
-		{45, FaultKill, "p2"}, {54, FaultRestart, "p2"},
-		{55, FaultKill, "p0"}, {60, FaultRestart, "p0"},
+		{AfterOp: 15, Action: FaultKill, Process: "p0"}, {AfterOp: 20, Action: FaultRestart, Process: "p0"},
+		{AfterOp: 28, Action: FaultKill, Process: "p1"}, {AfterOp: 41, Action: FaultRestart, Process: "p1"},
+		{AfterOp: 45, Action: FaultKill, Process: "p2"}, {AfterOp: 54, Action: FaultRestart, Process: "p2"},
+		{AfterOp: 55, Action: FaultKill, Process: "p0"}, {AfterOp: 60, Action: FaultRestart, Process: "p0"},
 	}
 	if !reflect.DeepEqual(a.Events, want) {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
@@ -101,8 +101,8 @@ func TestFaultScheduleEveryKillRestartedWithinTheBoundOneDownAtATime(t *testing.
 
 // Red controls for CheckFaultSchedule: each seeded defect must be caught.
 func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
-	k := func(n int, p string) FaultEvent { return FaultEvent{n, FaultKill, p} }
-	r := func(n int, p string) FaultEvent { return FaultEvent{n, FaultRestart, p} }
+	k := func(n int, p string) FaultEvent { return FaultEvent{AfterOp: n, Action: FaultKill, Process: p} }
+	r := func(n int, p string) FaultEvent { return FaultEvent{AfterOp: n, Action: FaultRestart, Process: p} }
 	good := []FaultEvent{k(2, "p0"), r(5, "p0"), k(5, "p1"), r(25, "p1")}
 	if err := CheckFaultSchedule(good, 30, 20, testProcess); err != nil {
 		t.Fatalf("green: %v", err)
@@ -117,7 +117,7 @@ func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
 		"after the last op":        {k(29, "p0"), r(31, "p0")},
 		"before the first op":      {k(0, "p0"), r(1, "p0")},
 		"unknown process":          {k(2, "px"), r(3, "px")},
-		"unknown action":           {{2, "pause", "p0"}},
+		"unknown action":           {{AfterOp: 2, Action: "pause", Process: "p0"}},
 	} {
 		if err := CheckFaultSchedule(ev, 30, 20, testProcess); err == nil {
 			t.Errorf("red control %q not caught", name)
@@ -174,15 +174,15 @@ func TestMasterOutagesComeOnlyWhileNothingIsDown(t *testing.T) {
 	}
 	// Red controls for the checker: an outage while a process is down.
 	for name, ev := range map[string][]FaultEvent{
-		"outage while down":    {{2, FaultKill, "p1"}, {3, FaultMasterOutage, "p0"}, {4, FaultRestart, "p1"}},
-		"outage of an unknown": {{3, FaultMasterOutage, "q"}},
-		"outage out of order":  {{5, FaultMasterOutage, "p0"}, {3, FaultMasterOutage, "p0"}},
+		"outage while down":    {{AfterOp: 2, Action: FaultKill, Process: "p1"}, {AfterOp: 3, Action: FaultMasterOutage, Process: "p0"}, {AfterOp: 4, Action: FaultRestart, Process: "p1"}},
+		"outage of an unknown": {{AfterOp: 3, Action: FaultMasterOutage, Process: "q"}},
+		"outage out of order":  {{AfterOp: 5, Action: FaultMasterOutage, Process: "p0"}, {AfterOp: 3, Action: FaultMasterOutage, Process: "p0"}},
 	} {
 		if CheckFaultSchedule(ev, 30, 20, testProcess) == nil {
 			t.Errorf("red control %q not caught", name)
 		}
 	}
-	if err := CheckFaultSchedule([]FaultEvent{{2, FaultKill, "p1"}, {4, FaultRestart, "p1"}, {5, FaultMasterOutage, "p0"}}, 30, 20, testProcess); err != nil {
+	if err := CheckFaultSchedule([]FaultEvent{{AfterOp: 2, Action: FaultKill, Process: "p1"}, {AfterOp: 4, Action: FaultRestart, Process: "p1"}, {AfterOp: 5, Action: FaultMasterOutage, Process: "p0"}}, 30, 20, testProcess); err != nil {
 		t.Errorf("green: %v", err)
 	}
 }

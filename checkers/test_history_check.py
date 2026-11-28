@@ -2092,5 +2092,78 @@ class C0Resolved(unittest.TestCase):
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
 
 
+
+class StoreFault(unittest.TestCase):
+    """C6 after a store fault: the requests between a store_pause record and
+    the next step must each answer ok, and one at least must run. The paused
+    snapshot's unknown is placed by the placement row (C6 and C0, one
+    resolution)."""
+
+    def case(self, followups):
+        """v1: an observation, a store pause around snapshot s1 (unknown), a
+        healthy point and the observation that places it (the name absent:
+        did not), the store_pause record, then the follow-ups:
+        [(verb, outcome)]."""
+        steps = list(BASE) + [('obs', 'v1', 4, FILES, dict(WS, snapshots=[]))]
+        steps += [('fault_apply', None, {'fault_key': 'store_pause:weed-filer', 'process': 'weed-filer', 'bound_seconds': 75}, 'ok'),
+                  ('snapshot', 'v1', {'name': 's1', 'request': 'v1-s1', 'attempt': 1}, 'unknown'),
+                  ('fault_restore', None, {'fault_key': 'store_pause:weed-filer', 'process': 'weed-filer'}, 'ok'),
+                  ('obs', 'v1', 4, FILES, dict(WS, snapshots=[]))]
+        recs = history(*steps)
+        end = recs.pop()
+        at = next(i for i, r in enumerate(recs) if r['kind'] == 'complete' and r.get('verb') == 'fault_restore') + 1
+        recs.insert(at, {'seq': 0, 'kind': 'observe', 'verb': 'healthy', 'mono_ns': recs[at - 1]['mono_ns'], 'result': {'healthy': True, 'down': [], 'not_serving': []}})
+        recs.append({'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'store_pause', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'],
+                     'result': {'after_op': 3, 'opno': 4, 'action': 'v3_op_snapshot', 'volume': 'v1', 'process': 'weed-filer', 'bound_seconds': 75,
+                                'outcome': 'unknown', 'hit': True, 'followups': [{'action': 'v3_op_snapshot'}, {'action': 'v3_op_stop'}]}})
+        for verb, out in followups:
+            n = len(recs)
+            recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': 'v1', 'args': {}, 'mono_ns': n + 1})
+            recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': 'v1', 'mono_ns': n + 2, 'outcome': out, 'result': {}})
+        recs.append(end)
+        for i, r in enumerate(recs):
+            if r['kind'] == 'complete' and r['outcome'] == 'unknown':
+                r['result'] = {'detail': 'deadline: the filer did not answer'}
+            r['mono_ns'] = 2 * i + 2
+            if 'from_mono_ns' in r:
+                r['from_mono_ns'] = 2 * i + 1
+            if r.get('volume') is None:
+                r.pop('volume', None)
+        return hc.check(dump(renumber(recs)))
+
+    def test_the_requests_after_a_store_pause_succeed(self):
+        v = self.case([('snapshot', 'ok'), ('stop', 'ok')])
+        self.assertFalse(any('after the store fault' in x for x in v['C6']['findings']), v['C6'])
+        self.assertTrue(any('placed did not: by snapshot names' in x for x in v['C6']['findings']), v['C6'])
+        self.assertFalse(any('outcome unknown' in x for x in v['C0']['findings']), v['C0'])   # C0: resolved by the same placement
+
+    def test_red_a_refused_detach_after_a_store_pause_fails_c6(self):
+        v = self.case([('snapshot', 'ok'), ('stop', 'refused')])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('stop v1 answered refused: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_an_unknown_snapshot_after_a_store_pause_fails_c6(self):
+        v = self.case([('snapshot', 'unknown'), ('stop', 'ok')])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('snapshot v1 answered unknown: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_a_follow_up_that_never_ran_fails_c6(self):
+        v = self.case([('snapshot', 'ok')])   # the record names a snapshot and a detach
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('1 of the 2 requests it names ran' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_nothing_after_a_store_pause_fails_c6(self):
+        v = self.case([])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('no request followed it' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_a_kill_beside_an_open_operation_is_no_overlap(self):
+        # kill_during: the kill (no volume) invoked while a write is open.
+        recs = [{'seq': 1, 'kind': 'invoke', 'op': 'X.W', 'verb': 'write', 'volume': 'v1', 'args': {'lba': 0}, 'mono_ns': 1},
+                {'seq': 2, 'kind': 'invoke', 'op': 'Env.Kill', 'verb': 'kill', 'volume': '', 'args': {'process': 'blockvolume:0'}, 'mono_ns': 2},
+                {'seq': 3, 'kind': 'complete', 'of': 2, 'op': 'Env.Kill', 'verb': 'kill', 'volume': '', 'mono_ns': 3, 'outcome': 'ok', 'result': {}},
+                {'seq': 4, 'kind': 'complete', 'of': 1, 'op': 'X.W', 'verb': 'write', 'volume': 'v1', 'mono_ns': 4, 'outcome': 'unknown', 'result': {}}]
+        self.assertEqual(hc.overlaps(hc.read_history(dump(recs))), set())
+
 if __name__ == '__main__':
     unittest.main()

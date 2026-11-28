@@ -65,7 +65,7 @@ func TestReplayReadsFaultsAndHealthyByTheirVerbs(t *testing.T) {
 			_ = h.Complete(seq, outcome, nil)
 		}
 		obs("gen_header", map[string]any{"generator": "toy-f/1", "seed": "1", "ops": 2, "fault_restart_within": 20})
-		obs("fault_schedule", FaultSchedule{Seed: 1, Events: []FaultEvent{{1, FaultKill, "p1"}, {2, FaultRestart, "p1"}}}.Record())
+		obs("fault_schedule", FaultSchedule{Seed: 1, Events: []FaultEvent{{AfterOp: 1, Action: FaultKill, Process: "p1"}, {AfterOp: 2, Action: FaultRestart, Process: "p1"}}}.Record())
 		obs("gen_step", map[string]any{"opno": 1, "action": "write", "params": map[string]any{}})
 		op("write", tr.OutcomeOK)
 		op(kill, tr.OutcomeUnknown)

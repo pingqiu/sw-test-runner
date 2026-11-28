@@ -61,6 +61,9 @@ type Script struct {
 	// Kills are the recorded kill decisions (fault_kill), in order; nil when
 	// the history has none.
 	Kills []KillDecision
+	// InOp are the recorded in-operation faults that fired, by operation
+	// number (inop.go).
+	InOp map[int]inOpRecord
 }
 
 // ReplayStep is one step of a recorded script with its recorded outcome.
@@ -106,6 +109,10 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	// operation's outcome (stepFold).
 	folds := map[int]*stepFold{}
 	attemptOf := map[uint64]string{}
+	// open: the current step's invokes not yet completed; faultSeq: the
+	// invokes of faults inside a step (not the step's operation).
+	open, faultSeq := map[uint64]bool{}, map[uint64]bool{}
+	inOp := map[int]inOpRecord{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 16<<20)
 	line := 0
@@ -152,6 +159,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				}
 				steps = append(steps, ReplayStep{Op: o})
 				cur = len(steps) - 1
+				open = map[uint64]bool{}
 			case "gen_sweep":
 				if sweep != nil {
 					return Script{}, fmt.Errorf("%s: %s line %d: a second gen_sweep", name, path, line)
@@ -181,20 +189,60 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 					outageSkips[int(k)] = true
 				}
 				cur = -1
+			case "fault_during":
+				// A kill that fired beside an operation (with its operation
+				// number); one that never fired has none and replays as none.
+				if no, ok := r.Result["opno"].(float64); ok {
+					rec := inOpRecord{Action: FaultKillDuring, OpNo: int(no)}
+					a, _ := r.Result["after_op"].(float64)
+					off, _ := r.Result["offset_ms"].(float64)
+					rec.AfterOp, rec.OffsetMs = int(a), int(off)
+					rec.Process, _ = r.Result["process"].(string)
+					inOp[rec.OpNo] = rec
+				}
+			case "store_pause":
+				no, ok := r.Result["opno"].(float64)
+				if !ok {
+					cur = -1
+					continue // a pause that never fired (MISSED: no target in its window)
+				}
+				a, ok2 := r.Result["after_op"].(float64)
+				fu, err := parseOps(r.Result, "followups")
+				if !ok2 || err != nil {
+					return Script{}, fmt.Errorf("%s: %s line %d: store_pause %v %v", name, path, line, r.Result, err)
+				}
+				inOp[int(no)] = inOpRecord{Action: FaultStorePause, OpNo: int(no), AfterOp: int(a), Followups: fu}
+				cur = -1
 			case "gen_coverage", "gen_replay", "gen_stop", VerbHealthy:
 				cur = -1
 			}
 		case tr.HistoryInvoke:
+			// A store fault's apply and restore, and a kill beside an
+			// operation still open (kill_during), are inside the step but are
+			// not its operation; any other kill or restart ends the step.
+			if r.Verb == VerbFaultApply || r.Verb == VerbFaultRestore {
+				faultSeq[r.Seq] = true
+				continue
+			}
 			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
+				if cur >= 0 && len(open) > 0 {
+					faultSeq[r.Seq] = true
+					continue
+				}
 				cur = -1
 			}
 			if cur >= 0 {
+				open[r.Seq] = true
 				if key, ok := requestKey(rerunnerOf(d), steps[cur].Op.Action, r); ok {
 					attemptOf[r.Seq] = key
 					steps[cur].Attempts++
 				}
 			}
 		case tr.HistoryComplete:
+			delete(open, r.Of)
+			if faultSeq[r.Of] {
+				continue
+			}
 			if cur >= 0 {
 				if folds[cur] == nil {
 					folds[cur] = &stepFold{}
@@ -229,7 +277,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			return Script{}, fmt.Errorf("%s: %s: the master outage after operation %d has no master_outage record", name, path, e.AfterOp)
 		}
 	}
-	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills}, nil
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills, InOp: inOp}, nil
 }
 
 // requestKey is the request an attempt record belongs to: its verb, volume
@@ -396,6 +444,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		fr = newFaultRun(r, events, nil, header, sc.Outages)
 		fr.kills = sc.Kills
 		fr.outageSkips = sc.OutageSkips
+		fr.inOpRecs = sc.InOp
 		fr.stopOnUnhealthy = true
 	}
 	// The coverage tail's steps ran after the run's end (the final healthy
@@ -412,7 +461,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
 		o := st.Op
-		replayed, n, err := r.step(ctx, actx, o)
+		replayed, n, err := fr.stepOpN(ctx, actx, r, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
@@ -426,7 +475,11 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		}
 		if fr != nil {
 			fr.note(o, replayed)
-			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+			err := fr.afterStep(ctx, actx)
+			if err == nil {
+				err = fr.afterOp(ctx, actx, o.No)
+			}
+			if errors.Is(err, errUnhealthy) {
 				if err := stopRun(actx, o.No); err != nil {
 					return nil, err
 				}

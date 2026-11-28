@@ -172,7 +172,12 @@ code is 0 only when every checker passes.
       carries the finding "unknowns resolved: <n>" (a run with healthy
       points and n = 0 PASSes; the night requires n > 0 in some run). FAIL
       (not exercised) if the history holds neither an unknown nor a healthy
-      record.
+      record. AFTER A STORE FAULT: a `store_pause` record (the driver paused
+      the store around one operation, then continued it) is followed by the
+      requests the run issues on that volume before its next step (the
+      record's followups: a later snapshot and a detach); every one it names
+      must run and answer ok, and at least one must run, or C6 FAILS: the
+      store fault must leave the volume usable.
   MO  a short master outage interrupts nothing (checks.json master_outage):
       the window runs from an ok kill of the master's completion to its next
       ok restart's completion on the history's clock; one at most
@@ -1405,6 +1410,34 @@ def _settle(recs, ops_, inv, comp):
     return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
 
 
+def after_store_fault(recs):
+    """C6's rule after a store fault: the requests between a store_pause
+    record and the run's next step (gen_step, gen_sweep or the end) must
+    each answer ok, and there must be at least one."""
+    f = []
+    for i, r in enumerate(recs):
+        if r['kind'] != 'observe' or r.get('verb') != 'store_pause':
+            continue
+        comp = {x['of']: x for x in recs if x['kind'] == 'complete'}
+        ran = 0
+        for x in recs[i + 1:]:
+            if x['kind'] == 'observe' and x.get('verb') in ('gen_step', 'gen_sweep'):
+                break
+            if x['kind'] != 'invoke' or x['verb'] in FAULT_VERBS or x['verb'] in RUNNER_VERBS:
+                continue
+            ran += 1
+            c = comp.get(x['seq'])
+            if c is None or c['outcome'] != 'ok':
+                f.append('after the store fault (record seq %d): seq %d %s %s answered %s: a request after a store fault must succeed'
+                         % (r['seq'], x['seq'], x['verb'], x.get('volume', ''), 'nothing' if c is None else c['outcome']))
+        want = len((r.get('result') or {}).get('followups') or [])
+        if not ran:
+            f.append('after the store fault (record seq %d): no request followed it: a store fault must be followed by a request that succeeds' % r['seq'])
+        elif ran < want:
+            f.append('after the store fault (record seq %d): %d of the %d requests it names ran: each must run and succeed' % (r['seq'], ran, want))
+    return f
+
+
 def resolve_unknown(recs, ops_, inv, comp, points, earlier):
     """The resolution of one unknown operation: the ONE function C6 and C0
     both call, so they cannot disagree. A lifecycle verb (NEEDS_SETTLED) by
@@ -1512,6 +1545,7 @@ def c6(recs):
     if healthy and (healthy[-1].get('result') or {}).get('healthy') is not True:
         res = healthy[-1].get('result') or {}
         f.append('the run ended unhealthy: last healthy record seq %d: down %s, not serving %s' % (healthy[-1]['seq'], res.get('down'), res.get('not_serving')))
+    f += after_store_fault(recs)
     f_rec, n_rec, timed = recovery_findings(recs, ops_, healthy)
     f += f_rec
     notes += n_rec
