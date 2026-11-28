@@ -17,6 +17,10 @@ of a kill. Numbers and names a page states live in checks.json, not here.
                                 whether a later value shows the same state
                                 (across a master restart at that wall time:
                                 checks.json observation.across_master_restart)
+  expiry_rule(part, before, after, restart_wall_ns=None)
+                                which across_master_restart rule compared a
+                                pair's expiry, or None
+  compared_note(counts)         C5's note of the pairs each rule compared
   observation_findings(obs)     what one observation contradicts in itself
                                 (a lease printed expired while still valid)
   show_part(state, part)        one part, short, for a finding
@@ -367,6 +371,25 @@ def restart_expiry(before, after, restart_wall_ns):
         end = (after.clock or {}).get('end_wall_ns')
         return end is None or a <= end + row['extend'] + row['slack']
     return None
+
+
+EXPIRY_RULES = ('across a master restart', 'no restart')
+
+
+def expiry_rule(part, before, after, restart_wall_ns=None):
+    """Which rule of checks.json across_master_restart compared the expiry
+    of this pair (restart_expiry not None): 'across a master restart' (a
+    restart with its wall time between) or 'no restart'; None when the pair
+    was not compared (another part, a renewing state, a value missing, an
+    unrecorded restart)."""
+    if part != 'workspace' or restart_expiry(before, after, restart_wall_ns) is None:
+        return None
+    return EXPIRY_RULES[0] if restart_wall_ns is not None else EXPIRY_RULES[1]
+
+
+def compared_note(counts):
+    """C5's note line: {rule: pairs} of expiry_rule, each pair once."""
+    return 'lease expiry pairs compared: %d (%s)' % (sum(counts.values()), '; '.join('%s: %d' % (r, counts.get(r, 0)) for r in EXPIRY_RULES))
 
 
 def time_explains(key, bv, av, before, after, fact_compared=False):

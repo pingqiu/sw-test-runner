@@ -857,6 +857,20 @@ def show_part(state, part):
     return PRODUCT.show_part(state, part)
 
 
+def note_compared(compared, before, after, a, b, restart_wall_ns):
+    """Record in `compared` {(earlier seq, later seq): rule} which rule of
+    the product reader compared a pair (expiry_rule), when one did. A note
+    only: it changes no verdict."""
+    (sa, ba), (sb, bb) = a, b
+    if compared is None or ba or bb:
+        return
+    for p in STATE_PARTS:
+        if p in sa and p in sb:
+            rule = PRODUCT.expiry_rule(p, sa[p], sb[p], restart_wall_ns)
+            if rule is not None:
+                compared[(before['seq'], after['seq'])] = rule
+
+
 def limits_of(recs):
     """{invoke seq: limit}: the limit the generator's latest gen_step names for
     the operations it proposed, else "ordinary <verb>"."""
@@ -869,9 +883,10 @@ def limits_of(recs):
     return out
 
 
-def baseline(recs):
+def baseline(recs, compared=None):
     """(pairs checked, findings): every two consecutive observations of a
-    volume with no operation touching it invoked between them."""
+    volume with no operation touching it invoked between them. compared:
+    filled as note_compared does."""
     last, checked, f = {}, 0, []
     restarts = master_restarts(recs)
     fit = history_wall_fit(recs)
@@ -883,7 +898,10 @@ def baseline(recs):
         elif r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume'):
             vol = r['volume']
             if vol in last:
-                diff, _ = state_diff(observed_state(last[vol], fit), observed_state(r, fit), master_restart_between(restarts, last[vol]['seq'], r['seq']))
+                sa, sb, rw = observed_state(last[vol], fit), observed_state(r, fit), master_restart_between(restarts, last[vol]['seq'], r['seq'])
+                diff, _ = state_diff(sa, sb, rw)
+                if diff is not None:
+                    note_compared(compared, last[vol], r, sa, sb, rw)
                 if diff is not None:
                     checked += 1
                     if diff:
@@ -936,6 +954,7 @@ def c5(recs):
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
     per = {}   # limit -> [refusals, judged], every refused attempt
+    compared = {}   # (earlier seq, later seq) -> the reader's rule that compared the pair (a note)
     attempts_judged = 0   # of those, attempts a later attempt of the same request replaced
     for inv, comp in ops_:
         if inv['seq'] in earlier:
@@ -976,7 +995,10 @@ def c5(recs):
             notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
             continue
         b, a = observed_state(before, fit), observed_state(after, fit)
-        diff, missing = state_diff(b, a, master_restart_between(restarts, before['seq'], after['seq']))
+        rw = master_restart_between(restarts, before['seq'], after['seq'])
+        diff, missing = state_diff(b, a, rw)
+        if diff is not None:
+            note_compared(compared, before, after, b, a, rw)
         if diff is None:
             notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
             continue
@@ -1022,7 +1044,12 @@ def c5(recs):
     judged = sum(j for _, j in per.values())   # judged: refused attempts judged
     guarded = guard_trips(recs, limit)
     report += [guarded[lim] for lim in sorted(guarded)]
-    checked, bf = baseline(recs)
+    checked, bf = baseline(recs, compared)
+    counts = {}
+    for rule in compared.values():
+        counts[rule] = counts.get(rule, 0) + 1
+    if counts:   # a history in which the reader compared no pair carries no such note
+        notes.append(PRODUCT.compared_note(counts))
     if of:
         return {'verdict': 'FAIL', 'judged': judged, 'findings': of + bf + f + report + notes}
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal

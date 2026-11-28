@@ -2319,6 +2319,46 @@ class AcrossMasterRestart(unittest.TestCase):
         pb.bind(checks)
 
 
+class ExpiryPairsNote(unittest.TestCase):
+    """C5 notes how many pairs the expiry row compared, each pair once, by
+    rule; the note changes no verdict."""
+
+    def test_the_note_counts_each_rule(self):
+        amr = AcrossMasterRestart()
+        def counted(*a, **kw):
+            recs = []
+            orig = hc.baseline
+            seen = {}
+            def keep(r, compared=None):
+                recs.append(r)
+                return orig(r, seen)
+            with mock.patch.object(hc, 'baseline', keep):
+                amr.pair(*a, **kw)
+            return sorted(seen.values())
+        self.assertEqual(counted(amr.W + 20 * amr.S, ('revoking', 'revoking')), ['across a master restart'])
+        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), restart=False), ['no restart'])
+        self.assertEqual(counted(amr.E, ('granted', 'granted'), restart=False), [])            # renewing: not compared
+        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), wall=False), [])            # unrecorded restart: not compared
+        self.assertEqual(hc.PRODUCT.compared_note({'across a master restart': 2, 'no restart': 3}),
+                         'lease expiry pairs compared: 5 (across a master restart: 2; no restart: 3)')
+        self.assertEqual(hc.PRODUCT.compared_note({}), 'lease expiry pairs compared: 0 (across a master restart: 0; no restart: 0)')
+
+    def test_c5_carries_the_note_and_the_verdict_does_not_change(self):
+        # A revoking lease, unchanged, around a refusal: the refusal's pair
+        # and the baseline pair before it, each counted once (no restart).
+        amr = AcrossMasterRestart()
+        rev = {'workspace': {'exit': 0, 'text': amr.text('revoking', amr.E, 2)}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
+        steps = (('obs', 'v1', 4, FILES, rev), ('obs', 'v1', 4, FILES, rev), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, rev))
+        v = hc.check(dump(history(*(BASE + steps))))['C5']
+        notes = [x for x in v['findings'] if x.startswith('lease expiry pairs compared: ')]
+        self.assertEqual(notes, ['lease expiry pairs compared: 2 (across a master restart: 0; no restart: 2)'], v)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        with mock.patch.object(hc.PRODUCT, 'expiry_rule', lambda *a: None):
+            w = hc.check(dump(history(*(BASE + steps))))['C5']
+        self.assertFalse(any(x.startswith('lease expiry pairs compared') for x in w['findings']), w)
+        self.assertEqual((v['verdict'], v['judged']), (w['verdict'], w['judged']))
+
+
 class ExpiredLeaseObservation(unittest.TestCase):
     """C5's OBSERVATION rule: a lease printed in its expired state has no
     validity left, validity = expiry - skew/2 - now (checks.json
