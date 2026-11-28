@@ -66,6 +66,8 @@
   ],
   "required_note": "C5 requires these parts in both observations of a judged refusal: a pair lacking one leaves the refusal not judged (no PASS on what was not seen).",
   "ignored": [
+   {"field": "HEAD mtime",
+    "why": "available from the filer listing in whole seconds (core/frontend/chunkstore/layout_store.go:344-346); not recorded: too coarse to order writes within an observation pair"},
    {"field": "head: VolumeID",
     "why": "not recorded by the observation: it keeps HEAD's generation, epoch, holder and state, the volume's identity, ownership and life state"},
    {"field": "head_diag.claim_id (HEAD's ClaimID)",
