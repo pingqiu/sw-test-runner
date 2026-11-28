@@ -1,6 +1,8 @@
 package v3block
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +90,18 @@ func prebuiltDir(t *testing.T, sha string, skip string) string {
 			t.Fatal(err)
 		}
 	}
+	// The manifest, as prebuild.sh writes it: one sha256 line per binary present.
+	var sums strings.Builder
+	for _, b := range []string{"blockmaster", "blockvolume", "sw-block", "v3ctl"} {
+		data, err := os.ReadFile(filepath.Join(d, b))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256(data), b)
+	}
+	if err := os.WriteFile(filepath.Join(d, "SHA256SUMS"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return d
 }
 
@@ -113,7 +127,45 @@ func TestPrebuiltBinariesComeFromTheCheckoutsCommit(t *testing.T) {
 	if err == nil || !strings.Contains(out, "prebuilt_bin lacks an executable v3ctl") {
 		t.Fatalf("missing v3ctl: err %v, out %q", err, out)
 	}
-	// Green: the checkout's commit, all four: copied, and each one hashed.
+	// Red: no SHA256SUMS beside the binaries.
+	d := prebuiltDir(t, head, "")
+	if err := os.Remove(filepath.Join(d, "SHA256SUMS")); err != nil {
+		t.Fatal(err)
+	}
+	_, err, out = runBuild(t, d)
+	if err == nil || !strings.Contains(out, "prebuilt_bin has no SHA256SUMS") {
+		t.Fatalf("no SHA256SUMS: err %v, out %q", err, out)
+	}
+	// Red: a binary with no line in SHA256SUMS.
+	d = prebuiltDir(t, head, "")
+	sums, err := os.ReadFile(filepath.Join(d, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keep []string
+	for _, l := range strings.Split(strings.TrimSpace(string(sums)), "\n") {
+		if !strings.HasSuffix(l, " sw-block") {
+			keep = append(keep, l)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(d, "SHA256SUMS"), []byte(strings.Join(keep, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err, out = runBuild(t, d)
+	if err == nil || !strings.Contains(out, "SHA256SUMS has no line for sw-block") {
+		t.Fatalf("no line for sw-block: err %v, out %q", err, out)
+	}
+	// Red: a binary replaced after the manifest was written (old binaries
+	// beside a fresh product.sha and SHA256SUMS fail the same way).
+	d = prebuiltDir(t, head, "")
+	if err := os.WriteFile(filepath.Join(d, "blockvolume"), []byte("#!/bin/sh\necho older\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err, out = runBuild(t, d)
+	if err == nil || !strings.Contains(out, "prebuilt_bin blockvolume is ") || !strings.Contains(out, "its SHA256SUMS says") {
+		t.Fatalf("replaced blockvolume: err %v, out %q", err, out)
+	}
+	// Green: the checkout's commit, all four, each matching its line: copied and hashed.
 	_, err, out = runBuild(t, prebuiltDir(t, head, ""))
 	if err != nil {
 		t.Fatalf("matching prebuilt refused: %v %s", err, out)
