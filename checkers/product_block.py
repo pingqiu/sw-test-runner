@@ -388,8 +388,9 @@ def expiry_rule(part, before, after, restart_wall_ns=None):
 
 
 def compared_note(counts):
-    """C5's note line: {rule: pairs} of expiry_rule, each pair once."""
-    return 'lease expiry pairs compared: %d (%s)' % (sum(counts.values()), '; '.join('%s: %d' % (r, counts.get(r, 0)) for r in EXPIRY_RULES))
+    """C5's note line: {rule: pairs} of expiry_rule, each pair once; the
+    total, and of it the pairs across a master restart."""
+    return 'lease expiry pairs compared: %d (%s: %d)' % (sum(counts.values()), EXPIRY_RULES[0], counts.get(EXPIRY_RULES[0], 0))
 
 
 def time_explains(key, bv, av, before, after, fact_compared=False):
