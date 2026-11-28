@@ -57,6 +57,10 @@ type Runner struct {
 	// Header, when set, adds the product's run settings to the run's
 	// header (get reads the run's parameters); it may refuse the run.
 	Header func(get func(string) string) (map[string]any, error)
+	// Judge, when set, runs the pack's checkers on a replay's own history
+	// (replayjudge.go): a replay matches only with every required checker
+	// PASS there.
+	Judge JudgeFunc
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.

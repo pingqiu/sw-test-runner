@@ -50,9 +50,9 @@ package randomrun
 //   - every other difference is downstream of that operation's outcome on
 //     the same volume (a later step on that volume); one at another volume,
 //     or before the fault, is a difference as before;
-//   - the replay's own history passes its checkers: a replay answering
-//     "match_inop_hit_differs" is a match only with its bundle's checkers
-//     passing (the replay judges no checker itself).
+//   - the replay's own history passes its checkers: the replay judges it
+//     (replayjudge.go), and a required checker not PASS answers
+//     "replay_checks_fail" instead, for a plain match too.
 
 import (
 	"bufio"
@@ -639,13 +639,27 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		return nil, fmt.Errorf("%s: %d of %d steps differ; first: operation %d (%s %s) recorded %s, replayed %s",
 			r.Name, len(diffs), len(steps), d.OpNo, d.Action, d.Volume, d.Recorded, d.Replayed)
 	}
+	checked := "not run"
+	if r.Judge != nil {
+		cs, _ := header["checkers"].(string) // the run's required set; none recorded: every checker
+		fails, err := r.judgeReplay(ctx, actx, cs)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
+		if len(fails) > 0 {
+			return checksFailAnswer(r.Name, len(steps), fails)
+		}
+		checked = "pass"
+	} else {
+		actx.Log("  %s: the replay's own history is not judged (no checker entry)", r.Name)
+	}
 	if len(hitDiffs) > 0 {
 		for _, h := range hitDiffs {
 			actx.Log("  %s: %s", r.Name, h.line())
 		}
-		actx.Log("  %s: %d steps match %s, but for %d in-op fault hit(s) that differ: a match only with the replay's checkers passing", r.Name, len(steps), src, len(hitDiffs))
-		return map[string]string{"value": "match_inop_hit_differs", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": strconv.Itoa(len(hitDiffs))}, nil
+		actx.Log("  %s: %d steps match %s, but for %d in-op fault hit(s) that differ", r.Name, len(steps), src, len(hitDiffs))
+		return map[string]string{"value": "match_inop_hit_differs", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": strconv.Itoa(len(hitDiffs)), "checks": checked}, nil
 	}
 	actx.Log("  %s: %d steps match %s", r.Name, len(steps), src)
-	return map[string]string{"value": "match", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": "0"}, nil
+	return map[string]string{"value": "match", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": "0", "checks": checked}, nil
 }
