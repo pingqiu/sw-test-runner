@@ -93,7 +93,11 @@ code is 0 only when every checker passes.
       In a history that records no restart's started_wall_ns at all, the
       expiry across its master restart is not compared. A time_derived step
       whose fact moved within these bounds is time alone, every other kept
-      fact equal. OBSERVATION: a lease printed in its expired state with an
+      fact equal. RELEASE (checks.json observation.release_on_delete): a
+      delete (ok or unknown) of a volume the history shows restored from a
+      source, invoked and completed between two observations of the source,
+      lets the source's HEAD generation move later, by at most the number of
+      such deletes between (ok and unknown), and nothing else; a refused delete allows nothing. OBSERVATION: a lease printed in its expired state with an
       expiry after the reading's end in wall time + skew/2 (the row's
       skew_seconds) FAILS; an observation without from_wall_ns is not
       checked.
@@ -838,7 +842,15 @@ def master_restart_between(restarts, lo, hi):
     return max(walls)
 
 
-def state_diff(a, b, restart_wall_ns=None):
+def released_between(rel, vol, lo, hi):
+    """How many deletes of restore targets of `vol` the product reader's
+    releases (rel) show invoked and completed between seqs lo and hi: the
+    COUNT BOUND, an ok delete counts 1 and an unknown one 0 or 1, so the
+    bound is the ok count + the unknown count."""
+    return sum(1 for i, c, s, t in rel if s == vol and lo < i and c < hi)
+
+
+def state_diff(a, b, restart_wall_ns=None, released=0):
     """The parts in which two comparable states differ, and the parts not
     compared because neither records them, or (None, why) when they cannot be
     compared."""
@@ -850,7 +862,7 @@ def state_diff(a, b, restart_wall_ns=None):
         return None, 'records %s in one observation only' % ', '.join(one)
     # `a` is the earlier observation: the product reader decides whether the
     # later value is the same state (it may allow a step that time alone makes).
-    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p], restart_wall_ns)], [p for p in STATE_PARTS if p not in sa]
+    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p], restart_wall_ns, released)], [p for p in STATE_PARTS if p not in sa]
 
 
 def show_part(state, part):
@@ -890,6 +902,7 @@ def baseline(recs, compared=None):
     last, checked, f = {}, 0, []
     restarts = master_restarts(recs)
     fit = history_wall_fit(recs)
+    rel = PRODUCT.releases(recs)
     for r in recs:
         if r['kind'] == 'invoke':
             for vol in list(last):
@@ -899,7 +912,7 @@ def baseline(recs, compared=None):
             vol = r['volume']
             if vol in last:
                 sa, sb, rw = observed_state(last[vol], fit), observed_state(r, fit), master_restart_between(restarts, last[vol]['seq'], r['seq'])
-                diff, _ = state_diff(sa, sb, rw)
+                diff, _ = state_diff(sa, sb, rw, released_between(rel, vol, last[vol]['seq'], r['seq']))
                 if diff is not None:
                     note_compared(compared, last[vol], r, sa, sb, rw)
                 if diff is not None:
@@ -945,6 +958,7 @@ def c5(recs):
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
     restarts = master_restarts(recs)
     fit = history_wall_fit(recs)
+    rel = PRODUCT.releases(recs)
     # An observation that contradicts itself (a lease printed expired while
     # still valid) is a product result, whatever the refusals show.
     of = [x for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe' for x in PRODUCT.observation_findings(r)]
@@ -996,7 +1010,7 @@ def c5(recs):
             continue
         b, a = observed_state(before, fit), observed_state(after, fit)
         rw = master_restart_between(restarts, before['seq'], after['seq'])
-        diff, missing = state_diff(b, a, rw)
+        diff, missing = state_diff(b, a, rw, released_between(rel, vol, before['seq'], after['seq']))
         if diff is not None:
             note_compared(compared, before, after, b, a, rw)
         if diff is None:

@@ -2320,6 +2320,95 @@ class AcrossMasterRestart(unittest.TestCase):
         pb.bind(checks)
 
 
+class ReleaseOnDelete(unittest.TestCase):
+    """checks.json release_on_delete: a delete (ok or unknown) of a volume
+    the history shows restored (ok) from a source releases it from the
+    source's dependents, which moves the source's HEAD generation later by
+    one (INV-SNAPK-RELEASE-001), and nothing else. A refused delete allows
+    nothing. COUNT BOUND: the generation rises by at most the number of
+    such deletes between the pair (ok count + unknown count)."""
+
+    RESTORE = ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok')
+
+    def pair(self, *between, gen=5, after=WS, files=FILES, restore=True, epoch=None):
+        steps = ((self.RESTORE,) if restore else ()) + (('obs', 'v1', 4, FILES, WS),) + between + (('obs', 'v1', gen, files, after),)
+        recs = history(*steps)
+        if epoch is not None:
+            [r for r in recs if r['kind'] == 'observe'][-1]['result']['head']['epoch'] = epoch
+        return hc.baseline(hc.read_history(dump(recs)))
+
+    def changed(self, got):
+        checked, f = got
+        return checked == 1 and bool(f) and f[0].startswith('baseline: v1 changed with no operation on it (head')
+
+    def test_the_release_moves_the_generation_only(self):
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'ok')), (1, []))
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'unknown')), (1, []))
+        # two targets deleted: two releases
+        two = (self.RESTORE, ('restore', 'v3', {'source': 'v1', 'snapshot': 's1'}, 'ok'))
+        recs = history(*(two + (('obs', 'v1', 4, FILES, WS), ('delete', 'v2', {}, 'ok'), ('delete', 'v3', {}, 'ok'), ('obs', 'v1', 6, FILES, WS))))
+        self.assertEqual(hc.baseline(hc.read_history(dump(recs))), (1, []))
+
+    def test_red_the_same_delete_with_another_part_changed_is_a_change(self):
+        d = ('delete', 'v2', {}, 'ok')
+        for name, kw in (('files', {'files': FILES + ['seg/1-y']}),
+                         ('snapshots', {'after': dict(WS, snapshots=['s9'])}),
+                         ('workspace', {'after': dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')})}),
+                         ('epoch', {'epoch': 2})):
+            checked, f = self.pair(d, **kw)
+            self.assertEqual(checked, 1, name)
+            self.assertTrue(f and f[0].startswith('baseline: v1 changed with no operation on it ('), (name, f))
+        # epoch: the HEAD itself differs in more than its generation
+        self.assertTrue(self.changed(self.pair(d, epoch=2)))
+
+    def test_red_a_generation_move_with_no_such_delete_between_is_a_change(self):
+        self.assertTrue(self.changed(self.pair()))                                         # nothing between
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), restore=False)))   # v2 not a restore target
+        self.assertTrue(self.changed(self.pair(('delete', 'v9', {}, 'ok'))))                # another volume
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), gen=6)))         # one release, two steps
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), gen=3)))         # earlier
+        # the count bound counts deletes: an unknown then an ok delete of the
+        # same target allow 2, not 3
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'unknown'), ('delete', 'v2', {}, 'ok'), gen=6), (1, []))
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'unknown'), ('delete', 'v2', {}, 'ok'), gen=7)))
+        # after an ok delete the name is no restore target: a second delete counts nothing
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), ('delete', 'v2', {}, 'ok'), gen=6)))
+        # one unknown delete: 2 is a change
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'unknown'), gen=6)))
+        # a delete before the earlier observation is not between the pair
+        recs = history(self.RESTORE, ('delete', 'v2', {}, 'ok'), ('obs', 'v1', 4, FILES, WS), ('obs', 'v1', 5, FILES, WS))
+        self.assertTrue(self.changed(hc.baseline(hc.read_history(dump(recs)))))
+
+    def test_red_a_refused_delete_of_the_target_allows_nothing(self):
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', NEG, 'refused'))))
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', NEG, 'refused'), ('delete', 'v2', NEG, 'refused'))))
+
+    def test_a_refusal_pair_on_the_source_takes_the_release_too(self):
+        steps = BASE + (self.RESTORE, ('obs', 'v1', 4, FILES, WS), ('delete', 'v2', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES, WS))
+        v = hc.check(dump(history(*steps)))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        steps = BASE + (self.RESTORE, ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES, WS))
+        self.assertEqual(hc.check(dump(history(*steps)))['C5']['verdict'], 'FAIL')
+
+    def test_the_row_is_data_and_a_bad_row_does_not_load(self):
+        import copy
+        checks = json.loads((Path(hc.__file__).resolve().parent.parent / 'packs' / 'v3block' / 'product' / 'checks.json').read_text(encoding='utf-8'))
+        row = checks['observation']['release_on_delete']
+        self.assertEqual((row['verb'], row['restored_by'], row['part'], row['moves'], row['per_release']), ('delete', 'restore', 'head', 'gen', 1))
+        for cite in ('delete.go:176-183', 'head.go:519-539', 'INV-SNAPK-RELEASE-001'):
+            self.assertIn(cite, row['cite'])
+        for seed in (lambda r: r.update(part='files'), lambda r: r.update(moves='epoch'), lambda r: r.update(per_release=0),
+                     lambda r: r.update(outcomes=['ok', 'refused']), lambda r: r.update(restored_outcomes=['ok', 'unknown']),
+                     lambda r: r.pop('cite'), lambda r: r.update(extra=1)):
+            bad = copy.deepcopy(checks)
+            seed(bad['observation']['release_on_delete'])
+            with self.assertRaises(ValueError):
+                hc.PRODUCT.bind(bad)
+        hc.PRODUCT.bind(checks)
+        with mock.patch.object(hc.PRODUCT, '_release', None):   # with no row, the same pair is a change
+            self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'))))
+
+
 class ExpiryPairsNote(unittest.TestCase):
     """C5 notes how many pairs the expiry row compared, each pair once, by
     rule; the note changes no verdict."""

@@ -37,6 +37,10 @@
  "observation": {
   "compared": ["head", "snapshots", "workspace", "dirs", "files"],
   "required": ["head", "workspace"],
+  "release_on_delete": {"verb": "delete", "outcomes": ["ok", "unknown"], "restored_by": "restore", "restored_outcomes": ["ok"], "source_arg": "source",
+   "part": "head", "moves": "gen", "per_release": 1,
+   "cite": "core/frontend/chunkstore/layout/delete.go:176-183 (DeleteVolume: once the target's HEAD is deleting, the target is released from each source it depends on), :146-151 (RunReleaseDependent: one conditional update of the source's HEAD), :92-119 (ReleaseDependent changes only the dependents of the source's snapshots; a source with no such dependent is a replay and writes nothing), core/frontend/chunkstore/layout/head.go:519-539 (runTransition: the update advances the source's HEAD generation by one, :537); docs/design/invariants.md:1097 (INV-SNAPK-RELEASE-001); the same lines at the rc.3 pin, the invariant at :1098",
+   "why": "a delete (ok or unknown) of a volume the history shows restored (ok) from a source releases it from the source's dependents: the source's HEAD generation moves LATER, by at most per_release x the number of such deletes invoked and completed between the two observations of the source (an ok delete counts 1, an unknown one 0 or 1: the bound is the ok count + the unknown count; a larger rise is a change), and nothing else: its epoch, holder and state, its snapshot names (the dependents are not observed), its files and its workspace answer stay equal. A refused delete allows nothing. Not a reset of the source's baseline: any other difference is still a change."},
   "across_master_restart": [
    {"fact": "lease expiry_ns", "state_field": "lease state",
     "states": [

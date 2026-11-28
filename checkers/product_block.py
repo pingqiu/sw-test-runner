@@ -13,7 +13,10 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   wall_fit(observations)        a history's wall clock minus its own clock,
                                 fitted from the leases' printed facts, for
                                 observations without from_wall_ns (or None)
-  same_part(part, before, after, restart_wall_ns=None)
+  releases(recs)                [(invoke seq, complete seq, source, target)] of
+                                each delete that releases a restore target
+                                from its source (checks.json release_on_delete)
+  same_part(part, before, after, restart_wall_ns=None, released=0)
                                 whether a later value shows the same state
                                 (across a master restart at that wall time:
                                 checks.json observation.across_master_restart)
@@ -69,6 +72,11 @@ _restart_allow = {}
 RESTART_ALLOW_KEYS = {'fact', 'state_field', 'states', 'ttl_seconds', 'slack_seconds', 'cite', 'why',
                       'no_restart_ttl_factor', 'no_restart_cite', 'validity', 'expired_state', 'skew_seconds', 'skew_cite'}
 RESTART_STATE_KEYS = {'state', 'renews', 'cite'}
+# checks.json observation.release_on_delete: the row, or None. A delete of
+# a restore target releases it from its source's dependents, which moves the
+# source's HEAD generation and nothing it observes.
+_release = None
+RELEASE_KEYS = {'verb', 'outcomes', 'restored_by', 'restored_outcomes', 'source_arg', 'part', 'moves', 'per_release', 'cite', 'why'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
 # later) values time alone may step it through.
@@ -100,12 +108,21 @@ def placement_rows(checks):
 
 def bind(checks):
     """Take the product facts this module reads from checks.json."""
-    global _master, _time_derived, _placement, _restart_allow
+    global _master, _time_derived, _placement, _restart_allow, _release
     masters = [t['name'] for t in checks.get('fault_targets', []) if t.get('role') == 'master']
     _master = masters[0] if masters else None
     _placement = placement_rows(checks)
     rows = (checks.get('observation') or {}).get('time_derived') or []
     _time_derived = {r['field']: (r['fact'], r['validity'], frozenset(tuple(x) for x in r['steps'])) for r in rows}
+    _release = None
+    rel = (checks.get('observation') or {}).get('release_on_delete')
+    if rel is not None:
+        if (set(rel) != RELEASE_KEYS or rel['part'] != 'head' or rel['moves'] != 'gen' or not isinstance(rel['per_release'], int)
+                or isinstance(rel['per_release'], bool) or rel['per_release'] <= 0 or not rel['cite']
+                or not set(rel['outcomes']) <= {'ok', 'unknown'} or not rel['outcomes'] or rel['restored_outcomes'] != ['ok']):
+            raise ValueError('release_on_delete: keys %s, part head, moves gen, per_release a positive int, outcomes within ok and unknown, '
+                             'restored_outcomes ["ok"], a cite' % sorted(RELEASE_KEYS))
+        _release = rel
     _restart_allow = {}
     for r in (checks.get('observation') or {}).get('across_master_restart') or []:
         extra = set(r) - RESTART_ALLOW_KEYS
@@ -421,7 +438,49 @@ def time_explains(key, bv, av, before, after, fact_compared=False):
     return bc[validity] <= ac['at_ns'] - bc['from_ns']
 
 
-def same_part(part, before, after, restart_wall_ns=None):
+def releases(recs):
+    """[(invoke seq, complete seq, source, target)] of each delete
+    (release_on_delete verb, an outcome it lists) of a volume the history
+    shows restored from a source (restored_by completed ok, its source arg):
+    the delete releases the target from that source's dependents. An ok
+    delete ends the target; a later volume of its name is not that
+    restore's target."""
+    if _release is None:
+        return []
+    inv_of, source, out = {}, {}, []
+    for r in recs:
+        if r['kind'] == 'invoke':
+            inv_of[r['seq']] = r
+            continue
+        if r['kind'] != 'complete' or r.get('of') not in inv_of:
+            continue
+        inv = inv_of[r['of']]
+        vol = inv.get('volume')
+        if inv['verb'] == _release['restored_by'] and r['outcome'] in _release['restored_outcomes']:
+            src = (inv.get('args') or {}).get(_release['source_arg'])
+            if src:
+                source[vol] = src
+        elif inv['verb'] == _release['verb'] and r['outcome'] in _release['outcomes'] and source.get(vol):
+            out.append((inv['seq'], r['seq'], source[vol], vol))
+            if r['outcome'] == 'ok':
+                del source[vol]
+    return out
+
+
+def released_head(before, after, released):
+    """A HEAD whose only difference is its generation moved LATER by at most
+    `released` x per_release (release_on_delete): `released` is the number
+    of deletes of restore targets between the two observations (ok and
+    unknown). Epoch, holder and state equal."""
+    if _release is None or not released:
+        return False
+    if not (isinstance(before, tuple) and isinstance(after, tuple) and len(before) == len(after) == 5 and before[0] == after[0] == 'head'):
+        return False
+    b, a = before[1], after[1]
+    return before[2:] == after[2:] and isinstance(b, int) and isinstance(a, int) and b < a <= b + released * _release['per_release']
+
+
+def same_part(part, before, after, restart_wall_ns=None, released=0):
     """Whether the later value of a part shows the same state as the earlier
     one. Equal values are; so is a workspace answer whose only difference is
     one step of a time_derived fact that time alone explains (checks.json
@@ -429,7 +488,11 @@ def same_part(part, before, after, restart_wall_ns=None):
     matters: `before` is the earlier observation. restart_wall_ns is the wall
     time of a master restart between the two (None: none, or not recorded).
     While the lease is in a state that does not renew, its expiry IS
-    compared (restart_expiry), step or no step."""
+    compared (restart_expiry), step or no step. released: the restore
+    targets of this volume released between the two (releases): its HEAD
+    generation may move later by that many (released_head), nothing else."""
+    if part == (_release or {}).get('part') and before != after:
+        return released_head(before, after, released)
     across = restart_expiry(before, after, restart_wall_ns) if part == 'workspace' else None
     if across is False:
         return False
