@@ -555,10 +555,19 @@ func TestDeclaredObserveEquivalent(t *testing.T) {
 		{name: "filer port not a number", params: p, vars: map[string]string{"filer": "127.0.0.1:x"}, rules: with(eqAnswer{out: head})},
 	}
 	cases = append(cases, commonErrorCases(p, with(eqAnswer{out: head}))...)
-	// The one deliberate change since the frozen handler: the workspace
-	// field also keeps the first 4 lines of the show's stderr.
+	// The deliberate changes since the frozen handler: the workspace field
+	// also keeps the first 4 lines of the show's stderr, and a readable
+	// HEAD also records the rest of HEAD beside it (head_diag); every
+	// other field, and the head the frozen handler records, is unchanged.
 	checkEquivalentAs(t, "v3_op_observe", v3OpObserveFrozen, cases, func(c eqCase, r *eqRun) {
 		for _, rec := range r.records {
+			if _, ok := rec.Result["head"].(map[string]any); ok {
+				for _, rule := range c.rules {
+					if rule.match == "ops chunk show" {
+						rec.Result["head_diag"] = wantHeadDiag(t, rule.answers[0].out)
+					}
+				}
+			}
 			ws, ok := rec.Result["workspace"].(map[string]any)
 			if !ok {
 				continue
@@ -575,7 +584,7 @@ func TestDeclaredObserveEquivalent(t *testing.T) {
 	if len(r.records) != 2 {
 		t.Fatalf("records %v", r.records)
 	}
-	for _, k := range []string{"head", "snapshots", "workspace", "dirs", "files"} {
+	for _, k := range []string{"head", "head_diag", "snapshots", "workspace", "dirs", "files"} {
 		if _, ok := r.records[0].Result[k]; !ok {
 			t.Errorf("no %s in %v", k, r.records[0].Result)
 		}

@@ -989,6 +989,49 @@ def w(lba, sha, outcome='ok', flush=True, vol='v1'):
     return ('write', vol, args, outcome, {})
 
 
+def head_diag(claim='c-1', kind='idle', session='', position=9, current=0, deps=()):
+    """The rest of HEAD an observation records beside head (head_diag), in
+    the shape the block pack records it: ClaimID, Activity, Position,
+    Current and the snapshots map with each snapshot's dependents."""
+    root = {'Hash': [current] * 32}
+    return {'claim_id': claim, 'activity': {'kind': kind, 'session': session}, 'position': position, 'current': root,
+            'snapshots': {'s1': {'Root': root, 'Position': 5, 'Meta': {'CreatedNs': 0, 'Class': '', 'ExpiresNs': 0, 'Labels': None},
+                                 'Dependents': [{'Target': t, 'TargetID': [1] * 16, 'Root': root} for t in deps] or None}}}
+
+
+class HeadDiag(unittest.TestCase):
+    """head_diag is recorded for diagnosis and NOT compared (checks.json
+    observation.ignored): two observations that differ only in it give the
+    same verdicts and findings, of C5 and of every other checker, as two
+    that do not record it at all."""
+
+    BEFORE = head_diag()
+    AFTERS = {'claim_id': head_diag(claim='c-2'), 'activity': head_diag(kind='snap', session='s-9'),
+              'position': head_diag(position=4096), 'current': head_diag(current=7),
+              'dependents': head_diag(deps=('t1',)), 'all': head_diag('c-2', 'clean', 's-9', 4096, 7, ('t1', 't2'))}
+
+    def recs(self, verb, before=None, after=None, gen_after=4):
+        base = [dict(WS, head_diag=d) if d is not None else WS for d in (before, after)]
+        pair = (('obs', 'v0', 1, FILES, base[0]), ('obs', 'v0', 1, FILES, base[1]))   # the baseline pair too
+        return history(*(pair + (('obs', 'v1', 4, FILES, base[0]), (verb, 'v1', NEG, 'refused'), ('obs', 'v1', gen_after, FILES, base[1]))))
+
+    def test_only_head_diag_differs_every_verdict_and_finding_is_unchanged(self):
+        for verb in ('write', 'delete', 'snapshot', 'snapshot_delete', 'restore', 'move', 'create'):
+            want = hc.check(dump(self.recs(verb)))
+            self.assertEqual(want['C5']['verdict'], 'PASS', (verb, want['C5']))
+            for name, after in self.AFTERS.items():
+                got = hc.check(dump(self.recs(verb, self.BEFORE, after)))
+                self.assertEqual(got, want, (verb, name))
+                # one side only records it (a history from before the field)
+                self.assertEqual(hc.check(dump(self.recs(verb, None, after))), want, (verb, name, 'after only'))
+
+    def test_red_the_same_difference_in_the_compared_head_fails(self):
+        # The control can see a change: the generation, which head compares, moved.
+        v = hc.check(dump(self.recs('write', self.BEFORE, self.BEFORE, gen_after=6)))['C5']
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertIn('its head changed', v['findings'][0])
+
+
 def rd(lba, sha, vol='v1'):
     return ('read', vol, {'lba': lba}, 'ok', {'sha256': sha})
 

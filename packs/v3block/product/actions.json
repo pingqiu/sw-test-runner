@@ -625,7 +625,7 @@
             "{{config.chunk_path}}"
           ],
           "runner_deadline_seconds": 60,
-          "cite": "cmd/sw-block/chunk.go:89-90 (dispatch); cmd/sw-block/chunk_b.go:209-212 (--volume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master); it prints the decoded HEAD, whose snapshots map is the volume's snapshot list",
+          "cite": "cmd/sw-block/chunk.go:89-90 (dispatch); cmd/sw-block/chunk_b.go:209-212 (--volume; --timeout 30s), :117-122 (--chunk-filer, --chunk-path, --master); it prints the decoded HEAD, whose snapshots map is the volume's snapshot list: cmd/sw-block/chunk_b.go:219-233 (the body: head is a layout.Head), cmd/sw-block/chunk.go:317 (encoding/json, so the keys are the Go field names); core/frontend/chunkstore/layout/head.go:143-154 (Head: Gen, Epoch, Holder, State, and the fields head_diag records: ClaimID, Activity, Current, Position, Snapshots), :29-32 (Activity's keys kind and session, session omitted when empty), :47-52 (a snapshot: Root, Position, Meta, Dependents), :38-42 (a dependent: Target, TargetID, Root), :82-87 (Meta); core/frontend/chunkstore/layout/layout.go:364 (Current and every Root are a RootName {Hash}), :43 (a Hash is a byte array, printed as a list of numbers); a null Current: no image committed yet (core/frontend/chunkstore/layout/head.go:150)",
           "read": {
             "kind": "json_object",
             "schema": {
@@ -634,7 +634,14 @@
                 "Epoch": "uint",
                 "Holder": "string",
                 "State": "string",
-                "Snapshots": "object"
+                "Snapshots": "object",
+                "ClaimID": "string",
+                "Activity": {
+                  "kind": "string",
+                  "session": "string"
+                },
+                "Current": "object",
+                "Position": "uint"
               }
             },
             "require": "head",
@@ -657,6 +664,25 @@
               },
               "snapshots": {
                 "sorted_keys": "head.Snapshots"
+              },
+              "head_diag": {
+                "object": {
+                  "claim_id": {
+                    "value": "head.ClaimID"
+                  },
+                  "activity": {
+                    "value": "head.Activity"
+                  },
+                  "position": {
+                    "value": "head.Position"
+                  },
+                  "current": {
+                    "value": "head.Current"
+                  },
+                  "snapshots": {
+                    "value": "head.Snapshots"
+                  }
+                }
               }
             },
             "on_unreadable": {
