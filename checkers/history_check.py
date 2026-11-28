@@ -80,13 +80,23 @@ code is 0 only when every checker passes.
       touching it invoked between them must show the same state; the product
       works in the background (checkpoint publishing, cleaning), and a
       difference there makes C5 UNKNOWN for the run, and so does a history
-      with refusals but no such pair. ACROSS A MASTER RESTART (a blockmaster
+      with refusals but no such pair. A LEASE THAT DOES NOT RENEW (checks.json
+      observation.across_master_restart: its state at both observations is
+      one with renews false) has an expiry that is compared, and MONOTONE:
+      equal or later, never earlier. ACROSS A MASTER RESTART (a blockmaster
       restart completed ok between the two observations, its complete's
-      started_wall_ns recorded): a time_derived step whose fact moved is
-      time alone when the fact moved later, never earlier, and at most to
-      that wall time + the row's TTL + slack (checks.json
-      observation.across_master_restart), every other kept fact equal; a
-      restart without its wall time gets no allowance.
+      started_wall_ns recorded) it is at most that wall time + the row's TTL
+      + slack; ACROSS NO RESTART at most the later reading's end in wall
+      time (from_wall_ns + mono_ns - from_mono_ns; in a history before
+      from_wall_ns, mono_ns + the history's fit from the printed validity,
+      and no ceiling when there is no fit) + the row's factor x TTL + slack.
+      In a history that records no restart's started_wall_ns at all, the
+      expiry across its master restart is not compared. A time_derived step
+      whose fact moved within these bounds is time alone, every other kept
+      fact equal. OBSERVATION: a lease printed in its expired state with an
+      expiry after the reading's end in wall time + skew/2 (the row's
+      skew_seconds) FAILS; an observation without from_wall_ns is not
+      checked.
       Each refusal belongs to a LIMIT: the generator's gen_step names the
       limit a negative operation probes; other refusals are "ordinary <verb>".
       Every refused attempt of a rerun request is a refusal of its limit
@@ -781,11 +791,18 @@ def touches(inv, vol):
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
-def observed_state(obs):
+def observed_state(obs, wall_fit=None):
     """The comparable state of an observation: {part: value} for each part it
     records, and {part: why} for each part it records but cannot compare. The
-    parts are checks.json's observation.compared; the product reader reads them."""
-    return PRODUCT.observed_state(obs, STATE_PARTS)
+    parts are checks.json's observation.compared; the product reader reads them.
+    wall_fit: the history's fitted wall offset (history_wall_fit)."""
+    return PRODUCT.observed_state(obs, STATE_PARTS, wall_fit)
+
+
+def history_wall_fit(recs):
+    """The product reader's fit of the history's wall clock (for records
+    without from_wall_ns), or None."""
+    return PRODUCT.wall_fit([r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe'])
 
 
 def master_restarts(recs):
@@ -857,6 +874,7 @@ def baseline(recs):
     volume with no operation touching it invoked between them."""
     last, checked, f = {}, 0, []
     restarts = master_restarts(recs)
+    fit = history_wall_fit(recs)
     for r in recs:
         if r['kind'] == 'invoke':
             for vol in list(last):
@@ -865,7 +883,7 @@ def baseline(recs):
         elif r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume'):
             vol = r['volume']
             if vol in last:
-                diff, _ = state_diff(observed_state(last[vol]), observed_state(r), master_restart_between(restarts, last[vol]['seq'], r['seq']))
+                diff, _ = state_diff(observed_state(last[vol], fit), observed_state(r, fit), master_restart_between(restarts, last[vol]['seq'], r['seq']))
                 if diff is not None:
                     checked += 1
                     if diff:
@@ -908,8 +926,12 @@ def c5(recs):
     earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
     restarts = master_restarts(recs)
+    fit = history_wall_fit(recs)
+    # An observation that contradicts itself (a lease printed expired while
+    # still valid) is a product result, whatever the refusals show.
+    of = [x for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe' for x in PRODUCT.observation_findings(r)]
     if not refusals:
-        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
+        return {'verdict': 'FAIL', 'findings': of + ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
@@ -953,7 +975,7 @@ def c5(recs):
         if before is None or after is None:
             notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
             continue
-        b, a = observed_state(before), observed_state(after)
+        b, a = observed_state(before, fit), observed_state(after, fit)
         diff, missing = state_diff(b, a, master_restart_between(restarts, before['seq'], after['seq']))
         if diff is None:
             notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
@@ -1001,6 +1023,8 @@ def c5(recs):
     guarded = guard_trips(recs, limit)
     report += [guarded[lim] for lim in sorted(guarded)]
     checked, bf = baseline(recs)
+    if of:
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': of + bf + f + report + notes}
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:

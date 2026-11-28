@@ -8,11 +8,17 @@ directories and files, the tombstone a delete leaves, and the process names
 of a kill. Numbers and names a page states live in checks.json, not here.
 
   bind(checks)                  receives checks.json once, at load
-  observed_state(obs, parts)    an observation's comparable parts
+  observed_state(obs, parts, wall_fit=None)
+                                an observation's comparable parts
+  wall_fit(observations)        a history's wall clock minus its own clock,
+                                fitted from the leases' printed facts, for
+                                observations without from_wall_ns (or None)
   same_part(part, before, after, restart_wall_ns=None)
                                 whether a later value shows the same state
                                 (across a master restart at that wall time:
                                 checks.json observation.across_master_restart)
+  observation_findings(obs)     what one observation contradicts in itself
+                                (a lease printed expired while still valid)
   show_part(state, part)        one part, short, for a finding
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
@@ -32,6 +38,7 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   settled(obs)                  (volume, state, evidence) of a settled record, else None
 """
 import re
+import statistics
 
 TOMBSTONE = {'HEAD', 'VOLUME'}   # a deleted volume's directory keeps exactly these
 LIVE = {'HEAD', 'VOLUME'}        # a live volume's directory holds at least these
@@ -51,10 +58,12 @@ PLACEMENT_BY = ('list_member',)
 PLACEMENT_CASES = ('present_before', 'others_lost', 'present', 'absent')
 PLACEMENT_OUTCOMES = {'took_effect': 'took effect', 'did_not': 'did not', 'third': 'third', 'not_placed': None}
 PLACEMENT_KEYS = {'verb', 'by', 'field', 'arg', 'outcomes', 'cite', 'what'}
-# checks.json observation.across_master_restart: {fact: (ttl_ns, slack_ns)},
-# a time_derived fact a master restart may move later, within its bound.
+# checks.json observation.across_master_restart: {fact: row}, a lease fact
+# compared while the lease does not renew: it may move later, never earlier,
+# within a ceiling (the row's ttl, slack, factor and skew, in ns).
 _restart_allow = {}
-RESTART_ALLOW_KEYS = {'fact', 'state_field', 'states', 'ttl_seconds', 'slack_seconds', 'cite', 'why'}
+RESTART_ALLOW_KEYS = {'fact', 'state_field', 'states', 'ttl_seconds', 'slack_seconds', 'cite', 'why',
+                      'no_restart_ttl_factor', 'no_restart_cite', 'validity', 'expired_state', 'skew_seconds', 'skew_cite'}
 RESTART_STATE_KEYS = {'state', 'renews', 'cite'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
@@ -98,6 +107,12 @@ def bind(checks):
         extra = set(r) - RESTART_ALLOW_KEYS
         if extra or not isinstance(r.get('ttl_seconds'), int) or not isinstance(r.get('slack_seconds'), int) or r['ttl_seconds'] <= 0 or r['slack_seconds'] < 0:
             raise ValueError('across_master_restart row %r: keys %s outside %s, or a ttl/slack that is not a non-negative int' % (r.get('fact'), sorted(extra), sorted(RESTART_ALLOW_KEYS)))
+        factor, skew = r.get('no_restart_ttl_factor'), r.get('skew_seconds')
+        if (not isinstance(factor, (int, float)) or isinstance(factor, bool) or factor <= 0 or not r.get('no_restart_cite')
+                or not isinstance(skew, int) or isinstance(skew, bool) or skew <= 0 or not r.get('skew_cite')
+                or not r.get('validity') or not r.get('expired_state')):
+            raise ValueError('across_master_restart row %r: its no_restart_ttl_factor (a positive number) and no_restart_cite, '
+                             'its validity field, its expired_state, its skew_seconds (a positive int) and skew_cite' % r.get('fact'))
         states = r.get('states')
         if not r.get('state_field') or not isinstance(states, list) or not states:
             raise ValueError('across_master_restart row %r: its state_field and its states' % r.get('fact'))
@@ -106,7 +121,12 @@ def bind(checks):
             if set(st) - RESTART_STATE_KEYS or not isinstance(st.get('renews'), bool) or not st.get('state') or not st.get('cite') or st['state'] in renews:
                 raise ValueError('across_master_restart row %r: state %r: {state, renews (true or false), cite}, once each' % (r.get('fact'), st))
             renews[st['state']] = st['renews']
-        _restart_allow[r['fact']] = (r['ttl_seconds'] * 10**9, r['slack_seconds'] * 10**9, r['state_field'], renews)
+        if r['expired_state'] not in renews or renews[r['expired_state']]:
+            raise ValueError('across_master_restart row %r: expired_state %r is not one of its states that does not renew' % (r.get('fact'), r['expired_state']))
+        _restart_allow[r['fact']] = {
+            'ttl': r['ttl_seconds'] * 10**9, 'slack': r['slack_seconds'] * 10**9, 'field': r['state_field'], 'renews': renews,
+            'extend': int(round(factor * r['ttl_seconds'] * 10**9)), 'validity': r['validity'],
+            'expired': r['expired_state'], 'skew': skew * 10**9, 'skew_cite': r['skew_cite']}
 
 
 # --- observation -----------------------------------------------------------
@@ -150,8 +170,10 @@ WORKSPACE_DROPPED_FIELDS = ('lease expiry_ns', 'host validity_ns at query')
 class Workspace(tuple):
     """A workspace answer's compared value, (exit, facts): equal as that tuple.
     `clock` carries what is kept but not compared: the dropped fields, by
-    name, and the observation's reading window (from_ns, at_ns); a
-    time_derived step reads them (same_part)."""
+    name, the observation's reading window (from_ns, at_ns) and the
+    reading's end in wall time (end_wall_ns, None when neither the record
+    nor a fit gives it); a time_derived step and the lease rule read them
+    (same_part)."""
     clock = None
 
 
@@ -220,11 +242,56 @@ READERS = {'head': _head, 'snapshots': _snapshots, 'workspace': _workspace,
            'dirs': _listing('dirs', 'dirs_error'), 'files': _listing('files', 'listing_error')}
 
 
-def observed_state(obs, parts):
+def _int(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def reading_end_wall(obs, wall_fit=None):
+    """The reading's end in wall time (ns): from_wall_ns + (mono_ns -
+    from_mono_ns) when the record carries both starts; else mono_ns + the
+    history's fitted offset (wall_fit) when there is one; else None."""
+    fw, frm, at = _int(obs.get('from_wall_ns')), _int(obs.get('from_mono_ns')), _int(obs.get('mono_ns'))
+    if fw is not None and frm is not None and at is not None:
+        return fw + (at - frm)
+    if wall_fit is not None and at is not None:
+        return at + wall_fit
+    return None
+
+
+def wall_fit(observations):
+    """For a history before from_wall_ns: its wall clock minus its own clock
+    (ns), fitted from what the leases print. While a lease's validity at
+    query lies strictly between 0 and the TTL it is not clamped, and the
+    product computes it as expiry - skew/2 - now (checks.json
+    across_master_restart validity, skew_cite): now = expiry - skew/2 -
+    validity. The median over those observations of now - mono_ns (the
+    record's stamp, just after the reading); None with no row, a history that
+    records from_wall_ns (it needs no fit), or no such observation."""
+    if not _restart_allow:
+        return None
+    row = next(iter(_restart_allow.values()))
+    fact = next(iter(_restart_allow))
+    offs = []
+    for obs in observations:
+        if _int(obs.get('from_wall_ns')) is not None:
+            return None
+        ws = (obs.get('result') or {}).get('workspace')
+        if not isinstance(ws, dict) or ws.get('exit') != 0:
+            continue
+        c = workspace_clock(ws.get('text'))
+        e, v, at = c.get(fact), c.get(row['validity']), _int(obs.get('mono_ns'))
+        if e is None or v is None or at is None or not 0 < v < row['ttl']:
+            continue
+        offs.append(e - row['skew'] // 2 - v - at)
+    return statistics.median_low(offs) if offs else None
+
+
+def observed_state(obs, parts, wall_fit=None):
     """The comparable state of an observation: {part: value} for each part it
     records, and {part: why} for each part it records but cannot compare.
     `parts` is checks.json's observation.compared; a part this module cannot
-    read is a KeyError (caught at load)."""
+    read is a KeyError (caught at load). wall_fit: the history's fitted wall
+    offset (wall_fit()), used only when the record has no from_wall_ns."""
     res = obs.get('result') or {}
     state, bad = {}, {}
     for part in parts:
@@ -232,39 +299,73 @@ def observed_state(obs, parts):
         if got is None:
             continue
         if isinstance(got[1], Workspace):
-            frm, at = obs.get('from_mono_ns'), obs.get('mono_ns')
-            got[1].clock = dict(got[1].clock, from_ns=frm if isinstance(frm, int) else None,
-                                at_ns=at if isinstance(at, int) else None)
+            got[1].clock = dict(got[1].clock, from_ns=_int(obs.get('from_mono_ns')), at_ns=_int(obs.get('mono_ns')),
+                                end_wall_ns=reading_end_wall(obs, wall_fit))
         (state if got[0] == 'ok' else bad)[part] = got[1]
     return state, bad
+
+
+def observation_findings(obs):
+    """What one observation contradicts in itself: a lease printed in its
+    expired state (the row's expired_state) whose printed expiry is after
+    the reading's END in wall time + skew/2. Expired means no validity is
+    left, validity = expiry - skew/2 - now (the row's skew_cite), so at the
+    query expiry <= now + skew/2 <= the reading's end + skew/2. Needs the
+    record's from_wall_ns: an observation without it is not checked (the
+    fit is derived from the same printed validity, so it cannot judge it)."""
+    end = reading_end_wall(obs)
+    if end is None or not _restart_allow:
+        return []
+    ws = (obs.get('result') or {}).get('workspace')
+    if not isinstance(ws, dict) or ws.get('exit') != 0:
+        return []
+    facts = workspace_facts(ws.get('text'))
+    if facts is None:
+        return []
+    out = []
+    for fact, row in _restart_allow.items():
+        e = workspace_clock(ws.get('text')).get(fact)
+        if dict(facts).get(row['field']) != row['expired'] or e is None:
+            continue
+        if e > end + row['skew'] // 2:
+            out.append('observation seq %s of %s: lease state %s, but its printed expiry %d is %.3f s after the reading\'s end in wall time %d + skew/2 (%d s): '
+                       'the lease was still valid at the query (%s)' % (obs.get('seq'), obs.get('volume') or '(no volume)', row['expired'], e,
+                                                                       (e - end - row['skew'] // 2) / 1e9, end, row['skew'] // 2 // 10**9, row['skew_cite']))
+    return out
 
 
 def restart_expiry(before, after, restart_wall_ns):
     """The expiry of a lease in a state that does not renew (the row's
     states, renews false) in both observations (checks.json
     across_master_restart), keyed on the lease STATE, step or no step: True
-    when it holds, False when it does not. Across a master restart at
-    restart_wall_ns it may move later, never earlier, at most to the
-    restart's wall time + ttl + slack (a lease the restart left never
-    expiring is one that never takes its step); across no restart, or one
-    that records no wall time, it must be EQUAL (a lease that does not renew
-    has an expiry that does not move on its own). None when it is not
-    compared: no row, a renewing state at either observation (granted), a
-    state the row does not list, a value not recorded, or a master restart
-    between in a history that records no restart's wall time at all
-    (restart_wall_ns 'unrecorded': a history from before the field)."""
+    when it holds, False when it does not. It is MONOTONE: equal or later,
+    never earlier. Across a master restart at restart_wall_ns it is at most
+    the restart's wall time + ttl + slack (a lease the restart left never
+    expiring is one that never takes its step). Across no restart (or a
+    restart that records no wall time in a history that has the field) it
+    is at most the later reading's end in wall time + no_restart_ttl_factor
+    x ttl + slack (the extender's horizon); with no end in wall time (no
+    from_wall_ns and no fit) that ceiling is not checked, the order still
+    is. None when it is not compared: no row, a renewing state at either
+    observation (granted), a state the row does not list, a value not
+    recorded, or a master restart between in a history that records no
+    restart's wall time at all (restart_wall_ns 'unrecorded': a history
+    from before the field)."""
     if not isinstance(before, Workspace) or not isinstance(after, Workspace) or restart_wall_ns == 'unrecorded':
         return None
-    for fact, (ttl, slack, field, renews) in _restart_allow.items():
-        bs, as_ = dict(before[1]).get(field), dict(after[1]).get(field)
-        if renews.get(bs, True) or renews.get(as_, True):
+    for fact, row in _restart_allow.items():
+        bs, as_ = dict(before[1]).get(row['field']), dict(after[1]).get(row['field'])
+        if row['renews'].get(bs, True) or row['renews'].get(as_, True):
             return None
         b, a = (before.clock or {}).get(fact), (after.clock or {}).get(fact)
         if b is None or a is None:
             return None
-        if restart_wall_ns is None:
-            return a == b
-        return b <= a <= restart_wall_ns + ttl + slack
+        if a < b:
+            return False
+        if restart_wall_ns is not None:
+            return a <= restart_wall_ns + row['ttl'] + row['slack']
+        end = (after.clock or {}).get('end_wall_ns')
+        return end is None or a <= end + row['extend'] + row['slack']
     return None
 
 

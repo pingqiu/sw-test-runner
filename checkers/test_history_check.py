@@ -2125,14 +2125,15 @@ class KillTouches(unittest.TestCase):
 
 
 class AcrossMasterRestart(unittest.TestCase):
-    """Across a blockmaster restart between two observations, keyed on the
-    lease STATE (checks.json across_master_restart, its states' renews
-    flags): while the lease is in a state that does not renew (revoking,
-    expired) in both, its expiry is compared, step or no step: later, never
-    earlier, at most the restart's wall time + TTL (30 s) + slack (2 s); in
-    a renewing state (granted at either) it is not compared. Every other
-    kept fact equal. Across no restart, or one that records no wall time, a
-    non-renewing lease's expiry must be equal."""
+    """Keyed on the lease STATE (checks.json across_master_restart, its
+    states' renews flags): while the lease is in a state that does not renew
+    (revoking, expired) in both observations, its expiry is compared, step
+    or no step, and is MONOTONE (equal or later, never earlier). Across a
+    blockmaster restart it is at most the restart's wall time + TTL (30 s) +
+    slack (2 s); across no restart at most the later reading's end in wall
+    time + 1.5 x TTL + slack (47 s), the end from from_wall_ns, else from
+    the history's fit, else unchecked. In a renewing state (granted at
+    either) it is not compared. Every other kept fact equal."""
 
     W = 1795836860000000000   # the restart's wall time, ns
     E = 1795836866594534158   # the expiry before it
@@ -2143,9 +2144,14 @@ class AcrossMasterRestart(unittest.TestCase):
                 'holder: %s (logical replica)' % holder, 'lease expiry_ns: %d; host validity_ns at query: %d' % (expiry, validity),
                 'recorded ACK: %s' % ack, 'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
 
-    def pair(self, after_expiry, states=('revoking', 'expired'), restart=True, wall=True, **after):
+    def pair(self, after_expiry, states=('revoking', 'expired'), restart=True, wall=True, end_wall=None, bvalid=2, **after):
+        """end_wall: the later observation's reading end in wall time; both
+        observations then carry from_wall_ns (the earlier one 10 s before).
+        Without it neither does, and the ceiling across no restart comes from
+        the history's fit (bvalid: the earlier validity, 0 gives no fit when
+        the later lease is expired)."""
         bstate, astate = states
-        before = {'workspace': {'exit': 0, 'text': self.text(bstate, self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
+        before = {'workspace': {'exit': 0, 'text': self.text(bstate, self.E, bvalid)}, 'dirs': WS['dirs'], 'snapshots': []}
         later = {'workspace': {'exit': 0, 'text': self.text(astate, after_expiry, 0 if astate == 'expired' else 5, **after)}, 'dirs': WS['dirs'], 'snapshots': []}
         steps = [('obs', 'v0', 1, FILES, before)]
         if restart:
@@ -2155,6 +2161,10 @@ class AcrossMasterRestart(unittest.TestCase):
         for r in recs:
             if r['kind'] == 'complete' and r['verb'] == 'restart' and wall:
                 r['result'] = {'started_wall_ns': self.W}
+        if end_wall is not None:
+            obs = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe']
+            obs[0]['from_wall_ns'] = end_wall - 10 * self.S
+            obs[-1]['from_wall_ns'] = end_wall - (obs[-1]['mono_ns'] - obs[-1]['from_mono_ns'])
         return hc.baseline(hc.read_history(dump(recs)))
 
     def changed(self, got):
@@ -2189,15 +2199,62 @@ class AcrossMasterRestart(unittest.TestCase):
             self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, **other)), other)
             self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), **other)), other)
 
-    def test_red_a_non_renewing_expiry_that_moves_with_no_restart_is_a_change(self):
-        # Across no restart a lease that does not renew keeps its expiry:
-        # it must be equal, step or no step.
+    # Rule 1, across no restart: monotone, and at most the later reading's
+    # end in wall time + 1.5 x TTL + slack = end + 47 s.
+    R = 1795836850000000000   # the later reading's end in wall time, ns (E is 16.6 s after it)
+    CEIL = R + 47 * 10**9
+
+    def test_no_restart_a_non_renewing_expiry_equal_or_later_within_the_ceiling_is_no_change(self):
         for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
-            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, states, restart=False)), states)
-            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False)), states)
-            self.assertEqual(self.pair(self.E, states, restart=False), (1, []), states)   # equal: no change
+            for e in (self.E, self.E + 1, self.E + 20 * self.S, self.CEIL):   # the ceiling itself
+                self.assertEqual(self.pair(e, states, restart=False, end_wall=self.R), (1, []), (states, e))
+
+    def test_red_no_restart_a_non_renewing_expiry_that_moved_earlier_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertTrue(self.changed(self.pair(self.E - 1, states, restart=False, end_wall=self.R)), states)
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False)), states)               # by the fit
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False, bvalid=0)), states)     # no fit: the order still holds
+
+    def test_red_no_restart_a_non_renewing_expiry_past_the_ceiling_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertTrue(self.changed(self.pair(self.CEIL + 1, states, restart=False, end_wall=self.R)), states)
+            self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, states, restart=False, end_wall=self.R)), states)
         # A granted lease's expiry still moves freely with no restart.
-        self.assertEqual(self.pair(self.W + 86400 * self.S, ('granted', 'granted'), restart=False), (1, []))
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('granted', 'granted'), restart=False, end_wall=self.R), (1, []))
+
+    def test_no_restart_in_a_history_before_from_wall_ns_the_ceiling_comes_from_the_fit(self):
+        # The earlier observation prints validity 2 ns, unclamped: now = E -
+        # skew/2 - 2, and the fit puts the later reading's end at about E - 10 s
+        # (the records' clock moves a few ns): the ceiling is about E + 37 s.
+        for states in (('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.E + 36 * self.S, states, restart=False), (1, []), states)
+            self.assertTrue(self.changed(self.pair(self.E + 38 * self.S, states, restart=False)), states)
+
+    def test_no_restart_with_no_fit_the_ceiling_is_unchecked(self):
+        # Neither observation has an unclamped validity (0 before, expired
+        # after) and neither records from_wall_ns: no end in wall time, so
+        # only the order is checked. Named here so the gap is not hidden.
+        self.assertIsNone(hc.history_wall_fit(hc.read_history(dump(history(
+            ('obs', 'v0', 1, FILES, {'workspace': {'exit': 0, 'text': self.text('expired', self.E, 0)}, 'dirs': WS['dirs'], 'snapshots': []}))))))
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('expired', 'expired'), restart=False, bvalid=0), (1, []))
+
+    def test_the_fit_is_the_median_offset_of_the_unclamped_validities(self):
+        def obs(mono, expiry, validity, **kw):
+            return dict({'kind': 'observe', 'verb': 'observe', 'mono_ns': mono,
+                         'result': {'workspace': {'exit': 0, 'text': self.text('granted', expiry, validity)}}}, **kw)
+        half = 10 * self.S   # skew/2, the row's skew_seconds 20
+        seen = [obs(100, self.E, 3 * self.S), obs(200, self.E, 2 * self.S + 50), obs(300, self.E + 5, 1 * self.S + 400)]
+        offs = sorted(self.E - half - v - m for m, v in ((100, 3 * self.S), (200, 2 * self.S + 50), (300, 1 * self.S + 400)))
+        self.assertEqual(hc.PRODUCT.wall_fit(seen), offs[1])
+        # clamped (0, or the TTL) or failed readings do not count
+        self.assertEqual(hc.PRODUCT.wall_fit(seen + [obs(1, self.E, 0), obs(2, self.E, 30 * self.S), dict(obs(3, self.E, 5), result={'workspace': {'exit': 1, 'text': ''}})]), offs[1])
+        self.assertIsNone(hc.PRODUCT.wall_fit([obs(1, self.E, 0), obs(2, self.E, 30 * self.S)]))
+        # a history that records from_wall_ns needs no fit
+        self.assertIsNone(hc.PRODUCT.wall_fit(seen + [obs(400, self.E, self.S, from_wall_ns=1, from_mono_ns=399)]))
+        # the record's own start wins over a fit
+        self.assertEqual(hc.PRODUCT.reading_end_wall({'from_wall_ns': 1000, 'from_mono_ns': 10, 'mono_ns': 15}, wall_fit=7), 1005)
+        self.assertEqual(hc.PRODUCT.reading_end_wall({'from_mono_ns': 10, 'mono_ns': 15}, wall_fit=7), 22)
+        self.assertIsNone(hc.PRODUCT.reading_end_wall({'from_mono_ns': 10, 'mono_ns': 15}))
 
     def test_an_old_format_history_across_an_unrecorded_restart_is_uncompared(self):
         # Rule 3: a history with no started_wall_ns anywhere (from before the
@@ -2208,22 +2265,33 @@ class AcrossMasterRestart(unittest.TestCase):
         for states in (('revoking', 'revoking'), ('expired', 'expired')):
             self.assertEqual(self.pair(self.W + 20 * self.S, states, wall=False), (1, []), states)
             self.assertEqual(self.pair(self.W + 86400 * self.S, states, wall=False), (1, []), states)
+            self.assertEqual(self.pair(self.E - self.S, states, wall=False), (1, []), states)
         self.assertEqual(self.pair(self.E, ('revoking', 'expired'), wall=False), (1, []))
         self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'expired'), wall=False)))
         # Across no restart rule 1 still applies in an old-format history.
-        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), restart=False, wall=False)))
+        self.assertTrue(self.changed(self.pair(self.E - self.S, ('revoking', 'revoking'), restart=False, wall=False)))
+        self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), restart=False, wall=False)))
 
     def test_red_a_restart_without_its_wall_time_in_a_history_that_records_it_gets_no_allowance(self):
         # A history whose other restart records the field: a restart missing
-        # it is not an old format; the expiry must be equal across it.
-        before = {'workspace': {'exit': 0, 'text': self.text('revoking', self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
-        later = {'workspace': {'exit': 0, 'text': self.text('revoking', self.W + 20 * self.S, 5)}, 'dirs': WS['dirs'], 'snapshots': []}
-        recs = history(('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok'),
-                       ('obs', 'v0', 1, FILES, before), ('kill', '', {'process': 'blockmaster'}, 'ok'),
-                       ('restart', '', {'process': 'blockmaster'}, 'ok'), ('obs', 'v0', 1, FILES, later))
-        first = next(r for r in recs if r['kind'] == 'complete' and r['verb'] == 'restart')
-        first['result'] = {'started_wall_ns': self.W - 100 * self.S}
-        self.assertTrue(self.changed(hc.baseline(hc.read_history(dump(recs)))))
+        # it is not an old format; the rule across no restart applies to it
+        # (monotone, at most the later reading's end + 47 s), not the
+        # restart's own allowance.
+        def case(expiry):
+            before = {'workspace': {'exit': 0, 'text': self.text('revoking', self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
+            later = {'workspace': {'exit': 0, 'text': self.text('revoking', expiry, 5)}, 'dirs': WS['dirs'], 'snapshots': []}
+            recs = history(('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok'),
+                           ('obs', 'v0', 1, FILES, before), ('kill', '', {'process': 'blockmaster'}, 'ok'),
+                           ('restart', '', {'process': 'blockmaster'}, 'ok'), ('obs', 'v0', 1, FILES, later))
+            first = next(r for r in recs if r['kind'] == 'complete' and r['verb'] == 'restart')
+            first['result'] = {'started_wall_ns': self.W + 86400 * self.S}   # a late wall time that would allow anything
+            obs = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe']
+            obs[0]['from_wall_ns'] = self.R - 10 * self.S
+            obs[-1]['from_wall_ns'] = self.R - (obs[-1]['mono_ns'] - obs[-1]['from_mono_ns'])
+            return hc.baseline(hc.read_history(dump(recs)))
+        self.assertEqual(case(self.CEIL), (1, []))
+        self.assertTrue(self.changed(case(self.CEIL + 1)))
+        self.assertTrue(self.changed(case(self.E - 1)))
 
     def test_the_row_is_data_and_a_bad_row_does_not_load(self):
         import copy
@@ -2231,14 +2299,74 @@ class AcrossMasterRestart(unittest.TestCase):
         row = checks['observation']['across_master_restart'][0]
         self.assertEqual((row['fact'], row['ttl_seconds'], row['slack_seconds'], row['state_field']), ('lease expiry_ns', 30, 2, 'lease state'))
         self.assertEqual({s['state']: s['renews'] for s in row['states']}, {'granted': True, 'revoking': False, 'expired': False})
+        self.assertEqual((row['no_restart_ttl_factor'], row['skew_seconds'], row['expired_state'], row['validity']),
+                         (1.5, 20, 'expired', 'host validity_ns at query'))
+        for cite in ('core/authority/workspace_lease_view.go:306', ':455', 'core/authority/authority.go:257'):
+            self.assertIn(cite, row['no_restart_cite'])
+        for cite in ('core/authority/workspace_lease_view.go:154-157', 'cmd/blockmaster/main.go:138'):
+            self.assertIn(cite, row['skew_cite'])
         for seed in (lambda r: r.update(ttl_seconds='30'), lambda r: r.update(slack_seconds=-1), lambda r: r.update(ceiling='none'),
                      lambda r: r['states'][0].update(renews='yes'), lambda r: r['states'].append(dict(r['states'][1])),
-                     lambda r: r.pop('state_field'), lambda r: r['states'][1].pop('cite')):
+                     lambda r: r.pop('state_field'), lambda r: r['states'][1].pop('cite'),
+                     lambda r: r.pop('no_restart_ttl_factor'), lambda r: r.update(no_restart_ttl_factor='1.5'),
+                     lambda r: r.update(no_restart_ttl_factor=0), lambda r: r.pop('no_restart_cite'),
+                     lambda r: r.pop('skew_seconds'), lambda r: r.update(skew_seconds=0), lambda r: r.pop('skew_cite'),
+                     lambda r: r.pop('validity'), lambda r: r.update(expired_state='granted'), lambda r: r.update(expired_state='gone')):
             bad = copy.deepcopy(checks)
             seed(bad['observation']['across_master_restart'][0])
             with self.assertRaises(ValueError):
                 pb.bind(bad)
         pb.bind(checks)
+
+
+class ExpiredLeaseObservation(unittest.TestCase):
+    """C5's OBSERVATION rule: a lease printed in its expired state has no
+    validity left, validity = expiry - skew/2 - now (checks.json
+    across_master_restart skew_seconds 20, skew_cite), so its printed expiry
+    is at or before the reading's END in wall time (from_wall_ns + mono_ns -
+    from_mono_ns) + skew/2. Past that the lease was still valid at the query:
+    a product result, C5 FAILS. An observation without from_wall_ns is not
+    checked."""
+
+    S = 10**9
+    END = 1795836850000000000
+
+    def obs(self, state, expiry, wall=True, seq=7):
+        r = {'seq': seq, 'kind': 'observe', 'verb': 'observe', 'volume': 'v0', 'from_mono_ns': 100, 'mono_ns': 100 + 3 * self.S,
+             'result': {'workspace': {'exit': 0, 'text': AcrossMasterRestart.text(None, state, expiry, 0 if state == 'expired' else 5 * self.S)}}}
+        if wall:
+            r['from_wall_ns'] = self.END - 3 * self.S
+        return r
+
+    def test_an_expired_lease_at_or_before_the_end_plus_half_the_skew_is_no_finding(self):
+        for e in (self.END - 60 * self.S, self.END, self.END + 10 * self.S):
+            self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', e)), [], e)
+
+    def test_red_an_expired_lease_still_valid_at_the_query_is_a_finding(self):
+        got = hc.PRODUCT.observation_findings(self.obs('expired', self.END + 10 * self.S + 1))
+        self.assertEqual(len(got), 1, got)
+        self.assertIn('lease state expired, but its printed expiry', got[0])
+        self.assertIn('workspace_lease_view.go:154-157', got[0])
+
+    def test_the_rule_reads_the_end_not_the_start_and_needs_from_wall_ns(self):
+        # 3 s between start and end: an expiry 2 s past start + skew/2 is fine
+        self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', self.END - 3 * self.S + 12 * self.S)), [])
+        # without from_wall_ns: not checked
+        self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', self.END + 86400 * self.S, wall=False)), [])
+        # other states: not this rule
+        for state in ('granted', 'revoking'):
+            self.assertEqual(hc.PRODUCT.observation_findings(self.obs(state, self.END + 86400 * self.S)), [], state)
+
+    def test_red_c5_fails_on_it(self):
+        bad = {'workspace': {'exit': 0, 'text': AcrossMasterRestart.text(None, 'expired', self.END + 11 * self.S, 0)}, 'dirs': WS['dirs'], 'snapshots': []}
+        recs = history(('obs', 'v0', 1, FILES, bad))
+        for r in recs:
+            if r['kind'] == 'observe':
+                r['from_wall_ns'] = self.END - (r['mono_ns'] - r['from_mono_ns'])
+        v = hc.c5(hc.read_history(dump(recs)))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertTrue(v['findings'][0].startswith('observation seq '), v)
+        self.assertIn('lease state expired, but its printed expiry', v['findings'][0])
 
 
 class StoreFault(unittest.TestCase):
