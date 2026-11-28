@@ -52,9 +52,14 @@ type FaultSchedule struct {
 }
 
 // NewFaultSchedule derives the schedule. rate is the chance, after each
-// operation while no process is down, that one process (drawn uniformly from
-// the sorted list) is killed; its restart comes 1..within operations later,
-// capped at ops. A rate of 0 gives an empty schedule.
+// operation while no process is down, that a process is killed; its restart
+// comes 1..within operations later, capped at ops. A rate of 0 gives an
+// empty schedule. Every process is reached BY CONSTRUCTION, not by luck over
+// seeds: the kills take the sorted processes in turn (round-robin), and the
+// first len(processes) kills are forced, the i-th (from 1) no earlier than
+// after operation i*ops/(len(processes)+1) (or the first operation after the
+// restart before it), so each process is scheduled at least once whenever
+// the operations leave room.
 func NewFaultSchedule(seed uint64, ops int, processes []string, rate float64, within int, valid func(string) bool) (FaultSchedule, error) {
 	s := FaultSchedule{Seed: seed, Events: []FaultEvent{}}
 	if rate < 0 || rate > 1 {
@@ -81,11 +86,15 @@ func NewFaultSchedule(seed uint64, ops int, processes []string, rate float64, wi
 	}
 	// Its own stream: the operation generator's stream (same seed) is untouched.
 	rng := rand.New(rand.NewPCG(seed^0x6661756c74730000, seed+0x2545f4914f6cdd1d))
+	kills := 0
 	for k := 1; k < ops; k++ {
-		if rng.Float64() >= rate {
+		drawn := rng.Float64() < rate
+		forced := kills < len(procs) && k >= (kills+1)*ops/(len(procs)+1)
+		if !drawn && !forced {
 			continue
 		}
-		p := procs[rng.IntN(len(procs))]
+		p := procs[kills%len(procs)]
+		kills++
 		r := min(k+1+rng.IntN(within), ops)
 		s.Events = append(s.Events, FaultEvent{k, FaultKill, p}, FaultEvent{r, FaultRestart, p})
 		k = r // the next kill comes after the restart's operation

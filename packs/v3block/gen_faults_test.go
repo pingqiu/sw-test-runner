@@ -20,10 +20,12 @@ func TestFaultScheduleOverBlockProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// m2-gen/10: the processes in turn, the first of each forced.
 	want := []FaultEvent{
-		{AfterOp: 24, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 29, Action: FaultRestart, Process: "blockvolume:0"},
-		{AfterOp: 34, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 39, Action: FaultRestart, Process: "blockvolume:0"},
-		{AfterOp: 50, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 57, Action: FaultRestart, Process: "blockmaster"},
+		{AfterOp: 15, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 20, Action: FaultRestart, Process: "blockmaster"},
+		{AfterOp: 28, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 41, Action: FaultRestart, Process: "blockvolume:0"},
+		{AfterOp: 45, Action: FaultKill, Process: "blockvolume:1"}, {AfterOp: 54, Action: FaultRestart, Process: "blockvolume:1"},
+		{AfterOp: 55, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 60, Action: FaultRestart, Process: "blockmaster"},
 	}
 	if !reflect.DeepEqual(a.Events, want) || CheckFaultSchedule(a.Events, 60, 20) != nil {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
@@ -159,7 +161,7 @@ func (f *faultFake) install(t *testing.T) {
 
 func faultAct(ops, rate string) tr.Action {
 	a := genAct(ops)
-	a.Params["pool"] = strings.Join(pool(100), " ") // not exhausted before the budget
+	a.Params["pool"] = strings.Join(pool(200), " ") // not exhausted before the budget (this fake answers unknown while a process is down; every listed process is now killed)
 	a.Params["faults"] = rate
 	a.Params["fault_processes"] = "blockvolume:0 blockvolume:1"
 	return a
@@ -958,7 +960,7 @@ func TestGenRunLearnsFromSettledAndHealthyRecords(t *testing.T) {
 			switch {
 			case r.Verb == "gen_step":
 				stepVol, stepAct = r.Volume, r.Result["action"].(string)
-				if since[stepVol] {
+				if since[stepVol] && stepAct != "v3_op_observe" { // observation is all an unsettled volume is offered
 					bad = append(bad, fmt.Sprintf("%s %s while unsettled", stepAct, stepVol))
 				}
 				if settledOnce[stepVol] && r.Result["negative"] == nil {
@@ -1249,5 +1251,38 @@ func TestNothingProposedAtAKilledHolder(t *testing.T) {
 	g.m.Observed(healthyRec(nil))
 	if g.vols["g1"].state != stUnknown || len(offered(g, "g1")) != 0 {
 		t.Fatalf("an unknown restart: %q %v", g.vols["g1"].state, offered(g, "g1"))
+	}
+}
+
+// Every holder of the fault processes is killed and restarted BY
+// CONSTRUCTION: for the nightly's seeds (the generic schedule kills the
+// processes in turn, the first of each forced), a run over four holders
+// reaches kill|blockvolume:<i> and restart|blockvolume:<i> for every i in
+// its fault coverage.
+func TestEveryFaultProcessIsReached(t *testing.T) {
+	for _, seed := range []string{"1", "5", "7"} {
+		f := &faultFake{}
+		f.install(t)
+		actx, p := genRunCtx(t)
+		act := faultAct("300", "0.05")
+		act.Params["seed"] = seed
+		act.Params["fault_processes"] = "blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
+		if _, err := v3GenRun(context.Background(), actx, act); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		var cells map[string]any
+		for _, r := range records(t, p) {
+			if r.Verb == "gen_coverage" {
+				cells, _ = r.Result["fault_cells"].(map[string]any)
+			}
+		}
+		for i := 0; i < 4; i++ {
+			for _, a := range []string{"kill", "restart"} {
+				if c := fmt.Sprintf("%s|blockvolume:%d", a, i); cells[c] == nil || cells[c].(float64) == 0 {
+					t.Errorf("seed %s: %s never reached: %v", seed, c, cells)
+				}
+			}
+		}
 	}
 }

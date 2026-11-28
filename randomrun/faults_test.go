@@ -1,6 +1,7 @@
 package randomrun
 
 import (
+	"math/rand/v2"
 	"reflect"
 	"regexp"
 	"testing"
@@ -23,10 +24,13 @@ func TestFaultScheduleSameSeedSameScheduleAndPinned(t *testing.T) {
 	}
 	// Pinned: a change to the derivation changes every recorded run's schedule,
 	// so it must come with a new fault-run generator version.
+	// (m2-gen/10: the kills take the processes in turn, the first three
+	// forced no earlier than after operations 15, 30 and 45.)
 	want := []FaultEvent{
-		{24, FaultKill, "p1"}, {29, FaultRestart, "p1"},
-		{34, FaultKill, "p1"}, {39, FaultRestart, "p1"},
-		{50, FaultKill, "p0"}, {57, FaultRestart, "p0"},
+		{15, FaultKill, "p0"}, {20, FaultRestart, "p0"},
+		{28, FaultKill, "p1"}, {41, FaultRestart, "p1"},
+		{45, FaultKill, "p2"}, {54, FaultRestart, "p2"},
+		{55, FaultKill, "p0"}, {60, FaultRestart, "p0"},
 	}
 	if !reflect.DeepEqual(a.Events, want) {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
@@ -180,5 +184,48 @@ func TestMasterOutagesComeOnlyWhileNothingIsDown(t *testing.T) {
 	}
 	if err := CheckFaultSchedule([]FaultEvent{{2, FaultKill, "p1"}, {4, FaultRestart, "p1"}, {5, FaultMasterOutage, "p0"}}, 30, 20, testProcess); err != nil {
 		t.Errorf("green: %v", err)
+	}
+}
+
+// Every process is reached by construction: for any seed and rate, with
+// room in the operations, each listed process is killed (and restarted) at
+// least once. Red control: the uniform draw of before misses a process for
+// some seed.
+func TestFaultScheduleReachesEveryProcess(t *testing.T) {
+	procs := []string{"p0", "p1", "p2", "p3"}
+	for seed := uint64(1); seed <= 500; seed++ {
+		for _, rate := range []float64{0.01, 0.05, 0.2} {
+			s, err := NewFaultSchedule(seed, 300, procs, rate, 20, testProcess)
+			if err != nil {
+				t.Fatal(err)
+			}
+			killed := map[string]bool{}
+			for _, e := range s.Events {
+				if e.Action == FaultKill {
+					killed[e.Process] = true
+				}
+			}
+			if len(killed) != len(procs) {
+				t.Fatalf("seed %d rate %v: killed %v", seed, rate, killed)
+			}
+		}
+	}
+	// The red control: a schedule that draws its process uniformly (the
+	// derivation before m2-gen/10) leaves a process unkilled for some seed.
+	missed := false
+	for seed := uint64(1); seed <= 50 && !missed; seed++ {
+		rng := rand.New(rand.NewPCG(seed^0x6661756c74730000, seed+0x2545f4914f6cdd1d))
+		killed := map[string]bool{}
+		for k := 1; k < 300; k++ {
+			if rng.Float64() >= 0.01 {
+				continue
+			}
+			killed[procs[rng.IntN(len(procs))]] = true
+			k += 1 + rng.IntN(20)
+		}
+		missed = len(killed) < len(procs)
+	}
+	if !missed {
+		t.Fatal("red control: the uniform draw reached every process for every seed")
 	}
 }

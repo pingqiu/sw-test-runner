@@ -63,8 +63,10 @@ const GenVersion = "m1-gen/9"
 // kill of the master; it also learns as m1-gen/4.
 // m2-gen/4: as m1-gen/5. m2-gen/5: as m1-gen/6. m2-gen/6: a master outage
 // with nothing serving is skipped. m2-gen/7: as m1-gen/7. m2-gen/8: as
-// m1-gen/8. m2-gen/9: as m1-gen/9.
-const GenVersionFaults = "m2-gen/9"
+// m1-gen/8. m2-gen/9: as m1-gen/9. m2-gen/10: the schedule kills the fault
+// processes in turn, the first of each forced (randomrun.NewFaultSchedule),
+// so every listed process is reached by construction.
+const GenVersionFaults = "m2-gen/10"
 
 //go:embed product/operations.json
 var operationsJSON []byte
