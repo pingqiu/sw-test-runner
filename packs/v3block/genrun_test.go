@@ -24,6 +24,11 @@ type fakeProduct struct {
 	boom       string
 	effect     string // this action answers refused_effect
 	refusedFor string // this action answers refused
+	// content, when set, records what the real handlers record (a write's
+	// lba and sha256, a read's per-lba sha256, a restore under its target)
+	// and keeps each volume's blocks as a correct product would, so the
+	// data checkers can judge the history (c3_reach_test.go).
+	content *blockStore
 }
 
 func (f *fakeProduct) install(t *testing.T) {
@@ -56,6 +61,10 @@ func (f *fakeProduct) install(t *testing.T) {
 				_ = actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Verb: "observe", Volume: act.Params["volume"],
 					Result: map[string]any{"workspace": map[string]any{"exit": 0, "text": []any{"lease state: expired"}}}})
 				return map[string]string{"value": "observed"}, nil // as v3OpObserve: an observation, not an outcome
+			}
+			if f.content != nil {
+				f.content.record(actx, name, act, out)
+				return map[string]string{"value": out}, nil
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + verb, Verb: verb, Volume: act.Params["volume"]})
 			_ = actx.History.Complete(seq, out, nil)
