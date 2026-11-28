@@ -806,13 +806,18 @@ def master_restarts(recs):
 
 
 def master_restart_between(restarts, lo, hi):
-    """The wall time (ns) of the latest master restart (master_restarts)
-    between seqs lo and hi; None when there is none, or one of them does not
-    record its wall time (a history before the field: the strict rule, no
-    allowance)."""
+    """What lies between seqs lo and hi of master restarts (master_restarts),
+    as the product reader's same_part takes it: None for no restart; the
+    wall time (ns) of the latest when every one records it; 'unrecorded'
+    when one does not and the history records the field nowhere (a history
+    from before it: the expiry is not compared across that restart). A
+    restart without the field in a history that has it elsewhere gets no
+    allowance (None: the rule with no restart)."""
     walls = [w for s, w in restarts if lo < s < hi]
-    if not walls or None in walls:
+    if not walls:
         return None
+    if None in walls:
+        return 'unrecorded' if all(w is None for _, w in restarts) else None
     return max(walls)
 
 

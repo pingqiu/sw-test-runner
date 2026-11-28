@@ -2130,9 +2130,9 @@ class AcrossMasterRestart(unittest.TestCase):
     flags): while the lease is in a state that does not renew (revoking,
     expired) in both, its expiry is compared, step or no step: later, never
     earlier, at most the restart's wall time + TTL (30 s) + slack (2 s); in
-    a renewing state (granted) it is not compared. Every other kept fact
-    equal. A pair across no restart, or one that records no wall time,
-    keeps the strict rule."""
+    a renewing state (granted at either) it is not compared. Every other
+    kept fact equal. Across no restart, or one that records no wall time, a
+    non-renewing lease's expiry must be equal."""
 
     W = 1795836860000000000   # the restart's wall time, ns
     E = 1795836866594534158   # the expiry before it
@@ -2189,13 +2189,41 @@ class AcrossMasterRestart(unittest.TestCase):
             self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, **other)), other)
             self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), **other)), other)
 
-    def test_red_a_pair_across_no_master_restart_keeps_the_strict_rule(self):
-        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, restart=False)))       # the step's fact moved
-        self.assertEqual(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), restart=False), (1, []))   # no step: the expiry not compared, as before
+    def test_red_a_non_renewing_expiry_that_moves_with_no_restart_is_a_change(self):
+        # Across no restart a lease that does not renew keeps its expiry:
+        # it must be equal, step or no step.
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, states, restart=False)), states)
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False)), states)
+            self.assertEqual(self.pair(self.E, states, restart=False), (1, []), states)   # equal: no change
+        # A granted lease's expiry still moves freely with no restart.
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('granted', 'granted'), restart=False), (1, []))
 
-    def test_a_restart_without_its_wall_time_gets_no_allowance(self):
-        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, wall=False)))
-        self.assertEqual(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), wall=False), (1, []))
+    def test_an_old_format_history_across_an_unrecorded_restart_is_uncompared(self):
+        # Rule 3: a history with no started_wall_ns anywhere (from before the
+        # field): across its master restart the expiry is not compared
+        # (06a5338's behaviour for these bundles): with no step, moved or not,
+        # no change; a lease-state step keeps the time_derived rule as it
+        # was there (its fact equal).
+        for states in (('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.W + 20 * self.S, states, wall=False), (1, []), states)
+            self.assertEqual(self.pair(self.W + 86400 * self.S, states, wall=False), (1, []), states)
+        self.assertEqual(self.pair(self.E, ('revoking', 'expired'), wall=False), (1, []))
+        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'expired'), wall=False)))
+        # Across no restart rule 1 still applies in an old-format history.
+        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), restart=False, wall=False)))
+
+    def test_red_a_restart_without_its_wall_time_in_a_history_that_records_it_gets_no_allowance(self):
+        # A history whose other restart records the field: a restart missing
+        # it is not an old format; the expiry must be equal across it.
+        before = {'workspace': {'exit': 0, 'text': self.text('revoking', self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
+        later = {'workspace': {'exit': 0, 'text': self.text('revoking', self.W + 20 * self.S, 5)}, 'dirs': WS['dirs'], 'snapshots': []}
+        recs = history(('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok'),
+                       ('obs', 'v0', 1, FILES, before), ('kill', '', {'process': 'blockmaster'}, 'ok'),
+                       ('restart', '', {'process': 'blockmaster'}, 'ok'), ('obs', 'v0', 1, FILES, later))
+        first = next(r for r in recs if r['kind'] == 'complete' and r['verb'] == 'restart')
+        first['result'] = {'started_wall_ns': self.W - 100 * self.S}
+        self.assertTrue(self.changed(hc.baseline(hc.read_history(dump(recs)))))
 
     def test_the_row_is_data_and_a_bad_row_does_not_load(self):
         import copy

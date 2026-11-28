@@ -240,17 +240,20 @@ def observed_state(obs, parts):
 
 
 def restart_expiry(before, after, restart_wall_ns):
-    """Across a master restart at restart_wall_ns (checks.json
-    across_master_restart), keyed on the lease STATE: while the lease is in a
-    state that does not renew (revoking, expired: the row's states) in both
-    observations, its expiry is compared, step or no step: True when it moved
-    later or not at all, never earlier, and at most to the restart's wall
-    time + ttl + slack; False otherwise (a lease the restart left never
-    expiring is one that never takes its step). None when it is not compared:
-    no restart wall time (a history before it: the strict rule), no row, a
-    renewing state (granted), a state the row does not list, or a value not
-    recorded."""
-    if restart_wall_ns is None or not isinstance(before, Workspace) or not isinstance(after, Workspace):
+    """The expiry of a lease in a state that does not renew (the row's
+    states, renews false) in both observations (checks.json
+    across_master_restart), keyed on the lease STATE, step or no step: True
+    when it holds, False when it does not. Across a master restart at
+    restart_wall_ns it may move later, never earlier, at most to the
+    restart's wall time + ttl + slack (a lease the restart left never
+    expiring is one that never takes its step); across no restart, or one
+    that records no wall time, it must be EQUAL (a lease that does not renew
+    has an expiry that does not move on its own). None when it is not
+    compared: no row, a renewing state at either observation (granted), a
+    state the row does not list, a value not recorded, or a master restart
+    between in a history that records no restart's wall time at all
+    (restart_wall_ns 'unrecorded': a history from before the field)."""
+    if not isinstance(before, Workspace) or not isinstance(after, Workspace) or restart_wall_ns == 'unrecorded':
         return None
     for fact, (ttl, slack, field, renews) in _restart_allow.items():
         bs, as_ = dict(before[1]).get(field), dict(after[1]).get(field)
@@ -259,6 +262,8 @@ def restart_expiry(before, after, restart_wall_ns):
         b, a = (before.clock or {}).get(fact), (after.clock or {}).get(fact)
         if b is None or a is None:
             return None
+        if restart_wall_ns is None:
+            return a == b
         return b <= a <= restart_wall_ns + ttl + slack
     return None
 
@@ -289,9 +294,9 @@ def same_part(part, before, after, restart_wall_ns=None):
     one step of a time_derived fact that time alone explains (checks.json
     observation.time_derived), every other kept fact equal. Direction
     matters: `before` is the earlier observation. restart_wall_ns is the wall
-    time of a master restart between the two (None: none, or not recorded):
-    across it, while the lease is in a state that does not renew, its expiry
-    IS compared (restart_expiry), step or no step."""
+    time of a master restart between the two (None: none, or not recorded).
+    While the lease is in a state that does not renew, its expiry IS
+    compared (restart_expiry), step or no step."""
     across = restart_expiry(before, after, restart_wall_ns) if part == 'workspace' else None
     if across is False:
         return False
