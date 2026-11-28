@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -444,41 +448,78 @@ func TestChecksFailNamesOnlyAViolationAProductFinding(t *testing.T) {
 	}
 }
 
-// The guards end with their History: after a History's operation and
-// fault guards were used and it is closed and dropped, nothing keeps it
-// (the garbage collector runs its finalizer). Red control: a
-// package-level registry of guards by History keeps every one forever.
+// The guards end with their History, by construction: each is a field of
+// the History it guards, and randomrun keeps no package-level registry
+// that could hold one. Shown without the garbage collector:
+//   - a source check: no package-level var of randomrun (non-test files)
+//     is a sync.Map or names a History (a constant table such as
+//     outcomeRank, keyed by outcome, holds no history);
+//   - two Histories' guards are independent (each refuses its own second
+//     holder, neither blocks the other).
+//
+// Red control, seeded: a package-level sync.Map of the Histories that
+// entered fails the source check.
 func TestAClosedHistoryLeavesNoGuardBehind(t *testing.T) {
-	done := make(chan struct{})
-	func() {
+	if bad := registries(t, "."); len(bad) > 0 {
+		t.Fatalf("package-level registries in randomrun: %v", bad)
+	}
+	open := func() *tr.History {
 		h, err := tr.OpenHistory(filepath.Join(t.TempDir(), "h.jsonl"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, g := range []string{opGuard, faultGuard} {
-			leave, ok := enter(g, h)
-			if !ok {
-				t.Fatalf("%s: refused on a fresh history", g)
-			}
-			if _, again := enter(g, h); again {
-				t.Fatalf("%s: a second holder entered", g)
-			}
-			leave()
+		t.Cleanup(func() { _ = h.Close() })
+		return h
+	}
+	h1, h2 := open(), open()
+	for _, g := range []string{opGuard, faultGuard} {
+		leave1, ok1 := enter(g, h1)
+		_, again := enter(g, h1)
+		leave2, ok2 := enter(g, h2)
+		if !ok1 || again || !ok2 {
+			t.Fatalf("%s: first %v, second on the same history %v, the other history %v", g, ok1, again, ok2)
 		}
-		runtime.SetFinalizer(h, func(*tr.History) { close(done) })
-		if err := h.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-	for i := 0; i < 100; i++ {
-		runtime.GC()
-		select {
-		case <-done:
-			return
-		case <-time.After(20 * time.Millisecond):
+		leave1()
+		leave2()
+	}
+}
+
+// registries are randomrun's package-level vars (non-test files in dir)
+// that are a sync.Map or whose type or value names a History.
+func registries(t *testing.T, dir string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bad []string
+	for _, pkg := range pkgs {
+		for name, f := range pkg.Files {
+			for _, d := range f.Decls {
+				gd, ok := d.(*ast.GenDecl)
+				if !ok || gd.Tok != token.VAR {
+					continue
+				}
+				for _, sp := range gd.Specs {
+					vs := sp.(*ast.ValueSpec)
+					var typ string
+					if vs.Type != nil {
+						typ = types.ExprString(vs.Type)
+					}
+					for _, v := range vs.Values {
+						typ += " " + types.ExprString(v)
+					}
+					if strings.Contains(typ, "sync.Map") || strings.Contains(typ, "History") {
+						for _, n := range vs.Names {
+							bad = append(bad, filepath.Base(name)+": "+n.Name+" "+strings.TrimSpace(typ))
+						}
+					}
+				}
+			}
 		}
 	}
-	t.Fatal("a closed, dropped History is still referenced after its guards were used")
+	return bad
 }
 
 // twoPartDriver splits every operation into two calls (parts), as a write
