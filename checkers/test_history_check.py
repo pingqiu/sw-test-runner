@@ -2093,6 +2093,37 @@ class C0Resolved(unittest.TestCase):
 
 
 
+class KillTouches(unittest.TestCase):
+    """A holder kill or restart touches the volume its holder serves (the
+    product's kill_scope): two observations of that volume around it are no
+    baseline pair, while observations of another volume around it still
+    are; a master kill or restart touches no volume."""
+
+    def pairs(self, vol_obs, kill_args, verb='kill'):
+        recs = history(('obs', vol_obs, 4, FILES), (verb, '', kill_args, 'ok'), ('obs', vol_obs, 5, FILES))
+        return hc.baseline(hc.read_history(dump(recs)))
+
+    def test_a_holder_kill_between_observations_of_its_own_volume_is_no_pair(self):
+        checked, f = self.pairs('v1', {'process': 'blockvolume:0', 'volume': 'v1'})
+        self.assertEqual((checked, f), (0, []))
+        checked, f = self.pairs('v1', {'process': 'blockvolume:0', 'volume': 'v1'}, verb='restart')
+        self.assertEqual((checked, f), (0, []))
+
+    def test_red_the_same_kill_between_observations_of_another_volume_is_still_a_pair(self):
+        checked, f = self.pairs('v2', {'process': 'blockvolume:0', 'volume': 'v1'})
+        self.assertEqual(checked, 1)
+        self.assertTrue(f and f[0].startswith('baseline: v2 changed with no operation on it'), f)
+
+    def test_a_master_kill_resets_no_baseline(self):
+        checked, f = self.pairs('v1', {'process': 'blockmaster'})
+        self.assertEqual(checked, 1)
+        self.assertTrue(f and f[0].startswith('baseline: v1 changed'), f)
+
+    def test_a_kill_naming_no_volume_touches_every_volume(self):
+        checked, f = self.pairs('v1', {'process': 'blockvolume:7'})
+        self.assertEqual((checked, f), (0, []))
+
+
 class StoreFault(unittest.TestCase):
     """C6 after a store fault: the requests between a store_pause record and
     the next step must each answer ok, and one at least must run. The paused

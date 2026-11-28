@@ -62,8 +62,10 @@ code is 0 only when every checker passes.
       completing ok or unknown in between; AFTER is the first observation of
       the volume after the refusal's complete, with no operation touching the
       volume invoked in between. An operation touches its volume, a restore
-      also its source, and a fault operation every volume (the history does
-      not map volumes to VMs). Compared, the whole observed state: HEAD
+      also its source, a fault operation every volume (the history does
+      not map volumes to VMs), and a process kill or restart the volumes it
+      reaches (the product's kill_scope: a holder's own volume, the master's
+      none). Compared, the whole observed state: HEAD
       (generation, epoch, holder, state) or the show error's code, HEAD's
       snapshot names (result.snapshots), the control plane's workspace answer (exit, and the stable facts of its
       text: the lease expiry and the validity at query are dropped, and a
@@ -760,10 +762,16 @@ def c7(recs):
 
 def touches(inv, vol):
     """Whether an operation may change volume `vol` as far as the history
-    tells: its own volume, a restore's source, and every volume for a fault
-    operation (a VM fault is not mapped to volumes)."""
+    tells: its own volume, a restore's source, every volume for a fault
+    operation (a VM fault is not mapped to volumes), and for a process kill
+    or restart the volumes it reaches (the product's kill_scope, one
+    definition: a holder's own volume; the master's none; a process it
+    cannot map, every volume)."""
     if inv['verb'] in FAULT_VERBS:
         return True
+    if inv['verb'] in ('kill', 'restart'):
+        scope = kill_scope(inv)
+        return scope is None or vol in scope
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
