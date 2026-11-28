@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,9 +33,15 @@ func inOpAct(seed string) tr.Action {
 // holds its answer until the kill has landed, as the product's operation
 // cut by its holder's death does, so the hit follows from the operation's
 // behaviour and not from the machine's timing; killLandGuard bounds that
-// hold (on expiry it answers ok, and the test sees the kill MISSED).
+// hold (on expiry it answers ok, and the test sees the kill MISSED). With
+// the hold the delay only has to give a measurable window: 5 ms.
+// nightOpDelay is the seed-1 night's (inOpNight1): its kills' recorded
+// offsets (permille of a 50 ms window, 10 to 40 ms) stay well past a 1 ms
+// replayed operation, so a replay that does not hold misses them by
+// construction (replayMissing).
 const (
-	fakeOpDelay   = 50 * time.Millisecond
+	fakeOpDelay   = 5 * time.Millisecond
+	nightOpDelay  = 50 * time.Millisecond
 	killLandGuard = 10 * time.Second
 )
 
@@ -42,7 +49,12 @@ const (
 // write and snapshot taking fakeOpDelay) and returns its records.
 func inOpRun(t *testing.T, seed string) ([]tr.HistoryRecord, string, *faultFake) {
 	t.Helper()
-	f := &faultFake{opDelay: fakeOpDelay}
+	return inOpRunWith(t, seed, fakeOpDelay)
+}
+
+func inOpRunWith(t *testing.T, seed string, delay time.Duration) ([]tr.HistoryRecord, string, *faultFake) {
+	t.Helper()
+	f := &faultFake{opDelay: delay}
 	f.install(t)
 	actx, p := genRunCtx(t)
 	if _, err := v3GenRun(context.Background(), actx, inOpAct(seed)); err != nil {
@@ -50,6 +62,35 @@ func inOpRun(t *testing.T, seed string) ([]tr.HistoryRecord, string, *faultFake)
 	}
 	_ = actx.History.Close()
 	return records(t, p), p, f
+}
+
+// night1 is the seed-1 in-operation night, recorded once for the package:
+// its bytes, kept in memory (nothing outlives the test run), written into
+// each test's own temp dir. The replay tests read it and never change it.
+var night1 struct {
+	once sync.Once
+	b    []byte
+}
+
+// inOpNight1 is the seed-1 night's records and a path to its own copy.
+func inOpNight1(t *testing.T) ([]tr.HistoryRecord, string) {
+	t.Helper()
+	night1.once.Do(func() {
+		_, p, _ := inOpRunWith(t, "1", nightOpDelay)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		night1.b = b
+	})
+	if night1.b == nil {
+		t.Fatal("the seed-1 night was not recorded")
+	}
+	p := filepath.Join(t.TempDir(), "night1.jsonl")
+	if err := os.WriteFile(p, night1.b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return records(t, p), p
 }
 
 // excerpt is the records of a history from seq from to seq to, one line each.
@@ -195,7 +236,7 @@ func TestMissedInOpFaultsDoNotCount(t *testing.T) {
 // operations, the kill at the same offset of the same holder, the same
 // store pause and follow-ups; every step matches.
 func TestInOpFaultsReplay(t *testing.T) {
-	_, src, _ := inOpRun(t, "1")
+	_, src := inOpNight1(t)
 	f := &faultFake{opDelay: fakeOpDelay}
 	f.install(t)
 	actx, p := genRunCtx(t)
@@ -287,7 +328,7 @@ func inOpOps(recs []tr.HistoryRecord) map[int]string {
 // both outcomes), counted in the answer, never a silent match
 // (match_inop_hit_differs, not match) and not a failure by itself.
 func TestReplayReportsAnInOpHitThatDiffers(t *testing.T) {
-	recs, src, _ := inOpRun(t, "1")
+	recs, src := inOpNight1(t)
 	ops := inOpOps(recs)
 	if len(ops) != 2 {
 		t.Fatalf("the night's in-op kills that hit: %v", ops)
@@ -323,7 +364,7 @@ func TestReplayReportsAnInOpHitThatDiffers(t *testing.T) {
 // before (another volume; the same volume before the fault); one
 // downstream on the same volume is in the fault's line.
 func TestReplayInOpHitDiffersOnlyExcusesItsOwnVolumeDownstream(t *testing.T) {
-	recs, src, _ := inOpRun(t, "1")
+	recs, src := inOpNight1(t)
 	ops := inOpOps(recs)
 	first, vol := 0, ""
 	for no, v := range ops {

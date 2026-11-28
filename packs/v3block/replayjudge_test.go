@@ -147,7 +147,7 @@ sys.exit(1 if 'ZZ' in req else 0)
 // history. (With the kind "unknown" any FAIL blocks; a coverage-only FAIL
 // blocks it as well.)
 func TestReplayChecksFailBlocksMatchInOpHitDiffers(t *testing.T) {
-	_, src, _ := inOpRun(t, "1")
+	_, src := inOpNight1(t)
 	f := &faultFake{opDelay: time.Millisecond, noHold: true}
 	f.install(t)
 	run := func(verdict string) (map[string]string, error) {
