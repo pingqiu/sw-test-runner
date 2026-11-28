@@ -124,6 +124,7 @@ class AutoP2(unittest.TestCase):
 
     def test_scenario_packages_checker_and_guards_operator_command(self):
         source = (Path(__file__).resolve().parents[2] / "scenarios/v3block/r4-node-loss.yaml").read_text()
+        source += (Path(__file__).resolve().parents[2]/'scenarios/v3block/includes/r4-standalone-start.yaml').read_text()
         self.assertIn('failover_mode: "automatic"', source)
         self.assertIn('git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py"', source)
         self.assertIn("[ '{{ failover_mode }}' = operator ] || exit 0\n", source)

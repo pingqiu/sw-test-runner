@@ -1,0 +1,151 @@
+# Shared standalone setup; one owner for the documented product argv.
+phases:
+  - name: preflight
+    actions:
+      - action: exec
+        node: controller
+        timeout: 60s
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.RF: "{{ rf }}"
+        env.MODE: "{{ failover_mode }}"
+        cmd: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          def show(repo,sha,path):
+              if not re.fullmatch('[0-9a-f]{40}',sha): raise SystemExit('full source pin required')
+              return subprocess.check_output(['git','-C',repo,'show',sha+':'+path],text=True,timeout=20)
+          src,head,rs,rhead=(os.environ[k] for k in ('SRC','HEAD','RS','RHEAD'))
+          assert os.environ['RF'] in ('2','3'), 'rf must be 2 or 3'
+          assert os.environ['MODE'] in ('automatic','operator'), 'invalid failover_mode'
+          files={p:show(src,head,p) for p in ('cmd/blockvolume/main.go','cmd/blockmaster/main.go','cmd/sw-block/failover.go','docs/standalone-deployment.md','deploy/systemd/sw-blockvolume.service')}
+          for flag in ('master-tls-cert','master-tls-key','master-ca','nvme-listen','replication-ack'):
+              assert '"'+flag+'"' in files['cmd/blockvolume/main.go'], 'removed volume flag '+flag
+          for flag in ('failback-runtime-rpc','tls-cert','role-file','audit-log','launcher-replication-ack','lifecycle-product-loop-interval'):
+              assert '"'+flag+'"' in files['cmd/blockmaster/main.go'], 'removed master flag '+flag
+          for flag in ('target-data','target-ctrl','expect-current','confirm-old-node-off'):
+              assert '"'+flag+'"' in files['cmd/sw-block/failover.go'], 'removed failover flag '+flag
+          assert 'RestartPreventExitStatus=78' in files['deploy/systemd/sw-blockvolume.service']
+          from pathlib import Path
+          for p in ('scenarios/v3block/r4-node-loss.yaml','scenarios/v3block/r4.sh','scripts/r4/auto-p2.py','scripts/r4/guest-io.py','scenarios/v3block/includes/r4-standalone-start.yaml','scenarios/v3block/includes/r4-standalone-collect.yaml'):
+              assert Path(rs,p).read_text()==show(rs,rhead,p), 'runner working copy differs from pin: '+p
+          print('PREFLIGHT PASS product='+head+' runner='+rhead+' rf='+os.environ['RF'])
+          PY
+  - name: build
+    actions:
+      # Binaries and certificates are made once on the controller, from the
+      # pinned commits (git archive / git show, never the working tree), and
+      # uploaded (the runner repository is private: no fetch on the VMs).
+      - action: exec
+        node: controller
+        timeout: 20m
+        env.SRC: "{{ product_src }}"
+        env.HEAD: "{{ product_head }}"
+        env.RS: "{{ runner_src }}"
+        env.RHEAD: "{{ runner_head }}"
+        env.L: "/tmp/r4-{{ run_id }}-rf{{ rf }}"
+        cmd: |
+          set -eu
+          hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
+          hex40 "$HEAD" || { echo "product_head is not a full sha" >&2; exit 2; }
+          hex40 "$RHEAD" || { echo "runner_head is not a full sha" >&2; exit 2; }
+          git -C "$SRC" cat-file -e "$HEAD^{commit}"
+          git -C "$RS" cat-file -e "$RHEAD^{commit}"
+          git -C "$RS" diff --quiet "$RHEAD" -- scenarios/v3block/r4-node-loss.yaml || { echo "the scenario being run is not runner_head's" >&2; exit 2; }
+          [ ! -e "$L" ] || { echo "$L exists: not fresh work" >&2; exit 2; }
+          mkdir -p "$L/src" "$L/pkg/bin"
+          git -C "$SRC" archive -o "$L/src.tar" "$HEAD" && tar -xf "$L/src.tar" -C "$L/src"
+          for b in blockmaster blockvolume sw-block; do (cd "$L/src" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$L/pkg/bin/$b" ./cmd/$b); done
+          git -C "$RS" show "$RHEAD:scenarios/v3block/r4.sh" > "$L/pkg/r4.sh"
+          git -C "$RS" show "$RHEAD:scripts/r4/auto-p2.py" > "$L/pkg/auto-p2.py"
+          git -C "$RS" show "$RHEAD:scripts/r4/guest-io.py" > "$L/pkg/guest-io.py"
+          # Development certificates from the product's script (files only):
+          # blockmaster's carries DNS:blockmaster, so every node maps that
+          # name to node-1's private address and dials blockmaster by name.
+          SW_BLOCK_TLS_APPLY=0 bash "$L/src/scripts/k8s-alpha-certs.sh" standalone "$L/pkg/tls" s1 s2 s3 >/dev/null
+          (cd "$L/pkg" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+          tar -C "$L/pkg" -czf "$L/r4-pkg.tgz" .
+          { echo "product_head=$HEAD"; echo "runner_head=$RHEAD"; go version
+            grep -E ' \./(bin/|r4\.sh|auto-p2\.py|guest-io\.py)' "$L/pkg/SHA256SUMS"; sha256sum "$L/r4-pkg.tgz" | sed "s#$L/##"; } > "$L/provenance.txt"
+          cat "$L/provenance.txt"
+      - {action: upload_path, node: node-1, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      - {action: upload_path, node: node-2, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      - {action: upload_path, node: node-3, path: "/tmp/r4-{{ run_id }}-rf{{ rf }}/r4-pkg.tgz", dest: "/tmp/r4-{{ run_id }}-rf{{ rf }}.tgz"}
+      # Fresh work on every host, the package checked against its SHA256SUMS.
+      - {action: exec, node: node-1, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      - {action: exec, node: node-2, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      - {action: exec, node: node-3, cmd: "T={{ run_id }}-rf{{ rf }}; X=/tmp/r4-$T-x; mkdir $X && tar -xzf /tmp/r4-$T.tgz -C $X && sudo bash $X/r4.sh install $X $T {{ n1_data }}"}
+      # Initial and replacement guests use the holder's local kernel target.
+      - {action: exec, node: node-1, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - {action: exec, node: node-2, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - {action: exec, node: node-3, cmd: "sudo bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh client-check"}
+      - action: exec
+        node: controller
+        cmd: >-
+          L=/tmp/r4-{{ run_id }}-rf{{ rf }};
+          python3 $L/pkg/guest-io.py --config $L/guest/config.json init
+          --tag {{ run_id }}-rf{{ rf }} --rf {{ rf }} --user '{{ ssh_user }}' --key '{{ ssh_key }}'
+          --node node-1 '{{ n1_ip }}' '{{ n1_data }}' '{{ n1_host_key }}'
+          --node node-2 '{{ n2_ip }}' '{{ n2_data }}' '{{ n2_host_key }}'
+          --node node-3 '{{ n3_ip }}' '{{ n3_data }}' '{{ n3_host_key }}'
+          --data-port {{ data_port }} --nvme-port {{ nvme_port }} --writes {{ writes }}
+
+  - name: start
+    actions:
+      # blockmaster on node-1, the volume's replicas per rf, each as the run's
+      # own persistent unit (see the header).
+      - action: exec
+        node: node-1
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh spec $T {{ rf }} {{ n1_data }} {{ n2_data }} {{ n3_data }} {{ data_port }} {{ ctrl_port }} &&
+          sudo bash $W/r4.sh unit $T master -- $W/bin/blockmaster
+          --authority-store $W/master/authority --lifecycle-store $W/master/lifecycle
+          --cluster-spec $W/cluster-spec.yaml --expected-slots-per-volume {{ rf }}
+          --lifecycle-product-loop-interval 100ms
+          --launcher-replication-ack sync-quorum --listen 0.0.0.0:{{ master_port }}
+          --tls-cert $W/tls/master.crt --tls-key $W/tls/master.key --tls-client-ca $W/tls/ca.crt
+          --role-file $W/tls/roles --audit-log $W/master/audit.jsonl --failback-runtime-rpc &&
+          sudo bash $W/r4.sh start $T master
+      - action: exec
+        node: node-2
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s2 --volume-id v1 --replica-id r1
+          --data-addr {{ n2_data }}:{{ data_port }} --ctrl-addr {{ n2_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s2.crt --master-tls-key $W/tls/node-s2.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      - action: exec
+        node: node-3
+        timeout: 2m
+        cmd: >-
+          T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T; R=$([ {{ rf }} = 3 ] && echo r3 || echo r2);
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s3 --volume-id v1 --replica-id $R
+          --data-addr {{ n3_data }}:{{ data_port }} --ctrl-addr {{ n3_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s3.crt --master-tls-key $W/tls/node-s3.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      - action: exec
+        node: node-1
+        timeout: 2m
+        cmd: >-
+          [ {{ rf }} = 3 ] || exit 0; T={{ run_id }}-rf{{ rf }}; W=/var/lib/r4/$T;
+          sudo bash $W/r4.sh unit $T volume -- $W/bin/blockvolume --master blockmaster:{{ master_port }}
+          --server-id s1 --volume-id v1 --replica-id r2
+          --data-addr {{ n1_data }}:{{ data_port }} --ctrl-addr {{ n1_data }}:{{ ctrl_port }} --status-addr 127.0.0.1:{{ status_port }}
+          --durable-root $W/vol --durable-impl walstore --durable-blocks 65536 --durable-blocksize 4096 --replication-ack sync-quorum
+          --nvme-listen 127.0.0.1:{{ nvme_port }} --nvme-subsysnqn nqn.2026-11.io.seaweedfs:r4-$T
+          --master-tls-cert $W/tls/node-s1.crt --master-tls-key $W/tls/node-s1.key --master-ca $W/tls/ca.crt &&
+          sudo bash $W/r4.sh start $T volume
+      # r1 primary at epoch 1 (creation complete: its first ready answer).
+      - {action: exec, node: node-2, timeout: 3m, cmd: "bash /var/lib/r4/{{ run_id }}-rf{{ rf }}/r4.sh wait-role 'curl -sf --max-time 5 http://127.0.0.1:{{ status_port }}/status?volume=v1' primary 1 150"}
+

@@ -51,7 +51,7 @@ class R4CloudPack(unittest.TestCase):
                                 h["id"]: "ssh-ed25519 TEST-PIN-" + h["id"] for h in self.hosts})
         self.calls = []
 
-    def run_pack(self, first_scenario_exit=0, degraded_status=None, long_exit=2):
+    def run_pack(self, first_scenario_exit=0, degraded_status=None, long_exit=2, **options):
         (self.root / "inventory.json").write_text(json.dumps(dict(
             target="azure", hosts=self.hosts,
             managed_resource_ids=[h["resource_id"] for h in self.hosts])))
@@ -74,7 +74,7 @@ class R4CloudPack(unittest.TestCase):
                 patch.object(pack.subprocess, "check_output", side_effect=git), \
                 patch.object(pack.time, "monotonic", side_effect=[0, 0, 0, 301]), \
                 patch.object(pack.time, "sleep"):
-            return pack.main(self.root)
+            return pack.main(self.root, **options)
 
     def test_captured_imds404_degraded_done_reaches_both_rounds(self):
         # Captured from the rejected Azure bootstrap: exit 2, done, no errors.
@@ -199,6 +199,17 @@ class R4CloudPack(unittest.TestCase):
         self.assertIn("R4 launcher refuses Python optimization", result.stderr)
         self.assertNotIn("FileNotFoundError", result.stderr)
 
+
+
+
+    def test_quorum_rows_forward_the_explicit_policy_to_both_rf_rounds(self):
+        policy=dict(write_budget_ms=5000,resume_budget_ms=10000,budget_ref='test-only-policy')
+        self.assertEqual(self.run_pack(scenario='scenarios/v3block/quorum-stall.yaml',extra_env=policy),0)
+        calls=[a for a in self.calls if a[0]==str(self.root/'swblock')]
+        self.assertEqual(len(calls),2)
+        for call in calls:
+            self.assertTrue(any(v.replace(chr(92),'/').endswith('scenarios/v3block/quorum-stall.yaml') for v in call))
+            for k,v in policy.items():self.assertIn(str(k)+'='+str(v),call)
 
 if __name__ == "__main__":
     unittest.main()
