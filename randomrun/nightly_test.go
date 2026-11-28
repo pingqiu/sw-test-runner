@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -124,7 +125,14 @@ func TestNightWithFaultRunsNeedsAnUnknownResolved(t *testing.T) {
 		"a checks.json that is no JSON": {{Exit: 0, Coverage: fault, Checks: writeJSON(t, "checks.json", "x"), History: h}},
 	} {
 		r := Judge(7, runs)
-		if r.Verdict != "FAIL" || len(r.Findings) != 1 {
+		// The unknowns rule's finding, once (a failing run adds its own line).
+		n := 0
+		for _, f := range r.Findings {
+			if strings.Contains(f, "no run's C6 resolved an unknown") {
+				n++
+			}
+		}
+		if r.Verdict != "FAIL" || n != 1 {
 			t.Errorf("%s: night %s %v", name, r.Verdict, r.Findings)
 		}
 	}
@@ -234,5 +242,31 @@ func TestKillHitsNeverSatisfyTheUnknownsRule(t *testing.T) {
 	rep = Judge(7, []NightRun{{Exit: 0, Coverage: paused, Checks: none, History: h}})
 	if rep.Verdict != "FAIL" {
 		t.Fatalf("a hit cell alone satisfied the rule: %v", rep.Findings)
+	}
+}
+
+// The union holds every cell any run reached, a fault cell too: a fault
+// cell one run lists never reached and another run reached is reached in
+// the union (red control: the union of before summed only the ordinary
+// cells, and listed it never reached). And the night records why it
+// FAILs: each failing run's line, with its index, seed and error.
+func TestUnionHoldsAFaultCellAnyRunReached(t *testing.T) {
+	h, ck := historyFile(t, "C0"), checksFile(t, "unknowns resolved: 1")
+	hitCell := "kill_during|v3_op_write|hit"
+	reached := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"cells_never_reached": []string{}, "fault_cells": map[string]int{"kill|p0": 1, hitCell: 1}})
+	missed := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"cells_never_reached": []string{hitCell, "kill|p9"}, "fault_cells": map[string]int{"kill|p0": 1, "kill_during|v3_op_write|missed": 1}})
+	rep := Judge(7, []NightRun{{Index: 0, Seed: 11, Exit: 0, Coverage: reached, Checks: ck, History: h}, {Index: 1, Seed: 12, Exit: 0, Coverage: missed, Checks: ck, History: h}})
+	if rep.Verdict != "PASS" || rep.UnionFaultCells[hitCell] != 1 || slices.Contains(rep.UnionNeverReached, hitCell) {
+		t.Fatalf("a hit one run reached: %s never %v fault cells %v", rep.Verdict, rep.UnionNeverReached, rep.UnionFaultCells)
+	}
+	if !slices.Equal(rep.UnionNeverReached, []string{"kill|p9"}) {
+		t.Fatalf("a fault cell no run reached is never reached: %v", rep.UnionNeverReached)
+	}
+	// A failing run's reason is a night finding.
+	rep = Judge(7, []NightRun{{Index: 0, Seed: 11, Exit: 0, Coverage: reached, Checks: ck, History: h}, {Index: 4, Seed: 15, Exit: 1, Coverage: reached, Checks: ck, History: h}})
+	if rep.Verdict != "FAIL" || len(rep.Findings) != 1 || rep.Findings[0] != "run 4 (seed 15) FAILs: run exited 1" {
+		t.Fatalf("the night's reason: %s %v", rep.Verdict, rep.Findings)
 	}
 }

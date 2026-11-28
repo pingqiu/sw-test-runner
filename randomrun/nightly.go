@@ -135,9 +135,16 @@ type NightReport struct {
 	NightlySeed       uint64         `json:"nightly_seed"`
 	Runs              []NightRun     `json:"runs"`
 	UnionCells        map[string]int `json:"union_cells"`
+	// UnionFaultCells sums the runs' fault cells (kill|p, while_down|a, the
+	// in-operation hit cells): a run's cells_never_reached lists fault cells
+	// too, and a cell is reached in the union when any run reached it, an
+	// ordinary cell or a fault cell.
+	UnionFaultCells   map[string]int `json:"union_fault_cells,omitempty"`
 	UnionNeverReached []string       `json:"union_cells_never_reached"`
 	Verdict           string         `json:"verdict"`
-	Findings          []string       `json:"findings,omitempty"` // night-level reasons for FAIL
+	// Findings are the night's reasons for FAIL: each failing run's (its
+	// index, seed and error) and the night-level rules'.
+	Findings []string `json:"findings,omitempty"`
 	// InOp are the night's in-operation fault hits, one line per cell, beside
 	// the unknowns rule: they neither satisfy nor replace it.
 	InOp []string `json:"in_op,omitempty"`
@@ -208,6 +215,12 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 			for k, v := range cov.Cells {
 				rep.UnionCells[k] += v
 			}
+			for k, v := range cov.Faults {
+				if rep.UnionFaultCells == nil {
+					rep.UnionFaultCells = map[string]int{}
+				}
+				rep.UnionFaultCells[k] += v
+			}
 			for _, c := range cov.Never {
 				never[c]++
 			}
@@ -274,13 +287,14 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 		}
 		if r.Verdict != "PASS" {
 			rep.Verdict = "FAIL"
+			rep.Findings = append(rep.Findings, fmt.Sprintf("run %d (seed %d) FAILs: %s", r.Index, r.Seed, r.Error))
 		}
 		rep.Runs = append(rep.Runs, r)
 	}
 	// A cell is never reached in the union when some run reports it unreached
-	// and no run reached it.
+	// and no run reached it, as an ordinary cell or as a fault cell.
 	for c := range never {
-		if rep.UnionCells[c] == 0 {
+		if rep.UnionCells[c] == 0 && rep.UnionFaultCells[c] == 0 {
 			rep.UnionNeverReached = append(rep.UnionNeverReached, c)
 		}
 	}

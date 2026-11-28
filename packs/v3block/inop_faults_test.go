@@ -24,11 +24,18 @@ func inOpAct(seed string) tr.Action {
 	return a
 }
 
+// fakeOpDelay is how long a fake write or snapshot takes between its invoke
+// and its answer: long against the platform's timer granularity (about
+// 16 ms on Windows), so the shortest measured call and the next one differ
+// by less than the kill's margin (at most 800/1000 of the shortest) and a
+// kill timed into the fake lands inside by construction.
+const fakeOpDelay = 50 * time.Millisecond
+
 // inOpRun runs a fault run with in-operation faults over the fake (each
-// write and snapshot taking 20 ms) and returns its records.
+// write and snapshot taking fakeOpDelay) and returns its records.
 func inOpRun(t *testing.T, seed string) ([]tr.HistoryRecord, string, *faultFake) {
 	t.Helper()
-	f := &faultFake{opDelay: 20 * time.Millisecond}
+	f := &faultFake{opDelay: fakeOpDelay}
 	f.install(t)
 	actx, p := genRunCtx(t)
 	if _, err := v3GenRun(context.Background(), actx, inOpAct(seed)); err != nil {
@@ -143,15 +150,20 @@ func TestInOpFaultsHitByConstruction(t *testing.T) {
 	}
 }
 
-// A MISSED fault never counts: with operations that take no measurable
-// time the kill finds no duration to land in and never fires before its
-// restart: recorded MISSED, counted apart, and the hit cell is reported
-// never reached (red control of the coverage rule).
+// A MISSED fault never counts: a kill timed into an action no operation of
+// the run ever is (no target: none is proposed, none can be forced) never
+// fires before its restart: recorded MISSED, counted apart ("kill_during|v3_op_none|missed"), and
+// its hit cell is reported never reached (red control of the coverage
+// rule). Deterministic: no timing decides it (a kill landing after the
+// operation's completion is MISSED too: randomrun's
+// TestKillDuringLandsInsideTheOperation).
 func TestMissedInOpFaultsDoNotCount(t *testing.T) {
-	f := &faultFake{}
+	f := &faultFake{opDelay: fakeOpDelay}
 	f.install(t)
 	actx, p := genRunCtx(t)
-	if _, err := v3GenRun(context.Background(), actx, inOpAct("1")); err != nil {
+	act := inOpAct("1")
+	act.Params["fault_during"] = "v3_op_none"
+	if _, err := v3GenRun(context.Background(), actx, act); err != nil {
 		t.Fatal(err)
 	}
 	_ = actx.History.Close()
@@ -166,8 +178,9 @@ func TestMissedInOpFaultsDoNotCount(t *testing.T) {
 		}
 	}
 	never := fmt.Sprint(cov["cells_never_reached"])
-	if missed == 0 || !strings.Contains(never, "kill_during|v3_op_write|hit") {
-		t.Fatalf("%d missed, never reached %s", missed, never)
+	cells, _ := cov["fault_cells"].(map[string]any)
+	if missed != 1 || !strings.Contains(never, "kill_during|v3_op_none|hit") || cells["kill_during|v3_op_none|missed"] == nil {
+		t.Fatalf("%d missed, never reached %s, cells %v", missed, never, cells)
 	}
 }
 
@@ -176,7 +189,7 @@ func TestMissedInOpFaultsDoNotCount(t *testing.T) {
 // store pause and follow-ups; every step matches.
 func TestInOpFaultsReplay(t *testing.T) {
 	_, src, _ := inOpRun(t, "1")
-	f := &faultFake{opDelay: 20 * time.Millisecond}
+	f := &faultFake{opDelay: fakeOpDelay}
 	f.install(t)
 	actx, p := genRunCtx(t)
 	out, err := genRunner("v3_gen_replay", "host", &blockModel{}).Replay(context.Background(), actx, src)

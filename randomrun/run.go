@@ -775,14 +775,16 @@ func (f *faultRun) run(ctx context.Context, actx *tr.ActionContext, e FaultEvent
 		if !f.fired[e.Process] {
 			// The kill during an operation never fired (no target operation
 			// before its restart): MISSED, and nothing to restart.
+			target := ""
 			for _, a := range f.armed {
 				if a.Action == FaultKillDuring && a.Process == e.Process {
+					target = a.Target
 					f.disarm(a)
 					break
 				}
 			}
 			if f.gen != nil {
-				f.gen.inOp(FaultKillDuring, "", false)
+				f.gen.inOp(FaultKillDuring, target, false)
 			}
 			return actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_during", Result: map[string]any{
 				"after_op": e.AfterOp, "scheduled": e.Process, "hit": false, "why": "MISSED: no target operation before its restart"}})
