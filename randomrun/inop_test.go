@@ -74,7 +74,18 @@ func (x *inOpRunner) runner(d Driver) Runner {
 	ok := func() string { return tr.OutcomeOK }
 	return Runner{Name: "t", Node: "n", Driver: d, Handlers: map[string]tr.ActionHandlerFunc{
 		"write": op("write"), "snapshot": op("snapshot"),
-		"kill": rec(VerbKill, func() string { x.mu.Lock(); x.killed = true; x.mu.Unlock(); return tr.OutcomeOK }),
+		// The kill lands when its handler is called, before its own record:
+		// an operation that checks after that answers unknown, and its
+		// completion record waits for the kill's invocation record (one
+		// history), so the records say hit. Set inside out() instead, a slow
+		// write of the kill's record (a slow disk's fsync) could let the
+		// operation answer ok after the kill's invocation: a flaky fake.
+		"kill": func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			x.mu.Lock()
+			x.killed = true
+			x.mu.Unlock()
+			return rec(VerbKill, ok)(ctx, actx, act)
+		},
 		"restart": rec(VerbRestart, ok),
 		"pause":   rec(VerbFaultApply, func() string { x.paused = true; return tr.OutcomeOK }),
 		"cont":    rec(VerbFaultRestore, func() string { x.paused = false; return tr.OutcomeOK }),
@@ -350,5 +361,38 @@ func TestKillDuringIsTimedFromTheInvocation(t *testing.T) {
 		if r.Verb == "fault_during" && r.Result["hit"] != true {
 			t.Fatalf("%v", r.Result)
 		}
+	}
+}
+
+// The test seam: the handlers of the operation a kill is timed into see
+// KillTimedInto(ctx) true; an ordinary step's do not. It changes nothing
+// else: the kill, its offset and the records are those of
+// TestKillDuringLandsInsideTheOperation.
+func TestKillTimedIntoMarksOnlyTheInOpOperation(t *testing.T) {
+	x := &inOpRunner{opTime: 100 * time.Millisecond}
+	r := x.runner(toyDriver{})
+	var seen []bool
+	inner := r.Handlers["write"]
+	r.Handlers["write"] = func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		seen = append(seen, KillTimedInto(ctx))
+		return inner(ctx, actx, act)
+	}
+	actx, _ := rerunHistory(t)
+	defer actx.History.Close()
+	e := FaultEvent{AfterOp: 0, Action: FaultKillDuring, Process: "p0", Target: "write", Permille: 500}
+	fr := newFaultRun(r, []FaultEvent{e}, nil, map[string]any{}, nil)
+	fr.inOpRecs = map[int]inOpRecord{1: {Action: FaultKillDuring, AfterOp: 0, OpNo: 1, Process: "p0", OffsetMs: 20}}
+	fr.arm(e)
+	if got, err := fr.stepOp(context.Background(), actx, r, Op{No: 1, Action: "write", Volume: "v1", Params: map[string]string{"volume": "v1"}}); err != nil || got != tr.OutcomeUnknown {
+		t.Fatalf("in-op write: %q %v", got, err)
+	}
+	if _, err := r.Exec(context.Background(), actx, Op{No: 2, Action: "write", Volume: "v1", Params: map[string]string{"volume": "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || !seen[0] || seen[1] {
+		t.Fatalf("KillTimedInto per write call: %v, want [true false]", seen)
+	}
+	if KillTimedInto(context.Background()) {
+		t.Fatal("a plain context is marked")
 	}
 }

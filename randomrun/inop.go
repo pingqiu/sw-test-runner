@@ -33,6 +33,13 @@ package randomrun
 //
 // A replay re-executes both from their records: the same operation number,
 // process, offset and follow-ups.
+//
+// The handlers of an operation a kill is timed into are called with a
+// context that says so (KillTimedInto): a product ignores it; an emulation
+// of the product (a test's fake) can hold that operation's answer until the
+// kill has landed, so a hit there follows from the operation's behaviour,
+// not from the machine's timing. Nothing else changes: the offset, its
+// timing and the records are the same with or without a reader of it.
 
 import (
 	"bufio"
@@ -225,6 +232,15 @@ func (f *faultRun) expire(actx *tr.ActionContext, opno int) error {
 	return nil
 }
 
+type killTimedKey struct{}
+
+// KillTimedInto reports whether ctx is that of an operation a kill_during
+// is timed into (killDuring): for an emulation of the product only.
+func KillTimedInto(ctx context.Context) bool {
+	v, _ := ctx.Value(killTimedKey{}).(bool)
+	return v
+}
+
 // disarm drops an armed event once it fired.
 func (f *faultRun) disarm(e FaultEvent) {
 	f.armed = slices.DeleteFunc(f.armed, func(a FaultEvent) bool { return a == e })
@@ -351,7 +367,7 @@ func (f *faultRun) killDuring(ctx context.Context, actx *tr.ActionContext, o Op,
 		killOut, killErr = kh(ctx, &kactx, tr.Action{Action: kill.Action, Node: f.r.Node, Params: kill.Params})
 	}()
 	hk := &AttemptHooks{}
-	outcome, n, took, err := f.r.stepWith(ctx, actx, o, hk)
+	outcome, n, took, err := f.r.stepWith(context.WithValue(ctx, killTimedKey{}, true), actx, o, hk)
 	actx.History.OnInvoke(nil)
 	close(opDone)
 	wg.Wait()

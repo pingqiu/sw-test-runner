@@ -25,11 +25,15 @@ func inOpAct(seed string) tr.Action {
 }
 
 // fakeOpDelay is how long a fake write or snapshot takes between its invoke
-// and its answer: long against the platform's timer granularity (about
-// 16 ms on Windows), so the shortest measured call and the next one differ
-// by less than the kill's margin (at most 800/1000 of the shortest) and a
-// kill timed into the fake lands inside by construction.
-const fakeOpDelay = 50 * time.Millisecond
+// and its answer. An operation a kill is timed into (randomrun.KillTimedInto)
+// holds its answer until the kill has landed, as the product's operation
+// cut by its holder's death does, so the hit follows from the operation's
+// behaviour and not from the machine's timing; killLandGuard bounds that
+// hold (on expiry it answers ok, and the test sees the kill MISSED).
+const (
+	fakeOpDelay   = 50 * time.Millisecond
+	killLandGuard = 10 * time.Second
+)
 
 // inOpRun runs a fault run with in-operation faults over the fake (each
 // write and snapshot taking fakeOpDelay) and returns its records.

@@ -113,6 +113,16 @@ func (f *faultFake) install(t *testing.T) {
 				seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"],
 					Args: cutArgs(name, act)})
 				time.Sleep(f.opDelay)
+				if randomrun.KillTimedInto(ctx) {
+					// A kill is timed into this operation: like the product's
+					// operation cut by its holder's death, it holds its answer
+					// until the kill has landed (or the guard), whatever the
+					// machine's timing. A guard expiry answers ok: the test
+					// then sees the kill MISSED and fails.
+					for guard := time.Now().Add(killLandGuard); f.kills.Load() == k0 && time.Now().Before(guard); {
+						time.Sleep(time.Millisecond)
+					}
+				}
 				if f.kills.Load() != k0 || (name == "v3_op_snapshot" && f.storePaused.Load()) {
 					_ = actx.History.Complete(seq, tr.OutcomeUnknown, map[string]any{"detail": "fake: cut by a fault"})
 					return map[string]string{"value": tr.OutcomeUnknown, "detail": "fake: cut by a fault"}, nil
@@ -137,7 +147,6 @@ func (f *faultFake) install(t *testing.T) {
 			p := act.Params["process"]
 			f.log = append(f.log, verb+" "+p)
 			if verb == FaultKill {
-				f.kills.Add(1)
 				if f.down != "" {
 					f.maxDown = 2
 				}
@@ -148,6 +157,9 @@ func (f *faultFake) install(t *testing.T) {
 				f.ready = append(f.ready, act.Params["ready_seconds"])
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Process." + verb, Verb: verb, Args: map[string]any{"process": p}})
+			if verb == FaultKill {
+				f.kills.Add(1) // after its invocation record: an operation it cuts completes after it
+			}
 			if verb == FaultRestart && f.refuseRestart {
 				_ = actx.History.Complete(seq, tr.OutcomeRefused, nil)
 				return map[string]string{"value": tr.OutcomeRefused}, nil
