@@ -99,7 +99,7 @@ func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op, hk *Atte
 		return "", 0, fmt.Errorf("%s: no handler for %s", r.Name, o.Action)
 	}
 	if actx.History != nil {
-		leave, ok := enter(&opGuard, actx.History)
+		leave, ok := enter(opGuard, actx.History)
 		if !ok {
 			return "", 0, fmt.Errorf("%s: %s %s: %w", r.Name, o.Action, o.Volume, errTwoOperations)
 		}

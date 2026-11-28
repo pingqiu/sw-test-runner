@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -81,6 +82,27 @@ type History struct {
 	broken error
 	// onInvoke, when set (OnInvoke), is told of each invocation recorded.
 	onInvoke func(HistoryRecord)
+	// guards are the named flags a driver keeps on this history (Guard):
+	// owned by it, they end with it.
+	guards map[string]*atomic.Int32
+}
+
+// Guard is the history's own flag of that name, created on first use: a
+// driver's "one operation at a time" guard lives in the History it guards,
+// so nothing outside it keeps a History alive after it is closed and
+// dropped.
+func (h *History) Guard(name string) *atomic.Int32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.guards == nil {
+		h.guards = map[string]*atomic.Int32{}
+	}
+	g := h.guards[name]
+	if g == nil {
+		g = new(atomic.Int32)
+		h.guards[name] = g
+	}
+	return g
 }
 
 // OnInvoke sets f to be called with each invocation the history records,

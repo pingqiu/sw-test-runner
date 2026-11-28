@@ -50,7 +50,6 @@ import (
 	"os"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
@@ -166,12 +165,15 @@ func AttemptsWith(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandle
 }
 
 // The concurrency guard: at most one operation at a time on a history, and
-// at most one fault beside it.
-var opGuard, faultGuard sync.Map // *tr.History -> *atomic.Int32
+// at most one fault beside it. Each is the History's own flag (Guard), so it
+// ends with the History: no package-level registry keeps a closed one.
+const (
+	opGuard    = "randomrun.operation"
+	faultGuard = "randomrun.fault"
+)
 
-func enter(m *sync.Map, h *tr.History) (func(), bool) {
-	v, _ := m.LoadOrStore(h, new(atomic.Int32))
-	c := v.(*atomic.Int32)
+func enter(name string, h *tr.History) (func(), bool) {
+	c := h.Guard(name)
 	if !c.CompareAndSwap(0, 1) {
 		return nil, false
 	}
@@ -362,7 +364,7 @@ func (f *faultRun) killDuring(ctx context.Context, actx *tr.ActionContext, o Op,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		leave, ok := enter(&faultGuard, actx.History)
+		leave, ok := enter(faultGuard, actx.History)
 		if !ok {
 			killErr = fmt.Errorf("two faults at once beside operation %d", o.No)
 			return
@@ -478,7 +480,7 @@ func (f *faultRun) storePause(ctx context.Context, actx *tr.ActionContext, o Op,
 		if !ok {
 			return fmt.Errorf("no handler for %s", op.Action)
 		}
-		leave, ok := enter(&faultGuard, actx.History)
+		leave, ok := enter(faultGuard, actx.History)
 		if !ok {
 			return fmt.Errorf("two faults at once around operation %d", o.No)
 		}

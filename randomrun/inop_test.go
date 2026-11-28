@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -439,4 +441,41 @@ func TestChecksFailNamesOnlyAViolationAProductFinding(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "the violation(s) of C1 are a product finding") || strings.Contains(err.Error(), "C6 are") {
 		t.Fatalf("%v", err)
 	}
+}
+
+// The guards end with their History: after a History's operation and
+// fault guards were used and it is closed and dropped, nothing keeps it
+// (the garbage collector runs its finalizer). Red control: a
+// package-level registry of guards by History keeps every one forever.
+func TestAClosedHistoryLeavesNoGuardBehind(t *testing.T) {
+	done := make(chan struct{})
+	func() {
+		h, err := tr.OpenHistory(filepath.Join(t.TempDir(), "h.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, g := range []string{opGuard, faultGuard} {
+			leave, ok := enter(g, h)
+			if !ok {
+				t.Fatalf("%s: refused on a fresh history", g)
+			}
+			if _, again := enter(g, h); again {
+				t.Fatalf("%s: a second holder entered", g)
+			}
+			leave()
+		}
+		runtime.SetFinalizer(h, func(*tr.History) { close(done) })
+		if err := h.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		runtime.GC()
+		select {
+		case <-done:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("a closed, dropped History is still referenced after its guards were used")
 }
