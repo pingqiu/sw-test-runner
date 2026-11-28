@@ -35,7 +35,7 @@ class ApprovedQuorumGate(unittest.TestCase):
         p=self.judge('2');self.assertNotEqual(p.returncode,0);self.assertIn('RF2 ACKed',p.stderr)
     def test_test_chosen_fault_markers_cannot_hide_peer_window(self):
         self.seed('2');self.io[3]['ok']=True
-        self.io=[r for r in self.io if r['op'] not in tuple(str(n) for n in range(3,21))]
+        self.io=[r for r in self.io if r['op'] != '20']
         next(r for r in self.phases if r['phase']=='fault')['at_ns']=2500000000
         next(r for r in self.phases if r['phase']=='fault-pending')['at_ns']=2400000000
         self.flush();p=self.judge('2');self.assertNotEqual(p.returncode,0);self.assertIn('RF2 ACKed',p.stderr)
