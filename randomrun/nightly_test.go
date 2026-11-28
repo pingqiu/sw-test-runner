@@ -264,6 +264,11 @@ func TestUnionHoldsAFaultCellAnyRunReached(t *testing.T) {
 	if !slices.Equal(rep.UnionNeverReached, []string{"kill|p9"}) {
 		t.Fatalf("a fault cell no run reached is never reached: %v", rep.UnionNeverReached)
 	}
+	// A night that lists a never-reached fault cell says that nights before
+	// the fix overstated them.
+	if len(rep.Findings) != 1 || !strings.HasPrefix(rep.Findings[0], "note: night verdicts before d105834") {
+		t.Fatalf("the note: %v", rep.Findings)
+	}
 	// A failing run's reason is a night finding.
 	rep = Judge(7, []NightRun{{Index: 0, Seed: 11, Exit: 0, Coverage: reached, Checks: ck, History: h}, {Index: 4, Seed: 15, Exit: 1, Coverage: reached, Checks: ck, History: h}})
 	if rep.Verdict != "FAIL" || len(rep.Findings) != 1 || rep.Findings[0] != "run 4 (seed 15) FAILs: run exited 1" {

@@ -143,11 +143,24 @@ type NightReport struct {
 	UnionNeverReached []string       `json:"union_cells_never_reached"`
 	Verdict           string         `json:"verdict"`
 	// Findings are the night's reasons for FAIL: each failing run's (its
-	// index, seed and error) and the night-level rules'.
+	// index, seed and error) and the night-level rules'; and its notes
+	// ("note: ..."), which decide nothing.
 	Findings []string `json:"findings,omitempty"`
 	// InOp are the night's in-operation fault hits, one line per cell, beside
 	// the unknowns rule: they neither satisfy nor replace it.
 	InOp []string `json:"in_op,omitempty"`
+}
+
+// isFaultCell says whether a coverage cell is a fault cell (generator.go's
+// fault cells: kill|p, restart|p, master_outage|p, while_down|a and the
+// in-operation cells).
+func isFaultCell(c string) bool {
+	for _, p := range []string{FaultKill + "|", FaultRestart + "|", FaultMasterOutage + "|", FaultKillDuring + "|", FaultStorePause + "|", "while_down|"} {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvedPrefix is the C6 finding that counts the unknowns resolved by
@@ -299,6 +312,12 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 		}
 	}
 	slices.Sort(rep.UnionNeverReached)
+	for _, c := range rep.UnionNeverReached {
+		if isFaultCell(c) {
+			rep.Findings = append(rep.Findings, "note: night verdicts before d105834 summed only the ordinary cells into the union, so they listed a fault cell any one run missed as never reached; earlier nights' never-reached fault cells are not evidence of misses")
+			break
+		}
+	}
 	faults, resolved := 0, 0
 	for _, r := range rep.Runs {
 		if r.Faults {

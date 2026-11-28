@@ -54,7 +54,8 @@ PLACEMENT_KEYS = {'verb', 'by', 'field', 'arg', 'outcomes', 'cite', 'what'}
 # checks.json observation.across_master_restart: {fact: (ttl_ns, slack_ns)},
 # a time_derived fact a master restart may move later, within its bound.
 _restart_allow = {}
-RESTART_ALLOW_KEYS = {'fact', 'ttl_seconds', 'slack_seconds', 'cite', 'why'}
+RESTART_ALLOW_KEYS = {'fact', 'state_field', 'states', 'ttl_seconds', 'slack_seconds', 'cite', 'why'}
+RESTART_STATE_KEYS = {'state', 'renews', 'cite'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
 # later) values time alone may step it through.
@@ -97,7 +98,15 @@ def bind(checks):
         extra = set(r) - RESTART_ALLOW_KEYS
         if extra or not isinstance(r.get('ttl_seconds'), int) or not isinstance(r.get('slack_seconds'), int) or r['ttl_seconds'] <= 0 or r['slack_seconds'] < 0:
             raise ValueError('across_master_restart row %r: keys %s outside %s, or a ttl/slack that is not a non-negative int' % (r.get('fact'), sorted(extra), sorted(RESTART_ALLOW_KEYS)))
-        _restart_allow[r['fact']] = (r['ttl_seconds'] * 10**9, r['slack_seconds'] * 10**9)
+        states = r.get('states')
+        if not r.get('state_field') or not isinstance(states, list) or not states:
+            raise ValueError('across_master_restart row %r: its state_field and its states' % r.get('fact'))
+        renews = {}
+        for st in states:
+            if set(st) - RESTART_STATE_KEYS or not isinstance(st.get('renews'), bool) or not st.get('state') or not st.get('cite') or st['state'] in renews:
+                raise ValueError('across_master_restart row %r: state %r: {state, renews (true or false), cite}, once each' % (r.get('fact'), st))
+            renews[st['state']] = st['renews']
+        _restart_allow[r['fact']] = (r['ttl_seconds'] * 10**9, r['slack_seconds'] * 10**9, r['state_field'], renews)
 
 
 # --- observation -----------------------------------------------------------
@@ -230,29 +239,44 @@ def observed_state(obs, parts):
     return state, bad
 
 
-def restart_moved(fact, b, a, restart_wall_ns):
-    """Whether a master restart at restart_wall_ns explains fact moving from
-    b to a: it moved LATER, never earlier, and at most to the restart's wall
-    time + the row's ttl + slack (checks.json across_master_restart)."""
-    if restart_wall_ns is None or fact not in _restart_allow or a is None or b is None:
-        return False
-    ttl, slack = _restart_allow[fact]
-    return b < a <= restart_wall_ns + ttl + slack
+def restart_expiry(before, after, restart_wall_ns):
+    """Across a master restart at restart_wall_ns (checks.json
+    across_master_restart), keyed on the lease STATE: while the lease is in a
+    state that does not renew (revoking, expired: the row's states) in both
+    observations, its expiry is compared, step or no step: True when it moved
+    later or not at all, never earlier, and at most to the restart's wall
+    time + ttl + slack; False otherwise (a lease the restart left never
+    expiring is one that never takes its step). None when it is not compared:
+    no restart wall time (a history before it: the strict rule), no row, a
+    renewing state (granted), a state the row does not list, or a value not
+    recorded."""
+    if restart_wall_ns is None or not isinstance(before, Workspace) or not isinstance(after, Workspace):
+        return None
+    for fact, (ttl, slack, field, renews) in _restart_allow.items():
+        bs, as_ = dict(before[1]).get(field), dict(after[1]).get(field)
+        if renews.get(bs, True) or renews.get(as_, True):
+            return None
+        b, a = (before.clock or {}).get(fact), (after.clock or {}).get(fact)
+        if b is None or a is None:
+            return None
+        return b <= a <= restart_wall_ns + ttl + slack
+    return None
 
 
-def time_explains(key, bv, av, before, after, restart_wall_ns=None):
+def time_explains(key, bv, av, before, after, fact_compared=False):
     """Whether time alone steps a time_derived fact from bv to av: a listed
-    step, its fact equal in both observations (or, across a master restart,
-    moved later within the restart's bound: restart_moved), and the earlier
-    validity not larger than the longest time between the two readings (the
-    later observation's end minus the earlier one's start)."""
+    step, its fact equal in both observations (or already compared across a
+    master restart and found within its bound: fact_compared,
+    restart_expiry), and the earlier validity not larger than the longest
+    time between the two readings (the later observation's end minus the
+    earlier one's start)."""
     if key not in _time_derived:
         return False
     fact, validity, steps = _time_derived[key]
     if (bv, av) not in steps:
         return False
     bc, ac = before.clock or {}, after.clock or {}
-    if bc.get(fact) is None or (bc.get(fact) != ac.get(fact) and not restart_moved(fact, bc.get(fact), ac.get(fact), restart_wall_ns)):
+    if bc.get(fact) is None or (bc.get(fact) != ac.get(fact) and not fact_compared):
         return False
     if bc.get(validity) is None or bc.get('from_ns') is None or ac.get('at_ns') is None:
         return False
@@ -266,8 +290,11 @@ def same_part(part, before, after, restart_wall_ns=None):
     observation.time_derived), every other kept fact equal. Direction
     matters: `before` is the earlier observation. restart_wall_ns is the wall
     time of a master restart between the two (None: none, or not recorded):
-    across it the step's fact may have moved later within its bound
-    (across_master_restart)."""
+    across it, while the lease is in a state that does not renew, its expiry
+    IS compared (restart_expiry), step or no step."""
+    across = restart_expiry(before, after, restart_wall_ns) if part == 'workspace' else None
+    if across is False:
+        return False
     if before == after:
         return True
     if part != 'workspace' or not isinstance(before, Workspace) or not isinstance(after, Workspace):
@@ -279,7 +306,7 @@ def same_part(part, before, after, restart_wall_ns=None):
     for (bk, bv), (ak, av) in zip(bf, af):
         if (bk, bv) == (ak, av):
             continue
-        if bk == ak and not stepped and time_explains(bk, bv, av, before, after, restart_wall_ns):
+        if bk == ak and not stepped and time_explains(bk, bv, av, before, after, across is True):
             stepped = True
             continue
         return False

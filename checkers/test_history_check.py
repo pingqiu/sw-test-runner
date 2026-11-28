@@ -2125,24 +2125,28 @@ class KillTouches(unittest.TestCase):
 
 
 class AcrossMasterRestart(unittest.TestCase):
-    """Across a blockmaster restart between two observations, a lease's
-    expiry may move LATER, never earlier, and at most to the restart's wall
-    time + the TTL + the slack of checks.json across_master_restart (30 s +
-    2 s), with the lease-state step in the time_derived table and every
-    other kept fact equal. A pair across no restart, or across one that
-    records no wall time, keeps the strict rule."""
+    """Across a blockmaster restart between two observations, keyed on the
+    lease STATE (checks.json across_master_restart, its states' renews
+    flags): while the lease is in a state that does not renew (revoking,
+    expired) in both, its expiry is compared, step or no step: later, never
+    earlier, at most the restart's wall time + TTL (30 s) + slack (2 s); in
+    a renewing state (granted) it is not compared. Every other kept fact
+    equal. A pair across no restart, or one that records no wall time,
+    keeps the strict rule."""
 
     W = 1795836860000000000   # the restart's wall time, ns
     E = 1795836866594534158   # the expiry before it
+    S = 10**9
 
     def text(self, state, expiry, validity, holder='r1@1', ack='r1@1 HEAD generation 14'):
         return ['volume: v0 (query snapshot, not authority to serve)', 'replica: r1', 'epoch: 1', 'lease state: %s' % state,
                 'holder: %s (logical replica)' % holder, 'lease expiry_ns: %d; host validity_ns at query: %d' % (expiry, validity),
                 'recorded ACK: %s' % ack, 'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
 
-    def pair(self, after_expiry, restart=True, wall=True, **after):
-        before = {'workspace': {'exit': 0, 'text': self.text('revoking', self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
-        later = {'workspace': {'exit': 0, 'text': self.text('expired', after_expiry, 0, **after)}, 'dirs': WS['dirs'], 'snapshots': []}
+    def pair(self, after_expiry, states=('revoking', 'expired'), restart=True, wall=True, **after):
+        bstate, astate = states
+        before = {'workspace': {'exit': 0, 'text': self.text(bstate, self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
+        later = {'workspace': {'exit': 0, 'text': self.text(astate, after_expiry, 0 if astate == 'expired' else 5, **after)}, 'dirs': WS['dirs'], 'snapshots': []}
         steps = [('obs', 'v0', 1, FILES, before)]
         if restart:
             steps += [('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok')]
@@ -2153,41 +2157,58 @@ class AcrossMasterRestart(unittest.TestCase):
                 r['result'] = {'started_wall_ns': self.W}
         return hc.baseline(hc.read_history(dump(recs)))
 
-    def test_a_later_expiry_within_the_bound_is_no_baseline_change(self):
-        self.assertEqual(self.pair(self.W + 31 * 10**9), (1, []))
-        self.assertEqual(self.pair(self.W + 32 * 10**9), (1, []))   # the bound itself
+    def changed(self, got):
+        checked, f = got
+        return checked == 1 and bool(f) and f[0].startswith('baseline: v0 changed with no operation on it (workspace')
 
-    def test_red_an_expiry_that_moved_earlier_is_a_change(self):
-        checked, f = self.pair(self.E - 10**9)
-        self.assertEqual(checked, 1)
-        self.assertTrue(f and f[0].startswith('baseline: v0 changed with no operation on it (workspace'), f)
+    def test_within_the_ceiling_with_or_without_a_step_is_no_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.W + 31 * self.S, states), (1, []), states)
+            self.assertEqual(self.pair(self.W + 32 * self.S, states), (1, []), states)   # the ceiling itself
+            self.assertEqual(self.pair(self.E, states), (1, []), states)                  # not moved
 
-    def test_red_an_expiry_past_the_restart_plus_ttl_plus_slack_is_a_change(self):
-        checked, f = self.pair(self.W + 32 * 10**9 + 1)
-        self.assertTrue(f and 'workspace' in f[0], f)
+    def test_red_a_revoking_expiry_that_moved_earlier_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking')):
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states)), states)
 
-    def test_red_the_same_later_expiry_with_another_fact_changed_is_a_change(self):
+    def test_red_a_revoking_expiry_past_the_ceiling_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking')):
+            self.assertTrue(self.changed(self.pair(self.W + 32 * self.S + 1, states)), states)
+
+    def test_red_the_stuck_lease_a_far_future_expiry_with_no_step_is_a_change(self):
+        # revoking -> revoking: the step never happens, and the expiry the
+        # restart left is a day away: compared, past the ceiling.
+        self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'))))
+
+    def test_a_granted_lease_expiry_is_not_compared(self):
+        for e in (self.E - 10 * self.S, self.W + 86400 * self.S, self.E):
+            self.assertEqual(self.pair(e, ('granted', 'granted')), (1, []), e)
+
+    def test_red_another_fact_changed_is_a_change(self):
         for other in ({'holder': 'r2@2'}, {'ack': 'r1@1 HEAD generation 15'}):
-            checked, f = self.pair(self.W + 20 * 10**9, **other)
-            self.assertTrue(f and 'workspace' in f[0], (other, f))
+            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, **other)), other)
+            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), **other)), other)
 
     def test_red_a_pair_across_no_master_restart_keeps_the_strict_rule(self):
-        checked, f = self.pair(self.W + 20 * 10**9, restart=False)
-        self.assertTrue(f and 'workspace' in f[0], f)
+        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, restart=False)))       # the step's fact moved
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), restart=False), (1, []))   # no step: the expiry not compared, as before
 
     def test_a_restart_without_its_wall_time_gets_no_allowance(self):
-        checked, f = self.pair(self.W + 20 * 10**9, wall=False)
-        self.assertTrue(f and 'workspace' in f[0], f)
+        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, wall=False)))
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), wall=False), (1, []))
 
     def test_the_row_is_data_and_a_bad_row_does_not_load(self):
         import copy
         checks = json.loads((Path(hc.__file__).resolve().parent.parent / 'packs' / 'v3block' / 'product' / 'checks.json').read_text(encoding='utf-8'))
         row = checks['observation']['across_master_restart'][0]
-        self.assertEqual((row['fact'], row['ttl_seconds'], row['slack_seconds']), ('lease expiry_ns', 30, 2))
-        for seed in ({'ttl_seconds': '30'}, {'slack_seconds': -1}, {'ceiling': 'none'}):
+        self.assertEqual((row['fact'], row['ttl_seconds'], row['slack_seconds'], row['state_field']), ('lease expiry_ns', 30, 2, 'lease state'))
+        self.assertEqual({s['state']: s['renews'] for s in row['states']}, {'granted': True, 'revoking': False, 'expired': False})
+        for seed in (lambda r: r.update(ttl_seconds='30'), lambda r: r.update(slack_seconds=-1), lambda r: r.update(ceiling='none'),
+                     lambda r: r['states'][0].update(renews='yes'), lambda r: r['states'].append(dict(r['states'][1])),
+                     lambda r: r.pop('state_field'), lambda r: r['states'][1].pop('cite')):
             bad = copy.deepcopy(checks)
-            bad['observation']['across_master_restart'][0].update(seed)
-            with self.assertRaises(ValueError, msg=seed):
+            seed(bad['observation']['across_master_restart'][0])
+            with self.assertRaises(ValueError):
                 pb.bind(bad)
         pb.bind(checks)
 
