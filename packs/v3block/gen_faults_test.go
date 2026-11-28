@@ -83,6 +83,7 @@ type faultFake struct {
 	// storePaused: between a store pause and its continue a snapshot answers
 	// unknown (its publish cut). storeCalls logs them.
 	opDelay     time.Duration
+	noHold      bool // an operation a kill is timed into does not hold its answer: the kill may land after it
 	kills       atomic.Int64
 	storePaused atomic.Bool
 	storeCalls  []string
@@ -113,7 +114,7 @@ func (f *faultFake) install(t *testing.T) {
 				seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"],
 					Args: cutArgs(name, act)})
 				time.Sleep(f.opDelay)
-				if randomrun.KillTimedInto(ctx) {
+				if randomrun.KillTimedInto(ctx) && !f.noHold {
 					// A kill is timed into this operation: like the product's
 					// operation cut by its holder's death, it holds its answer
 					// until the kill has landed (or the guard), whatever the

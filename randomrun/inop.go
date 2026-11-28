@@ -189,6 +189,7 @@ type inOpRecord struct {
 	Process   string
 	OffsetMs  int
 	Followups []Op
+	Hit       bool // the record's hit: the fault landed inside the operation
 }
 
 // arm takes an in-operation event after its after_op: it waits for its
@@ -249,6 +250,15 @@ type killTimedKey struct{}
 func KillTimedInto(ctx context.Context) bool {
 	v, _ := ctx.Value(killTimedKey{}).(bool)
 	return v
+}
+
+// seen keeps what an in-operation fault that fired did, by operation
+// number: a replay compares it with the night's record (Replay).
+func (f *faultRun) seen(rec inOpRecord) {
+	if f.inOpSeen == nil {
+		f.inOpSeen = map[int]inOpRecord{}
+	}
+	f.inOpSeen[rec.OpNo] = rec
 }
 
 // disarm drops an armed event once it fired.
@@ -399,6 +409,7 @@ func (f *faultRun) killDuring(ctx context.Context, actx *tr.ActionContext, o Op,
 		"process": target, "offset_ms": offset.Milliseconds(), "kill_outcome": got}
 	hit, why := duringTimes(recs, res)
 	res["hit"], res["why"] = hit, why
+	f.seen(inOpRecord{Action: FaultKillDuring, AfterOp: e.AfterOp, OpNo: o.No, Process: target, OffsetMs: int(offset.Milliseconds()), Hit: hit})
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_during", Volume: o.Volume, Result: res}); err != nil {
 		return "", n, true, err
 	}
@@ -514,6 +525,7 @@ func (f *faultRun) storePause(ctx context.Context, actx *tr.ActionContext, o Op,
 		if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "store_pause", Volume: o.Volume, Result: res}); err != nil {
 			return err
 		}
+		f.seen(inOpRecord{Action: FaultStorePause, AfterOp: e.AfterOp, OpNo: o.No, Process: e.Process, Followups: follow, Hit: hit})
 		if f.gen != nil {
 			f.gen.Fault(FaultStorePause, e.Process)
 			f.gen.inOp(FaultStorePause, o.Action, hit)

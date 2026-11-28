@@ -586,6 +586,7 @@ type faultRun struct {
 	fired      map[string]bool
 	durations  map[string][]time.Duration
 	inOpRecs   map[int]inOpRecord
+	inOpSeen   map[int]inOpRecord // what each in-operation fault that fired did in this run
 	storeBound int
 	post       func(ctx context.Context, actx *tr.ActionContext) error
 	forcing    bool // a target operation is queued for an armed fault

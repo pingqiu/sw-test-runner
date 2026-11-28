@@ -396,3 +396,34 @@ func TestKillTimedIntoMarksOnlyTheInOpOperation(t *testing.T) {
 		t.Fatal("a plain context is marked")
 	}
 }
+
+// Red controls of the replay rule's first condition: every driver decision
+// of an in-op fault must match (inOpDecision): fired at all, the same
+// fault and process, the same offset (a kill), the same follow-ups (a
+// store pause). A differing hit alone is not a decision.
+func TestInOpDecisionMustMatch(t *testing.T) {
+	kill := inOpRecord{Action: FaultKillDuring, OpNo: 5, Process: "p0", OffsetMs: 12, Hit: true}
+	if why := inOpDecision(kill, inOpRecord{Action: FaultKillDuring, OpNo: 5, Process: "p0", OffsetMs: 12}, true); why != "" {
+		t.Fatalf("a differing hit alone is not a decision: %s", why)
+	}
+	for name, c := range map[string]struct {
+		got   inOpRecord
+		fired bool
+	}{
+		"not fired":       {inOpRecord{}, false},
+		"another process": {inOpRecord{Action: FaultKillDuring, Process: "p1", OffsetMs: 12}, true},
+		"another offset":  {inOpRecord{Action: FaultKillDuring, Process: "p0", OffsetMs: 13}, true},
+		"another fault":   {inOpRecord{Action: FaultStorePause, Process: "p0"}, true},
+	} {
+		if inOpDecision(kill, c.got, c.fired) == "" {
+			t.Errorf("%s: not a difference", name)
+		}
+	}
+	store := inOpRecord{Action: FaultStorePause, Process: "filer", Followups: []Op{{Action: "snapshot", Volume: "v1"}}}
+	if inOpDecision(store, inOpRecord{Action: FaultStorePause, Process: "filer", Followups: []Op{{Action: "stop", Volume: "v1"}}}, true) == "" {
+		t.Error("other follow-ups: not a difference")
+	}
+	if why := inOpDecision(store, store, true); why != "" {
+		t.Errorf("the same store pause: %s", why)
+	}
+}
