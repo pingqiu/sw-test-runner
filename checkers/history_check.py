@@ -80,7 +80,13 @@ code is 0 only when every checker passes.
       touching it invoked between them must show the same state; the product
       works in the background (checkpoint publishing, cleaning), and a
       difference there makes C5 UNKNOWN for the run, and so does a history
-      with refusals but no such pair.
+      with refusals but no such pair. ACROSS A MASTER RESTART (a blockmaster
+      restart completed ok between the two observations, its complete's
+      started_wall_ns recorded): a time_derived step whose fact moved is
+      time alone when the fact moved later, never earlier, and at most to
+      that wall time + the row's TTL + slack (checks.json
+      observation.across_master_restart), every other kept fact equal; a
+      restart without its wall time gets no allowance.
       Each refusal belongs to a LIMIT: the generator's gen_step names the
       limit a negative operation probes; other refusals are "ordinary <verb>".
       Every refused attempt of a rerun request is a refusal of its limit
@@ -782,7 +788,35 @@ def observed_state(obs):
     return PRODUCT.observed_state(obs, STATE_PARTS)
 
 
-def state_diff(a, b):
+def master_restarts(recs):
+    """[(complete seq, wall ns or None)] of each master restart completed ok:
+    the wall time from its complete's result.started_wall_ns (None in a
+    history before the field)."""
+    inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}
+    out = []
+    for r in recs:
+        if r['kind'] != 'complete' or r.get('outcome') != 'ok':
+            continue
+        inv = inv_of.get(r.get('of'))
+        if inv is None or inv['verb'] != 'restart' or MASTER is None or (inv.get('args') or {}).get('process') != MASTER:
+            continue
+        w = (r.get('result') or {}).get('started_wall_ns')
+        out.append((r['seq'], w if isinstance(w, int) else None))
+    return out
+
+
+def master_restart_between(restarts, lo, hi):
+    """The wall time (ns) of the latest master restart (master_restarts)
+    between seqs lo and hi; None when there is none, or one of them does not
+    record its wall time (a history before the field: the strict rule, no
+    allowance)."""
+    walls = [w for s, w in restarts if lo < s < hi]
+    if not walls or None in walls:
+        return None
+    return max(walls)
+
+
+def state_diff(a, b, restart_wall_ns=None):
     """The parts in which two comparable states differ, and the parts not
     compared because neither records them, or (None, why) when they cannot be
     compared."""
@@ -794,7 +828,7 @@ def state_diff(a, b):
         return None, 'records %s in one observation only' % ', '.join(one)
     # `a` is the earlier observation: the product reader decides whether the
     # later value is the same state (it may allow a step that time alone makes).
-    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p])], [p for p in STATE_PARTS if p not in sa]
+    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p], restart_wall_ns)], [p for p in STATE_PARTS if p not in sa]
 
 
 def show_part(state, part):
@@ -817,6 +851,7 @@ def baseline(recs):
     """(pairs checked, findings): every two consecutive observations of a
     volume with no operation touching it invoked between them."""
     last, checked, f = {}, 0, []
+    restarts = master_restarts(recs)
     for r in recs:
         if r['kind'] == 'invoke':
             for vol in list(last):
@@ -825,7 +860,7 @@ def baseline(recs):
         elif r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume'):
             vol = r['volume']
             if vol in last:
-                diff, _ = state_diff(observed_state(last[vol]), observed_state(r))
+                diff, _ = state_diff(observed_state(last[vol]), observed_state(r), master_restart_between(restarts, last[vol]['seq'], r['seq']))
                 if diff is not None:
                     checked += 1
                     if diff:
@@ -867,6 +902,7 @@ def c5(recs):
     # "negative not refused" rule reads a request's LAST attempt.
     earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
+    restarts = master_restarts(recs)
     if not refusals:
         return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
@@ -913,7 +949,7 @@ def c5(recs):
             notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
             continue
         b, a = observed_state(before), observed_state(after)
-        diff, missing = state_diff(b, a)
+        diff, missing = state_diff(b, a, master_restart_between(restarts, before['seq'], after['seq']))
         if diff is None:
             notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
             continue

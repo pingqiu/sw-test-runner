@@ -9,7 +9,10 @@ of a kill. Numbers and names a page states live in checks.json, not here.
 
   bind(checks)                  receives checks.json once, at load
   observed_state(obs, parts)    an observation's comparable parts
-  same_part(part, before, after)    whether a later value shows the same state
+  same_part(part, before, after, restart_wall_ns=None)
+                                whether a later value shows the same state
+                                (across a master restart at that wall time:
+                                checks.json observation.across_master_restart)
   show_part(state, part)        one part, short, for a finding
   PLACED_BY_STATUS              verbs of an unknown placed by an observation
   NEEDS_BASELINE                of those, the verbs placed against the one before too
@@ -48,6 +51,10 @@ PLACEMENT_BY = ('list_member',)
 PLACEMENT_CASES = ('present_before', 'others_lost', 'present', 'absent')
 PLACEMENT_OUTCOMES = {'took_effect': 'took effect', 'did_not': 'did not', 'third': 'third', 'not_placed': None}
 PLACEMENT_KEYS = {'verb', 'by', 'field', 'arg', 'outcomes', 'cite', 'what'}
+# checks.json observation.across_master_restart: {fact: (ttl_ns, slack_ns)},
+# a time_derived fact a master restart may move later, within its bound.
+_restart_allow = {}
+RESTART_ALLOW_KEYS = {'fact', 'ttl_seconds', 'slack_seconds', 'cite', 'why'}
 # checks.json observation.time_derived: {field: (fact, validity, steps)}, a
 # workspace fact derived from another fact and the clock, and the (earlier,
 # later) values time alone may step it through.
@@ -79,12 +86,18 @@ def placement_rows(checks):
 
 def bind(checks):
     """Take the product facts this module reads from checks.json."""
-    global _master, _time_derived, _placement
+    global _master, _time_derived, _placement, _restart_allow
     masters = [t['name'] for t in checks.get('fault_targets', []) if t.get('role') == 'master']
     _master = masters[0] if masters else None
     _placement = placement_rows(checks)
     rows = (checks.get('observation') or {}).get('time_derived') or []
     _time_derived = {r['field']: (r['fact'], r['validity'], frozenset(tuple(x) for x in r['steps'])) for r in rows}
+    _restart_allow = {}
+    for r in (checks.get('observation') or {}).get('across_master_restart') or []:
+        extra = set(r) - RESTART_ALLOW_KEYS
+        if extra or not isinstance(r.get('ttl_seconds'), int) or not isinstance(r.get('slack_seconds'), int) or r['ttl_seconds'] <= 0 or r['slack_seconds'] < 0:
+            raise ValueError('across_master_restart row %r: keys %s outside %s, or a ttl/slack that is not a non-negative int' % (r.get('fact'), sorted(extra), sorted(RESTART_ALLOW_KEYS)))
+        _restart_allow[r['fact']] = (r['ttl_seconds'] * 10**9, r['slack_seconds'] * 10**9)
 
 
 # --- observation -----------------------------------------------------------
@@ -217,30 +230,44 @@ def observed_state(obs, parts):
     return state, bad
 
 
-def time_explains(key, bv, av, before, after):
+def restart_moved(fact, b, a, restart_wall_ns):
+    """Whether a master restart at restart_wall_ns explains fact moving from
+    b to a: it moved LATER, never earlier, and at most to the restart's wall
+    time + the row's ttl + slack (checks.json across_master_restart)."""
+    if restart_wall_ns is None or fact not in _restart_allow or a is None or b is None:
+        return False
+    ttl, slack = _restart_allow[fact]
+    return b < a <= restart_wall_ns + ttl + slack
+
+
+def time_explains(key, bv, av, before, after, restart_wall_ns=None):
     """Whether time alone steps a time_derived fact from bv to av: a listed
-    step, its fact equal in both observations, and the earlier validity not
-    larger than the longest time between the two readings (the later
-    observation's end minus the earlier one's start)."""
+    step, its fact equal in both observations (or, across a master restart,
+    moved later within the restart's bound: restart_moved), and the earlier
+    validity not larger than the longest time between the two readings (the
+    later observation's end minus the earlier one's start)."""
     if key not in _time_derived:
         return False
     fact, validity, steps = _time_derived[key]
     if (bv, av) not in steps:
         return False
     bc, ac = before.clock or {}, after.clock or {}
-    if bc.get(fact) is None or bc.get(fact) != ac.get(fact):
+    if bc.get(fact) is None or (bc.get(fact) != ac.get(fact) and not restart_moved(fact, bc.get(fact), ac.get(fact), restart_wall_ns)):
         return False
     if bc.get(validity) is None or bc.get('from_ns') is None or ac.get('at_ns') is None:
         return False
     return bc[validity] <= ac['at_ns'] - bc['from_ns']
 
 
-def same_part(part, before, after):
+def same_part(part, before, after, restart_wall_ns=None):
     """Whether the later value of a part shows the same state as the earlier
     one. Equal values are; so is a workspace answer whose only difference is
     one step of a time_derived fact that time alone explains (checks.json
     observation.time_derived), every other kept fact equal. Direction
-    matters: `before` is the earlier observation."""
+    matters: `before` is the earlier observation. restart_wall_ns is the wall
+    time of a master restart between the two (None: none, or not recorded):
+    across it the step's fact may have moved later within its bound
+    (across_master_restart)."""
     if before == after:
         return True
     if part != 'workspace' or not isinstance(before, Workspace) or not isinstance(after, Workspace):
@@ -252,7 +279,7 @@ def same_part(part, before, after):
     for (bk, bv), (ak, av) in zip(bf, af):
         if (bk, bv) == (ak, av):
             continue
-        if bk == ak and not stepped and time_explains(bk, bv, av, before, after):
+        if bk == ak and not stepped and time_explains(bk, bv, av, before, after, restart_wall_ns):
             stepped = True
             continue
         return False

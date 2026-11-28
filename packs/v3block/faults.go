@@ -232,6 +232,12 @@ func (e opEnv) restartMaster(ctx context.Context, actx *tr.ActionContext, node r
 	name := fmt.Sprintf("blockmaster-restart%d", n) // its own log: the killed one's stays
 	_, stderr, code, err := node.Run(ctx, fmt.Sprintf("bash %s spawn %s %s %s %s -- %s", shellQuote(e.ownScript), shellQuote(e.work), shellQuote(e.owner),
 		name, portOf(e.master), strings.Join(quoteAll(p.Argv), " ")))
+	// The wall clock just after the spawn: the restarted master holds its
+	// port, so its start (when it re-arms every lease: core/authority/
+	// authority.go:316-322) is at or before this; the checkers bound a
+	// lease expiry across the restart by it (checks.json
+	// across_master_restart).
+	startedWall := nowFn().UnixNano()
 	res := map[string]any{"name": name}
 	// The identity spawn recorded, whatever its exit: it records before it waits.
 	after, lwhy := ledger(ctx, node, e.work)
@@ -240,6 +246,9 @@ func (e opEnv) restartMaster(ctx context.Context, actx *tr.ActionContext, node r
 		p.PID, p.Start, p.KilledPID, p.Argv = started.pid, started.start, "", nil
 		p.save(actx)
 		res["pid"], res["pid_start"] = started.pid, started.start
+	}
+	if err == nil && code == 0 && found {
+		res["started_wall_ns"] = startedWall
 	}
 	if err != nil || code != 0 {
 		res["detail"] = fmt.Sprintf("spawn exit %d: %s", code, firstLine(stderr))

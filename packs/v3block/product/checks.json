@@ -37,6 +37,11 @@
  "observation": {
   "compared": ["head", "snapshots", "workspace", "dirs", "files"],
   "required": ["head", "workspace"],
+  "across_master_restart": [
+   {"fact": "lease expiry_ns", "ttl_seconds": 30, "slack_seconds": 2,
+    "cite": "core/authority/authority.go:257 (workspaceTTL = 30 * time.Second), :316-322 (at the master's start every workspace lease's deadline is set to now + workspaceTTL: persisted wall time alone never shortens a live host's lease)",
+    "why": "a master restart re-arms each lease: across a blockmaster restart record between two observations, a time_derived step whose fact moved is still time alone when the fact moved LATER, never earlier, and at most to the restart's wall time (its complete's started_wall_ns) + ttl_seconds + slack_seconds; every other kept fact equal, the step itself in the time_derived table. slack_seconds (2) covers the runner's wall time taken just after the restarted master holds its port, at or after the master's own now. Without a ceiling a lease that never expires would pass, and it blocks deletes and moves forever. A restart record without started_wall_ns (a history before it) gets no allowance: the strict rule"}
+  ],
   "time_derived": [
    {"field": "lease state", "fact": "lease expiry_ns", "validity": "host validity_ns at query",
     "steps": [["granted", "expired"], ["revoking", "expired"]],
