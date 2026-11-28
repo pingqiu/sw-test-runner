@@ -374,23 +374,31 @@ def restart_expiry(before, after, restart_wall_ns):
 
 
 EXPIRY_RULES = ('across a master restart', 'no restart')
+NOT_COMPARED = 'not compared'
 
 
 def expiry_rule(part, before, after, restart_wall_ns=None):
     """Which rule of checks.json across_master_restart compared the expiry
     of this pair (restart_expiry not None): 'across a master restart' (a
-    restart with its wall time between) or 'no restart'; None when the pair
-    was not compared (another part, a renewing state, a value missing, an
-    unrecorded restart)."""
-    if part != 'workspace' or restart_expiry(before, after, restart_wall_ns) is None:
+    restart with its wall time between) or 'no restart'. NOT_COMPARED when
+    the row had a lease to look at (both workspace answers print the row's
+    state field) but did not compare it (a renewing state, a value missing,
+    an unrecorded restart); None when there was no lease to look at."""
+    if part != 'workspace' or not isinstance(before, Workspace) or not isinstance(after, Workspace) or not _restart_allow:
         return None
+    if not all(dict(v[1]).get(row['field']) is not None for v in (before, after) for row in _restart_allow.values()):
+        return None
+    if restart_expiry(before, after, restart_wall_ns) is None:
+        return NOT_COMPARED
     return EXPIRY_RULES[0] if restart_wall_ns is not None else EXPIRY_RULES[1]
 
 
 def compared_note(counts):
     """C5's note line: {rule: pairs} of expiry_rule, each pair once; the
-    total, and of it the pairs across a master restart."""
-    return 'lease expiry pairs compared: %d (%s: %d)' % (sum(counts.values()), EXPIRY_RULES[0], counts.get(EXPIRY_RULES[0], 0))
+    total compared, and of it the pairs across a master restart. Zero is
+    printed as zero: a history whose leases the row looked at and compared
+    none says so (NOT_COMPARED pairs are not in the total)."""
+    return 'lease expiry pairs compared: %d (%s: %d)' % (sum(counts.get(r, 0) for r in EXPIRY_RULES), EXPIRY_RULES[0], counts.get(EXPIRY_RULES[0], 0))
 
 
 def time_explains(key, bv, av, before, after, fact_compared=False):

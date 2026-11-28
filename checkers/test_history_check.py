@@ -643,7 +643,8 @@ class C5(unittest.TestCase):
     def test_unchanged_passes(self):
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary write: 1 of 1 refusal(s) judged'])
+        # the leases are granted: the row looked at them and compared none, and says 0
+        self.assertEqual(v['findings'], ['limit ordinary write: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
 
     def test_a_moved_generation_fails(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
@@ -836,7 +837,7 @@ class C5(unittest.TestCase):
             return hc.check(dump(recs))['C5']
         v = run()
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
+        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
         # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
         for name, ws, state, part in (
                 ('revoked', dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')}), '', 'workspace'),
@@ -895,7 +896,7 @@ class C5(unittest.TestCase):
     def test_a_refused_effect_in_its_documented_state_passes(self):
         v = hc.check(dump(self.effect_history()))
         self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
-        self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged'])
+        self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
         # C0 takes it as a known outcome, with no note
         self.assertEqual((v['C0']['verdict'], v['C0']['findings']), ('PASS', []))
         # C6 has nothing to resolve: it is not an unknown
@@ -906,7 +907,7 @@ class C5(unittest.TestCase):
         # already refused, before and after: correct product behaviour.
         v = hc.check(dump(self.effect_history(repeat=True)))['C5']
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary delete: 2 of 2 refusal(s) judged'])
+        self.assertEqual(v['findings'], ['limit ordinary delete: 2 of 2 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
 
     def test_red_refused_effect_another_part_changed(self):
         v = hc.check(dump(self.effect_history(after_gen=5)))['C5']
@@ -2337,11 +2338,22 @@ class ExpiryPairsNote(unittest.TestCase):
             return sorted(seen.values())
         self.assertEqual(counted(amr.W + 20 * amr.S, ('revoking', 'revoking')), ['across a master restart'])
         self.assertEqual(counted(amr.E, ('revoking', 'revoking'), restart=False), ['no restart'])
-        self.assertEqual(counted(amr.E, ('granted', 'granted'), restart=False), [])            # renewing: not compared
-        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), wall=False), [])            # unrecorded restart: not compared
+        self.assertEqual(counted(amr.E, ('granted', 'granted'), restart=False), ['not compared'])     # renewing: looked at, not compared
+        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), wall=False), ['not compared'])     # unrecorded restart: looked at, not compared
         self.assertEqual(hc.PRODUCT.compared_note({'across a master restart': 2, 'no restart': 3}),
                          'lease expiry pairs compared: 5 (across a master restart: 2)')
         self.assertEqual(hc.PRODUCT.compared_note({'no restart': 3}), 'lease expiry pairs compared: 3 (across a master restart: 0)')
+        self.assertEqual(hc.PRODUCT.compared_note({'not compared': 4}), 'lease expiry pairs compared: 0 (across a master restart: 0)')   # zero printed as zero
+
+    def test_only_a_pair_with_a_lease_to_look_at_counts(self):
+        amr = AcrossMasterRestart()
+        def ws(res):
+            return hc.observed_state({'result': res})[0].get('workspace')
+        lease = ws({'workspace': {'exit': 0, 'text': amr.text('granted', amr.E, 5)}})
+        failed = ws({'workspace': {'exit': 1, 'text': ''}})
+        self.assertEqual(hc.PRODUCT.expiry_rule('workspace', lease, lease), 'not compared')
+        self.assertIsNone(hc.PRODUCT.expiry_rule('workspace', lease, failed))   # a failed show: no lease to look at
+        self.assertIsNone(hc.PRODUCT.expiry_rule('head', lease, lease))
 
     def test_c5_carries_the_note_and_the_verdict_does_not_change(self):
         # A revoking lease, unchanged, around a refusal: the refusal's pair

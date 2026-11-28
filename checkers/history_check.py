@@ -1048,7 +1048,7 @@ def c5(recs):
     counts = {}
     for rule in compared.values():
         counts[rule] = counts.get(rule, 0) + 1
-    if counts:   # a history in which the reader compared no pair carries no such note
+    if counts:   # the row had leases to look at: the line is printed, a zero as zero
         notes.append(PRODUCT.compared_note(counts))
     if of:
         return {'verdict': 'FAIL', 'judged': judged, 'findings': of + bf + f + report + notes}
