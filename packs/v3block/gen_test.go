@@ -1103,10 +1103,11 @@ func pairGaps(ops []GenOp) []string {
 	attached := map[string]bool{}
 	read := map[string]map[string]bool{}  // "src|tgt|vol" -> lbas read on vol since the restore
 	snapc := map[string]map[string]bool{} // "vol|snapshot" -> its content
-	// crossW: "src|tgt|side" -> lbas written on side since the restore that
-	// the other side also holds; crossed: "src|tgt|side" -> such a write was
-	// then read on the other side.
-	crossW, crossed := map[string]map[string]bool{}, map[string]bool{}
+	// crossW: "src|tgt|side" -> lba -> the op number of side's latest write
+	// of it since the restore; crossed: "src|tgt|side" -> such a write was
+	// then read on the other side with no write of the reader's own to that
+	// lba after it (C3's rule: the reader need not hold the block).
+	crossW, crossed := map[string]map[string]int{}, map[string]bool{}
 	var bad []string
 	set := func(v string) map[string]bool {
 		if content[v] == nil {
@@ -1127,13 +1128,12 @@ func pairGaps(ops []GenOp) []string {
 		case "v3_op_write":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
 				for t, s := range source {
-					other := map[string]string{s: t, t: s}[v]
-					if other != "" && content[other][b] {
+					if v == s || v == t {
 						k := s + "|" + t + "|" + v
 						if crossW[k] == nil {
-							crossW[k] = map[string]bool{}
+							crossW[k] = map[string]int{}
 						}
-						crossW[k][b] = true
+						crossW[k][b] = o.No
 					}
 				}
 				set(v)[b] = true
@@ -1141,7 +1141,7 @@ func pairGaps(ops []GenOp) []string {
 		case "v3_op_read":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
 				for t, s := range source {
-					if other := map[string]string{s: t, t: s}[v]; other != "" && crossW[s+"|"+t+"|"+other][b] {
+					if other := map[string]string{s: t, t: s}[v]; other != "" && crossW[s+"|"+t+"|"+other][b] > crossW[s+"|"+t+"|"+v][b] {
 						crossed[s+"|"+t+"|"+other] = true
 					}
 				}
@@ -1218,9 +1218,10 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 		t.Fatalf("%d inherited reads, %d pair reads", inherited, pairs)
 	}
 	// The generator's own state: after the restore the target's first attach
-	// is due (its placement host), then its inherited lbas; neither side is
-	// stopped, moved or deleted before the window, which comes pairDelay
-	// drawn operations after both serve.
+	// is due (its placement host), then its inherited lbas, then at once the
+	// source -> target window (C3: a write on the source read on the
+	// target); neither side is stopped, moved or deleted before the target ->
+	// source window, which comes pairDelay drawn operations after both serve.
 	g, _ := NewGenerator(GenConfig{Seed: 1, Ops: 10, Pool: pool(4), Blocks: 8})
 	drive(g, op("v3_op_create", "g1"), op("v3_op_attach", "g1", "host", "0"), op("v3_op_write", "g1", "lbas", "2 6", "round", "r"),
 		op("v3_op_snapshot", "g1", "name", "g1-s1"), op("v3_op_move", "g1"), op("v3_op_attach", "g1", "host", "1"))
@@ -1235,6 +1236,22 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 		t.Fatalf("due after the target's first attach: %+v", d)
 	}
 	drive(g, d0(g))
+	window := func() []string {
+		var got []string
+		for d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair"; d = g.m.Due() {
+			o := d[0]
+			got = append(got, o.Forced+" "+strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Volume+" "+o.Params["lbas"])
+			drive(g, o)
+		}
+		return got
+	}
+	// Source -> target: an inherited lba written on the source, read on the target.
+	if got, want := window(), []string{"pair write g1 2", "pair read g2 2"}; !slices.Equal(got, want) {
+		t.Fatalf("the source -> target window:\n%q\nwant\n%q", got, want)
+	}
+	if c := g.m.c3["g1|g2"]; c == nil || !c.ex[0] || c.ex[1] {
+		t.Fatalf("C3 facts after the source -> target window: %+v", c)
+	}
 	drive(g, op("v3_op_write", "g2", "lbas", "5", "round", "r2"))
 	for i := 0; i < pairDelay-1; i++ { // the write above was the first drawn one
 		if has(g.ordinary(), "v3_op_stop", "g1", "") || has(g.ordinary(), "v3_op_stop", "g2", "") || has(g.ordinary(), "v3_op_move", "g1", "") {
@@ -1244,21 +1261,15 @@ func TestGeneratorReadsTheInheritedLBAsAndGivesAPairWindow(t *testing.T) {
 			t.Fatal("negatives on a pending pair are held too")
 		}
 		if d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair" {
-			t.Fatalf("the window before pairDelay: %d", i)
+			t.Fatalf("the target -> source window before pairDelay: %d", i)
 		}
 		drive(g, op("v3_op_read", "g1", "lbas", "2"))
 	}
-	var got []string
-	for d := g.m.Due(); len(d) > 0 && d[0].Forced == "pair"; d = g.m.Due() {
-		o := d[0]
-		got = append(got, o.Forced+" "+strings.TrimPrefix(o.Action, "v3_op_")+" "+o.Volume+" "+o.Params["lbas"])
-		drive(g, o)
-	}
-	// Across first (an inherited lba written on one side, read on the other,
-	// both ways), then the same lbas read on both.
-	want := []string{"pair write g1 2", "pair read g2 2", "pair write g2 6", "pair read g1 6", "pair read g1 2 5 6", "pair read g2 2 5 6"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("the pair window:\n%q\nwant\n%q", got, want)
+	// Target -> source (another inherited lba written on the target, read on
+	// the source), then the union of both contents read on both.
+	want := []string{"pair write g2 6", "pair read g1 6", "pair read g1 2 5 6", "pair read g2 2 5 6"}
+	if got := window(); !slices.Equal(got, want) {
+		t.Fatalf("the target -> source window:\n%q\nwant\n%q", got, want)
 	}
 	if !has(g.ordinary(), "v3_op_stop", "g1", "") || !has(g.ordinary(), "v3_op_stop", "g2", "") {
 		t.Fatal("the hold not released after the window")
@@ -1470,7 +1481,7 @@ func pairsUnexercised(ops []GenOp, notes []string) []string {
 		return holds[v]
 	}
 	var pairs []pair
-	wrote := map[string]map[string]bool{} // "s|t|side" -> lbas written on side the other held
+	wrote := map[string]map[string]int{} // "s|t|side" -> lba -> op number of side's latest write since the restore
 	crossed := map[string]bool{}
 	for _, o := range ops {
 		if o.Negative != "" || answer(o) != "ok" {
@@ -1487,13 +1498,12 @@ func pairsUnexercised(ops []GenOp, notes []string) []string {
 		case "v3_op_write":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
 				for _, p := range pairs {
-					other := map[string]string{p.s: p.t, p.t: p.s}[v]
-					if other != "" && holds[other][b] {
+					if v == p.s || v == p.t {
 						k := p.s + "|" + p.t + "|" + v
 						if wrote[k] == nil {
-							wrote[k] = map[string]bool{}
+							wrote[k] = map[string]int{}
 						}
-						wrote[k][b] = true
+						wrote[k][b] = o.No
 					}
 				}
 				set(v)[b] = true
@@ -1501,7 +1511,7 @@ func pairsUnexercised(ops []GenOp, notes []string) []string {
 		case "v3_op_read":
 			for _, b := range strings.Fields(o.Params["lbas"]) {
 				for _, p := range pairs {
-					if other := map[string]string{p.s: p.t, p.t: p.s}[v]; other != "" && wrote[p.s+"|"+p.t+"|"+other][b] {
+					if other := map[string]string{p.s: p.t, p.t: p.s}[v]; other != "" && wrote[p.s+"|"+p.t+"|"+other][b] > wrote[p.s+"|"+p.t+"|"+v][b] {
 						crossed[p.s+"|"+p.t+"|"+other] = true
 					}
 				}

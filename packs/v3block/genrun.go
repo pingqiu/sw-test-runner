@@ -171,7 +171,9 @@ func (m *blockModel) StorePause(e randomrun.FaultEvent, boundSeconds int) (GenOp
 // AfterStorePause: the requests that follow a store pause around a snapshot
 // of a serving volume, which must succeed: a later snapshot (a new name,
 // while the volume has room for one) and a detach (the dirty lbas read back
-// first, as before any stop).
+// first, as before any stop). No detach of a side of a pending restore
+// pair: it would end the pair's C3 directions (pairs.go); the snapshot is
+// its follow-up then.
 func (m *blockModel) AfterStorePause(o GenOp) []GenOp {
 	v := m.vols[o.Volume]
 	if v == nil {
@@ -180,6 +182,9 @@ func (m *blockModel) AfterStorePause(o GenOp) []GenOp {
 	var out []GenOp
 	if len(v.snaps) < MaxSnapshots-1 {
 		out = append(out, op("v3_op_snapshot", o.Volume, "name", fmt.Sprintf("%s-after%d", o.Volume, o.No)))
+	}
+	if m.pending(v) && !oldPairs {
+		return out
 	}
 	stop := op("v3_op_stop", o.Volume)
 	out = append(out, m.readsOf(v, sortedLBAs(v.dirty), "readback")...)

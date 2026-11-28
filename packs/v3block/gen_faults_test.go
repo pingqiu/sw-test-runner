@@ -97,6 +97,18 @@ func (f *faultFake) lookNotServing() []string {
 	return []string{}
 }
 
+// reaches says the process down reaches vol: with content (a product that
+// keeps blocks), a holder blockvolume:<i> serves only the i-th pool name
+// and the master every volume; without, every volume (the fake answers
+// unknown to anything while a process is down).
+func (f *faultFake) reaches(vol string) bool {
+	i, err := strconv.Atoi(strings.TrimPrefix(f.down, "blockvolume:"))
+	if f.content == nil || err != nil || !strings.HasPrefix(f.down, "blockvolume:") {
+		return true
+	}
+	return i < len(f.pool) && f.pool[i] == vol
+}
+
 func (f *faultFake) install(t *testing.T) {
 	f.fakeProduct.install(t)
 	for name, inner := range genHandlers {
@@ -110,22 +122,36 @@ func (f *faultFake) install(t *testing.T) {
 				// answer, and is cut (unknown) by a kill that ran meanwhile, or
 				// while the store is paused.
 				k0 := f.kills.Load()
+				args := cutArgs(name, act)
+				if f.content != nil {
+					args = f.content.args(name, act, args)
+				}
 				seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"],
-					Args: cutArgs(name, act)})
+					Args: args})
 				time.Sleep(f.opDelay)
 				if f.kills.Load() != k0 || (name == "v3_op_snapshot" && f.storePaused.Load()) {
+					if f.content != nil {
+						f.content.apply(name, act, tr.OutcomeUnknown)
+					}
 					_ = actx.History.Complete(seq, tr.OutcomeUnknown, map[string]any{"detail": "fake: cut by a fault"})
 					return map[string]string{"value": tr.OutcomeUnknown, "detail": "fake: cut by a fault"}, nil
+				}
+				if f.content != nil {
+					f.content.apply(name, act, tr.OutcomeOK)
 				}
 				_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
 				return map[string]string{"value": tr.OutcomeOK}, nil
 			}
-			if f.down == "" || act.Params["expect"] != "" || (f.inOutage && !f.outageUnknown) {
+			if f.down == "" || act.Params["expect"] != "" || (f.inOutage && !f.outageUnknown) || f.content != nil && !f.reaches(act.Params["volume"]) {
 				return inner(ctx, actx, act)
 			}
 			f.calls = append(f.calls, act)
 			if name == "v3_op_attach" || name == "v3_op_stop" {
 				f.unsettled = append(f.unsettled, act.Params["volume"])
+			}
+			if f.content != nil {
+				f.content.record(actx, name, act, tr.OutcomeUnknown)
+				return map[string]string{"value": tr.OutcomeUnknown}, nil
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"]})
 			_ = actx.History.Complete(seq, tr.OutcomeUnknown, nil)
