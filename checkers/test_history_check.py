@@ -2532,11 +2532,14 @@ class StoreFault(unittest.TestCase):
         recs.insert(at, {'seq': 0, 'kind': 'observe', 'verb': 'healthy', 'mono_ns': recs[at - 1]['mono_ns'], 'result': {'healthy': True, 'down': [], 'not_serving': []}})
         recs.append({'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'store_pause', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'],
                      'result': {'after_op': 3, 'opno': 4, 'action': 'v3_op_snapshot', 'volume': 'v1', 'process': 'weed-filer', 'bound_seconds': 75,
-                                'outcome': 'unknown', 'hit': True, 'followups': [{'action': 'v3_op_snapshot'}, {'action': 'v3_op_stop'}]}})
-        for verb, out in followups:
+                                'outcome': 'unknown', 'hit': True, 'followups': self.FOLLOWUPS}})
+        for step in followups:
+            verb, out = step[:2]
+            vol, args = (step[2:] + (None, None))[:2]
+            args = dict(self.ARGS.get(verb, {}), **(args or {}))
             n = len(recs)
-            recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': 'v1', 'args': {}, 'mono_ns': n + 1})
-            recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': 'v1', 'mono_ns': n + 2, 'outcome': out, 'result': {}})
+            recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol or 'v1', 'args': args, 'mono_ns': n + 1})
+            recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol or 'v1', 'mono_ns': n + 2, 'outcome': out, 'result': {}})
         recs.append(end)
         for i, r in enumerate(recs):
             if r['kind'] == 'complete' and r['outcome'] == 'unknown':
@@ -2548,26 +2551,47 @@ class StoreFault(unittest.TestCase):
                 r.pop('volume', None)
         return hc.check(dump(renumber(recs)))
 
+    # The record's follow-ups, as the driver writes them (action, volume,
+    # params), and the record args of the invocations they make.
+    FOLLOWUPS = [{'action': 'v3_op_snapshot', 'volume': 'v1', 'params': {'name': 'v1-after4', 'volume': 'v1'}},
+                 {'action': 'v3_op_read', 'volume': 'v1', 'params': {'lbas': '3 5', 'volume': 'v1'}},
+                 {'action': 'v3_op_stop', 'volume': 'v1', 'params': {'volume': 'v1'}}]
+    ARGS = {'snapshot': {'name': 'v1-after4', 'request': 'v1-v1-after4', 'attempt': 1}, 'stop': {'server': 'a-v1', 'epoch': 1}}
+    RIGHT = [('snapshot', 'ok'), ('read', 'ok', None, {'lba': 3}), ('read', 'ok', None, {'lba': 5}), ('stop', 'ok')]
+
     def test_the_requests_after_a_store_pause_succeed(self):
-        v = self.case([('snapshot', 'ok'), ('stop', 'ok')])
+        v = self.case(self.RIGHT)
+        self.assertFalse(any('after the store fault' in x for x in v['C6']['findings']), v['C6'])
+        # a later attempt of a named call is that call again
+        v = self.case([self.RIGHT[0], ('snapshot', 'ok', None, {'attempt': 2})] + self.RIGHT[1:])
         self.assertFalse(any('after the store fault' in x for x in v['C6']['findings']), v['C6'])
         self.assertTrue(any('placed did not: by snapshot names' in x for x in v['C6']['findings']), v['C6'])
         self.assertFalse(any('outcome unknown' in x for x in v['C0']['findings']), v['C0'])   # C0: resolved by the same placement
 
     def test_red_a_refused_detach_after_a_store_pause_fails_c6(self):
-        v = self.case([('snapshot', 'ok'), ('stop', 'refused')])
+        v = self.case(self.RIGHT[:3] + [('stop', 'refused')])
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
         self.assertTrue(any('stop v1 answered refused: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
 
     def test_red_an_unknown_snapshot_after_a_store_pause_fails_c6(self):
-        v = self.case([('snapshot', 'unknown'), ('stop', 'ok')])
+        v = self.case([('snapshot', 'unknown')] + self.RIGHT[1:])
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
         self.assertTrue(any('snapshot v1 answered unknown: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
 
     def test_red_a_follow_up_that_never_ran_fails_c6(self):
-        v = self.case([('snapshot', 'ok')])   # the record names a snapshot and a detach
+        v = self.case(self.RIGHT[:3])   # the record names a snapshot, reads and a detach
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
-        self.assertTrue(any('1 of the 2 requests it names ran' in x for x in v['C6']['findings']), v['C6'])
+        self.assertTrue(any('the follow-up v3_op_stop v1' in x and 'never ran' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_equal_count_but_not_the_named_follow_ups_fails_c6(self):
+        # As many requests as named, each ok, but one is not what the record names.
+        for name, steps in (('a wrong action', [('delete', 'ok')] + self.RIGHT[1:]),
+                            ('a wrong volume', [('snapshot', 'ok', 'v2')] + self.RIGHT[1:]),
+                            ('wrong parameters', [('snapshot', 'ok', None, {'name': 'v1-other'})] + self.RIGHT[1:]),
+                            ('a wrong lba', self.RIGHT[:1] + [('read', 'ok', None, {'lba': 4})] + self.RIGHT[2:])):
+            v = self.case(steps)
+            self.assertEqual(v['C6']['verdict'], 'FAIL', (name, v['C6']))
+            self.assertTrue(any('is not the follow-up it names next' in x for x in v['C6']['findings']), (name, v['C6']))
 
     def test_red_nothing_after_a_store_pause_fails_c6(self):
         v = self.case([])

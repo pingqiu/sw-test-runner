@@ -281,6 +281,8 @@ def load_product(product_dir):
         checks = json.load(fh)
     mod = _load_module(checks['reader']['module'], product_dir)
     mod.bind(checks)
+    if hasattr(mod, 'bind_product_dir'):
+        mod.bind_product_dir(product_dir)
     parts = tuple(checks['observation']['compared'])
     mod.observed_state({'result': {}}, parts)   # a part the reader cannot read fails here, not mid-run
     required = tuple(checks['observation'].get('required', ()))
@@ -1524,31 +1526,69 @@ def _settle(recs, ops_, inv, comp):
     return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
 
 
+def _call_matches(x, call):
+    """Whether invocation x is the expected call (verb, volume, {arg: value})."""
+    verb, vol, args = call
+    got = x.get('args') or {}
+    return x['verb'] == verb and (x.get('volume') or '') == vol and all(k in got and str(got[k]) == v for k, v in args.items())
+
+
 def after_store_fault(recs):
     """C6's rule after a store fault: the requests between a store_pause
     record and the run's next step (gen_step, gen_sweep or the end) must
-    each answer ok, and there must be at least one."""
+    each answer ok, and there must be at least one. Each follow-up the
+    record names (action, volume, parameters) must be one of them, in
+    order: the product reader's followup_calls gives the invocations it
+    makes (verb, volume, record args); a later attempt of the same call
+    is that call again. An invocation that is no named follow-up, or a
+    named one that never ran, FAILS."""
     f = []
+    comp = {x['of']: x for x in recs if x['kind'] == 'complete'}
     for i, r in enumerate(recs):
         if r['kind'] != 'observe' or r.get('verb') != 'store_pause':
             continue
-        comp = {x['of']: x for x in recs if x['kind'] == 'complete'}
-        ran = 0
+        ran = []
         for x in recs[i + 1:]:
             if x['kind'] == 'observe' and x.get('verb') in ('gen_step', 'gen_sweep'):
                 break
             if x['kind'] != 'invoke' or x['verb'] in FAULT_VERBS or x['verb'] in RUNNER_VERBS:
                 continue
-            ran += 1
+            ran.append(x)
             c = comp.get(x['seq'])
             if c is None or c['outcome'] != 'ok':
                 f.append('after the store fault (record seq %d): seq %d %s %s answered %s: a request after a store fault must succeed'
                          % (r['seq'], x['seq'], x['verb'], x.get('volume', ''), 'nothing' if c is None else c['outcome']))
-        want = len((r.get('result') or {}).get('followups') or [])
+        followups = (r.get('result') or {}).get('followups') or []
         if not ran:
             f.append('after the store fault (record seq %d): no request followed it: a store fault must be followed by a request that succeeds' % r['seq'])
-        elif ran < want:
-            f.append('after the store fault (record seq %d): %d of the %d requests it names ran: each must run and succeed' % (r['seq'], ran, want))
+            continue
+        calls = []
+        for fu in followups:
+            cs = PRODUCT.followup_calls(fu) if hasattr(PRODUCT, 'followup_calls') else None
+            if cs is None:
+                calls = None   # the reader cannot say what this follow-up invokes: the count rule only
+                break
+            calls += [(fu, c) for c in cs]
+        if calls is None:
+            if len(ran) < len(followups):
+                f.append('after the store fault (record seq %d): %d of the %d requests it names ran: each must run and succeed' % (r['seq'], len(ran), len(followups)))
+            continue
+        j = 0
+        for x in ran:
+            if j < len(calls) and _call_matches(x, calls[j][1]):
+                j += 1
+            elif j > 0 and _call_matches(x, calls[j - 1][1]):
+                continue   # a later attempt of the call just matched
+            else:
+                want = ('%s %s %s' % (calls[j][0].get('action'), calls[j][0].get('volume'), calls[j][0].get('params'))) if j < len(calls) else 'nothing more'
+                f.append('after the store fault (record seq %d): seq %d %s %s %s is not the follow-up it names next (%s)'
+                         % (r['seq'], x['seq'], x['verb'], x.get('volume', ''), x.get('args'), want))
+                break
+        else:
+            if j < len(calls):
+                fu = calls[j][0]
+                f.append('after the store fault (record seq %d): the follow-up %s %s %s never ran: each must run and succeed'
+                         % (r['seq'], fu.get('action'), fu.get('volume'), fu.get('params')))
     return f
 
 

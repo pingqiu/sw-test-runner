@@ -24,6 +24,8 @@ of a kill. Numbers and names a page states live in checks.json, not here.
                                 which across_master_restart rule compared a
                                 pair's expiry, or None
   compared_note(counts)         C5's note of the pairs each rule compared
+  bind_product_dir(dir)         reads the description's actions.json (the verbs and record args)
+  followup_calls(followup)      the invocations a store pause's follow-up makes: [(verb, volume, {arg: value})]
   observation_findings(obs)     what one observation contradicts in itself
                                 (a lease printed expired while still valid)
   show_part(state, part)        one part, short, for a finding
@@ -44,6 +46,8 @@ of a kill. Numbers and names a page states live in checks.json, not here.
   third_state(healthy_obs)      [(volume, why)] of volumes in neither consistent state
   settled(obs)                  (volume, state, evidence) of a settled record, else None
 """
+import json
+import os
 import re
 import statistics
 
@@ -148,6 +152,56 @@ def bind(checks):
             'ttl': r['ttl_seconds'] * 10**9, 'slack': r['slack_seconds'] * 10**9, 'field': r['state_field'], 'renews': renews,
             'extend': int(round(factor * r['ttl_seconds'] * 10**9)), 'validity': r['validity'],
             'expired': r['expired_state'], 'skew': skew * 10**9, 'skew_cite': r['skew_cite']}
+
+
+# The description's actions (product/actions.json): {action: (verb, each,
+# {record arg: the param its template names, or ITEM})}. An action with
+# "each" records one invocation per item of that param ({{item}}).
+_actions = {}
+ITEM = object()
+
+
+def bind_product_dir(product_dir):
+    """Read the actions of the description next to checks.json."""
+    global _actions
+    _actions = {}
+    p = os.path.join(product_dir, 'actions.json')
+    if not os.path.exists(p):
+        return
+    with open(p, encoding='utf-8') as fh:
+        doc = json.load(fh)
+    for a in doc.get('actions', []):
+        args = {}
+        for k, v in ((a.get('record') or {}).get('args') or {}).items():
+            t = v.get('template') if isinstance(v, dict) else v
+            m = re.fullmatch(r'\{\{(\w+)\}\}', t) if isinstance(t, str) else None
+            if m:
+                args[k] = ITEM if m.group(1) == 'item' else m.group(1)
+        _actions[a['action']] = (a.get('verb'), a.get('each'), args)
+
+
+def followup_calls(fu):
+    """The invocations a store pause's follow-up {action, volume, params}
+    makes, as the description records them: one per item of its "each"
+    param (a read or a write: one per lba), else one; each (verb, volume,
+    {record arg: the value the follow-up's param gives it}). None when the
+    action is not in the description (the follow-up cannot be matched)."""
+    a = _actions.get(fu.get('action'))
+    if a is None or not a[0]:
+        return None
+    verb, each, args = a
+    params = fu.get('params') or {}
+    items = str(params.get(each, '')).split() if each else [None]
+    out = []
+    for item in items:
+        want = {}
+        for k, src in args.items():
+            if src is ITEM:
+                want[k] = item
+            elif src in params:
+                want[k] = str(params[src])
+        out.append((verb, fu.get('volume') or '', want))
+    return out
 
 
 # --- observation -----------------------------------------------------------
