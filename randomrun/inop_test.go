@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -478,4 +479,49 @@ func TestAClosedHistoryLeavesNoGuardBehind(t *testing.T) {
 		}
 	}
 	t.Fatal("a closed, dropped History is still referenced after its guards were used")
+}
+
+// twoPartDriver splits every operation into two calls (parts), as a write
+// over two lbas is.
+type twoPartDriver struct{ storeDriver }
+
+func (twoPartDriver) Calls(o Op) []map[string]string { return []map[string]string{o.Params, o.Params} }
+
+// The store restore covers the whole paused operation, not only its final
+// part: when the FIRST part fails (a runner error), the restore still runs,
+// once, in its own cleanup context (here the run's context is already
+// cancelled when the restore runs). Red control: the restore attached to
+// the last part only never runs.
+func TestStoreRestoreRunsWhenAnEarlierPartFails(t *testing.T) {
+	x := &inOpRunner{}
+	r := x.runner(twoPartDriver{})
+	ctx, cancel := context.WithCancel(context.Background())
+	part := 0
+	r.Handlers["snapshot"] = func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		part++
+		cancel() // the run's context ends with the failure
+		return nil, fmt.Errorf("part %d: the runner failed", part)
+	}
+	var restoreCtxErr error
+	restores := 0
+	cont := r.Handlers["cont"]
+	r.Handlers["cont"] = func(c context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		restores++
+		restoreCtxErr = c.Err()
+		return cont(c, actx, act)
+	}
+	actx, p := rerunHistory(t)
+	e := FaultEvent{AfterOp: 0, Action: FaultStorePause, Process: "store", Target: "snapshot"}
+	fr := newFaultRun(r, []FaultEvent{e}, nil, map[string]any{"fault_store_bound": 75}, nil)
+	fr.inOpRecs = map[int]inOpRecord{1: {Action: FaultStorePause, AfterOp: 0, OpNo: 1}}
+	fr.arm(e)
+	_, err := fr.stepOp(ctx, actx, r, Op{No: 1, Action: "snapshot", Volume: "v1", Params: map[string]string{"volume": "v1"}})
+	actx.History.Close()
+	shape, _ := inOpShape(t, p)
+	if err == nil || part != 1 || restores != 1 || restoreCtxErr != nil || x.paused {
+		t.Fatalf("err %v, parts %d, restores %d (context %v), still paused %v\n%s", err, part, restores, restoreCtxErr, x.paused, strings.Join(shape, "\n"))
+	}
+	if strings.Join(shape, "|") != "observe gen_step|invoke fault_apply|complete fault_apply ok|invoke fault_restore|complete fault_restore ok" {
+		t.Fatalf("records:\n%s", strings.Join(shape, "\n"))
+	}
 }

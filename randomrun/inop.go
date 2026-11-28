@@ -465,6 +465,11 @@ func duringTimes(recs []tr.HistoryRecord, res map[string]any) (bool, string) {
 	return true, ""
 }
 
+// storeRestoreBound bounds the store restore after a paused operation (its
+// cleanup context): a continue answers in seconds; the pause's own bound
+// continues the store regardless.
+const storeRestoreBound = 60 * time.Second
+
 // storePause: see the file's doc.
 func (f *faultRun) storePause(ctx context.Context, actx *tr.ActionContext, o Op, e FaultEvent) (string, int, bool, error) {
 	sf, ok := f.r.Driver.(StoreFaulter)
@@ -475,7 +480,7 @@ func (f *faultRun) storePause(ctx context.Context, actx *tr.ActionContext, o Op,
 		return "", 0, false, nil // one fault at a time
 	}
 	pause, cont := sf.StorePause(e, f.storeBound)
-	run := func(op Op) error {
+	run := func(ctx context.Context, op Op) error {
 		h, ok := f.r.Handlers[op.Action]
 		if !ok {
 			return fmt.Errorf("no handler for %s", op.Action)
@@ -494,7 +499,14 @@ func (f *faultRun) storePause(ctx context.Context, actx *tr.ActionContext, o Op,
 		}
 		return nil
 	}
-	hk := &AttemptHooks{BeforeFirst: func() error { return run(pause) }, AfterLast: func() error { return run(cont) }}
+	// The restore runs in its own bounded cleanup context: it still runs
+	// when the run's context ends (an error, a cancel), and cannot hang.
+	restore := func() error {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeRestoreBound)
+		defer cancel()
+		return run(cctx, cont)
+	}
+	hk := &AttemptHooks{BeforeFirst: func() error { return run(ctx, pause) }, AfterLast: restore}
 	outcome, n, took, err := f.r.stepWith(ctx, actx, o, hk)
 	if err != nil {
 		return "", n, true, fmt.Errorf("store pause around operation %d: %w", o.No, err)

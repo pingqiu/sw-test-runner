@@ -89,8 +89,10 @@ func (r Runner) Exec(ctx context.Context, actx *tr.ActionContext, o Op) (string,
 
 // exec is Exec, also answering the attempts made (Attempts' count, summed
 // over the parts); hk, when set, runs around the attempts (BeforeFirst
-// before the first part's first attempt, AfterLast after the last part) and
-// takes the time of its first call. One operation at a time: a second exec on
+// before the first part's first attempt; AfterLast once after the whole
+// operation, whenever BeforeFirst was called: after the last part, and also
+// when an earlier part fails, so a store restore covers the whole paused
+// operation) and takes the time of its first call. One operation at a time: a second exec on
 // the same history while one runs is refused (opGuard); only a fault may run
 // beside an operation (inop.go).
 func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op, hk *AttemptHooks) (string, int, error) {
@@ -108,6 +110,25 @@ func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op, hk *Atte
 	if hk == nil {
 		hk = &AttemptHooks{}
 	}
+	// AfterLast belongs to the whole operation, not to its last part: it
+	// runs once BeforeFirst was called, whatever part fails (BeforeFirst
+	// may have changed the environment even when it answers an error).
+	before := false
+	worst, attempts, err := r.execParts(ctx, actx, o, h, hk, &before)
+	if before && hk.AfterLast != nil {
+		if aerr := hk.AfterLast(); aerr != nil {
+			if err == nil {
+				return "", 0, aerr
+			}
+			return "", 0, errors.Join(err, aerr)
+		}
+	}
+	return worst, attempts, err
+}
+
+// execParts runs the parts of exec (see there); before is set once the
+// first part's BeforeFirst was called.
+func (r Runner) execParts(ctx context.Context, actx *tr.ActionContext, o Op, h tr.ActionHandlerFunc, hk *AttemptHooks, before *bool) (string, int, error) {
 	observation := o.Action == r.Driver.Observe(o.Volume).Action
 	worst, attempts := "", 0
 	rr := rerunnerOf(r.Driver)
@@ -115,11 +136,11 @@ func (r Runner) exec(ctx context.Context, actx *tr.ActionContext, o Op, hk *Atte
 	hk.Took = 0
 	for i, p := range calls {
 		part := &AttemptHooks{}
-		if i == 0 {
-			part.BeforeFirst = hk.BeforeFirst
-		}
-		if i == len(calls)-1 {
-			part.AfterLast = hk.AfterLast
+		if i == 0 && hk.BeforeFirst != nil {
+			part.BeforeFirst = func() error {
+				*before = true
+				return hk.BeforeFirst()
+			}
 		}
 		out, n, err := AttemptsWith(ctx, actx, h, tr.Action{Action: o.Action, Node: r.Node, Params: p}, rr, o.Volume, func() (map[string]any, error) {
 			if err := r.observeSubjects(ctx, actx, o); err != nil {
