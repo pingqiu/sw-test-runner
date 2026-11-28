@@ -113,7 +113,11 @@ type StoreFollower interface {
 // AttemptHooks are run around the attempts of one call (AttemptsWith):
 // BeforeFirst right before the first attempt is issued (after the driver's
 // observation before it), AfterLast after the call's attempts ended. Took is
-// set to the time from the first attempt's issue to the last one's answer.
+// set to the first attempt's own window in the history: from its invocation
+// record to its completion record (recordWindow). A kill timed into an
+// operation runs from that invocation record (killDuring), so its offset is
+// a fraction of the same window: the handler's work before it records the
+// invocation, and the pauses and later attempts of a rerun, are not in it.
 type AttemptHooks struct {
 	BeforeFirst, AfterLast func() error
 	Took                   time.Duration
@@ -124,29 +128,35 @@ func AttemptsWith(ctx context.Context, actx *tr.ActionContext, h tr.ActionHandle
 	if hk == nil {
 		return Attempts(ctx, actx, h, act, rr, subject, observe)
 	}
-	var first, last time.Time
 	var hookErr error
+	issued := false
+	var took time.Duration
 	wrapped := func(ctx context.Context, actx *tr.ActionContext, a tr.Action) (map[string]string, error) {
-		if first.IsZero() {
-			if hk.BeforeFirst != nil {
-				if err := hk.BeforeFirst(); err != nil {
-					hookErr = err
-					return nil, err
-				}
-			}
-			first = time.Now()
+		if issued {
+			return h(ctx, actx, a)
 		}
+		issued = true
+		if hk.BeforeFirst != nil {
+			if err := hk.BeforeFirst(); err != nil {
+				hookErr = err
+				return nil, err
+			}
+		}
+		if actx.History == nil {
+			return h(ctx, actx, a) // no history: no window (Took 0, nothing measured)
+		}
+		from := historySize(actx.History)
 		out, err := h(ctx, actx, a)
-		last = time.Now()
+		if recs, rerr := historySince(actx.History, from); rerr == nil {
+			took = recordWindow(recs)
+		}
 		return out, err
 	}
 	out, n, err := Attempts(ctx, actx, wrapped, act, rr, subject, observe)
 	if hookErr != nil {
 		return nil, n, hookErr
 	}
-	if !first.IsZero() {
-		hk.Took = last.Sub(first)
-	}
+	hk.Took = took
 	if hk.AfterLast != nil {
 		if aerr := hk.AfterLast(); aerr != nil && err == nil {
 			return nil, n, aerr
@@ -574,6 +584,23 @@ func historySize(h *tr.History) int64 {
 		return 0
 	}
 	return st.Size()
+}
+
+// recordWindow is the window of the first operation recorded in recs (a
+// kill's records aside): from its invocation record to its completion
+// record, on the history's clock; 0 when it has no completion there.
+func recordWindow(recs []tr.HistoryRecord) time.Duration {
+	var inv *tr.HistoryRecord
+	for i := range recs {
+		r := &recs[i]
+		switch {
+		case inv == nil && r.Kind == tr.HistoryInvoke && r.Verb != VerbKill:
+			inv = r
+		case inv != nil && r.Kind == tr.HistoryComplete && r.Of == inv.Seq:
+			return time.Duration(r.MonoNs - inv.MonoNs)
+		}
+	}
+	return 0
 }
 
 // historySince reads the history's records from byte offset from.
