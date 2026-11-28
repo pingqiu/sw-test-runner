@@ -177,7 +177,7 @@ func TestReplayNotesADifferingAttemptCount(t *testing.T) {
 	ra, rp := rerunHistory(t)
 	out, err := rerunRunner([]string{"refused", "ok"}, &calls).Replay(context.Background(), ra, src)
 	ra.History.Close()
-	if err != nil || out["value"] != "match" || calls != 2 {
+	if err != nil || out["value"] != "match_unjudged" || calls != 2 {
 		t.Fatalf("fewer attempts: %v %v after %d calls", out, err, calls)
 	}
 	b, _ := os.ReadFile(rp)

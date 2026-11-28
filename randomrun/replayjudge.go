@@ -14,8 +14,10 @@ package randomrun
 //     mismatch; "differs" keeps meaning the driver or another record
 //     diverged). The kind is "unknown" until the checkers report it.
 //
-// Without a Judge (a Runner that sets none) nothing is judged and the
-// answer says so: "checks" "not run".
+// Without a Judge (a Runner that sets none) nothing is judged, and a match
+// is never answered as one: "match_unjudged" or
+// "match_inop_hit_differs_unjudged", with "checks" "not run: <why>" (the
+// Runner's Unjudged). "match" always means judged.
 
 import (
 	"bytes"

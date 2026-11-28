@@ -418,7 +418,7 @@ func TestGenRunEndsAtAHealthyPointStillFalse(t *testing.T) {
 	}
 	// The replay stops at the same point.
 	f.healthyCall = 0
-	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
+	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match_unjudged" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
 		t.Fatalf("replay: %v %v", out, err)
 	}
 	// Red control: a replay that meets a false healthy point the record did
@@ -483,7 +483,7 @@ func TestGenRunWithFaultsPassesTheHealthyWaitInRunAndReplay(t *testing.T) {
 		}
 	}
 	f.waits = nil
-	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	for _, w := range f.waits {
@@ -528,7 +528,7 @@ func TestGenReplayWithFaultsMatchesAndReExecutesTheSchedule(t *testing.T) {
 	recLog := f.log
 	f.log = nil
 	out, b, err := replayInto(t, a)
-	if err != nil || out["value"] != "match" {
+	if err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	if !reflect.DeepEqual(f.log, recLog) {
@@ -541,7 +541,7 @@ func TestGenReplayWithFaultsMatchesAndReExecutesTheSchedule(t *testing.T) {
 	if left := unresolvedUnknowns(rb); len(left) != 0 {
 		t.Fatalf("replay left unknowns unresolved: %v", left)
 	}
-	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("replay of the replay: %v %v", out, err)
 	}
 	// Red control: a replay that runs no faults differs (the steps run while
@@ -847,7 +847,7 @@ func TestGenRunWithMasterOutagesHasTheShapesMOReads(t *testing.T) {
 	recLog := f.log
 	f.log = nil
 	out, b, err := replayInto(t, a)
-	if err != nil || out["value"] != "match" || !reflect.DeepEqual(f.log, recLog) {
+	if err != nil || out["value"] != "match_unjudged" || !reflect.DeepEqual(f.log, recLog) {
 		t.Fatalf("%v %v\n%v\n%v", out, err, f.log, recLog)
 	}
 	if n, bad := judgeOutages(records(t, b)); n != outages || len(bad) != 0 {
@@ -955,7 +955,7 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	// The replay follows the recorded decisions, whatever its own looks show.
 	f.alsoDown = "blockvolume:7"
 	f.log = nil
-	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" || kills(f.log) != ran {
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match_unjudged" || kills(f.log) != ran {
 		t.Fatalf("replay of the kills: %v %v, log %v", out, err, f.log)
 	} // Red: a holder the run never killed is down: no kill and no restart runs.
 	f2 := &faultFake{alsoDown: "blockvolume:7"}
@@ -983,7 +983,7 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	}
 	f2.alsoDown = ""
 	f2.log = nil
-	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" || kills(f2.log) != 0 {
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match_unjudged" || kills(f2.log) != 0 {
 		t.Fatalf("replay of the skips: %v %v, log %v", out, err, f2.log)
 	}
 
@@ -1203,7 +1203,7 @@ func TestMasterOutageSkippedWhenNothingServes(t *testing.T) {
 			}
 			f.log = nil
 			out, b, err := replayInto(t, p)
-			if err != nil || out["value"] != "match" || masterKills(f.log) != kills {
+			if err != nil || out["value"] != "match_unjudged" || masterKills(f.log) != kills {
 				t.Fatalf("replay: %v %v, %d master kills", out, err, masterKills(f.log))
 			}
 			if s2, r2 := outages(b); s2 != skipped || r2 != ran {

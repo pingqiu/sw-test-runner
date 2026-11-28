@@ -166,3 +166,45 @@ func TestReplayChecksFailBlocksMatchInOpHitDiffers(t *testing.T) {
 		t.Fatalf("a coverage FAIL: %v %v", out, err)
 	}
 }
+
+// Red control: a replay that judged nothing never answers a plain match.
+// Without runner_src it answers match_unjudged, its checks "not run" with
+// the reason, so "match" always means judged.
+func TestReplayWithoutRunnerSrcNeverAnswersMatch(t *testing.T) {
+	f := &fakeProduct{}
+	f.install(t)
+	out, _, err := replayInto(t, recordRun(t, "30"))
+	if err != nil || out["value"] == "match" || out["value"] != "match_unjudged" || out["checks"] != "not run: no runner_src" {
+		t.Fatalf("%v %v", out, err)
+	}
+}
+
+// Every scenario that can run a replay sets runner_src, so its replays are
+// judged: a scenario naming v3_gen_replay must define the variable.
+func TestEveryScenarioThatReplaysSetsRunnerSrc(t *testing.T) {
+	root := filepath.Join("..", "..", "scenarios")
+	replaying := 0
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(b), "v3_gen_replay") {
+			return nil
+		}
+		replaying++
+		// The value comes from the run's -env (the vars default it to ""; an
+		// empty one leaves the replay _unjudged, never a match).
+		if !regexp.MustCompile(`(?m)^\s+runner_src:`).Match(b) {
+			t.Errorf("%s runs v3_gen_replay but sets no runner_src: its replays would answer _unjudged", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d scenario(s) run v3_gen_replay", replaying)
+}

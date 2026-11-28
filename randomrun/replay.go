@@ -639,7 +639,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		return nil, fmt.Errorf("%s: %d of %d steps differ; first: operation %d (%s %s) recorded %s, replayed %s",
 			r.Name, len(diffs), len(steps), d.OpNo, d.Action, d.Volume, d.Recorded, d.Replayed)
 	}
-	checked := "not run"
+	checked, suffix := "not run", "_unjudged"
 	if r.Judge != nil {
 		cs, _ := header["checkers"].(string) // the run's required set; none recorded: every checker
 		fails, err := r.judgeReplay(ctx, actx, cs)
@@ -649,17 +649,22 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		if len(fails) > 0 {
 			return checksFailAnswer(r.Name, len(steps), fails)
 		}
-		checked = "pass"
+		checked, suffix = "pass", ""
 	} else {
-		actx.Log("  %s: the replay's own history is not judged (no checker entry)", r.Name)
+		why := r.Unjudged
+		if why == "" {
+			why = "no checker entry"
+		}
+		checked = "not run: " + why
+		actx.Log("  %s: the replay's own history is not judged (%s): a match is answered _unjudged", r.Name, why)
 	}
 	if len(hitDiffs) > 0 {
 		for _, h := range hitDiffs {
 			actx.Log("  %s: %s", r.Name, h.line())
 		}
 		actx.Log("  %s: %d steps match %s, but for %d in-op fault hit(s) that differ", r.Name, len(steps), src, len(hitDiffs))
-		return map[string]string{"value": "match_inop_hit_differs", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": strconv.Itoa(len(hitDiffs)), "checks": checked}, nil
+		return map[string]string{"value": "match_inop_hit_differs" + suffix, "steps": strconv.Itoa(len(steps)), "inop_hit_differs": strconv.Itoa(len(hitDiffs)), "checks": checked}, nil
 	}
 	actx.Log("  %s: %d steps match %s", r.Name, len(steps), src)
-	return map[string]string{"value": "match", "steps": strconv.Itoa(len(steps)), "inop_hit_differs": "0", "checks": checked}, nil
+	return map[string]string{"value": "match" + suffix, "steps": strconv.Itoa(len(steps)), "inop_hit_differs": "0", "checks": checked}, nil
 }

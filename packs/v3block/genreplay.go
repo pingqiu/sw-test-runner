@@ -12,8 +12,9 @@ package v3block
 // packs/v3block/product, the one checks.json) and the run header's checker
 // set (the scenario's one list, recorded in the header): a checker added to
 // the pack is run by both. python (default python3) runs it. Without
-// runner_src the replay's history is not judged, and its answer says
-// "checks" "not run".
+// runner_src the replay's history is not judged: a match is answered
+// "match_unjudged" (or "match_inop_hit_differs_unjudged"), "checks" "not
+// run: no runner_src".
 
 import (
 	"context"
@@ -79,6 +80,8 @@ func v3GenReplay(ctx context.Context, actx *tr.ActionContext, act tr.Action) (ma
 			py = "python3"
 		}
 		r.Judge = pythonJudge(py, src)
+	} else {
+		r.Unjudged = "no runner_src"
 	}
 	return r.Replay(ctx, actx, opParam(act, actx, "history"))
 }

@@ -200,7 +200,7 @@ func TestInOpFaultsReplay(t *testing.T) {
 	f.install(t)
 	actx, p := genRunCtx(t)
 	out, err := genRunner("v3_gen_replay", "host", &blockModel{}).Replay(context.Background(), actx, src)
-	if err != nil || out["value"] != "match" {
+	if err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	_ = actx.History.Close()
@@ -293,7 +293,7 @@ func TestReplayReportsAnInOpHitThatDiffers(t *testing.T) {
 		t.Fatalf("the night's in-op kills that hit: %v", ops)
 	}
 	out, p, err := replayMissing(t, src)
-	if err != nil || out["value"] != "match_inop_hit_differs" || out["inop_hit_differs"] != "2" {
+	if err != nil || out["value"] != "match_inop_hit_differs_unjudged" || out["inop_hit_differs"] != "2" {
 		t.Fatalf("%v %v", out, err)
 	}
 	rep := lastVerb(t, p, "gen_replay").Result
@@ -312,7 +312,7 @@ func TestReplayReportsAnInOpHitThatDiffers(t *testing.T) {
 	f := &faultFake{opDelay: fakeOpDelay}
 	f.install(t)
 	actx, _ := genRunCtx(t)
-	if out, err := genRunner("v3_gen_replay", "host", &blockModel{}).Replay(context.Background(), actx, src); err != nil || out["value"] != "match" || out["inop_hit_differs"] != "0" {
+	if out, err := genRunner("v3_gen_replay", "host", &blockModel{}).Replay(context.Background(), actx, src); err != nil || out["value"] != "match_unjudged" || out["inop_hit_differs"] != "0" {
 		t.Fatalf("plain replay: %v %v", out, err)
 	}
 	_ = actx.History.Close()
@@ -371,7 +371,7 @@ func TestReplayInOpHitDiffersOnlyExcusesItsOwnVolumeDownstream(t *testing.T) {
 	}
 	after := pick(true, true)
 	out, p, err := replayMissing(t, tamper(t, src, after, tr.OutcomeRefused))
-	if err != nil || out["value"] != "match_inop_hit_differs" {
+	if err != nil || out["value"] != "match_inop_hit_differs_unjudged" {
 		t.Fatalf("same volume after, op %d: %v %v", after, out, err)
 	}
 	found := false

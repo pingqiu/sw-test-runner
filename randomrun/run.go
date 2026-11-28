@@ -61,6 +61,8 @@ type Runner struct {
 	// (replayjudge.go): a replay matches only with every required checker
 	// PASS there.
 	Judge JudgeFunc
+	// Unjudged says why a Runner has no Judge (a replay's answer names it).
+	Unjudged string
 }
 
 // outcomeRank orders outcomes for aggregation: the worst wins.
