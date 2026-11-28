@@ -427,3 +427,16 @@ func TestInOpDecisionMustMatch(t *testing.T) {
 		t.Errorf("the same store pause: %s", why)
 	}
 }
+
+// The replay_checks_fail message calls only a violation a product finding:
+// a checker of another kind (unknown, coverage) "did not pass".
+func TestChecksFailNamesOnlyAViolationAProductFinding(t *testing.T) {
+	_, err := checksFailAnswer("r", 3, []checkFail{{Checker: "C6", Verdict: "FAIL", Kind: CheckKindUnknown}, {Checker: "C5", Verdict: "UNKNOWN", Kind: CheckKindUnknown}})
+	if err == nil || !strings.Contains(err.Error(), "C6 FAIL, C5 UNKNOWN did not pass") || strings.Contains(err.Error(), "product finding") {
+		t.Fatalf("%v", err)
+	}
+	_, err = checksFailAnswer("r", 3, []checkFail{{Checker: "C1", Verdict: "FAIL", Kind: CheckKindViolation}, {Checker: "C6", Verdict: "FAIL", Kind: "coverage"}})
+	if err == nil || !strings.Contains(err.Error(), "the violation(s) of C1 are a product finding") || strings.Contains(err.Error(), "C6 are") {
+		t.Fatalf("%v", err)
+	}
+}

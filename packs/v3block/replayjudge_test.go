@@ -85,8 +85,11 @@ func TestReplayWhoseHistoryFailsACheckerAnswersReplayChecksFail(t *testing.T) {
 	src := recordJudged(t, "C0,C1,C5")
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
 	out, p, err := replayJudged(t, src, root, py)
+	// Kind unknown: the checkers "did not pass"; only a violation would be
+	// called a product finding.
 	if err == nil || out["value"] != "replay_checks_fail" || strings.Contains(err.Error(), "differ") || out["failing"] == "" ||
-		!strings.Contains(out["kinds"], ":"+randomrun.CheckKindUnknown) {
+		!strings.Contains(out["kinds"], ":"+randomrun.CheckKindUnknown) || !strings.Contains(err.Error(), "did not pass on the replay's own history") ||
+		strings.Contains(err.Error(), "product finding") {
 		t.Fatalf("%v %v", out, err)
 	}
 	rec := lastVerb(t, p, "gen_replay_checks").Result

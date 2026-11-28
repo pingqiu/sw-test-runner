@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -45,6 +46,10 @@ type JudgeFunc func(ctx context.Context, history, checkers string) (map[string]C
 // CheckKindUnknown is a failing checker's kind until the checkers say
 // whether a finding is a violation or a coverage gap.
 const CheckKindUnknown = "unknown"
+
+// CheckKindViolation is a failing checker's kind when its finding is a
+// violation: only that is a product finding.
+const CheckKindViolation = "violation"
 
 // checkFail is a required checker that did not PASS on the replay's history.
 type checkFail struct {
@@ -125,6 +130,17 @@ func checksFailAnswer(name string, steps int, fails []checkFail) (map[string]str
 		kinds = append(kinds, f.Checker+":"+f.Kind)
 	}
 	out := map[string]string{"value": "replay_checks_fail", "steps": fmt.Sprint(steps), "failing": strings.Join(names, ", "), "kinds": strings.Join(kinds, ", ")}
-	return out, fmt.Errorf("%s: replay_checks_fail: %s on the replay's own history (kind %s): a product finding, not a replay mismatch",
-		name, strings.Join(names, ", "), strings.Join(kinds, ", "))
+	// Only a violation is a product finding; a checker answering UNKNOWN, or
+	// a coverage gap, did not pass and is no finding about the product.
+	var violations []string
+	for _, f := range fails {
+		if f.Kind == CheckKindViolation {
+			violations = append(violations, f.Checker)
+		}
+	}
+	msg := fmt.Sprintf("%s: replay_checks_fail: %s did not pass on the replay's own history (kind %s)", name, strings.Join(names, ", "), strings.Join(kinds, ", "))
+	if len(violations) > 0 {
+		msg += fmt.Sprintf("; the violation(s) of %s are a product finding, not a replay mismatch", strings.Join(violations, ", "))
+	}
+	return out, errors.New(msg)
 }
