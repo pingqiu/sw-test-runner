@@ -7,6 +7,13 @@
 #                                             "pid starttime NAME"; wait until every PORT listens
 #                                             and is held by that process (or it exits: fail)
 #   m0-own.sh record WORK TOKEN NAME PID      record a process started elsewhere, with its start time
+#   m0-own.sh pause WORK TOKEN NAME BOUND     stop (SIGSTOP) the recorded process NAME, found by its pid
+#                                             and start time in WORK/owned only, and start a detached
+#                                             continue (SIGCONT) after BOUND seconds (1..600) that runs
+#                                             whatever happens to the caller; print one JSON line
+#                                             {outcome, process, pid, paused_ns, bound_seconds, error}
+#   m0-own.sh continue WORK TOKEN NAME        continue (SIGCONT) that process now; print
+#                                             {outcome, process, pid, continued_ns, error}
 #   m0-own.sh teardown WORK TOKEN NQN_PREFIX  only if WORK/.owner holds TOKEN: delete the kernel
 #                                             NVMe controllers whose subsystem NQN starts with this
 #                                             run's own prefix; stop each recorded process only if
@@ -60,7 +67,43 @@ listening() { # PORT -> the pids holding a listener on it, or nothing; fails if 
   return 0
 }
 
+# ledger_proc NAME: "pid start" of the last process recorded as NAME in the
+# ownership ledger, or nothing.
+ledger_proc() {
+  awk -v n="$2" '$3 == n { p = $1 " " $2 } END { if (p != "") print p }' "$1/owned"
+}
+
+# fail_json PROCESS MESSAGE: an unknown answer, as one JSON line, exit 1.
+fail_json() {
+  printf '{"outcome":"unknown","process":"%s","pid":0,"error":"%s"}\n' "$1" "$(printf '%s' "$2" | tr -d '"\\')"
+  exit 1
+}
+
 case "${1:-}" in
+pause)
+  w=$2 tok=$3 name=$4 bound=$5
+  owned "$w" "$tok" || fail_json "$name" "not this run's WORK: nothing paused"
+  case "$bound" in ''|*[!0-9]*) fail_json "$name" "bound $bound" ;; esac
+  [ "$bound" -ge 1 ] && [ "$bound" -le 600 ] || fail_json "$name" "bound $bound outside 1..600"
+  set -- $(ledger_proc "$w" "$name")
+  pid=${1:-} st=${2:-}
+  [ -n "$pid" ] || fail_json "$name" "$name is not in the ownership ledger"
+  [ "$(proc_state "$pid" "$st")" = running ] || fail_json "$name" "$name (pid $pid) is not running with its recorded start time"
+  # The bounded continue first, detached: the pause ends by BOUND even if
+  # this script, or the runner, dies right after the stop.
+  setsid bash -c 's=$(cat "$4/$1/stat" 2>/dev/null) || exit 0; sleep "$3"; t=$(cat "$4/$1/stat" 2>/dev/null) || exit 0; t=${t##*) }; set -- $1 $2 $3 $4 $t; [ "${24}" = "$2" ] && kill -CONT "$1"'     _ "$pid" "$st" "$bound" "$PROC" > /dev/null 2>&1 < /dev/null &
+  now=$(date +%s%N)
+  kill -STOP "$pid" || fail_json "$name" "SIGSTOP of pid $pid failed"
+  printf '{"outcome":"ok","process":"%s","pid":%s,"paused_ns":%s,"bound_seconds":%s,"error":""}\n' "$name" "$pid" "$now" "$bound" ;;
+continue)
+  w=$2 tok=$3 name=$4
+  owned "$w" "$tok" || fail_json "$name" "not this run's WORK: nothing continued"
+  set -- $(ledger_proc "$w" "$name")
+  pid=${1:-} st=${2:-}
+  [ -n "$pid" ] || fail_json "$name" "$name is not in the ownership ledger"
+  [ "$(proc_state "$pid" "$st")" = running ] || fail_json "$name" "$name (pid $pid) is not running with its recorded start time"
+  kill -CONT "$pid" || fail_json "$name" "SIGCONT of pid $pid failed"
+  printf '{"outcome":"ok","process":"%s","pid":%s,"continued_ns":%s,"error":""}\n' "$name" "$pid" "$(date +%s%N)" ;;
 claim)
   w=$2
   case "$w" in /*) ;; *) die "WORK must be absolute" ;; esac
@@ -139,5 +182,5 @@ teardown)
   done
   [ -z "$left" ] || { echo "m0-own: controllers of this run remain after 10 s:$left" >&2; rc=1; }
   exit $rc ;;
-*) die "usage: claim | spawn | record | teardown" ;;
+*) die "usage: claim | spawn | record | pause | continue | teardown" ;;
 esac

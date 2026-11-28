@@ -6,7 +6,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/randomrun"
@@ -76,6 +78,14 @@ type faultFake struct {
 	// refuseRestart: every restart answers refused (a holder that does not
 	// come back).
 	refuseRestart bool
+	// opDelay: a write or snapshot takes this long, and answers unknown when
+	// a kill ran meanwhile (a kill timed into it); kills counts the kills.
+	// storePaused: between a store pause and its continue a snapshot answers
+	// unknown (its publish cut). storeCalls logs them.
+	opDelay     time.Duration
+	kills       atomic.Int64
+	storePaused atomic.Bool
+	storeCalls  []string
 }
 
 // lookNotServing is what a single look shows not serving: the pool while
@@ -95,6 +105,21 @@ func (f *faultFake) install(t *testing.T) {
 			continue
 		}
 		genHandlers[name] = func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			if f.opDelay > 0 && (name == "v3_op_write" || name == "v3_op_snapshot") && act.Params["expect"] == "" && f.down == "" {
+				// The operation takes opDelay between its invoke and its
+				// answer, and is cut (unknown) by a kill that ran meanwhile, or
+				// while the store is paused.
+				k0 := f.kills.Load()
+				seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"],
+					Args: cutArgs(name, act)})
+				time.Sleep(f.opDelay)
+				if f.kills.Load() != k0 || (name == "v3_op_snapshot" && f.storePaused.Load()) {
+					_ = actx.History.Complete(seq, tr.OutcomeUnknown, map[string]any{"detail": "fake: cut by a fault"})
+					return map[string]string{"value": tr.OutcomeUnknown, "detail": "fake: cut by a fault"}, nil
+				}
+				_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
+				return map[string]string{"value": tr.OutcomeOK}, nil
+			}
 			if f.down == "" || act.Params["expect"] != "" || (f.inOutage && !f.outageUnknown) {
 				return inner(ctx, actx, act)
 			}
@@ -112,6 +137,7 @@ func (f *faultFake) install(t *testing.T) {
 			p := act.Params["process"]
 			f.log = append(f.log, verb+" "+p)
 			if verb == FaultKill {
+				f.kills.Add(1)
 				if f.down != "" {
 					f.maxDown = 2
 				}
@@ -130,6 +156,21 @@ func (f *faultFake) install(t *testing.T) {
 			return map[string]string{"value": tr.OutcomeOK}, nil
 		}
 	}
+	store := func(verb string, paused bool) tr.ActionHandlerFunc {
+		return func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			f.storeCalls = append(f.storeCalls, verb+" "+act.Params["store"]+" "+act.Params["bound_seconds"])
+			args := map[string]any{"fault_key": "store_pause:" + act.Params["store"], "process": act.Params["store"]}
+			if b := act.Params["bound_seconds"]; b != "" {
+				args["bound_seconds"] = b
+			}
+			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Env." + verb, Verb: verb, Args: args})
+			f.storePaused.Store(paused)
+			_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
+			return map[string]string{"value": tr.OutcomeOK}, nil
+		}
+	}
+	genHandlers["v3_op_fault_apply_store"] = store("fault_apply", true)
+	genHandlers["v3_op_fault_restore_store"] = store("fault_restore", false)
 	genHandlers["v3_op_kill"] = fault(FaultKill)
 	genHandlers["v3_op_restart"] = fault(FaultRestart)
 	genHandlers["v3_op_healthy"] = func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
@@ -1285,4 +1326,18 @@ func TestEveryFaultProcessIsReached(t *testing.T) {
 			}
 		}
 	}
+}
+
+// cutArgs are the record args of an operation a fault cut in this fake: a
+// snapshot's name, request and attempt (as the declared snapshot records
+// them), a write's lbas.
+func cutArgs(name string, act tr.Action) map[string]any {
+	if name == "v3_op_write" {
+		return map[string]any{"lbas": act.Params["lbas"]}
+	}
+	n, _ := strconv.Atoi(act.Params["attempt"])
+	if n == 0 {
+		n = 1
+	}
+	return map[string]any{"name": act.Params["name"], "request": act.Params["volume"] + "-" + act.Params["name"], "attempt": n}
 }

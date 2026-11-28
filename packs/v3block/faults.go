@@ -44,6 +44,11 @@ func init() {
 	// the environment, not a step of the product.
 	opIDs["kill"] = "Env.Kill"
 	opIDs["restart"] = "Env.Restart"
+	// The store fault (actions.json v3_op_fault_apply_store and
+	// v3_op_fault_restore_store): a pause of the store process and its
+	// continue, the environment's as a kill is.
+	opIDs["fault_apply"] = "Env.StorePause"
+	opIDs["fault_restore"] = "Env.StoreContinue"
 }
 
 var digits = regexp.MustCompile(`^[0-9]+$`)

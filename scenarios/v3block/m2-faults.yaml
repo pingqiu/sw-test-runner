@@ -67,6 +67,13 @@ env:
   # within the product's stated bound, read from its checks.json): its own
   # schedule event with this rate, never while another process is down.
   fault_master_outage: "0.02"
+  # In-operation faults, in every fault run by construction (randomrun
+  # inop.go): a holder kill timed into a write and into a snapshot, and a
+  # pause of the filer (m0-own.sh pause, bounded) around a snapshot's publish.
+  fault_during: "v3_op_write v3_op_snapshot"
+  fault_store: "weed-filer"
+  fault_store_action: "v3_op_snapshot"
+  fault_store_bound: "75"
   # The name pool. The product (a standalone deployment) has no online create
   # and never reuses a deleted name, so the cluster spec declares every name
   # the run may use, up front. 300 operations against a product answering ok
@@ -196,6 +203,10 @@ phases:
         fault_restart_within: "{{ fault_restart_within }}"
         fault_healthy_wait: "{{ fault_healthy_wait }}"
         fault_master_outage: "{{ fault_master_outage }}"
+        fault_during: "{{ fault_during }}"
+        fault_store: "{{ fault_store }}"
+        fault_store_action: "{{ fault_store_action }}"
+        fault_store_bound: "{{ fault_store_bound }}"
 
   # Only what this run acquired: nothing at all if the claim failed.
   - name: teardown

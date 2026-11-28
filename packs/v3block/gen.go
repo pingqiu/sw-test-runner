@@ -65,7 +65,11 @@ const GenVersion = "m1-gen/9"
 // with nothing serving is skipped. m2-gen/7: as m1-gen/7. m2-gen/8: as
 // m1-gen/8. m2-gen/9: as m1-gen/9. m2-gen/10: the schedule kills the fault
 // processes in turn, the first of each forced (randomrun.NewFaultSchedule),
-// so every listed process is reached by construction.
+// so every listed process is reached by construction; with fault_during and
+// fault_store, the in-operation faults (randomrun inop.go): a holder kill
+// timed into a write and into a snapshot, a store pause around a snapshot,
+// each with its target operation forced (TargetOp), and the follow-ups of
+// the store pause (AfterStorePause).
 const GenVersionFaults = "m2-gen/10"
 
 //go:embed product/operations.json
@@ -1325,6 +1329,10 @@ type GenConfig struct {
 	FaultProcesses []string // the processes the schedule may kill
 	RestartWithin  int      // a kill's restart comes within this many operations (default DefaultRestartWithin)
 	MasterOutage   float64  // chance of a short master outage after each operation outside a kill's interval
+	// In-operation faults (randomrun inop.go): kills timed into an operation
+	// of each InOp.During action, a store pause around one of InOp.StoreAction.
+	InOp       randomrun.InOpFaults
+	StoreBound int
 }
 
 // Generator is the generic generator over the block model; the model's
@@ -1342,7 +1350,8 @@ func NewGenerator(cfg GenConfig) (*Generator, error) {
 	}
 	m := &blockModel{blocks: cfg.Blocks}
 	g, err := randomrun.New(randomrun.Config{Seed: cfg.Seed, Ops: cfg.Ops, Pool: cfg.Pool, Negative: cfg.Negative, Weights: cfg.Weights,
-		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin, MasterOutage: cfg.MasterOutage}, m)
+		Faults: cfg.Faults, FaultProcesses: cfg.FaultProcesses, RestartWithin: cfg.RestartWithin, MasterOutage: cfg.MasterOutage,
+		InOp: cfg.InOp, StoreBound: cfg.StoreBound}, m)
 	if err != nil {
 		return nil, err
 	}
