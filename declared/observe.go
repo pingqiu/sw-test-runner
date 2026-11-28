@@ -278,7 +278,7 @@ func (s *scope) fill(res map[string]any, outs map[string]Out, data map[string]an
 func (x *Executor) observe(s *scope, actx *tr.ActionContext, a *Action, vol string) (map[string]string, error) {
 	res := map[string]any{}
 	var abandoned []Proc
-	from := actx.History.Now()
+	from, fromWall := actx.History.Now(), time.Now().UnixNano()
 	for i := range a.Steps {
 		st := &a.Steps[i]
 		if st.When != nil {
@@ -325,7 +325,7 @@ func (x *Executor) observe(s *scope, actx *tr.ActionContext, a *Action, vol stri
 		res[AbandonedKey] = abandoned
 	}
 	return map[string]string{"value": "observed"}, actx.History.Observe(tr.HistoryObserve,
-		tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Volume: vol, Verb: a.Verb, FromNs: from, Result: res})
+		tr.HistoryRecord{Client: s.vals["config."+x.File.Config.Client], Volume: vol, Verb: a.Verb, FromNs: from, FromWallNs: fromWall, Result: res})
 }
 
 func (s *scope) read(res map[string]any, r Read, stdout, stderr string, code int, runErr error) error {

@@ -57,9 +57,14 @@ type HistoryRecord struct {
 	// FromNs, on an observation: the clock (as MonoNs) when its reading
 	// began. MonoNs stamps the record after the reading, so the reading lies
 	// between FromNs and MonoNs. Absent: the record does not say.
-	FromNs  int64          `json:"from_mono_ns,omitempty"`
-	Outcome string         `json:"outcome,omitempty"`
-	Result  map[string]any `json:"result,omitempty"`
+	FromNs int64 `json:"from_mono_ns,omitempty"`
+	// FromWallNs, on an observation: this runner's wall clock (Unix ns) when
+	// its reading began, taken with FromNs. The reading's end in wall time is
+	// FromWallNs + (MonoNs - FromNs): a product fact printed in wall time (a
+	// lease expiry) is compared with it. Absent: the record does not say.
+	FromWallNs int64          `json:"from_wall_ns,omitempty"`
+	Outcome    string         `json:"outcome,omitempty"`
+	Result     map[string]any `json:"result,omitempty"`
 }
 
 // History appends records to the run's history file.
