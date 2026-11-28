@@ -8,7 +8,8 @@ package randomrun
 //     serves (HolderNamer) and whose action has a measured duration: a
 //     single look first (nothing down, as for any kill), then the operation,
 //     and BESIDE it, at permille/1000 of the action's SHORTEST measured
-//     duration after its first attempt was issued, the kill of that holder.
+//     call after the operation's own invocation record (the history's
+//     OnInvoke), the kill of that holder.
 //     It is the only concurrency of the runner: one fault beside one
 //     operation, never two operations (opGuard refuses a second). After both
 //     answered, an observe record "fault_during" {after_op, opno, action,
@@ -309,29 +310,50 @@ func (f *faultRun) killDuring(ctx context.Context, actx *tr.ActionContext, o Op,
 	var wg sync.WaitGroup
 	var killOut map[string]string
 	var killErr error
-	hk := &AttemptHooks{BeforeFirst: func() error {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			leave, ok := enter(&faultGuard, actx.History)
-			if !ok {
-				killErr = fmt.Errorf("two faults at once beside operation %d", o.No)
-				return
-			}
-			defer leave()
-			t := time.NewTimer(offset)
-			defer t.Stop()
-			select {
-			case <-ctx.Done():
-				killErr = ctx.Err()
-				return
-			case <-t.C:
-			}
-			killOut, killErr = kh(ctx, &kactx, tr.Action{Action: kill.Action, Node: f.r.Node, Params: kill.Params})
-		}()
-		return nil
-	}}
+	// The offset runs from the operation's own invocation record, not from
+	// the handler call (a handler checks and records before it issues the
+	// command): the history tells of each invocation (OnInvoke), and the
+	// first that is not the kill's starts the timer. A hook, not a poll of
+	// the file: no window in which the record exists but is not yet seen.
+	invoked := make(chan struct{})
+	opDone := make(chan struct{})
+	var once sync.Once
+	actx.History.OnInvoke(func(r tr.HistoryRecord) {
+		if r.Verb != VerbKill {
+			once.Do(func() { close(invoked) })
+		}
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		leave, ok := enter(&faultGuard, actx.History)
+		if !ok {
+			killErr = fmt.Errorf("two faults at once beside operation %d", o.No)
+			return
+		}
+		defer leave()
+		select {
+		case <-ctx.Done():
+			killErr = ctx.Err()
+			return
+		case <-opDone:
+			return // the operation recorded no invocation: nothing to kill into
+		case <-invoked:
+		}
+		t := time.NewTimer(offset)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			killErr = ctx.Err()
+			return
+		case <-t.C:
+		}
+		killOut, killErr = kh(ctx, &kactx, tr.Action{Action: kill.Action, Node: f.r.Node, Params: kill.Params})
+	}()
+	hk := &AttemptHooks{}
 	outcome, n, took, err := f.r.stepWith(ctx, actx, o, hk)
+	actx.History.OnInvoke(nil)
+	close(opDone)
 	wg.Wait()
 	mergeVars(actx.Vars, kbefore, kactx.Vars)
 	if err != nil {
@@ -354,7 +376,9 @@ func (f *faultRun) killDuring(ctx context.Context, actx *tr.ActionContext, o Op,
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "fault_during", Volume: o.Volume, Result: res}); err != nil {
 		return "", n, true, err
 	}
-	f.fired[e.Process] = true
+	if got != "" {
+		f.fired[e.Process] = true // the kill ran (its restart follows)
+	}
 	if got == tr.OutcomeOK || got == tr.OutcomeUnknown {
 		f.down, f.downScheduled = target, e.Process
 	}

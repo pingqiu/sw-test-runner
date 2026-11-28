@@ -33,11 +33,15 @@ type inOpRunner struct {
 	opTime     time.Duration
 	snapAnswer string
 	paused     bool
+	preInvoke  time.Duration // a write waits this long before recording its invocation (a handler's own checks)
 }
 
 func (x *inOpRunner) runner(d Driver) Runner {
 	rec := func(verb string, out func() string) tr.ActionHandlerFunc {
 		return func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			if verb == "write" {
+				time.Sleep(x.preInvoke)
+			}
 			args := map[string]any{}
 			if verb == VerbFaultApply || verb == VerbFaultRestore {
 				args["fault_key"] = "store_pause:" + act.Params["store"]
@@ -320,5 +324,31 @@ func TestReadScriptReadsInOpSteps(t *testing.T) {
 	}
 	if rec := sc.InOp[1]; rec.Action != FaultKillDuring || rec.Process != "p1" || rec.OffsetMs != 40 {
 		t.Fatalf("in-op record %+v", sc.InOp)
+	}
+}
+
+// The kill's offset runs from the operation's own invocation record, not
+// from the handler call: a handler that checks for 200 ms before recording
+// its invocation still has the kill land inside it (red control: timed from
+// the handler call, the 50 ms kill ran before the operation, MISSED).
+func TestKillDuringIsTimedFromTheInvocation(t *testing.T) {
+	x := &inOpRunner{opTime: 300 * time.Millisecond, preInvoke: 200 * time.Millisecond}
+	r := x.runner(toyDriver{})
+	actx, p := rerunHistory(t)
+	e := FaultEvent{AfterOp: 0, Action: FaultKillDuring, Process: "p0", Target: "write", Permille: 500}
+	fr := newFaultRun(r, []FaultEvent{e}, nil, map[string]any{}, nil)
+	fr.inOpRecs = map[int]inOpRecord{1: {Action: FaultKillDuring, AfterOp: 0, OpNo: 1, Process: "p0", OffsetMs: 50}}
+	fr.arm(e)
+	got, err := fr.stepOp(context.Background(), actx, r, Op{No: 1, Action: "write", Volume: "v1", Params: map[string]string{"volume": "v1"}})
+	actx.History.Close()
+	shape, recs := inOpShape(t, p)
+	want := []string{"observe gen_step", "invoke write", "invoke kill", "complete kill ok", "complete write unknown", "observe fault_during"}
+	if err != nil || got != tr.OutcomeUnknown || strings.Join(shape, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q %v\n%s", got, err, strings.Join(shape, "\n"))
+	}
+	for _, r := range recs {
+		if r.Verb == "fault_during" && r.Result["hit"] != true {
+			t.Fatalf("%v", r.Result)
+		}
 	}
 }

@@ -74,6 +74,18 @@ type History struct {
 	// line, so every later record is refused and the run fails to record.
 	// A history with a hole never reaches a checker as if it were whole.
 	broken error
+	// onInvoke, when set (OnInvoke), is told of each invocation recorded.
+	onInvoke func(HistoryRecord)
+}
+
+// OnInvoke sets f to be called with each invocation the history records,
+// right after it is appended and outside the history's lock (nil: none). A
+// driver uses it to time a fault from an operation's own invocation record,
+// with no polling of the file.
+func (h *History) OnInvoke(f func(HistoryRecord)) {
+	h.mu.Lock()
+	h.onInvoke = f
+	h.mu.Unlock()
 }
 
 // OpenHistory creates the history file; an existing file is refused, so a
@@ -112,12 +124,17 @@ func (h *History) Invoke(r HistoryRecord) (uint64, error) {
 		return 0, errors.New("history: an invocation names its op and verb")
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	r.Kind, r.Of, r.Outcome, r.Result = HistoryInvoke, 0, "", nil
 	if err := h.appendLocked(&r); err != nil {
+		h.mu.Unlock()
 		return 0, err
 	}
 	h.open[r.Seq] = r
+	f := h.onInvoke
+	h.mu.Unlock()
+	if f != nil {
+		f(r)
+	}
 	return r.Seq, nil
 }
 
