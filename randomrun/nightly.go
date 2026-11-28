@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -58,9 +59,15 @@ type NightRun struct {
 	// Filled by Judge: a fault run (its coverage has fault cells), and the n
 	// of its C6 finding "unknowns resolved: <n>" (0 when absent; ChecksNote
 	// says why).
-	Faults           bool   `json:"faults"`
-	UnknownsResolved int    `json:"unknowns_resolved"`
-	ChecksNote       string `json:"checks_note,omitempty"`
+	Faults           bool `json:"faults"`
+	UnknownsResolved int  `json:"unknowns_resolved"`
+	// InOpHits are the run's in-operation fault hits by cell
+	// ("<kind>|<action>|hit", its fault cells): reported BESIDE the unknowns
+	// rule, never toward it (a kill that landed inside an operation may still
+	// have been answered ok or refused; only C6's count says a request ended
+	// unknown and was placed).
+	InOpHits   map[string]int `json:"in_op_hits,omitempty"`
+	ChecksNote string         `json:"checks_note,omitempty"`
 	// The run's required checker set, from its header's "checkers", and the
 	// ones in it that its checks.json does not hold (not run: the run FAILs).
 	Checkers []string `json:"checkers"`
@@ -131,6 +138,9 @@ type NightReport struct {
 	UnionNeverReached []string       `json:"union_cells_never_reached"`
 	Verdict           string         `json:"verdict"`
 	Findings          []string       `json:"findings,omitempty"` // night-level reasons for FAIL
+	// InOp are the night's in-operation fault hits, one line per cell, beside
+	// the unknowns rule: they neither satisfy nor replace it.
+	InOp []string `json:"in_op,omitempty"`
 }
 
 // resolvedPrefix is the C6 finding that counts the unknowns resolved by
@@ -202,6 +212,14 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 				never[c]++
 			}
 			r.Faults = cov.Faults != nil
+			for c, n := range cov.Faults {
+				if strings.HasSuffix(c, "|hit") && n > 0 {
+					if r.InOpHits == nil {
+						r.InOpHits = map[string]int{}
+					}
+					r.InOpHits[c] = n
+				}
+			}
 			req, rerr := requiredCheckers(r.History)
 			r.Checkers = req
 			var ran map[string]verdict
@@ -276,9 +294,22 @@ func Judge(nightly uint64, runs []NightRun) NightReport {
 			resolved++
 		}
 	}
+	// The unknowns rule, on C6's count alone: an in-operation hit is no
+	// unknown resolved (a kill inside an operation may be answered ok).
 	if faults > 0 && resolved == 0 {
 		rep.Verdict = "FAIL"
 		rep.Findings = append(rep.Findings, fmt.Sprintf("%d fault runs, and no run's C6 resolved an unknown (%s<n> with n > 0)", faults, resolvedPrefix))
+	}
+	// Beside it, never toward it: the in-operation hits.
+	hits, inRuns := map[string]int{}, map[string]int{}
+	for _, r := range rep.Runs {
+		for c, n := range r.InOpHits {
+			hits[c] += n
+			inRuns[c]++
+		}
+	}
+	for _, c := range slices.Sorted(maps.Keys(hits)) {
+		rep.InOp = append(rep.InOp, fmt.Sprintf("in-operation hit %s: %d in %d of %d runs (beside the unknowns rule, never toward it)", c, hits[c], inRuns[c], len(rep.Runs)))
 	}
 	if len(runs) == 0 {
 		rep.Verdict = "FAIL"
