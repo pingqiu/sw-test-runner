@@ -33,6 +33,12 @@ env:
   product_src: ""
   runner_src: ""
   weed: ""
+  # Empty: the build phase compiles the product's binaries on this host. Set:
+  # a directory holding blockmaster, blockvolume, sw-block and v3ctl built
+  # elsewhere (a host that must not build), and a product.sha naming the
+  # commit they were built from; it must equal product_src's HEAD, or the run
+  # refuses to start.
+  prebuilt_bin: ""
   # Every listening port of the run is computed from port_base (v3_run_plan).
   port_base: "21000"
   # The work directory is work_prefix + tag and the NQN prefix carries the tag;
@@ -125,15 +131,37 @@ phases:
         env.SRC: "{{ product_src }}"
         env.WORK: "{{ work }}"
         env.V3CTL: "{{ runner_src }}/packs/v3block/v3ctl/main.go"
+        env.PREBUILT: "{{ prebuilt_bin }}"
         cmd: |
           set -eu
           [ -f "$SRC/go.mod" ] || { echo "product_src is not a checkout: $SRC" >&2; exit 2; }
           [ -f "$V3CTL" ] || { echo "runner_src is not this checkout: $V3CTL" >&2; exit 2; }
           mkdir -p "$WORK/bin" "$WORK/log"
           git -C "$SRC" rev-parse HEAD > "$WORK/product.sha"
-          for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
-          d="$SRC/.runner-v3ctl-$$"; mkdir "$d"; tail -n +2 "$V3CTL" > "$d/main.go"
-          (cd "$SRC" && go build -o "$WORK/bin/v3ctl" "./$(basename "$d")"); rm -r "$d"
+          if [ -n "$PREBUILT" ]; then
+            # Binaries built elsewhere: they must come from this checkout's commit.
+            [ -f "$PREBUILT/product.sha" ] || { echo "prebuilt_bin has no product.sha: $PREBUILT" >&2; exit 2; }
+            [ "$(cat "$PREBUILT/product.sha")" = "$(cat "$WORK/product.sha")" ] || { echo "prebuilt_bin was built from $(cat "$PREBUILT/product.sha"), product_src is at $(cat "$WORK/product.sha")" >&2; exit 2; }
+            # One unit: every binary must match its line in the directory's SHA256SUMS
+            # (written by prebuild.sh beside product.sha), so old binaries beside a new
+            # product.sha are refused.
+            [ -f "$PREBUILT/SHA256SUMS" ] || { echo "prebuilt_bin has no SHA256SUMS: $PREBUILT" >&2; exit 2; }
+            for b in blockmaster blockvolume sw-block v3ctl; do
+              [ -x "$PREBUILT/$b" ] || { echo "prebuilt_bin lacks an executable $b" >&2; exit 2; }
+              want=$(awk -v n="$b" '$2 == n || $2 == "*" n { print $1 }' "$PREBUILT/SHA256SUMS")
+              [ -n "$want" ] || { echo "prebuilt_bin SHA256SUMS has no line for $b" >&2; exit 2; }
+              got=$(sha256sum < "$PREBUILT/$b" | cut -c1-64)
+              [ "$got" = "$want" ] || { echo "prebuilt_bin $b is $got, its SHA256SUMS says $want" >&2; exit 2; }
+              cp "$PREBUILT/$b" "$WORK/bin/$b"
+            done
+            echo "binaries: prebuilt from $PREBUILT"
+          else
+            for b in blockmaster blockvolume sw-block; do (cd "$SRC" && go build -o "$WORK/bin/$b" ./cmd/$b); done
+            d="$SRC/.runner-v3ctl-$$"; mkdir "$d"; tail -n +2 "$V3CTL" > "$d/main.go"
+            (cd "$SRC" && go build -o "$WORK/bin/v3ctl" "./$(basename "$d")"); rm -r "$d"
+            echo "binaries: built on this host"
+          fi
+          (cd "$WORK/bin" && sha256sum blockmaster blockvolume sw-block v3ctl)
           cat "$WORK/product.sha"
 
   - name: store
