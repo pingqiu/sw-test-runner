@@ -479,6 +479,53 @@ func TestComputedConfiguration(t *testing.T) {
 	}
 }
 
+// An observation records when its reading began twice: on the history's
+// clock (from_mono_ns) and on the runner's wall clock (from_wall_ns), both
+// taken before the first step runs. Red controls: a wall start before the
+// call, after it, or past the record's own end.
+func TestObservationRecordsWallStart(t *testing.T) {
+	good := `"actions": [{"action": "o", "verb": "observe", "kind": "observe", "runs_on": "step_node", "params": [{"name": "volume", "kind": "subject"}],
+	  "record": {"volume": "{{volume.name}}"},
+	  "steps": [{"name": "s", "command": ["show"], "runner_deadline_seconds": 1, "cite": "x.go:1",
+	    "read": {"kind": "json_strings", "into": "l", "error_into": "e", "error": "listing: {{stderr_first_line}}"}}]}], "exceptions": []}`
+	f, err := Parse([]byte(head + good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "h.jsonl")
+	h, err := tr.OpenHistory(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &node{answers: []answer{{out: `["x"]`}}}
+	sub := &subject{f: map[string]string{}}
+	x := &Executor{File: f, Lookup: lookup,
+		Node:    func(*tr.ActionContext, string) (Runner, error) { return &SimHost{Inner: n}, nil },
+		Subject: func(_ *tr.ActionContext, name string) (Subject, error) { sub.f["name"] = name; return sub, nil }}
+	actx := &tr.ActionContext{History: h, Vars: map[string]string{"bin": "/b"}, Log: func(string, ...interface{}) {}}
+	lo := time.Now().UnixNano()
+	if _, err := x.Handler("o")(context.Background(), actx, tr.Action{Params: map[string]string{"volume": "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	hi := time.Now().UnixNano()
+	h.Close()
+	rs := readRecords(t, p)
+	r := rs[0] // then the end record Close writes
+	if r.Kind != tr.HistoryObserve || len(n.calls) != 1 {
+		t.Fatalf("%+v after %d calls", r, len(n.calls))
+	}
+	if r.FromWallNs < lo || r.FromWallNs > hi {
+		t.Errorf("from_wall_ns %d outside the call [%d, %d]", r.FromWallNs, lo, hi)
+	}
+	if end := r.FromWallNs + (r.MonoNs - r.FromNs); r.MonoNs < r.FromNs || end > hi {
+		t.Errorf("the reading's end in wall time %d (from_mono_ns %d, mono_ns %d) after the call ended %d", end, r.FromNs, r.MonoNs, hi)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), `"from_wall_ns":`) {
+		t.Errorf("no from_wall_ns in %s", b)
+	}
+}
+
 // Red control: the executor never loops. One call of an action with a
 // declared rerun is ONE attempt (attempt 1, one invoke and one complete),
 // whatever it answers; the attempt number is the driver's param.

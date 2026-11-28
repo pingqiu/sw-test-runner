@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,9 +58,14 @@ type HistoryRecord struct {
 	// FromNs, on an observation: the clock (as MonoNs) when its reading
 	// began. MonoNs stamps the record after the reading, so the reading lies
 	// between FromNs and MonoNs. Absent: the record does not say.
-	FromNs  int64          `json:"from_mono_ns,omitempty"`
-	Outcome string         `json:"outcome,omitempty"`
-	Result  map[string]any `json:"result,omitempty"`
+	FromNs int64 `json:"from_mono_ns,omitempty"`
+	// FromWallNs, on an observation: this runner's wall clock (Unix ns) when
+	// its reading began, taken with FromNs. The reading's end in wall time is
+	// FromWallNs + (MonoNs - FromNs): a product fact printed in wall time (a
+	// lease expiry) is compared with it. Absent: the record does not say.
+	FromWallNs int64          `json:"from_wall_ns,omitempty"`
+	Outcome    string         `json:"outcome,omitempty"`
+	Result     map[string]any `json:"result,omitempty"`
 }
 
 // History appends records to the run's history file.
@@ -74,6 +80,39 @@ type History struct {
 	// line, so every later record is refused and the run fails to record.
 	// A history with a hole never reaches a checker as if it were whole.
 	broken error
+	// onInvoke, when set (OnInvoke), is told of each invocation recorded.
+	onInvoke func(HistoryRecord)
+	// guards are the named flags a driver keeps on this history (Guard):
+	// owned by it, they end with it.
+	guards map[string]*atomic.Int32
+}
+
+// Guard is the history's own flag of that name, created on first use: a
+// driver's "one operation at a time" guard lives in the History it guards,
+// so nothing outside it keeps a History alive after it is closed and
+// dropped.
+func (h *History) Guard(name string) *atomic.Int32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.guards == nil {
+		h.guards = map[string]*atomic.Int32{}
+	}
+	g := h.guards[name]
+	if g == nil {
+		g = new(atomic.Int32)
+		h.guards[name] = g
+	}
+	return g
+}
+
+// OnInvoke sets f to be called with each invocation the history records,
+// right after it is appended and outside the history's lock (nil: none). A
+// driver uses it to time a fault from an operation's own invocation record,
+// with no polling of the file.
+func (h *History) OnInvoke(f func(HistoryRecord)) {
+	h.mu.Lock()
+	h.onInvoke = f
+	h.mu.Unlock()
 }
 
 // OpenHistory creates the history file; an existing file is refused, so a
@@ -112,12 +151,17 @@ func (h *History) Invoke(r HistoryRecord) (uint64, error) {
 		return 0, errors.New("history: an invocation names its op and verb")
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	r.Kind, r.Of, r.Outcome, r.Result = HistoryInvoke, 0, "", nil
 	if err := h.appendLocked(&r); err != nil {
+		h.mu.Unlock()
 		return 0, err
 	}
 	h.open[r.Seq] = r
+	f := h.onInvoke
+	h.mu.Unlock()
+	if f != nil {
+		f(r)
+	}
 	return r.Seq, nil
 }
 

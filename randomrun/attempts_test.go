@@ -177,7 +177,7 @@ func TestReplayNotesADifferingAttemptCount(t *testing.T) {
 	ra, rp := rerunHistory(t)
 	out, err := rerunRunner([]string{"refused", "ok"}, &calls).Replay(context.Background(), ra, src)
 	ra.History.Close()
-	if err != nil || out["value"] != "match" || calls != 2 {
+	if err != nil || out["value"] != "match_unjudged" || calls != 2 {
 		t.Fatalf("fewer attempts: %v %v after %d calls", out, err, calls)
 	}
 	b, _ := os.ReadFile(rp)
@@ -235,5 +235,42 @@ func TestDriverRecordsAGuardTrip(t *testing.T) {
 	}
 	if _, ok := guard.Result["elapsed_ms"].(float64); !ok {
 		t.Fatalf("no elapsed_ms: %+v", guard.Result)
+	}
+}
+
+// Took is the first attempt's own window in the history, from its
+// invocation record to its completion record: the time a handler spends
+// before it records the invocation is not in it (a kill timed into the
+// operation runs from that record). Red control: a handler that works
+// 120 ms before its invocation and 20 ms inside it measures about 20 ms,
+// not 140.
+func TestAttemptsWithTookIsTheRecordWindow(t *testing.T) {
+	actx, _ := rerunHistory(t)
+	defer actx.History.Close()
+	h := func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+		time.Sleep(120 * time.Millisecond)
+		seq, err := actx.History.Invoke(tr.HistoryRecord{Op: "X.Y", Verb: "write", Volume: "v1"})
+		if err != nil {
+			return nil, err
+		}
+		time.Sleep(20 * time.Millisecond)
+		return map[string]string{"value": tr.OutcomeOK}, actx.History.Complete(seq, tr.OutcomeOK, nil)
+	}
+	hk := &AttemptHooks{}
+	if _, _, err := AttemptsWith(context.Background(), actx, h, tr.Action{Action: "write", Params: map[string]string{}}, nil, "v1", nil, hk); err != nil {
+		t.Fatal(err)
+	}
+	if hk.Took < 20*time.Millisecond || hk.Took >= 120*time.Millisecond {
+		t.Fatalf("took %v, want the record window (about 20 ms)", hk.Took)
+	}
+	// recordWindow: a kill's records between are not the operation's; no
+	// completion gives 0.
+	recs := []tr.HistoryRecord{{Seq: 1, Kind: tr.HistoryInvoke, Verb: VerbKill, MonoNs: 5}, {Seq: 2, Kind: tr.HistoryInvoke, Verb: "write", MonoNs: 10},
+		{Seq: 3, Kind: tr.HistoryComplete, Of: 1, MonoNs: 12}, {Seq: 4, Kind: tr.HistoryComplete, Of: 2, MonoNs: 40}}
+	if got := recordWindow(recs); got != 30 {
+		t.Errorf("window %v, want 30ns", got)
+	}
+	if got := recordWindow(recs[:3]); got != 0 {
+		t.Errorf("window without completion %v, want 0", got)
 	}
 }

@@ -256,8 +256,14 @@ class Workspace(unittest.TestCase):
             self.assertFalse(self.same(self.before(state, validity=self.AT2 - self.FROM1 + 1), self.after()), state)
 
     def test_red_a_changed_expiry_is_a_change(self):
-        for state in ('granted', 'revoking'):
-            self.assertFalse(self.same(self.before(state), self.after(expiry=self.EXPIRY + 1)), state)
+        # granted renews: a step needs its expiry equal. revoking does not
+        # renew: its expiry is monotone (checks.json across_master_restart),
+        # so an earlier one is a change and a later one is not (no ceiling
+        # here: neither from_wall_ns nor a fit is given).
+        for d in (1, -1):
+            self.assertFalse(self.same(self.before('granted'), self.after(expiry=self.EXPIRY + d)), d)
+        self.assertFalse(self.same(self.before('revoking'), self.after(expiry=self.EXPIRY - 1)))
+        self.assertTrue(self.same(self.before('revoking'), self.after(expiry=self.EXPIRY + 1)))
 
     def test_red_time_does_not_run_backwards(self):
         # expired -> granted with the expiry unchanged, and every other unlisted step

@@ -26,6 +26,7 @@ var genHandlers = map[string]tr.ActionHandlerFunc{
 	"v3_op_snapshot": blockActions.Handler("v3_op_snapshot"), "v3_op_snapshot_delete": blockActions.Handler("v3_op_snapshot_delete"), "v3_op_restore": blockActions.Handler("v3_op_restore"),
 	"v3_op_stop": blockActions.Handler("v3_op_stop"), "v3_op_move": blockActions.Handler("v3_op_move"), "v3_op_delete": blockActions.Handler("v3_op_delete"), "v3_op_observe": blockActions.Handler("v3_op_observe"),
 	"v3_op_kill": blockActions.Handler("v3_op_kill"), "v3_op_restart": v3OpRestart, "v3_op_healthy": v3OpHealthy,
+	"v3_op_fault_apply_store": blockActions.Handler("v3_op_fault_apply_store"), "v3_op_fault_restore_store": blockActions.Handler("v3_op_fault_restore_store"),
 	"v3_op_flush":   blockActions.Handler("v3_op_flush"),
 	"v3_op_release": blockActions.Handler("v3_op_release"),
 }
@@ -91,7 +92,8 @@ func genExec(ctx context.Context, actx *tr.ActionContext, node string, o GenOp) 
 func genConfig(act tr.Action, actx *tr.ActionContext) (GenConfig, error) {
 	c, err := randomrun.ParseConfig("v3_gen_run", func(k string) string { return opParam(act, actx, k) })
 	cfg := GenConfig{Seed: c.Seed, Ops: c.Ops, Pool: c.Pool, Negative: c.Negative, Weights: c.Weights,
-		Faults: c.Faults, FaultProcesses: c.FaultProcesses, RestartWithin: c.RestartWithin, MasterOutage: c.MasterOutage}
+		Faults: c.Faults, FaultProcesses: c.FaultProcesses, RestartWithin: c.RestartWithin, MasterOutage: c.MasterOutage,
+		InOp: c.InOp, StoreBound: c.StoreBound}
 	if err != nil {
 		return cfg, err
 	}
@@ -138,3 +140,77 @@ func guestHeader(get func(string) string) (map[string]any, error) {
 	}
 	return map[string]any{"guest_connect": c.Label}, nil
 }
+
+// In-operation faults (randomrun inop.go).
+
+// HolderOf: the holder serving o's volume now ("blockvolume:<i>", i the
+// volume's place in the pool, as KillTarget names holders), none when it is
+// not serving, fenced or killed.
+func (m *blockModel) HolderOf(o GenOp) (string, bool) {
+	for k, n := range m.order {
+		if n != o.Volume {
+			continue
+		}
+		v := m.vols[n]
+		if v.state != stServing || v.fenced || v.killed {
+			return "", false
+		}
+		return "blockvolume:" + strconv.Itoa(k), true
+	}
+	return "", false
+}
+
+// StorePause: the declared fault actions v3_op_fault_apply_store (a
+// fault_apply: the store process paused, with its bounded detached continue)
+// and v3_op_fault_restore_store (its fault_restore).
+func (m *blockModel) StorePause(e randomrun.FaultEvent, boundSeconds int) (GenOp, GenOp) {
+	return GenOp{Action: "v3_op_fault_apply_store", Params: map[string]string{"store": e.Process, "bound_seconds": strconv.Itoa(boundSeconds)}},
+		GenOp{Action: "v3_op_fault_restore_store", Params: map[string]string{"store": e.Process}}
+}
+
+// AfterStorePause: the requests that follow a store pause around a snapshot
+// of a serving volume, which must succeed: a later snapshot (a new name,
+// while the volume has room for one) and a detach (the dirty lbas read back
+// first, as before any stop).
+func (m *blockModel) AfterStorePause(o GenOp) []GenOp {
+	v := m.vols[o.Volume]
+	if v == nil {
+		return nil
+	}
+	var out []GenOp
+	if len(v.snaps) < MaxSnapshots-1 {
+		out = append(out, op("v3_op_snapshot", o.Volume, "name", fmt.Sprintf("%s-after%d", o.Volume, o.No)))
+	}
+	stop := op("v3_op_stop", o.Volume)
+	out = append(out, m.readsOf(v, sortedLBAs(v.dirty), "readback")...)
+	return append(out, stop)
+}
+
+var (
+	_ randomrun.HolderNamer   = (*blockModel)(nil)
+	_ randomrun.StoreFaulter  = (*blockModel)(nil)
+	_ randomrun.StoreFollower = (*blockModel)(nil)
+)
+
+// TargetOp: an operation of action on the first serving volume that allows
+// it now (a write of lba 0, a snapshot while there is room), for an armed
+// in-operation fault.
+func (m *blockModel) TargetOp(action string) (GenOp, bool) {
+	for _, n := range m.order {
+		v := m.vols[n]
+		if v.state != stServing || v.fenced || v.killed || m.pending(v) {
+			continue
+		}
+		switch action {
+		case "v3_op_write":
+			return op("v3_op_write", n, "lbas", "0", "round", fmt.Sprintf("f%d", m.drawn)), true
+		case "v3_op_snapshot":
+			if len(v.snaps) < MaxSnapshots-1 {
+				return op("v3_op_snapshot", n, "name", fmt.Sprintf("%s-s%d", n, v.snapSeq+1)), true
+			}
+		}
+	}
+	return GenOp{}, false
+}
+
+var _ randomrun.Targeter = (*blockModel)(nil)

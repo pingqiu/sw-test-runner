@@ -6,7 +6,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tr "github.com/pingqiu/sw-test-runner"
 	"github.com/pingqiu/sw-test-runner/randomrun"
@@ -20,10 +22,12 @@ func TestFaultScheduleOverBlockProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// m2-gen/10: the processes in turn, the first of each forced.
 	want := []FaultEvent{
-		{AfterOp: 24, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 29, Action: FaultRestart, Process: "blockvolume:0"},
-		{AfterOp: 34, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 39, Action: FaultRestart, Process: "blockvolume:0"},
-		{AfterOp: 50, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 57, Action: FaultRestart, Process: "blockmaster"},
+		{AfterOp: 15, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 20, Action: FaultRestart, Process: "blockmaster"},
+		{AfterOp: 28, Action: FaultKill, Process: "blockvolume:0"}, {AfterOp: 41, Action: FaultRestart, Process: "blockvolume:0"},
+		{AfterOp: 45, Action: FaultKill, Process: "blockvolume:1"}, {AfterOp: 54, Action: FaultRestart, Process: "blockvolume:1"},
+		{AfterOp: 55, Action: FaultKill, Process: "blockmaster"}, {AfterOp: 60, Action: FaultRestart, Process: "blockmaster"},
 	}
 	if !reflect.DeepEqual(a.Events, want) || CheckFaultSchedule(a.Events, 60, 20) != nil {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
@@ -74,6 +78,15 @@ type faultFake struct {
 	// refuseRestart: every restart answers refused (a holder that does not
 	// come back).
 	refuseRestart bool
+	// opDelay: a write or snapshot takes this long, and answers unknown when
+	// a kill ran meanwhile (a kill timed into it); kills counts the kills.
+	// storePaused: between a store pause and its continue a snapshot answers
+	// unknown (its publish cut). storeCalls logs them.
+	opDelay     time.Duration
+	noHold      bool // an operation a kill is timed into does not hold its answer: the kill may land after it
+	kills       atomic.Int64
+	storePaused atomic.Bool
+	storeCalls  []string
 }
 
 // lookNotServing is what a single look shows not serving: the pool while
@@ -93,6 +106,31 @@ func (f *faultFake) install(t *testing.T) {
 			continue
 		}
 		genHandlers[name] = func(ctx context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			if f.opDelay > 0 && (name == "v3_op_write" || name == "v3_op_snapshot") && act.Params["expect"] == "" && f.down == "" {
+				// The operation takes opDelay between its invoke and its
+				// answer, and is cut (unknown) by a kill that ran meanwhile, or
+				// while the store is paused.
+				k0 := f.kills.Load()
+				seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "X." + strings.TrimPrefix(name, "v3_op_"), Verb: strings.TrimPrefix(name, "v3_op_"), Volume: act.Params["volume"],
+					Args: cutArgs(name, act)})
+				time.Sleep(f.opDelay)
+				if randomrun.KillTimedInto(ctx) && !f.noHold {
+					// A kill is timed into this operation: like the product's
+					// operation cut by its holder's death, it holds its answer
+					// until the kill has landed (or the guard), whatever the
+					// machine's timing. A guard expiry answers ok: the test
+					// then sees the kill MISSED and fails.
+					for guard := time.Now().Add(killLandGuard); f.kills.Load() == k0 && time.Now().Before(guard); {
+						time.Sleep(time.Millisecond)
+					}
+				}
+				if f.kills.Load() != k0 || (name == "v3_op_snapshot" && f.storePaused.Load()) {
+					_ = actx.History.Complete(seq, tr.OutcomeUnknown, map[string]any{"detail": "fake: cut by a fault"})
+					return map[string]string{"value": tr.OutcomeUnknown, "detail": "fake: cut by a fault"}, nil
+				}
+				_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
+				return map[string]string{"value": tr.OutcomeOK}, nil
+			}
 			if f.down == "" || act.Params["expect"] != "" || (f.inOutage && !f.outageUnknown) {
 				return inner(ctx, actx, act)
 			}
@@ -120,6 +158,9 @@ func (f *faultFake) install(t *testing.T) {
 				f.ready = append(f.ready, act.Params["ready_seconds"])
 			}
 			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Process." + verb, Verb: verb, Args: map[string]any{"process": p}})
+			if verb == FaultKill {
+				f.kills.Add(1) // after its invocation record: an operation it cuts completes after it
+			}
 			if verb == FaultRestart && f.refuseRestart {
 				_ = actx.History.Complete(seq, tr.OutcomeRefused, nil)
 				return map[string]string{"value": tr.OutcomeRefused}, nil
@@ -128,6 +169,21 @@ func (f *faultFake) install(t *testing.T) {
 			return map[string]string{"value": tr.OutcomeOK}, nil
 		}
 	}
+	store := func(verb string, paused bool) tr.ActionHandlerFunc {
+		return func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
+			f.storeCalls = append(f.storeCalls, verb+" "+act.Params["store"]+" "+act.Params["bound_seconds"])
+			args := map[string]any{"fault_key": "store_pause:" + act.Params["store"], "process": act.Params["store"]}
+			if b := act.Params["bound_seconds"]; b != "" {
+				args["bound_seconds"] = b
+			}
+			seq, _ := actx.History.Invoke(tr.HistoryRecord{Op: "Env." + verb, Verb: verb, Args: args})
+			f.storePaused.Store(paused)
+			_ = actx.History.Complete(seq, tr.OutcomeOK, nil)
+			return map[string]string{"value": tr.OutcomeOK}, nil
+		}
+	}
+	genHandlers["v3_op_fault_apply_store"] = store("fault_apply", true)
+	genHandlers["v3_op_fault_restore_store"] = store("fault_restore", false)
 	genHandlers["v3_op_kill"] = fault(FaultKill)
 	genHandlers["v3_op_restart"] = fault(FaultRestart)
 	genHandlers["v3_op_healthy"] = func(_ context.Context, actx *tr.ActionContext, act tr.Action) (map[string]string, error) {
@@ -159,7 +215,7 @@ func (f *faultFake) install(t *testing.T) {
 
 func faultAct(ops, rate string) tr.Action {
 	a := genAct(ops)
-	a.Params["pool"] = strings.Join(pool(100), " ") // not exhausted before the budget
+	a.Params["pool"] = strings.Join(pool(200), " ") // not exhausted before the budget (this fake answers unknown while a process is down; every listed process is now killed)
 	a.Params["faults"] = rate
 	a.Params["fault_processes"] = "blockvolume:0 blockvolume:1"
 	return a
@@ -362,7 +418,7 @@ func TestGenRunEndsAtAHealthyPointStillFalse(t *testing.T) {
 	}
 	// The replay stops at the same point.
 	f.healthyCall = 0
-	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
+	if out, b, err := replayInto(t, p); err != nil || out["value"] != "match_unjudged" || lastVerb(t, b, "gen_stop").Result["after_op"] != recs[stop].Result["after_op"] {
 		t.Fatalf("replay: %v %v", out, err)
 	}
 	// Red control: a replay that meets a false healthy point the record did
@@ -427,7 +483,7 @@ func TestGenRunWithFaultsPassesTheHealthyWaitInRunAndReplay(t *testing.T) {
 		}
 	}
 	f.waits = nil
-	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	for _, w := range f.waits {
@@ -472,7 +528,7 @@ func TestGenReplayWithFaultsMatchesAndReExecutesTheSchedule(t *testing.T) {
 	recLog := f.log
 	f.log = nil
 	out, b, err := replayInto(t, a)
-	if err != nil || out["value"] != "match" {
+	if err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	if !reflect.DeepEqual(f.log, recLog) {
@@ -485,7 +541,7 @@ func TestGenReplayWithFaultsMatchesAndReExecutesTheSchedule(t *testing.T) {
 	if left := unresolvedUnknowns(rb); len(left) != 0 {
 		t.Fatalf("replay left unknowns unresolved: %v", left)
 	}
-	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("replay of the replay: %v %v", out, err)
 	}
 	// Red control: a replay that runs no faults differs (the steps run while
@@ -791,7 +847,7 @@ func TestGenRunWithMasterOutagesHasTheShapesMOReads(t *testing.T) {
 	recLog := f.log
 	f.log = nil
 	out, b, err := replayInto(t, a)
-	if err != nil || out["value"] != "match" || !reflect.DeepEqual(f.log, recLog) {
+	if err != nil || out["value"] != "match_unjudged" || !reflect.DeepEqual(f.log, recLog) {
 		t.Fatalf("%v %v\n%v\n%v", out, err, f.log, recLog)
 	}
 	if n, bad := judgeOutages(records(t, b)); n != outages || len(bad) != 0 {
@@ -899,7 +955,7 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	// The replay follows the recorded decisions, whatever its own looks show.
 	f.alsoDown = "blockvolume:7"
 	f.log = nil
-	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" || kills(f.log) != ran {
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match_unjudged" || kills(f.log) != ran {
 		t.Fatalf("replay of the kills: %v %v, log %v", out, err, f.log)
 	} // Red: a holder the run never killed is down: no kill and no restart runs.
 	f2 := &faultFake{alsoDown: "blockvolume:7"}
@@ -927,7 +983,7 @@ func TestKillSkippedWhileALookShowsSomethingDown(t *testing.T) {
 	}
 	f2.alsoDown = ""
 	f2.log = nil
-	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match" || kills(f2.log) != 0 {
+	if out, _, err := replayInto(t, b); err != nil || out["value"] != "match_unjudged" || kills(f2.log) != 0 {
 		t.Fatalf("replay of the skips: %v %v, log %v", out, err, f2.log)
 	}
 
@@ -958,7 +1014,7 @@ func TestGenRunLearnsFromSettledAndHealthyRecords(t *testing.T) {
 			switch {
 			case r.Verb == "gen_step":
 				stepVol, stepAct = r.Volume, r.Result["action"].(string)
-				if since[stepVol] {
+				if since[stepVol] && stepAct != "v3_op_observe" { // observation is all an unsettled volume is offered
 					bad = append(bad, fmt.Sprintf("%s %s while unsettled", stepAct, stepVol))
 				}
 				if settledOnce[stepVol] && r.Result["negative"] == nil {
@@ -1147,7 +1203,7 @@ func TestMasterOutageSkippedWhenNothingServes(t *testing.T) {
 			}
 			f.log = nil
 			out, b, err := replayInto(t, p)
-			if err != nil || out["value"] != "match" || masterKills(f.log) != kills {
+			if err != nil || out["value"] != "match_unjudged" || masterKills(f.log) != kills {
 				t.Fatalf("replay: %v %v, %d master kills", out, err, masterKills(f.log))
 			}
 			if s2, r2 := outages(b); s2 != skipped || r2 != ran {
@@ -1250,4 +1306,51 @@ func TestNothingProposedAtAKilledHolder(t *testing.T) {
 	if g.vols["g1"].state != stUnknown || len(offered(g, "g1")) != 0 {
 		t.Fatalf("an unknown restart: %q %v", g.vols["g1"].state, offered(g, "g1"))
 	}
+}
+
+// Every holder of the fault processes is killed and restarted BY
+// CONSTRUCTION: for the nightly's seeds (the generic schedule kills the
+// processes in turn, the first of each forced), a run over four holders
+// reaches kill|blockvolume:<i> and restart|blockvolume:<i> for every i in
+// its fault coverage.
+func TestEveryFaultProcessIsReached(t *testing.T) {
+	for _, seed := range []string{"1", "5", "7"} {
+		f := &faultFake{}
+		f.install(t)
+		actx, p := genRunCtx(t)
+		act := faultAct("300", "0.05")
+		act.Params["seed"] = seed
+		act.Params["fault_processes"] = "blockvolume:0 blockvolume:1 blockvolume:2 blockvolume:3"
+		if _, err := v3GenRun(context.Background(), actx, act); err != nil {
+			t.Fatal(err)
+		}
+		_ = actx.History.Close()
+		var cells map[string]any
+		for _, r := range records(t, p) {
+			if r.Verb == "gen_coverage" {
+				cells, _ = r.Result["fault_cells"].(map[string]any)
+			}
+		}
+		for i := 0; i < 4; i++ {
+			for _, a := range []string{"kill", "restart"} {
+				if c := fmt.Sprintf("%s|blockvolume:%d", a, i); cells[c] == nil || cells[c].(float64) == 0 {
+					t.Errorf("seed %s: %s never reached: %v", seed, c, cells)
+				}
+			}
+		}
+	}
+}
+
+// cutArgs are the record args of an operation a fault cut in this fake: a
+// snapshot's name, request and attempt (as the declared snapshot records
+// them), a write's lbas.
+func cutArgs(name string, act tr.Action) map[string]any {
+	if name == "v3_op_write" {
+		return map[string]any{"lbas": act.Params["lbas"]}
+	}
+	n, _ := strconv.Atoi(act.Params["attempt"])
+	if n == 0 {
+		n = 1
+	}
+	return map[string]any{"name": act.Params["name"], "request": act.Params["volume"] + "-" + act.Params["name"], "attempt": n}
 }

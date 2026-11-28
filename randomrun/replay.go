@@ -35,6 +35,24 @@ package randomrun
 // {steps, differences: [{opno, action, volume, recorded, replayed}]}, and
 // notes [{opno, action, volume, note}] when a step's rerun made another
 // number of attempts than recorded (a note, not a difference).
+//
+// An in-operation fault whose HIT differs (the night's kill landed inside
+// the operation and the replay's after it, or the reverse; or a store
+// pause the operation answered through) is its own line, never a silent
+// match and not a failure by itself: "in-op fault hit differs at op N
+// (night: hit, replay: missed)", with both outcomes, in the gen_replay
+// record's "inop_hit_differs" and its count in the replay's answer. It
+// holds only when:
+//   - every driver decision still matches: the replay fired the same fault
+//     at the same operation, on the same process, at the same offset (a
+//     kill) or with the same follow-ups (a store pause); otherwise that
+//     operation is a difference;
+//   - every other difference is downstream of that operation's outcome on
+//     the same volume (a later step on that volume); one at another volume,
+//     or before the fault, is a difference as before;
+//   - the replay's own history passes its checkers: the replay judges it
+//     (replayjudge.go), and a required checker not PASS answers
+//     "replay_checks_fail" instead, for a plain match too.
 
 import (
 	"bufio"
@@ -61,6 +79,9 @@ type Script struct {
 	// Kills are the recorded kill decisions (fault_kill), in order; nil when
 	// the history has none.
 	Kills []KillDecision
+	// InOp are the recorded in-operation faults that fired, by operation
+	// number (inop.go).
+	InOp map[int]inOpRecord
 }
 
 // ReplayStep is one step of a recorded script with its recorded outcome.
@@ -68,6 +89,50 @@ type ReplayStep struct {
 	Op       Op
 	Recorded string // "" until a complete record is seen
 	Attempts int    // the step's invokes that carry an attempt number
+}
+
+// inOpHitDiff is an in-operation fault whose hit differs between the night
+// and the replay, with the steps downstream of it on its volume whose
+// outcome differs too.
+type inOpHitDiff struct {
+	OpNo                        int
+	Action, Volume, Fault       string
+	NightHit, ReplayHit         bool
+	NightOutcome, ReplayOutcome string
+	Downstream                  []replayDiff
+}
+
+func hitWord(hit bool) string {
+	if hit {
+		return "hit"
+	}
+	return "missed"
+}
+
+// line is the replay's report of the difference.
+func (d inOpHitDiff) line() string {
+	s := fmt.Sprintf("in-op fault hit differs at op %d (night: %s, replay: %s): %s %s %s, outcome night %s, replay %s",
+		d.OpNo, hitWord(d.NightHit), hitWord(d.ReplayHit), d.Fault, d.Action, d.Volume, d.NightOutcome, d.ReplayOutcome)
+	if len(d.Downstream) > 0 {
+		s += fmt.Sprintf("; %d later step(s) on %s differ downstream of it", len(d.Downstream), d.Volume)
+	}
+	return s
+}
+
+// inOpDecision compares the replay's fired in-operation fault with the
+// night's record: "" when every driver decision matches, else what differs.
+func inOpDecision(night inOpRecord, replay inOpRecord, fired bool) string {
+	switch {
+	case !fired:
+		return fmt.Sprintf("in-op %s not fired in the replay", night.Action)
+	case replay.Action != night.Action || replay.Process != night.Process:
+		return fmt.Sprintf("in-op fault %s on %s, replayed %s on %s", night.Action, night.Process, replay.Action, replay.Process)
+	case night.Action == FaultKillDuring && replay.OffsetMs != night.OffsetMs:
+		return fmt.Sprintf("in-op kill at %d ms, replayed at %d ms", night.OffsetMs, replay.OffsetMs)
+	case night.Action == FaultStorePause && fmt.Sprint(opList(replay.Followups)) != fmt.Sprint(opList(night.Followups)):
+		return fmt.Sprintf("store pause follow-ups %v, replayed %v", opList(night.Followups), opList(replay.Followups))
+	}
+	return ""
 }
 
 // replayDiff is one step whose replayed outcome differs from the recorded one.
@@ -106,6 +171,10 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 	// operation's outcome (stepFold).
 	folds := map[int]*stepFold{}
 	attemptOf := map[uint64]string{}
+	// open: the current step's invokes not yet completed; faultSeq: the
+	// invokes of faults inside a step (not the step's operation).
+	open, faultSeq := map[uint64]bool{}, map[uint64]bool{}
+	inOp := map[int]inOpRecord{}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 16<<20)
 	line := 0
@@ -152,6 +221,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 				}
 				steps = append(steps, ReplayStep{Op: o})
 				cur = len(steps) - 1
+				open = map[uint64]bool{}
 			case "gen_sweep":
 				if sweep != nil {
 					return Script{}, fmt.Errorf("%s: %s line %d: a second gen_sweep", name, path, line)
@@ -181,20 +251,61 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 					outageSkips[int(k)] = true
 				}
 				cur = -1
+			case "fault_during":
+				// A kill that fired beside an operation (with its operation
+				// number); one that never fired has none and replays as none.
+				if no, ok := r.Result["opno"].(float64); ok {
+					rec := inOpRecord{Action: FaultKillDuring, OpNo: int(no)}
+					a, _ := r.Result["after_op"].(float64)
+					off, _ := r.Result["offset_ms"].(float64)
+					rec.AfterOp, rec.OffsetMs = int(a), int(off)
+					rec.Process, _ = r.Result["process"].(string)
+					rec.Hit = r.Result["hit"] == true
+					inOp[rec.OpNo] = rec
+				}
+			case "store_pause":
+				no, ok := r.Result["opno"].(float64)
+				if !ok {
+					cur = -1
+					continue // a pause that never fired (MISSED: no target in its window)
+				}
+				a, ok2 := r.Result["after_op"].(float64)
+				fu, err := parseOps(r.Result, "followups")
+				if !ok2 || err != nil {
+					return Script{}, fmt.Errorf("%s: %s line %d: store_pause %v %v", name, path, line, r.Result, err)
+				}
+				inOp[int(no)] = inOpRecord{Action: FaultStorePause, OpNo: int(no), AfterOp: int(a), Followups: fu, Process: fmt.Sprint(r.Result["process"]), Hit: r.Result["hit"] == true}
+				cur = -1
 			case "gen_coverage", "gen_replay", "gen_stop", VerbHealthy:
 				cur = -1
 			}
 		case tr.HistoryInvoke:
+			// A store fault's apply and restore, and a kill beside an
+			// operation still open (kill_during), are inside the step but are
+			// not its operation; any other kill or restart ends the step.
+			if r.Verb == VerbFaultApply || r.Verb == VerbFaultRestore {
+				faultSeq[r.Seq] = true
+				continue
+			}
 			if faulty && (r.Verb == VerbKill || r.Verb == VerbRestart) {
+				if cur >= 0 && len(open) > 0 {
+					faultSeq[r.Seq] = true
+					continue
+				}
 				cur = -1
 			}
 			if cur >= 0 {
+				open[r.Seq] = true
 				if key, ok := requestKey(rerunnerOf(d), steps[cur].Op.Action, r); ok {
 					attemptOf[r.Seq] = key
 					steps[cur].Attempts++
 				}
 			}
 		case tr.HistoryComplete:
+			delete(open, r.Of)
+			if faultSeq[r.Of] {
+				continue
+			}
 			if cur >= 0 {
 				if folds[cur] == nil {
 					folds[cur] = &stepFold{}
@@ -229,7 +340,7 @@ func ReadScript(name, path string, d Driver) (Script, error) {
 			return Script{}, fmt.Errorf("%s: %s: the master outage after operation %d has no master_outage record", name, path, e.AfterOp)
 		}
 	}
-	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills}, nil
+	return Script{Header: header, Steps: steps, Events: events, Sweep: sweep, Outages: outages, OutageSkips: outageSkips, Kills: kills, InOp: inOp}, nil
 }
 
 // requestKey is the request an attempt record belongs to: its verb, volume
@@ -396,6 +507,7 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		fr = newFaultRun(r, events, nil, header, sc.Outages)
 		fr.kills = sc.Kills
 		fr.outageSkips = sc.OutageSkips
+		fr.inOpRecs = sc.InOp
 		fr.stopOnUnhealthy = true
 	}
 	// The coverage tail's steps ran after the run's end (the final healthy
@@ -407,26 +519,59 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	}
 	diffs := []replayDiff{}
 	var notes []any // a rerun's attempt count that differs: a note, not a difference
+	var hitDiffs []*inOpHitDiff
+	tainted := map[string]*inOpHitDiff{} // volume -> the in-op fault whose differing hit its later steps follow
 	for i, st := range steps {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w at operation %d", r.Name, ctx.Err(), st.Op.No)
 		}
 		o := st.Op
-		replayed, n, err := r.step(ctx, actx, o)
+		replayed, n, err := fr.stepOpN(ctx, actx, r, o)
 		if err != nil {
 			return nil, fmt.Errorf("%s: operation %d (%s %s): %w", r.Name, o.No, o.Action, o.Volume, err)
 		}
 		notes = attemptNote(notes, st, n)
+		var differs *replayDiff
 		if replayed != st.Recorded {
 			rec := st.Recorded
 			if rec == "" {
 				rec = "none"
 			}
-			diffs = append(diffs, replayDiff{OpNo: o.No, Action: o.Action, Volume: o.Volume, Recorded: rec, Replayed: replayed})
+			differs = &replayDiff{OpNo: o.No, Action: o.Action, Volume: o.Volume, Recorded: rec, Replayed: replayed}
 		}
+		var afterErr error
 		if fr != nil {
 			fr.note(o, replayed)
-			if err := fr.afterOp(ctx, actx, o.No); errors.Is(err, errUnhealthy) {
+			afterErr = fr.afterStep(ctx, actx)
+			if afterErr == nil {
+				afterErr = fr.afterOp(ctx, actx, o.No)
+			}
+			// An in-operation fault of the night at this step: the replay's
+			// decisions must match; a differing hit is its own line, and the
+			// step's outcome follows it.
+			if night, ok := sc.InOp[o.No]; ok {
+				got, fired := fr.inOpSeen[o.No]
+				if why := inOpDecision(night, got, fired); why != "" {
+					d := replayDiff{OpNo: o.No, Action: o.Action, Volume: o.Volume, Recorded: st.Recorded, Replayed: replayed + " (" + why + ")"}
+					differs = &d
+				} else if got.Hit != night.Hit {
+					hd := &inOpHitDiff{OpNo: o.No, Action: o.Action, Volume: o.Volume, Fault: night.Action, NightHit: night.Hit, ReplayHit: got.Hit,
+						NightOutcome: st.Recorded, ReplayOutcome: replayed}
+					hitDiffs = append(hitDiffs, hd)
+					tainted[o.Volume] = hd
+					differs = nil
+				}
+			} else if differs != nil && tainted[o.Volume] != nil {
+				// Downstream of a differing hit on the same volume.
+				tainted[o.Volume].Downstream = append(tainted[o.Volume].Downstream, *differs)
+				differs = nil
+			}
+		}
+		if differs != nil {
+			diffs = append(diffs, *differs)
+		}
+		if fr != nil {
+			if err := afterErr; errors.Is(err, errUnhealthy) {
 				if err := stopRun(actx, o.No); err != nil {
 					return nil, err
 				}
@@ -474,6 +619,18 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 	if notes != nil {
 		res["notes"] = notes
 	}
+	if hitDiffs != nil {
+		hl := make([]any, 0, len(hitDiffs))
+		for _, h := range hitDiffs {
+			down := make([]any, 0, len(h.Downstream))
+			for _, d := range h.Downstream {
+				down = append(down, map[string]any{"opno": d.OpNo, "action": d.Action, "volume": d.Volume, "recorded": d.Recorded, "replayed": d.Replayed})
+			}
+			hl = append(hl, map[string]any{"line": h.line(), "opno": h.OpNo, "action": h.Action, "volume": h.Volume, "fault": h.Fault,
+				"night_hit": h.NightHit, "replay_hit": h.ReplayHit, "night_outcome": h.NightOutcome, "replay_outcome": h.ReplayOutcome, "downstream": down})
+		}
+		res["inop_hit_differs"] = hl
+	}
 	if err := actx.History.Observe(tr.HistoryObserve, tr.HistoryRecord{Client: "gen", Verb: "gen_replay", Result: res}); err != nil {
 		return nil, err
 	}
@@ -482,6 +639,32 @@ func (r Runner) Replay(ctx context.Context, actx *tr.ActionContext, src string) 
 		return nil, fmt.Errorf("%s: %d of %d steps differ; first: operation %d (%s %s) recorded %s, replayed %s",
 			r.Name, len(diffs), len(steps), d.OpNo, d.Action, d.Volume, d.Recorded, d.Replayed)
 	}
+	checked, suffix := "not run", "_unjudged"
+	if r.Judge != nil {
+		cs, _ := header["checkers"].(string) // the run's required set; none recorded: every checker
+		fails, err := r.judgeReplay(ctx, actx, cs)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name, err)
+		}
+		if len(fails) > 0 {
+			return checksFailAnswer(r.Name, len(steps), fails)
+		}
+		checked, suffix = "pass", ""
+	} else {
+		why := r.Unjudged
+		if why == "" {
+			why = "no checker entry"
+		}
+		checked = "not run: " + why
+		actx.Log("  %s: the replay's own history is not judged (%s): a match is answered _unjudged", r.Name, why)
+	}
+	if len(hitDiffs) > 0 {
+		for _, h := range hitDiffs {
+			actx.Log("  %s: %s", r.Name, h.line())
+		}
+		actx.Log("  %s: %d steps match %s, but for %d in-op fault hit(s) that differ", r.Name, len(steps), src, len(hitDiffs))
+		return map[string]string{"value": "match_inop_hit_differs" + suffix, "steps": strconv.Itoa(len(steps)), "inop_hit_differs": strconv.Itoa(len(hitDiffs)), "checks": checked}, nil
+	}
 	actx.Log("  %s: %d steps match %s", r.Name, len(steps), src)
-	return map[string]string{"value": "match", "steps": strconv.Itoa(len(steps))}, nil
+	return map[string]string{"value": "match" + suffix, "steps": strconv.Itoa(len(steps)), "inop_hit_differs": "0", "checks": checked}, nil
 }

@@ -1,6 +1,7 @@
 package randomrun
 
 import (
+	"math/rand/v2"
 	"reflect"
 	"regexp"
 	"testing"
@@ -23,10 +24,13 @@ func TestFaultScheduleSameSeedSameScheduleAndPinned(t *testing.T) {
 	}
 	// Pinned: a change to the derivation changes every recorded run's schedule,
 	// so it must come with a new fault-run generator version.
+	// (m2-gen/10: the kills take the processes in turn, the first three
+	// forced no earlier than after operations 15, 30 and 45.)
 	want := []FaultEvent{
-		{24, FaultKill, "p1"}, {29, FaultRestart, "p1"},
-		{34, FaultKill, "p1"}, {39, FaultRestart, "p1"},
-		{50, FaultKill, "p0"}, {57, FaultRestart, "p0"},
+		{AfterOp: 15, Action: FaultKill, Process: "p0"}, {AfterOp: 20, Action: FaultRestart, Process: "p0"},
+		{AfterOp: 28, Action: FaultKill, Process: "p1"}, {AfterOp: 41, Action: FaultRestart, Process: "p1"},
+		{AfterOp: 45, Action: FaultKill, Process: "p2"}, {AfterOp: 54, Action: FaultRestart, Process: "p2"},
+		{AfterOp: 55, Action: FaultKill, Process: "p0"}, {AfterOp: 60, Action: FaultRestart, Process: "p0"},
 	}
 	if !reflect.DeepEqual(a.Events, want) {
 		t.Fatalf("schedule for seed 8 changed:\n%#v", a.Events)
@@ -97,8 +101,8 @@ func TestFaultScheduleEveryKillRestartedWithinTheBoundOneDownAtATime(t *testing.
 
 // Red controls for CheckFaultSchedule: each seeded defect must be caught.
 func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
-	k := func(n int, p string) FaultEvent { return FaultEvent{n, FaultKill, p} }
-	r := func(n int, p string) FaultEvent { return FaultEvent{n, FaultRestart, p} }
+	k := func(n int, p string) FaultEvent { return FaultEvent{AfterOp: n, Action: FaultKill, Process: p} }
+	r := func(n int, p string) FaultEvent { return FaultEvent{AfterOp: n, Action: FaultRestart, Process: p} }
 	good := []FaultEvent{k(2, "p0"), r(5, "p0"), k(5, "p1"), r(25, "p1")}
 	if err := CheckFaultSchedule(good, 30, 20, testProcess); err != nil {
 		t.Fatalf("green: %v", err)
@@ -113,7 +117,7 @@ func TestCheckFaultScheduleCatchesEachDefect(t *testing.T) {
 		"after the last op":        {k(29, "p0"), r(31, "p0")},
 		"before the first op":      {k(0, "p0"), r(1, "p0")},
 		"unknown process":          {k(2, "px"), r(3, "px")},
-		"unknown action":           {{2, "pause", "p0"}},
+		"unknown action":           {{AfterOp: 2, Action: "pause", Process: "p0"}},
 	} {
 		if err := CheckFaultSchedule(ev, 30, 20, testProcess); err == nil {
 			t.Errorf("red control %q not caught", name)
@@ -170,15 +174,58 @@ func TestMasterOutagesComeOnlyWhileNothingIsDown(t *testing.T) {
 	}
 	// Red controls for the checker: an outage while a process is down.
 	for name, ev := range map[string][]FaultEvent{
-		"outage while down":    {{2, FaultKill, "p1"}, {3, FaultMasterOutage, "p0"}, {4, FaultRestart, "p1"}},
-		"outage of an unknown": {{3, FaultMasterOutage, "q"}},
-		"outage out of order":  {{5, FaultMasterOutage, "p0"}, {3, FaultMasterOutage, "p0"}},
+		"outage while down":    {{AfterOp: 2, Action: FaultKill, Process: "p1"}, {AfterOp: 3, Action: FaultMasterOutage, Process: "p0"}, {AfterOp: 4, Action: FaultRestart, Process: "p1"}},
+		"outage of an unknown": {{AfterOp: 3, Action: FaultMasterOutage, Process: "q"}},
+		"outage out of order":  {{AfterOp: 5, Action: FaultMasterOutage, Process: "p0"}, {AfterOp: 3, Action: FaultMasterOutage, Process: "p0"}},
 	} {
 		if CheckFaultSchedule(ev, 30, 20, testProcess) == nil {
 			t.Errorf("red control %q not caught", name)
 		}
 	}
-	if err := CheckFaultSchedule([]FaultEvent{{2, FaultKill, "p1"}, {4, FaultRestart, "p1"}, {5, FaultMasterOutage, "p0"}}, 30, 20, testProcess); err != nil {
+	if err := CheckFaultSchedule([]FaultEvent{{AfterOp: 2, Action: FaultKill, Process: "p1"}, {AfterOp: 4, Action: FaultRestart, Process: "p1"}, {AfterOp: 5, Action: FaultMasterOutage, Process: "p0"}}, 30, 20, testProcess); err != nil {
 		t.Errorf("green: %v", err)
+	}
+}
+
+// Every process is reached by construction: for any seed and rate, with
+// room in the operations, each listed process is killed (and restarted) at
+// least once. Red control: the uniform draw of before misses a process for
+// some seed.
+func TestFaultScheduleReachesEveryProcess(t *testing.T) {
+	procs := []string{"p0", "p1", "p2", "p3"}
+	for seed := uint64(1); seed <= 500; seed++ {
+		for _, rate := range []float64{0.01, 0.05, 0.2} {
+			s, err := NewFaultSchedule(seed, 300, procs, rate, 20, testProcess)
+			if err != nil {
+				t.Fatal(err)
+			}
+			killed := map[string]bool{}
+			for _, e := range s.Events {
+				if e.Action == FaultKill {
+					killed[e.Process] = true
+				}
+			}
+			if len(killed) != len(procs) {
+				t.Fatalf("seed %d rate %v: killed %v", seed, rate, killed)
+			}
+		}
+	}
+	// The red control: a schedule that draws its process uniformly (the
+	// derivation before m2-gen/10) leaves a process unkilled for some seed.
+	missed := false
+	for seed := uint64(1); seed <= 50 && !missed; seed++ {
+		rng := rand.New(rand.NewPCG(seed^0x6661756c74730000, seed+0x2545f4914f6cdd1d))
+		killed := map[string]bool{}
+		for k := 1; k < 300; k++ {
+			if rng.Float64() >= 0.01 {
+				continue
+			}
+			killed[procs[rng.IntN(len(procs))]] = true
+			k += 1 + rng.IntN(20)
+		}
+		missed = len(killed) < len(procs)
+	}
+	if !missed {
+		t.Fatal("red control: the uniform draw reached every process for every seed")
 	}
 }

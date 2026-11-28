@@ -26,6 +26,10 @@ const (
 	VerbRestart = FaultRestart
 	VerbHealthy = "healthy"
 	VerbObserve = "observe"
+	// VerbFaultApply and VerbFaultRestore are a store fault's records (a
+	// pause and its continue): inside a step, never its operation.
+	VerbFaultApply   = "fault_apply"
+	VerbFaultRestore = "fault_restore"
 	LookSingle  = "single"
 	// HealthyKey is the healthy handler's answer key; HealthyTrue its value
 	// at a healthy point.

@@ -13,7 +13,14 @@ package randomrun
 //   - a process is killed only when it runs, restarted only when it is down;
 //   - a short master outage (one event: kill of the master, writes and
 //     single looks, restart; see faultRun) comes only while nothing is down,
-//     and never inside a kill's interval.
+//     and never inside a kill's interval;
+//   - an IN-OPERATION fault (AddInOpFaults) is armed after operation after_op
+//     and fires inside the first later operation of its target action: a
+//     kill_during kills the holder of that operation's subject at a seeded
+//     fraction of the action's measured duration, beside the operation (it
+//     is a kill: its restart follows within `within`, one down at a time);
+//     a store_pause pauses the store process around that operation, with a
+//     bounded continue, and comes only while nothing is down.
 //
 // Which process names exist is the product's: valid says it.
 
@@ -36,13 +43,27 @@ const (
 	// restarted within the product's outage bound, with one write on every
 	// serving subject and single health looks in between.
 	FaultMasterOutage = "master_outage"
+	// FaultKillDuring is a kill timed INTO an operation of action Target: the
+	// holder of its subject, at Permille/1000 of the action's measured
+	// duration after the operation began. Its restart is an ordinary restart
+	// event of the same scheduled process.
+	FaultKillDuring = "kill_during"
+	// FaultStorePause pauses the store process Process around the first
+	// operation of action Target after it is armed: paused before the
+	// operation, continued after it (and by a detached bounded continue
+	// regardless), then a healthy point and the model's follow-ups.
+	FaultStorePause = "store_pause"
 )
 
 // FaultEvent is one scheduled process fault.
 type FaultEvent struct {
 	AfterOp int    `json:"after_op"`
-	Action  string `json:"action"` // FaultKill or FaultRestart
+	Action  string `json:"action"` // FaultKill, FaultRestart, FaultMasterOutage, FaultKillDuring or FaultStorePause
 	Process string `json:"process"`
+	// Target and Permille are an in-operation fault's: the action it fires
+	// in, and (kill_during) where in its measured duration, in thousandths.
+	Target   string `json:"target,omitempty"`
+	Permille int    `json:"permille,omitempty"`
 }
 
 // FaultSchedule is the run's fault schedule, events in execution order.
@@ -52,9 +73,14 @@ type FaultSchedule struct {
 }
 
 // NewFaultSchedule derives the schedule. rate is the chance, after each
-// operation while no process is down, that one process (drawn uniformly from
-// the sorted list) is killed; its restart comes 1..within operations later,
-// capped at ops. A rate of 0 gives an empty schedule.
+// operation while no process is down, that a process is killed; its restart
+// comes 1..within operations later, capped at ops. A rate of 0 gives an
+// empty schedule. Every process is reached BY CONSTRUCTION, not by luck over
+// seeds: the kills take the sorted processes in turn (round-robin), and the
+// first len(processes) kills are forced, the i-th (from 1) no earlier than
+// after operation i*ops/(len(processes)+1) (or the first operation after the
+// restart before it), so each process is scheduled at least once whenever
+// the operations leave room.
 func NewFaultSchedule(seed uint64, ops int, processes []string, rate float64, within int, valid func(string) bool) (FaultSchedule, error) {
 	s := FaultSchedule{Seed: seed, Events: []FaultEvent{}}
 	if rate < 0 || rate > 1 {
@@ -79,18 +105,44 @@ func NewFaultSchedule(seed uint64, ops int, processes []string, rate float64, wi
 	if rate == 0 {
 		return s, nil
 	}
+	s.Events = ordinaryKills(seed, ops, procs, rate, within, nil)
+	return s, nil
+}
+
+// ordinaryKills are the rate-drawn and forced kills with their restarts,
+// outside the reserved windows ([from, to] pairs, sorted): a kill never
+// falls in one, and its restart comes before the next one begins.
+func ordinaryKills(seed uint64, ops int, procs []string, rate float64, within int, reserved [][2]int) []FaultEvent {
 	// Its own stream: the operation generator's stream (same seed) is untouched.
 	rng := rand.New(rand.NewPCG(seed^0x6661756c74730000, seed+0x2545f4914f6cdd1d))
+	var events []FaultEvent
+	kills := 0
 	for k := 1; k < ops; k++ {
-		if rng.Float64() >= rate {
+		drawn := rng.Float64() < rate
+		forced := kills < len(procs) && k >= (kills+1)*ops/(len(procs)+1)
+		if !drawn && !forced {
 			continue
 		}
-		p := procs[rng.IntN(len(procs))]
-		r := min(k+1+rng.IntN(within), ops)
-		s.Events = append(s.Events, FaultEvent{k, FaultKill, p}, FaultEvent{r, FaultRestart, p})
+		next := ops + 1 // the next reserved window's start after k
+		inside := false
+		for _, w := range reserved {
+			if k >= w[0] && k <= w[1] {
+				inside = true
+			}
+			if w[0] > k && w[0] < next {
+				next = w[0]
+			}
+		}
+		r := min(k+1+rng.IntN(within), ops, next-1)
+		if inside || r <= k {
+			continue // the window is an in-operation fault's: no kill here
+		}
+		p := procs[kills%len(procs)]
+		kills++
+		events = append(events, FaultEvent{AfterOp: k, Action: FaultKill, Process: p}, FaultEvent{AfterOp: r, Action: FaultRestart, Process: p})
 		k = r // the next kill comes after the restart's operation
 	}
-	return s, nil
+	return events
 }
 
 // AddMasterOutages adds short master outages to a schedule. rate is the
@@ -112,7 +164,7 @@ func AddMasterOutages(s FaultSchedule, ops int, master string, rate float64, val
 	start := 0
 	for _, e := range s.Events {
 		switch e.Action {
-		case FaultKill:
+		case FaultKill, FaultKillDuring:
 			start = e.AfterOp
 		case FaultRestart:
 			for k := start; k <= e.AfterOp; k++ {
@@ -124,11 +176,88 @@ func AddMasterOutages(s FaultSchedule, ops int, master string, rate float64, val
 	events := slices.Clone(s.Events)
 	for k := 1; k < ops; k++ {
 		if rng.Float64() < rate && !busy[k] {
-			events = append(events, FaultEvent{k, FaultMasterOutage, master})
+			events = append(events, FaultEvent{AfterOp: k, Action: FaultMasterOutage, Process: master})
 		}
 	}
 	slices.SortStableFunc(events, func(a, b FaultEvent) int { return a.AfterOp - b.AfterOp })
 	return FaultSchedule{Seed: s.Seed, Events: events}, nil
+}
+
+// InOpFaults sets the in-operation faults AddInOpFaults adds: one
+// kill_during per During action, in turn over the processes, and, when
+// Store names a store process, one store_pause around a StoreAction
+// operation.
+type InOpFaults struct {
+	During      []string // the actions a kill is timed into, one event each
+	Store       string   // the store process a store_pause pauses ("" for none)
+	StoreAction string   // the action a store_pause wraps
+}
+
+// NewFaultScheduleIn is NewFaultSchedule with the in-operation faults
+// placed FIRST, BY CONSTRUCTION, so every fault run holds them whatever its
+// seed and rate: each takes, from a seeded start in the first third of the
+// run (its own stream), the first window of within+1 operations no other
+// in-operation fault holds, and the ordinary kills are drawn around those
+// windows (none inside one, every restart before the next begins). A
+// kill_during gets its restart at its window's end and a seeded Permille in
+// 200..800; the scheduled process of each is the processes' in turn (the
+// target is resolved at run time: the holder of the operation's subject).
+// A window that does not fit is an error, not a silent drop.
+func NewFaultScheduleIn(seed uint64, ops int, processes []string, rate float64, within int, in InOpFaults, valid func(string) bool) (FaultSchedule, error) {
+	s, err := NewFaultSchedule(seed, ops, processes, 0, within, valid)
+	if err != nil {
+		return s, err
+	}
+	procs := slices.Clone(processes)
+	slices.Sort(procs)
+	if len(in.During) > 0 && len(procs) == 0 {
+		return s, fmt.Errorf("fault schedule: kills during an operation, but no processes")
+	}
+	if in.Store != "" && in.StoreAction == "" {
+		return s, fmt.Errorf("fault schedule: a store pause needs the action it wraps")
+	}
+	if rate < 0 || rate > 1 {
+		return s, fmt.Errorf("fault schedule: rate %v outside 0..1", rate)
+	}
+	rng := rand.New(rand.NewPCG(seed^0x696e6f7066617574, seed+0x51afd7ed558ccd))
+	var reserved [][2]int
+	var events []FaultEvent
+	place := func(what string) (int, error) {
+		from := max(1, ops/10+rng.IntN(max(1, ops/3-ops/10)))
+		for k := from; k+within < ops; k++ {
+			free := true
+			for _, w := range reserved {
+				free = free && (k+within < w[0] || k > w[1])
+			}
+			if free {
+				reserved = append(reserved, [2]int{k, k + within})
+				return k, nil
+			}
+		}
+		return 0, fmt.Errorf("fault schedule: no free window of %d operations for %s in %d operations", within+1, what, ops)
+	}
+	for i, a := range in.During {
+		k, err := place(FaultKillDuring + " " + a)
+		if err != nil {
+			return s, err
+		}
+		p := procs[i%len(procs)]
+		events = append(events, FaultEvent{AfterOp: k, Action: FaultKillDuring, Process: p, Target: a, Permille: 200 + rng.IntN(601)},
+			FaultEvent{AfterOp: k + within, Action: FaultRestart, Process: p})
+	}
+	if in.Store != "" {
+		k, err := place(FaultStorePause)
+		if err != nil {
+			return s, err
+		}
+		events = append(events, FaultEvent{AfterOp: k, Action: FaultStorePause, Process: in.Store, Target: in.StoreAction})
+	}
+	slices.SortFunc(reserved, func(a, b [2]int) int { return a[0] - b[0] })
+	if rate > 0 {
+		events = append(events, ordinaryKills(seed, ops, procs, rate, within, reserved)...)
+	}
+	slices.SortStableFunc(events, func(a, b FaultEvent) int { return a.AfterOp - b.AfterOp })
+	return FaultSchedule{Seed: seed, Events: events}, nil
 }
 
 // CheckFaultSchedule judges a schedule against the rules above; it is used
@@ -137,7 +266,13 @@ func AddMasterOutages(s FaultSchedule, ops int, master string, rate float64, val
 func CheckFaultSchedule(events []FaultEvent, ops, within int, valid func(string) bool) error {
 	down, since, last := "", 0, 0
 	for i, e := range events {
-		if !valid(e.Process) {
+		if e.Action == FaultStorePause {
+			// The store process is not a kill target: the product's store
+			// pause names it (its own validation).
+			if e.Process == "" || e.Target == "" {
+				return fmt.Errorf("event %d: a store pause needs its process and target", i)
+			}
+		} else if !valid(e.Process) {
 			return fmt.Errorf("event %d: process %q", i, e.Process)
 		}
 		if e.AfterOp < 1 || e.AfterOp > ops || e.AfterOp < last {
@@ -145,11 +280,18 @@ func CheckFaultSchedule(events []FaultEvent, ops, within int, valid func(string)
 		}
 		last = e.AfterOp
 		switch e.Action {
-		case FaultKill:
+		case FaultKill, FaultKillDuring:
 			if down != "" {
 				return fmt.Errorf("event %d: kill %s while %s is down (one process down at a time)", i, e.Process, down)
 			}
+			if e.Action == FaultKillDuring && (e.Target == "" || e.Permille < 1 || e.Permille > 999) {
+				return fmt.Errorf("event %d: a kill during an operation needs its target and a permille in 1..999", i)
+			}
 			down, since = e.Process, e.AfterOp
+		case FaultStorePause:
+			if down != "" {
+				return fmt.Errorf("event %d: store pause while %s is down (one fault at a time)", i, down)
+			}
 		case FaultRestart:
 			if down != e.Process {
 				return fmt.Errorf("event %d: restart %s, which is not down", i, e.Process)
@@ -176,7 +318,14 @@ func CheckFaultSchedule(events []FaultEvent, ops, within int, valid func(string)
 func (s FaultSchedule) Record() map[string]any {
 	ev := make([]any, 0, len(s.Events))
 	for _, e := range s.Events {
-		ev = append(ev, map[string]any{"after_op": e.AfterOp, "action": e.Action, "process": e.Process})
+		m := map[string]any{"after_op": e.AfterOp, "action": e.Action, "process": e.Process}
+		if e.Target != "" {
+			m["target"] = e.Target
+		}
+		if e.Permille != 0 {
+			m["permille"] = e.Permille
+		}
+		ev = append(ev, m)
 	}
 	return map[string]any{"seed": strconv.FormatUint(s.Seed, 10), "events": ev}
 }
@@ -199,7 +348,14 @@ func parseFaultEvents(res map[string]any) ([]FaultEvent, error) {
 		if !ok || !ok2 || !ok3 || k != float64(int(k)) {
 			return nil, fmt.Errorf("fault_schedule: event %d %v", i, m)
 		}
-		out = append(out, FaultEvent{int(k), a, p})
+		e := FaultEvent{AfterOp: int(k), Action: a, Process: p}
+		if t, ok := m["target"].(string); ok {
+			e.Target = t
+		}
+		if pm, ok := m["permille"].(float64); ok {
+			e.Permille = int(pm)
+		}
+		out = append(out, e)
 	}
 	return out, nil
 }

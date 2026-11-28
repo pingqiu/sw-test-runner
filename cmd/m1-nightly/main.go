@@ -198,6 +198,12 @@ func main() {
 		os.Exit(2)
 	}
 	fmt.Printf("m1-nightly: nightly seed %d, %d runs, verdict %s\n", nightly, len(runs), rep.Verdict)
+	for _, f := range rep.Findings {
+		fmt.Printf("m1-nightly: %s\n", f)
+	}
+	for _, l := range rep.InOp {
+		fmt.Printf("m1-nightly: %s\n", l)
+	}
 	if rep.Verdict != "PASS" {
 		os.Exit(1)
 	}

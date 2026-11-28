@@ -140,7 +140,7 @@ func runEq(t *testing.T, h tr.ActionHandlerFunc, c eqCase, detached bool) eqRun 
 			t.Fatal(err)
 		}
 		for _, rec := range records(t, p) {
-			rec.MonoNs, rec.FromNs = 0, 0 // the clock; the declared observation also stamps its start
+			rec.MonoNs, rec.FromNs, rec.FromWallNs = 0, 0, 0 // the clock; the declared observation also stamps its start
 			r.records = append(r.records, rec)
 		}
 	}

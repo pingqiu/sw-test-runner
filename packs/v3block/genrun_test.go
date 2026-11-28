@@ -320,7 +320,7 @@ func TestGenRunObservesAfterARefusedEffectAndReplayComparesIt(t *testing.T) {
 	if n == 0 {
 		t.Fatal("no refused_effect in the run")
 	}
-	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, a); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("replay: %v %v", out, err)
 	}
 	// Red control: a product answering a plain refusal instead differs.

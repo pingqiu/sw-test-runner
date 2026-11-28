@@ -408,3 +408,34 @@ func withoutReadback(r eqRun) eqRun {
 	r.records = recs
 	return r
 }
+
+// The blockmaster restart records the wall time of the master's start,
+// just after the spawn holds its port (started_wall_ns, the clock nowFn
+// reads), for the checkers' bound on a lease expiry across the restart
+// (checks.json across_master_restart). Only the master restart: a holder's
+// restart records none.
+func TestMasterRestartRecordsItsWallTime(t *testing.T) {
+	defer func(f func() time.Time) { nowFn = f }(nowFn)
+	at := time.Unix(1800000000, 0)
+	nowFn = func() time.Time { return at }
+	mk, _ := json.Marshal(faultProc{Name: "blockmaster", PID: "77", Start: "700", KilledPID: "77", Argv: masterArgv})
+	c := eqCase{name: "master", params: map[string]string{"process": "blockmaster", "ready_seconds": "2"},
+		vars: faultVars(t, map[string]string{masterVar: string(mk), "own_script": "/own.sh", "owner": "tok"}), vols: faultVols(false),
+		rules: []eqRule{
+			{"/proc/77", []eqAnswer{{out: "absent\n"}}},
+			{"cat /w/owned", []eqAnswer{{out: masterLedger}, {out: masterLedger + "88 800 blockmaster-restart1\n"}}},
+			{"/own.sh spawn", []eqAnswer{{out: "88\n"}}},
+			{"/proc/88", []eqAnswer{{out: "start 800\n"}}},
+			{"v3ctl", []eqAnswer{{out: `{"outcome":"refused","volume":"v1","error":"not created"}`, code: 1}}},
+		}}
+	r := runEq(t, registered("v3_op_restart"), c, false)
+	var got any
+	for _, rec := range r.records {
+		if rec.Kind == tr.HistoryComplete && rec.Verb == "restart" {
+			got = rec.Result["started_wall_ns"]
+		}
+	}
+	if r.err != nil || got != float64(at.UnixNano()) {
+		t.Fatalf("%v: started_wall_ns %v, want %d", r.err, got, at.UnixNano())
+	}
+}

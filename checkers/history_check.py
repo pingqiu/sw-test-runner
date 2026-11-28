@@ -62,8 +62,10 @@ code is 0 only when every checker passes.
       completing ok or unknown in between; AFTER is the first observation of
       the volume after the refusal's complete, with no operation touching the
       volume invoked in between. An operation touches its volume, a restore
-      also its source, and a fault operation every volume (the history does
-      not map volumes to VMs). Compared, the whole observed state: HEAD
+      also its source, a fault operation every volume (the history does
+      not map volumes to VMs), and a process kill or restart the volumes it
+      reaches (the product's kill_scope: a holder's own volume, the master's
+      none). Compared, the whole observed state: HEAD
       (generation, epoch, holder, state) or the show error's code, HEAD's
       snapshot names (result.snapshots), the control plane's workspace answer (exit, and the stable facts of its
       text: the lease expiry and the validity at query are dropped, and a
@@ -78,7 +80,27 @@ code is 0 only when every checker passes.
       touching it invoked between them must show the same state; the product
       works in the background (checkpoint publishing, cleaning), and a
       difference there makes C5 UNKNOWN for the run, and so does a history
-      with refusals but no such pair.
+      with refusals but no such pair. A LEASE THAT DOES NOT RENEW (checks.json
+      observation.across_master_restart: its state at both observations is
+      one with renews false) has an expiry that is compared, and MONOTONE:
+      equal or later, never earlier. ACROSS A MASTER RESTART (a blockmaster
+      restart completed ok between the two observations, its complete's
+      started_wall_ns recorded) it is at most that wall time + the row's TTL
+      + slack; ACROSS NO RESTART at most the later reading's end in wall
+      time (from_wall_ns + mono_ns - from_mono_ns; in a history before
+      from_wall_ns, mono_ns + the history's fit from the printed validity,
+      and no ceiling when there is no fit) + the row's factor x TTL + slack.
+      In a history that records no restart's started_wall_ns at all, the
+      expiry across its master restart is not compared. A time_derived step
+      whose fact moved within these bounds is time alone, every other kept
+      fact equal. RELEASE (checks.json observation.release_on_delete): a
+      delete (ok or unknown) of a volume the history shows restored from a
+      source, invoked and completed between two observations of the source,
+      lets the source's HEAD generation move later, by at most the number of
+      such deletes between (ok and unknown), and nothing else; a refused delete allows nothing. OBSERVATION: a lease printed in its expired state with an
+      expiry after the reading's end in wall time + skew/2 (the row's
+      skew_seconds) FAILS; an observation without from_wall_ns is not
+      checked.
       Each refusal belongs to a LIMIT: the generator's gen_step names the
       limit a negative operation probes; other refusals are "ordinary <verb>".
       Every refused attempt of a rerun request is a refusal of its limit
@@ -172,7 +194,12 @@ code is 0 only when every checker passes.
       carries the finding "unknowns resolved: <n>" (a run with healthy
       points and n = 0 PASSes; the night requires n > 0 in some run). FAIL
       (not exercised) if the history holds neither an unknown nor a healthy
-      record.
+      record. AFTER A STORE FAULT: a `store_pause` record (the driver paused
+      the store around one operation, then continued it) is followed by the
+      requests the run issues on that volume before its next step (the
+      record's followups: a later snapshot and a detach); every one it names
+      must run and answer ok, and at least one must run, or C6 FAILS: the
+      store fault must leave the volume usable.
   MO  a short master outage interrupts nothing (checks.json master_outage):
       the window runs from an ok kill of the master's completion to its next
       ok restart's completion on the history's clock; one at most
@@ -254,6 +281,8 @@ def load_product(product_dir):
         checks = json.load(fh)
     mod = _load_module(checks['reader']['module'], product_dir)
     mod.bind(checks)
+    if hasattr(mod, 'bind_product_dir'):
+        mod.bind_product_dir(product_dir)
     parts = tuple(checks['observation']['compared'])
     mod.observed_state({'result': {}}, parts)   # a part the reader cannot read fails here, not mid-run
     required = tuple(checks['observation'].get('required', ()))
@@ -755,21 +784,75 @@ def c7(recs):
 
 def touches(inv, vol):
     """Whether an operation may change volume `vol` as far as the history
-    tells: its own volume, a restore's source, and every volume for a fault
-    operation (a VM fault is not mapped to volumes)."""
+    tells: its own volume, a restore's source, every volume for a fault
+    operation (a VM fault is not mapped to volumes), and for a process kill
+    or restart the volumes it reaches (the product's kill_scope, one
+    definition: a holder's own volume; the master's none; a process it
+    cannot map, every volume)."""
     if inv['verb'] in FAULT_VERBS:
         return True
+    if inv['verb'] in ('kill', 'restart'):
+        scope = kill_scope(inv)
+        return scope is None or vol in scope
     return vol in (inv.get('volume'), (inv.get('args') or {}).get('source') if inv['verb'] == 'restore' else None)
 
 
-def observed_state(obs):
+def observed_state(obs, wall_fit=None):
     """The comparable state of an observation: {part: value} for each part it
     records, and {part: why} for each part it records but cannot compare. The
-    parts are checks.json's observation.compared; the product reader reads them."""
-    return PRODUCT.observed_state(obs, STATE_PARTS)
+    parts are checks.json's observation.compared; the product reader reads them.
+    wall_fit: the history's fitted wall offset (history_wall_fit)."""
+    return PRODUCT.observed_state(obs, STATE_PARTS, wall_fit)
 
 
-def state_diff(a, b):
+def history_wall_fit(recs):
+    """The product reader's fit of the history's wall clock (for records
+    without from_wall_ns), or None."""
+    return PRODUCT.wall_fit([r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe'])
+
+
+def master_restarts(recs):
+    """[(complete seq, wall ns or None)] of each master restart completed ok:
+    the wall time from its complete's result.started_wall_ns (None in a
+    history before the field)."""
+    inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}
+    out = []
+    for r in recs:
+        if r['kind'] != 'complete' or r.get('outcome') != 'ok':
+            continue
+        inv = inv_of.get(r.get('of'))
+        if inv is None or inv['verb'] != 'restart' or MASTER is None or (inv.get('args') or {}).get('process') != MASTER:
+            continue
+        w = (r.get('result') or {}).get('started_wall_ns')
+        out.append((r['seq'], w if isinstance(w, int) else None))
+    return out
+
+
+def master_restart_between(restarts, lo, hi):
+    """What lies between seqs lo and hi of master restarts (master_restarts),
+    as the product reader's same_part takes it: None for no restart; the
+    wall time (ns) of the latest when every one records it; 'unrecorded'
+    when one does not and the history records the field nowhere (a history
+    from before it: the expiry is not compared across that restart). A
+    restart without the field in a history that has it elsewhere gets no
+    allowance (None: the rule with no restart)."""
+    walls = [w for s, w in restarts if lo < s < hi]
+    if not walls:
+        return None
+    if None in walls:
+        return 'unrecorded' if all(w is None for _, w in restarts) else None
+    return max(walls)
+
+
+def released_between(rel, vol, lo, hi):
+    """How many deletes of restore targets of `vol` the product reader's
+    releases (rel) show invoked and completed between seqs lo and hi: the
+    COUNT BOUND, an ok delete counts 1 and an unknown one 0 or 1, so the
+    bound is the ok count + the unknown count."""
+    return sum(1 for i, c, s, t in rel if s == vol and lo < i and c < hi)
+
+
+def state_diff(a, b, restart_wall_ns=None, released=0):
     """The parts in which two comparable states differ, and the parts not
     compared because neither records them, or (None, why) when they cannot be
     compared."""
@@ -781,11 +864,25 @@ def state_diff(a, b):
         return None, 'records %s in one observation only' % ', '.join(one)
     # `a` is the earlier observation: the product reader decides whether the
     # later value is the same state (it may allow a step that time alone makes).
-    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p])], [p for p in STATE_PARTS if p not in sa]
+    return [p for p in STATE_PARTS if p in sa and not PRODUCT.same_part(p, sa[p], sb[p], restart_wall_ns, released)], [p for p in STATE_PARTS if p not in sa]
 
 
 def show_part(state, part):
     return PRODUCT.show_part(state, part)
+
+
+def note_compared(compared, before, after, a, b, restart_wall_ns):
+    """Record in `compared` {(earlier seq, later seq): rule} which rule of
+    the product reader compared a pair (expiry_rule), when one did. A note
+    only: it changes no verdict."""
+    (sa, ba), (sb, bb) = a, b
+    if compared is None or ba or bb:
+        return
+    for p in STATE_PARTS:
+        if p in sa and p in sb:
+            rule = PRODUCT.expiry_rule(p, sa[p], sb[p], restart_wall_ns)
+            if rule is not None:
+                compared[(before['seq'], after['seq'])] = rule
 
 
 def limits_of(recs):
@@ -800,10 +897,14 @@ def limits_of(recs):
     return out
 
 
-def baseline(recs):
+def baseline(recs, compared=None):
     """(pairs checked, findings): every two consecutive observations of a
-    volume with no operation touching it invoked between them."""
+    volume with no operation touching it invoked between them. compared:
+    filled as note_compared does."""
     last, checked, f = {}, 0, []
+    restarts = master_restarts(recs)
+    fit = history_wall_fit(recs)
+    rel = PRODUCT.releases(recs)
     for r in recs:
         if r['kind'] == 'invoke':
             for vol in list(last):
@@ -812,7 +913,10 @@ def baseline(recs):
         elif r['kind'] == 'observe' and r.get('verb') == 'observe' and r.get('volume'):
             vol = r['volume']
             if vol in last:
-                diff, _ = state_diff(observed_state(last[vol]), observed_state(r))
+                sa, sb, rw = observed_state(last[vol], fit), observed_state(r, fit), master_restart_between(restarts, last[vol]['seq'], r['seq'])
+                diff, _ = state_diff(sa, sb, rw, released_between(rel, vol, last[vol]['seq'], r['seq']))
+                if diff is not None:
+                    note_compared(compared, last[vol], r, sa, sb, rw)
                 if diff is not None:
                     checked += 1
                     if diff:
@@ -854,12 +958,19 @@ def c5(recs):
     # "negative not refused" rule reads a request's LAST attempt.
     earlier = superseded(recs)
     refusals = [(inv, comp) for inv, comp in ops_ if comp is not None and comp['outcome'] in REFUSALS]
+    restarts = master_restarts(recs)
+    fit = history_wall_fit(recs)
+    rel = PRODUCT.releases(recs)
+    # An observation that contradicts itself (a lease printed expired while
+    # still valid) is a product result, whatever the refusals show.
+    of = [x for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe' for x in PRODUCT.observation_findings(r)]
     if not refusals:
-        return {'verdict': 'FAIL', 'findings': ['no refused operation in the history: C5 not exercised']}
+        return {'verdict': 'FAIL', 'findings': of + ['no refused operation in the history: C5 not exercised']}
     inv_of = {r['seq']: r for r in recs if r['kind'] == 'invoke'}   # a completion carries no args
     limit = limits_of(recs)
     f, notes, gaps = [], [], set()
     per = {}   # limit -> [refusals, judged], every refused attempt
+    compared = {}   # (earlier seq, later seq) -> the reader's rule that compared the pair (a note)
     attempts_judged = 0   # of those, attempts a later attempt of the same request replaced
     for inv, comp in ops_:
         if inv['seq'] in earlier:
@@ -899,8 +1010,11 @@ def c5(recs):
         if before is None or after is None:
             notes.append('not judged: %s: no valid observation %s it' % (name, 'before' if before is None else 'after'))
             continue
-        b, a = observed_state(before), observed_state(after)
-        diff, missing = state_diff(b, a)
+        b, a = observed_state(before, fit), observed_state(after, fit)
+        rw = master_restart_between(restarts, before['seq'], after['seq'])
+        diff, missing = state_diff(b, a, rw, released_between(rel, vol, before['seq'], after['seq']))
+        if diff is not None:
+            note_compared(compared, before, after, b, a, rw)
         if diff is None:
             notes.append('not judged: %s: observations seq %d, %d: %s' % (name, before['seq'], after['seq'], missing))
             continue
@@ -946,7 +1060,14 @@ def c5(recs):
     judged = sum(j for _, j in per.values())   # judged: refused attempts judged
     guarded = guard_trips(recs, limit)
     report += [guarded[lim] for lim in sorted(guarded)]
-    checked, bf = baseline(recs)
+    checked, bf = baseline(recs, compared)
+    counts = {}
+    for rule in compared.values():
+        counts[rule] = counts.get(rule, 0) + 1
+    if counts:   # the row had leases to look at: the line is printed, a zero as zero
+        notes.append(PRODUCT.compared_note(counts))
+    if of:
+        return {'verdict': 'FAIL', 'judged': judged, 'findings': of + bf + f + report + notes}
     if bf or not checked:   # a change at a refusal may be the background work: not laid to the refusal
         return {'verdict': 'UNKNOWN', 'judged': judged, 'findings': (bf or ['baseline not established: no two consecutive observations of a volume with nothing between them']) + f + report + notes}
     if f:
@@ -1405,6 +1526,72 @@ def _settle(recs, ops_, inv, comp):
     return 'fail', 'never settled within the deadline %.3f s after its end = %s' % (late(deadline), terms)
 
 
+def _call_matches(x, call):
+    """Whether invocation x is the expected call (verb, volume, {arg: value})."""
+    verb, vol, args = call
+    got = x.get('args') or {}
+    return x['verb'] == verb and (x.get('volume') or '') == vol and all(k in got and str(got[k]) == v for k, v in args.items())
+
+
+def after_store_fault(recs):
+    """C6's rule after a store fault: the requests between a store_pause
+    record and the run's next step (gen_step, gen_sweep or the end) must
+    each answer ok, and there must be at least one. Each follow-up the
+    record names (action, volume, parameters) must be one of them, in
+    order: the product reader's followup_calls gives the invocations it
+    makes (verb, volume, record args); a later attempt of the same call
+    is that call again. An invocation that is no named follow-up, or a
+    named one that never ran, FAILS."""
+    f = []
+    comp = {x['of']: x for x in recs if x['kind'] == 'complete'}
+    for i, r in enumerate(recs):
+        if r['kind'] != 'observe' or r.get('verb') != 'store_pause':
+            continue
+        ran = []
+        for x in recs[i + 1:]:
+            if x['kind'] == 'observe' and x.get('verb') in ('gen_step', 'gen_sweep'):
+                break
+            if x['kind'] != 'invoke' or x['verb'] in FAULT_VERBS or x['verb'] in RUNNER_VERBS:
+                continue
+            ran.append(x)
+            c = comp.get(x['seq'])
+            if c is None or c['outcome'] != 'ok':
+                f.append('after the store fault (record seq %d): seq %d %s %s answered %s: a request after a store fault must succeed'
+                         % (r['seq'], x['seq'], x['verb'], x.get('volume', ''), 'nothing' if c is None else c['outcome']))
+        followups = (r.get('result') or {}).get('followups') or []
+        if not ran:
+            f.append('after the store fault (record seq %d): no request followed it: a store fault must be followed by a request that succeeds' % r['seq'])
+            continue
+        calls = []
+        for fu in followups:
+            cs = PRODUCT.followup_calls(fu) if hasattr(PRODUCT, 'followup_calls') else None
+            if cs is None:
+                calls = None   # the reader cannot say what this follow-up invokes: the count rule only
+                break
+            calls += [(fu, c) for c in cs]
+        if calls is None:
+            if len(ran) < len(followups):
+                f.append('after the store fault (record seq %d): %d of the %d requests it names ran: each must run and succeed' % (r['seq'], len(ran), len(followups)))
+            continue
+        j = 0
+        for x in ran:
+            if j < len(calls) and _call_matches(x, calls[j][1]):
+                j += 1
+            elif j > 0 and _call_matches(x, calls[j - 1][1]):
+                continue   # a later attempt of the call just matched
+            else:
+                want = ('%s %s %s' % (calls[j][0].get('action'), calls[j][0].get('volume'), calls[j][0].get('params'))) if j < len(calls) else 'nothing more'
+                f.append('after the store fault (record seq %d): seq %d %s %s %s is not the follow-up it names next (%s)'
+                         % (r['seq'], x['seq'], x['verb'], x.get('volume', ''), x.get('args'), want))
+                break
+        else:
+            if j < len(calls):
+                fu = calls[j][0]
+                f.append('after the store fault (record seq %d): the follow-up %s %s %s never ran: each must run and succeed'
+                         % (r['seq'], fu.get('action'), fu.get('volume'), fu.get('params')))
+    return f
+
+
 def resolve_unknown(recs, ops_, inv, comp, points, earlier):
     """The resolution of one unknown operation: the ONE function C6 and C0
     both call, so they cannot disagree. A lifecycle verb (NEEDS_SETTLED) by
@@ -1512,6 +1699,7 @@ def c6(recs):
     if healthy and (healthy[-1].get('result') or {}).get('healthy') is not True:
         res = healthy[-1].get('result') or {}
         f.append('the run ended unhealthy: last healthy record seq %d: down %s, not serving %s' % (healthy[-1]['seq'], res.get('down'), res.get('not_serving')))
+    f += after_store_fault(recs)
     f_rec, n_rec, timed = recovery_findings(recs, ops_, healthy)
     f += f_rec
     notes += n_rec

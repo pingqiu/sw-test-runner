@@ -643,7 +643,8 @@ class C5(unittest.TestCase):
     def test_unchanged_passes(self):
         v = self.c5(('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, WS))
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary write: 1 of 1 refusal(s) judged'])
+        # the leases are granted: the row looked at them and compared none, and says 0
+        self.assertEqual(v['findings'], ['limit ordinary write: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
 
     def test_a_moved_generation_fails(self):
         v = self.c5(('obs', 'v1', 4, FILES), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES))
@@ -836,7 +837,7 @@ class C5(unittest.TestCase):
             return hc.check(dump(recs))['C5']
         v = run()
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged'])
+        self.assertEqual(v['findings'], ['limit ordinary stop: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
         # Red controls: a revoked or not-serving workspace, or a sealed HEAD, after it.
         for name, ws, state, part in (
                 ('revoked', dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')}), '', 'workspace'),
@@ -895,7 +896,7 @@ class C5(unittest.TestCase):
     def test_a_refused_effect_in_its_documented_state_passes(self):
         v = hc.check(dump(self.effect_history()))
         self.assertEqual(v['C5']['verdict'], 'PASS', v['C5'])
-        self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged'])
+        self.assertEqual(v['C5']['findings'], ['limit ordinary delete: 1 of 1 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
         # C0 takes it as a known outcome, with no note
         self.assertEqual((v['C0']['verdict'], v['C0']['findings']), ('PASS', []))
         # C6 has nothing to resolve: it is not an unknown
@@ -906,7 +907,7 @@ class C5(unittest.TestCase):
         # already refused, before and after: correct product behaviour.
         v = hc.check(dump(self.effect_history(repeat=True)))['C5']
         self.assertEqual(v['verdict'], 'PASS', v)
-        self.assertEqual(v['findings'], ['limit ordinary delete: 2 of 2 refusal(s) judged'])
+        self.assertEqual(v['findings'], ['limit ordinary delete: 2 of 2 refusal(s) judged', 'lease expiry pairs compared: 0 (across a master restart: 0)'])
 
     def test_red_refused_effect_another_part_changed(self):
         v = hc.check(dump(self.effect_history(after_gen=5)))['C5']
@@ -2091,6 +2092,519 @@ class C0Resolved(unittest.TestCase):
         self.assertEqual(v['C0']['verdict'], 'FAIL', v['C0'])
         self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
 
+
+
+class KillTouches(unittest.TestCase):
+    """A holder kill or restart touches the volume its holder serves (the
+    product's kill_scope): two observations of that volume around it are no
+    baseline pair, while observations of another volume around it still
+    are; a master kill or restart touches no volume."""
+
+    def pairs(self, vol_obs, kill_args, verb='kill'):
+        recs = history(('obs', vol_obs, 4, FILES), (verb, '', kill_args, 'ok'), ('obs', vol_obs, 5, FILES))
+        return hc.baseline(hc.read_history(dump(recs)))
+
+    def test_a_holder_kill_between_observations_of_its_own_volume_is_no_pair(self):
+        checked, f = self.pairs('v1', {'process': 'blockvolume:0', 'volume': 'v1'})
+        self.assertEqual((checked, f), (0, []))
+        checked, f = self.pairs('v1', {'process': 'blockvolume:0', 'volume': 'v1'}, verb='restart')
+        self.assertEqual((checked, f), (0, []))
+
+    def test_red_the_same_kill_between_observations_of_another_volume_is_still_a_pair(self):
+        checked, f = self.pairs('v2', {'process': 'blockvolume:0', 'volume': 'v1'})
+        self.assertEqual(checked, 1)
+        self.assertTrue(f and f[0].startswith('baseline: v2 changed with no operation on it'), f)
+
+    def test_a_master_kill_resets_no_baseline(self):
+        checked, f = self.pairs('v1', {'process': 'blockmaster'})
+        self.assertEqual(checked, 1)
+        self.assertTrue(f and f[0].startswith('baseline: v1 changed'), f)
+
+    def test_a_kill_naming_no_volume_touches_every_volume(self):
+        checked, f = self.pairs('v1', {'process': 'blockvolume:7'})
+        self.assertEqual((checked, f), (0, []))
+
+
+class AcrossMasterRestart(unittest.TestCase):
+    """Keyed on the lease STATE (checks.json across_master_restart, its
+    states' renews flags): while the lease is in a state that does not renew
+    (revoking, expired) in both observations, its expiry is compared, step
+    or no step, and is MONOTONE (equal or later, never earlier). Across a
+    blockmaster restart it is at most the restart's wall time + TTL (30 s) +
+    slack (2 s); across no restart at most the later reading's end in wall
+    time + 1.5 x TTL + slack (47 s), the end from from_wall_ns, else from
+    the history's fit, else unchecked. In a renewing state (granted at
+    either) it is not compared. Every other kept fact equal."""
+
+    W = 1795836860000000000   # the restart's wall time, ns
+    E = 1795836866594534158   # the expiry before it
+    S = 10**9
+
+    def text(self, state, expiry, validity, holder='r1@1', ack='r1@1 HEAD generation 14'):
+        return ['volume: v0 (query snapshot, not authority to serve)', 'replica: r1', 'epoch: 1', 'lease state: %s' % state,
+                'holder: %s (logical replica)' % holder, 'lease expiry_ns: %d; host validity_ns at query: %d' % (expiry, validity),
+                'recorded ACK: %s' % ack, 'host: unknown (not recorded by the master); issued moves and bindings below are separate facts']
+
+    def pair(self, after_expiry, states=('revoking', 'expired'), restart=True, wall=True, end_wall=None, bvalid=2, **after):
+        """end_wall: the later observation's reading end in wall time; both
+        observations then carry from_wall_ns (the earlier one 10 s before).
+        Without it neither does, and the ceiling across no restart comes from
+        the history's fit (bvalid: the earlier validity, 0 gives no fit when
+        the later lease is expired)."""
+        bstate, astate = states
+        before = {'workspace': {'exit': 0, 'text': self.text(bstate, self.E, bvalid)}, 'dirs': WS['dirs'], 'snapshots': []}
+        later = {'workspace': {'exit': 0, 'text': self.text(astate, after_expiry, 0 if astate == 'expired' else 5, **after)}, 'dirs': WS['dirs'], 'snapshots': []}
+        steps = [('obs', 'v0', 1, FILES, before)]
+        if restart:
+            steps += [('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok')]
+        steps += [('obs', 'v0', 1, FILES, later)]
+        recs = history(*steps)
+        for r in recs:
+            if r['kind'] == 'complete' and r['verb'] == 'restart' and wall:
+                r['result'] = {'started_wall_ns': self.W}
+        if end_wall is not None:
+            obs = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe']
+            obs[0]['from_wall_ns'] = end_wall - 10 * self.S
+            obs[-1]['from_wall_ns'] = end_wall - (obs[-1]['mono_ns'] - obs[-1]['from_mono_ns'])
+        return hc.baseline(hc.read_history(dump(recs)))
+
+    def changed(self, got):
+        checked, f = got
+        return checked == 1 and bool(f) and f[0].startswith('baseline: v0 changed with no operation on it (workspace')
+
+    def test_within_the_ceiling_with_or_without_a_step_is_no_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.W + 31 * self.S, states), (1, []), states)
+            self.assertEqual(self.pair(self.W + 32 * self.S, states), (1, []), states)   # the ceiling itself
+            self.assertEqual(self.pair(self.E, states), (1, []), states)                  # not moved
+
+    def test_red_a_revoking_expiry_that_moved_earlier_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking')):
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states)), states)
+
+    def test_red_a_revoking_expiry_past_the_ceiling_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking')):
+            self.assertTrue(self.changed(self.pair(self.W + 32 * self.S + 1, states)), states)
+
+    def test_red_the_stuck_lease_a_far_future_expiry_with_no_step_is_a_change(self):
+        # revoking -> revoking: the step never happens, and the expiry the
+        # restart left is a day away: compared, past the ceiling.
+        self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'))))
+
+    def test_a_granted_lease_expiry_is_not_compared(self):
+        for e in (self.E - 10 * self.S, self.W + 86400 * self.S, self.E):
+            self.assertEqual(self.pair(e, ('granted', 'granted')), (1, []), e)
+
+    def test_red_another_fact_changed_is_a_change(self):
+        for other in ({'holder': 'r2@2'}, {'ack': 'r1@1 HEAD generation 15'}):
+            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, **other)), other)
+            self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'revoking'), **other)), other)
+
+    # Rule 1, across no restart: monotone, and at most the later reading's
+    # end in wall time + 1.5 x TTL + slack = end + 47 s.
+    R = 1795836850000000000   # the later reading's end in wall time, ns (E is 16.6 s after it)
+    CEIL = R + 47 * 10**9
+
+    def test_no_restart_a_non_renewing_expiry_equal_or_later_within_the_ceiling_is_no_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            for e in (self.E, self.E + 1, self.E + 20 * self.S, self.CEIL):   # the ceiling itself
+                self.assertEqual(self.pair(e, states, restart=False, end_wall=self.R), (1, []), (states, e))
+
+    def test_red_no_restart_a_non_renewing_expiry_that_moved_earlier_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertTrue(self.changed(self.pair(self.E - 1, states, restart=False, end_wall=self.R)), states)
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False)), states)               # by the fit
+            self.assertTrue(self.changed(self.pair(self.E - self.S, states, restart=False, bvalid=0)), states)     # no fit: the order still holds
+
+    def test_red_no_restart_a_non_renewing_expiry_past_the_ceiling_is_a_change(self):
+        for states in (('revoking', 'expired'), ('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertTrue(self.changed(self.pair(self.CEIL + 1, states, restart=False, end_wall=self.R)), states)
+            self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, states, restart=False, end_wall=self.R)), states)
+        # A granted lease's expiry still moves freely with no restart.
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('granted', 'granted'), restart=False, end_wall=self.R), (1, []))
+
+    def test_no_restart_in_a_history_before_from_wall_ns_the_ceiling_comes_from_the_fit(self):
+        # The earlier observation prints validity 2 ns, unclamped: now = E -
+        # skew/2 - 2, and the fit puts the later reading's end at about E - 10 s
+        # (the records' clock moves a few ns): the ceiling is about E + 37 s.
+        for states in (('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.E + 36 * self.S, states, restart=False), (1, []), states)
+            self.assertTrue(self.changed(self.pair(self.E + 38 * self.S, states, restart=False)), states)
+
+    def test_no_restart_with_no_fit_the_ceiling_is_unchecked(self):
+        # Neither observation has an unclamped validity (0 before, expired
+        # after) and neither records from_wall_ns: no end in wall time, so
+        # only the order is checked. Named here so the gap is not hidden.
+        self.assertIsNone(hc.history_wall_fit(hc.read_history(dump(history(
+            ('obs', 'v0', 1, FILES, {'workspace': {'exit': 0, 'text': self.text('expired', self.E, 0)}, 'dirs': WS['dirs'], 'snapshots': []}))))))
+        self.assertEqual(self.pair(self.W + 86400 * self.S, ('expired', 'expired'), restart=False, bvalid=0), (1, []))
+
+    def test_the_fit_is_the_median_offset_of_the_unclamped_validities(self):
+        def obs(mono, expiry, validity, **kw):
+            return dict({'kind': 'observe', 'verb': 'observe', 'mono_ns': mono,
+                         'result': {'workspace': {'exit': 0, 'text': self.text('granted', expiry, validity)}}}, **kw)
+        half = 10 * self.S   # skew/2, the row's skew_seconds 20
+        seen = [obs(100, self.E, 3 * self.S), obs(200, self.E, 2 * self.S + 50), obs(300, self.E + 5, 1 * self.S + 400)]
+        offs = sorted(self.E - half - v - m for m, v in ((100, 3 * self.S), (200, 2 * self.S + 50), (300, 1 * self.S + 400)))
+        self.assertEqual(hc.PRODUCT.wall_fit(seen), offs[1])
+        # clamped (0, or the TTL) or failed readings do not count
+        self.assertEqual(hc.PRODUCT.wall_fit(seen + [obs(1, self.E, 0), obs(2, self.E, 30 * self.S), dict(obs(3, self.E, 5), result={'workspace': {'exit': 1, 'text': ''}})]), offs[1])
+        self.assertIsNone(hc.PRODUCT.wall_fit([obs(1, self.E, 0), obs(2, self.E, 30 * self.S)]))
+        # a history that records from_wall_ns needs no fit
+        self.assertIsNone(hc.PRODUCT.wall_fit(seen + [obs(400, self.E, self.S, from_wall_ns=1, from_mono_ns=399)]))
+        # the record's own start wins over a fit
+        self.assertEqual(hc.PRODUCT.reading_end_wall({'from_wall_ns': 1000, 'from_mono_ns': 10, 'mono_ns': 15}, wall_fit=7), 1005)
+        self.assertEqual(hc.PRODUCT.reading_end_wall({'from_mono_ns': 10, 'mono_ns': 15}, wall_fit=7), 22)
+        self.assertIsNone(hc.PRODUCT.reading_end_wall({'from_mono_ns': 10, 'mono_ns': 15}))
+
+    def test_an_old_format_history_across_an_unrecorded_restart_is_uncompared(self):
+        # Rule 3: a history with no started_wall_ns anywhere (from before the
+        # field): across its master restart the expiry is not compared
+        # (06a5338's behaviour for these bundles): with no step, moved or not,
+        # no change; a lease-state step keeps the time_derived rule as it
+        # was there (its fact equal).
+        for states in (('revoking', 'revoking'), ('expired', 'expired')):
+            self.assertEqual(self.pair(self.W + 20 * self.S, states, wall=False), (1, []), states)
+            self.assertEqual(self.pair(self.W + 86400 * self.S, states, wall=False), (1, []), states)
+            self.assertEqual(self.pair(self.E - self.S, states, wall=False), (1, []), states)
+        self.assertEqual(self.pair(self.E, ('revoking', 'expired'), wall=False), (1, []))
+        self.assertTrue(self.changed(self.pair(self.W + 20 * self.S, ('revoking', 'expired'), wall=False)))
+        # Across no restart rule 1 still applies in an old-format history.
+        self.assertTrue(self.changed(self.pair(self.E - self.S, ('revoking', 'revoking'), restart=False, wall=False)))
+        self.assertTrue(self.changed(self.pair(self.W + 86400 * self.S, ('revoking', 'revoking'), restart=False, wall=False)))
+
+    def test_red_a_restart_without_its_wall_time_in_a_history_that_records_it_gets_no_allowance(self):
+        # A history whose other restart records the field: a restart missing
+        # it is not an old format; the rule across no restart applies to it
+        # (monotone, at most the later reading's end + 47 s), not the
+        # restart's own allowance.
+        def case(expiry):
+            before = {'workspace': {'exit': 0, 'text': self.text('revoking', self.E, 2)}, 'dirs': WS['dirs'], 'snapshots': []}
+            later = {'workspace': {'exit': 0, 'text': self.text('revoking', expiry, 5)}, 'dirs': WS['dirs'], 'snapshots': []}
+            recs = history(('kill', '', {'process': 'blockmaster'}, 'ok'), ('restart', '', {'process': 'blockmaster'}, 'ok'),
+                           ('obs', 'v0', 1, FILES, before), ('kill', '', {'process': 'blockmaster'}, 'ok'),
+                           ('restart', '', {'process': 'blockmaster'}, 'ok'), ('obs', 'v0', 1, FILES, later))
+            first = next(r for r in recs if r['kind'] == 'complete' and r['verb'] == 'restart')
+            first['result'] = {'started_wall_ns': self.W + 86400 * self.S}   # a late wall time that would allow anything
+            obs = [r for r in recs if r['kind'] == 'observe' and r.get('verb') == 'observe']
+            obs[0]['from_wall_ns'] = self.R - 10 * self.S
+            obs[-1]['from_wall_ns'] = self.R - (obs[-1]['mono_ns'] - obs[-1]['from_mono_ns'])
+            return hc.baseline(hc.read_history(dump(recs)))
+        self.assertEqual(case(self.CEIL), (1, []))
+        self.assertTrue(self.changed(case(self.CEIL + 1)))
+        self.assertTrue(self.changed(case(self.E - 1)))
+
+    def test_the_row_is_data_and_a_bad_row_does_not_load(self):
+        import copy
+        checks = json.loads((Path(hc.__file__).resolve().parent.parent / 'packs' / 'v3block' / 'product' / 'checks.json').read_text(encoding='utf-8'))
+        row = checks['observation']['across_master_restart'][0]
+        self.assertEqual((row['fact'], row['ttl_seconds'], row['slack_seconds'], row['state_field']), ('lease expiry_ns', 30, 2, 'lease state'))
+        self.assertEqual({s['state']: s['renews'] for s in row['states']}, {'granted': True, 'revoking': False, 'expired': False})
+        self.assertEqual((row['no_restart_ttl_factor'], row['skew_seconds'], row['expired_state'], row['validity']),
+                         (1.5, 20, 'expired', 'host validity_ns at query'))
+        for cite in ('core/authority/workspace_lease_view.go:306', ':455', 'core/authority/authority.go:257'):
+            self.assertIn(cite, row['no_restart_cite'])
+        for cite in ('core/authority/workspace_lease_view.go:154-157', 'cmd/blockmaster/main.go:138'):
+            self.assertIn(cite, row['skew_cite'])
+        for seed in (lambda r: r.update(ttl_seconds='30'), lambda r: r.update(slack_seconds=-1), lambda r: r.update(ceiling='none'),
+                     lambda r: r['states'][0].update(renews='yes'), lambda r: r['states'].append(dict(r['states'][1])),
+                     lambda r: r.pop('state_field'), lambda r: r['states'][1].pop('cite'),
+                     lambda r: r.pop('no_restart_ttl_factor'), lambda r: r.update(no_restart_ttl_factor='1.5'),
+                     lambda r: r.update(no_restart_ttl_factor=0), lambda r: r.pop('no_restart_cite'),
+                     lambda r: r.pop('skew_seconds'), lambda r: r.update(skew_seconds=0), lambda r: r.pop('skew_cite'),
+                     lambda r: r.pop('validity'), lambda r: r.update(expired_state='granted'), lambda r: r.update(expired_state='gone')):
+            bad = copy.deepcopy(checks)
+            seed(bad['observation']['across_master_restart'][0])
+            with self.assertRaises(ValueError):
+                pb.bind(bad)
+        pb.bind(checks)
+
+
+class ReleaseOnDelete(unittest.TestCase):
+    """checks.json release_on_delete: a delete (ok or unknown) of a volume
+    the history shows restored (ok) from a source releases it from the
+    source's dependents, which moves the source's HEAD generation later by
+    one (INV-SNAPK-RELEASE-001), and nothing else. A refused delete allows
+    nothing. COUNT BOUND: the generation rises by at most the number of
+    such deletes between the pair (ok count + unknown count)."""
+
+    RESTORE = ('restore', 'v2', {'source': 'v1', 'snapshot': 's1'}, 'ok')
+
+    def pair(self, *between, gen=5, after=WS, files=FILES, restore=True, epoch=None):
+        steps = ((self.RESTORE,) if restore else ()) + (('obs', 'v1', 4, FILES, WS),) + between + (('obs', 'v1', gen, files, after),)
+        recs = history(*steps)
+        if epoch is not None:
+            [r for r in recs if r['kind'] == 'observe'][-1]['result']['head']['epoch'] = epoch
+        return hc.baseline(hc.read_history(dump(recs)))
+
+    def changed(self, got):
+        checked, f = got
+        return checked == 1 and bool(f) and f[0].startswith('baseline: v1 changed with no operation on it (head')
+
+    def test_the_release_moves_the_generation_only(self):
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'ok')), (1, []))
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'unknown')), (1, []))
+        # two targets deleted: two releases
+        two = (self.RESTORE, ('restore', 'v3', {'source': 'v1', 'snapshot': 's1'}, 'ok'))
+        recs = history(*(two + (('obs', 'v1', 4, FILES, WS), ('delete', 'v2', {}, 'ok'), ('delete', 'v3', {}, 'ok'), ('obs', 'v1', 6, FILES, WS))))
+        self.assertEqual(hc.baseline(hc.read_history(dump(recs))), (1, []))
+
+    def test_red_the_same_delete_with_another_part_changed_is_a_change(self):
+        d = ('delete', 'v2', {}, 'ok')
+        for name, kw in (('files', {'files': FILES + ['seg/1-y']}),
+                         ('snapshots', {'after': dict(WS, snapshots=['s9'])}),
+                         ('workspace', {'after': dict(WS, workspace={'exit': 0, 'text': ws_text(state='revoking')})}),
+                         ('epoch', {'epoch': 2})):
+            checked, f = self.pair(d, **kw)
+            self.assertEqual(checked, 1, name)
+            self.assertTrue(f and f[0].startswith('baseline: v1 changed with no operation on it ('), (name, f))
+        # epoch: the HEAD itself differs in more than its generation
+        self.assertTrue(self.changed(self.pair(d, epoch=2)))
+
+    def test_red_a_generation_move_with_no_such_delete_between_is_a_change(self):
+        self.assertTrue(self.changed(self.pair()))                                         # nothing between
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), restore=False)))   # v2 not a restore target
+        self.assertTrue(self.changed(self.pair(('delete', 'v9', {}, 'ok'))))                # another volume
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), gen=6)))         # one release, two steps
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), gen=3)))         # earlier
+        # the count bound counts deletes: an unknown then an ok delete of the
+        # same target allow 2, not 3
+        self.assertEqual(self.pair(('delete', 'v2', {}, 'unknown'), ('delete', 'v2', {}, 'ok'), gen=6), (1, []))
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'unknown'), ('delete', 'v2', {}, 'ok'), gen=7)))
+        # after an ok delete the name is no restore target: a second delete counts nothing
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'), ('delete', 'v2', {}, 'ok'), gen=6)))
+        # one unknown delete: 2 is a change
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'unknown'), gen=6)))
+        # a delete before the earlier observation is not between the pair
+        recs = history(self.RESTORE, ('delete', 'v2', {}, 'ok'), ('obs', 'v1', 4, FILES, WS), ('obs', 'v1', 5, FILES, WS))
+        self.assertTrue(self.changed(hc.baseline(hc.read_history(dump(recs)))))
+
+    def test_red_a_refused_delete_of_the_target_allows_nothing(self):
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', NEG, 'refused'))))
+        self.assertTrue(self.changed(self.pair(('delete', 'v2', NEG, 'refused'), ('delete', 'v2', NEG, 'refused'))))
+
+    def test_a_refusal_pair_on_the_source_takes_the_release_too(self):
+        steps = BASE + (self.RESTORE, ('obs', 'v1', 4, FILES, WS), ('delete', 'v2', {}, 'ok'), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES, WS))
+        v = hc.check(dump(history(*steps)))['C5']
+        self.assertEqual(v['verdict'], 'PASS', v)
+        steps = BASE + (self.RESTORE, ('obs', 'v1', 4, FILES, WS), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 5, FILES, WS))
+        self.assertEqual(hc.check(dump(history(*steps)))['C5']['verdict'], 'FAIL')
+
+    def test_the_row_is_data_and_a_bad_row_does_not_load(self):
+        import copy
+        checks = json.loads((Path(hc.__file__).resolve().parent.parent / 'packs' / 'v3block' / 'product' / 'checks.json').read_text(encoding='utf-8'))
+        row = checks['observation']['release_on_delete']
+        self.assertEqual((row['verb'], row['restored_by'], row['part'], row['moves'], row['per_release']), ('delete', 'restore', 'head', 'gen', 1))
+        for cite in ('delete.go:176-183', 'head.go:519-539', 'INV-SNAPK-RELEASE-001'):
+            self.assertIn(cite, row['cite'])
+        for seed in (lambda r: r.update(part='files'), lambda r: r.update(moves='epoch'), lambda r: r.update(per_release=0),
+                     lambda r: r.update(outcomes=['ok', 'refused']), lambda r: r.update(restored_outcomes=['ok', 'unknown']),
+                     lambda r: r.pop('cite'), lambda r: r.update(extra=1)):
+            bad = copy.deepcopy(checks)
+            seed(bad['observation']['release_on_delete'])
+            with self.assertRaises(ValueError):
+                hc.PRODUCT.bind(bad)
+        hc.PRODUCT.bind(checks)
+        with mock.patch.object(hc.PRODUCT, '_release', None):   # with no row, the same pair is a change
+            self.assertTrue(self.changed(self.pair(('delete', 'v2', {}, 'ok'))))
+
+
+class ExpiryPairsNote(unittest.TestCase):
+    """C5 notes how many pairs the expiry row compared, each pair once, by
+    rule; the note changes no verdict."""
+
+    def test_the_note_counts_each_rule(self):
+        amr = AcrossMasterRestart()
+        def counted(*a, **kw):
+            recs = []
+            orig = hc.baseline
+            seen = {}
+            def keep(r, compared=None):
+                recs.append(r)
+                return orig(r, seen)
+            with mock.patch.object(hc, 'baseline', keep):
+                amr.pair(*a, **kw)
+            return sorted(seen.values())
+        self.assertEqual(counted(amr.W + 20 * amr.S, ('revoking', 'revoking')), ['across a master restart'])
+        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), restart=False), ['no restart'])
+        self.assertEqual(counted(amr.E, ('granted', 'granted'), restart=False), ['not compared'])     # renewing: looked at, not compared
+        self.assertEqual(counted(amr.E, ('revoking', 'revoking'), wall=False), ['not compared'])     # unrecorded restart: looked at, not compared
+        self.assertEqual(hc.PRODUCT.compared_note({'across a master restart': 2, 'no restart': 3}),
+                         'lease expiry pairs compared: 5 (across a master restart: 2)')
+        self.assertEqual(hc.PRODUCT.compared_note({'no restart': 3}), 'lease expiry pairs compared: 3 (across a master restart: 0)')
+        self.assertEqual(hc.PRODUCT.compared_note({'not compared': 4}), 'lease expiry pairs compared: 0 (across a master restart: 0)')   # zero printed as zero
+
+    def test_only_a_pair_with_a_lease_to_look_at_counts(self):
+        amr = AcrossMasterRestart()
+        def ws(res):
+            return hc.observed_state({'result': res})[0].get('workspace')
+        lease = ws({'workspace': {'exit': 0, 'text': amr.text('granted', amr.E, 5)}})
+        failed = ws({'workspace': {'exit': 1, 'text': ''}})
+        self.assertEqual(hc.PRODUCT.expiry_rule('workspace', lease, lease), 'not compared')
+        self.assertIsNone(hc.PRODUCT.expiry_rule('workspace', lease, failed))   # a failed show: no lease to look at
+        self.assertIsNone(hc.PRODUCT.expiry_rule('head', lease, lease))
+
+    def test_c5_carries_the_note_and_the_verdict_does_not_change(self):
+        # A revoking lease, unchanged, around a refusal: the refusal's pair
+        # and the baseline pair before it, each counted once (no restart).
+        amr = AcrossMasterRestart()
+        rev = {'workspace': {'exit': 0, 'text': amr.text('revoking', amr.E, 2)}, 'dirs': ['v1-0123abcd'], 'snapshots': []}
+        steps = (('obs', 'v1', 4, FILES, rev), ('obs', 'v1', 4, FILES, rev), ('write', 'v1', NEG, 'refused'), ('obs', 'v1', 4, FILES, rev))
+        v = hc.check(dump(history(*(BASE + steps))))['C5']
+        notes = [x for x in v['findings'] if x.startswith('lease expiry pairs compared: ')]
+        self.assertEqual(notes, ['lease expiry pairs compared: 2 (across a master restart: 0)'], v)
+        self.assertEqual(v['verdict'], 'PASS', v)
+        with mock.patch.object(hc.PRODUCT, 'expiry_rule', lambda *a: None):
+            w = hc.check(dump(history(*(BASE + steps))))['C5']
+        self.assertFalse(any(x.startswith('lease expiry pairs compared') for x in w['findings']), w)
+        self.assertEqual((v['verdict'], v['judged']), (w['verdict'], w['judged']))
+
+
+class ExpiredLeaseObservation(unittest.TestCase):
+    """C5's OBSERVATION rule: a lease printed in its expired state has no
+    validity left, validity = expiry - skew/2 - now (checks.json
+    across_master_restart skew_seconds 20, skew_cite), so its printed expiry
+    is at or before the reading's END in wall time (from_wall_ns + mono_ns -
+    from_mono_ns) + skew/2. Past that the lease was still valid at the query:
+    a product result, C5 FAILS. An observation without from_wall_ns is not
+    checked."""
+
+    S = 10**9
+    END = 1795836850000000000
+
+    def obs(self, state, expiry, wall=True, seq=7):
+        r = {'seq': seq, 'kind': 'observe', 'verb': 'observe', 'volume': 'v0', 'from_mono_ns': 100, 'mono_ns': 100 + 3 * self.S,
+             'result': {'workspace': {'exit': 0, 'text': AcrossMasterRestart.text(None, state, expiry, 0 if state == 'expired' else 5 * self.S)}}}
+        if wall:
+            r['from_wall_ns'] = self.END - 3 * self.S
+        return r
+
+    def test_an_expired_lease_at_or_before_the_end_plus_half_the_skew_is_no_finding(self):
+        for e in (self.END - 60 * self.S, self.END, self.END + 10 * self.S):
+            self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', e)), [], e)
+
+    def test_red_an_expired_lease_still_valid_at_the_query_is_a_finding(self):
+        got = hc.PRODUCT.observation_findings(self.obs('expired', self.END + 10 * self.S + 1))
+        self.assertEqual(len(got), 1, got)
+        self.assertIn('lease state expired, but its printed expiry', got[0])
+        self.assertIn('workspace_lease_view.go:154-157', got[0])
+
+    def test_the_rule_reads_the_end_not_the_start_and_needs_from_wall_ns(self):
+        # 3 s between start and end: an expiry 2 s past start + skew/2 is fine
+        self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', self.END - 3 * self.S + 12 * self.S)), [])
+        # without from_wall_ns: not checked
+        self.assertEqual(hc.PRODUCT.observation_findings(self.obs('expired', self.END + 86400 * self.S, wall=False)), [])
+        # other states: not this rule
+        for state in ('granted', 'revoking'):
+            self.assertEqual(hc.PRODUCT.observation_findings(self.obs(state, self.END + 86400 * self.S)), [], state)
+
+    def test_red_c5_fails_on_it(self):
+        bad = {'workspace': {'exit': 0, 'text': AcrossMasterRestart.text(None, 'expired', self.END + 11 * self.S, 0)}, 'dirs': WS['dirs'], 'snapshots': []}
+        recs = history(('obs', 'v0', 1, FILES, bad))
+        for r in recs:
+            if r['kind'] == 'observe':
+                r['from_wall_ns'] = self.END - (r['mono_ns'] - r['from_mono_ns'])
+        v = hc.c5(hc.read_history(dump(recs)))
+        self.assertEqual(v['verdict'], 'FAIL', v)
+        self.assertTrue(v['findings'][0].startswith('observation seq '), v)
+        self.assertIn('lease state expired, but its printed expiry', v['findings'][0])
+
+
+class StoreFault(unittest.TestCase):
+    """C6 after a store fault: the requests between a store_pause record and
+    the next step must each answer ok, and one at least must run. The paused
+    snapshot's unknown is placed by the placement row (C6 and C0, one
+    resolution)."""
+
+    def case(self, followups):
+        """v1: an observation, a store pause around snapshot s1 (unknown), a
+        healthy point and the observation that places it (the name absent:
+        did not), the store_pause record, then the follow-ups:
+        [(verb, outcome)]."""
+        steps = list(BASE) + [('obs', 'v1', 4, FILES, dict(WS, snapshots=[]))]
+        steps += [('fault_apply', None, {'fault_key': 'store_pause:weed-filer', 'process': 'weed-filer', 'bound_seconds': 75}, 'ok'),
+                  ('snapshot', 'v1', {'name': 's1', 'request': 'v1-s1', 'attempt': 1}, 'unknown'),
+                  ('fault_restore', None, {'fault_key': 'store_pause:weed-filer', 'process': 'weed-filer'}, 'ok'),
+                  ('obs', 'v1', 4, FILES, dict(WS, snapshots=[]))]
+        recs = history(*steps)
+        end = recs.pop()
+        at = next(i for i, r in enumerate(recs) if r['kind'] == 'complete' and r.get('verb') == 'fault_restore') + 1
+        recs.insert(at, {'seq': 0, 'kind': 'observe', 'verb': 'healthy', 'mono_ns': recs[at - 1]['mono_ns'], 'result': {'healthy': True, 'down': [], 'not_serving': []}})
+        recs.append({'seq': 0, 'kind': 'observe', 'client': 'gen', 'verb': 'store_pause', 'volume': 'v1', 'mono_ns': recs[-1]['mono_ns'],
+                     'result': {'after_op': 3, 'opno': 4, 'action': 'v3_op_snapshot', 'volume': 'v1', 'process': 'weed-filer', 'bound_seconds': 75,
+                                'outcome': 'unknown', 'hit': True, 'followups': self.FOLLOWUPS}})
+        for step in followups:
+            verb, out = step[:2]
+            vol, args = (step[2:] + (None, None))[:2]
+            args = dict(self.ARGS.get(verb, {}), **(args or {}))
+            n = len(recs)
+            recs.append({'seq': n + 1, 'kind': 'invoke', 'op': 'X.Y', 'verb': verb, 'volume': vol or 'v1', 'args': args, 'mono_ns': n + 1})
+            recs.append({'seq': n + 2, 'kind': 'complete', 'of': n + 1, 'op': 'X.Y', 'verb': verb, 'volume': vol or 'v1', 'mono_ns': n + 2, 'outcome': out, 'result': {}})
+        recs.append(end)
+        for i, r in enumerate(recs):
+            if r['kind'] == 'complete' and r['outcome'] == 'unknown':
+                r['result'] = {'detail': 'deadline: the filer did not answer'}
+            r['mono_ns'] = 2 * i + 2
+            if 'from_mono_ns' in r:
+                r['from_mono_ns'] = 2 * i + 1
+            if r.get('volume') is None:
+                r.pop('volume', None)
+        return hc.check(dump(renumber(recs)))
+
+    # The record's follow-ups, as the driver writes them (action, volume,
+    # params), and the record args of the invocations they make.
+    FOLLOWUPS = [{'action': 'v3_op_snapshot', 'volume': 'v1', 'params': {'name': 'v1-after4', 'volume': 'v1'}},
+                 {'action': 'v3_op_read', 'volume': 'v1', 'params': {'lbas': '3 5', 'volume': 'v1'}},
+                 {'action': 'v3_op_stop', 'volume': 'v1', 'params': {'volume': 'v1'}}]
+    ARGS = {'snapshot': {'name': 'v1-after4', 'request': 'v1-v1-after4', 'attempt': 1}, 'stop': {'server': 'a-v1', 'epoch': 1}}
+    RIGHT = [('snapshot', 'ok'), ('read', 'ok', None, {'lba': 3}), ('read', 'ok', None, {'lba': 5}), ('stop', 'ok')]
+
+    def test_the_requests_after_a_store_pause_succeed(self):
+        v = self.case(self.RIGHT)
+        self.assertFalse(any('after the store fault' in x for x in v['C6']['findings']), v['C6'])
+        # a later attempt of a named call is that call again
+        v = self.case([self.RIGHT[0], ('snapshot', 'ok', None, {'attempt': 2})] + self.RIGHT[1:])
+        self.assertFalse(any('after the store fault' in x for x in v['C6']['findings']), v['C6'])
+        self.assertTrue(any('placed did not: by snapshot names' in x for x in v['C6']['findings']), v['C6'])
+        self.assertFalse(any('outcome unknown' in x for x in v['C0']['findings']), v['C0'])   # C0: resolved by the same placement
+
+    def test_red_a_refused_detach_after_a_store_pause_fails_c6(self):
+        v = self.case(self.RIGHT[:3] + [('stop', 'refused')])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('stop v1 answered refused: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_an_unknown_snapshot_after_a_store_pause_fails_c6(self):
+        v = self.case([('snapshot', 'unknown')] + self.RIGHT[1:])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('snapshot v1 answered unknown: a request after a store fault must succeed' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_a_follow_up_that_never_ran_fails_c6(self):
+        v = self.case(self.RIGHT[:3])   # the record names a snapshot, reads and a detach
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('the follow-up v3_op_stop v1' in x and 'never ran' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_red_equal_count_but_not_the_named_follow_ups_fails_c6(self):
+        # As many requests as named, each ok, but one is not what the record names.
+        for name, steps in (('a wrong action', [('delete', 'ok')] + self.RIGHT[1:]),
+                            ('a wrong volume', [('snapshot', 'ok', 'v2')] + self.RIGHT[1:]),
+                            ('wrong parameters', [('snapshot', 'ok', None, {'name': 'v1-other'})] + self.RIGHT[1:]),
+                            ('a wrong lba', self.RIGHT[:1] + [('read', 'ok', None, {'lba': 4})] + self.RIGHT[2:])):
+            v = self.case(steps)
+            self.assertEqual(v['C6']['verdict'], 'FAIL', (name, v['C6']))
+            self.assertTrue(any('is not the follow-up it names next' in x for x in v['C6']['findings']), (name, v['C6']))
+
+    def test_red_nothing_after_a_store_pause_fails_c6(self):
+        v = self.case([])
+        self.assertEqual(v['C6']['verdict'], 'FAIL', v['C6'])
+        self.assertTrue(any('no request followed it' in x for x in v['C6']['findings']), v['C6'])
+
+    def test_a_kill_beside_an_open_operation_is_no_overlap(self):
+        # kill_during: the kill (no volume) invoked while a write is open.
+        recs = [{'seq': 1, 'kind': 'invoke', 'op': 'X.W', 'verb': 'write', 'volume': 'v1', 'args': {'lba': 0}, 'mono_ns': 1},
+                {'seq': 2, 'kind': 'invoke', 'op': 'Env.Kill', 'verb': 'kill', 'volume': '', 'args': {'process': 'blockvolume:0'}, 'mono_ns': 2},
+                {'seq': 3, 'kind': 'complete', 'of': 2, 'op': 'Env.Kill', 'verb': 'kill', 'volume': '', 'mono_ns': 3, 'outcome': 'ok', 'result': {}},
+                {'seq': 4, 'kind': 'complete', 'of': 1, 'op': 'X.W', 'verb': 'write', 'volume': 'v1', 'mono_ns': 4, 'outcome': 'unknown', 'result': {}}]
+        self.assertEqual(hc.overlaps(hc.read_history(dump(recs))), set())
 
 if __name__ == '__main__':
     unittest.main()

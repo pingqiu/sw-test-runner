@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -124,7 +125,14 @@ func TestNightWithFaultRunsNeedsAnUnknownResolved(t *testing.T) {
 		"a checks.json that is no JSON": {{Exit: 0, Coverage: fault, Checks: writeJSON(t, "checks.json", "x"), History: h}},
 	} {
 		r := Judge(7, runs)
-		if r.Verdict != "FAIL" || len(r.Findings) != 1 {
+		// The unknowns rule's finding, once (a failing run adds its own line).
+		n := 0
+		for _, f := range r.Findings {
+			if strings.Contains(f, "no run's C6 resolved an unknown") {
+				n++
+			}
+		}
+		if r.Verdict != "FAIL" || n != 1 {
 			t.Errorf("%s: night %s %v", name, r.Verdict, r.Findings)
 		}
 	}
@@ -196,5 +204,74 @@ func TestNightRequiresEachCheckerToJudgeSomething(t *testing.T) {
 	r := Judge(7, []NightRun{{Exit: 0, Coverage: cov, History: historyFile(t, "C0"), Checks: checks(pass, map[string]any{"verdict": "FAIL", "judged": 0})}})
 	if r.Verdict != "PASS" {
 		t.Fatalf("a checker outside the set decided the run: %+v", r.Runs[0])
+	}
+}
+
+// A kill HIT is not an unknown: a kill that landed inside an operation may
+// still have been answered ok. The unknowns rule stays its own line, on
+// C6's count alone; the in-operation hits are reported beside it and never
+// satisfy it. Red control: a night whose only "hits" are kills answered ok
+// (hit cells reached, C6 resolved nothing) FAILs the unknowns rule. A store
+// pause hit ends unknown and is placed by C6 by definition, so its run
+// counts through C6's count, not through its hit cell.
+func TestKillHitsNeverSatisfyTheUnknownsRule(t *testing.T) {
+	h := historyFile(t, "C0")
+	killsOK := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"fault_cells": map[string]int{"kill|p0": 1, "kill_during|v3_op_write|hit": 1, "kill_during|v3_op_snapshot|hit": 1}})
+	none := checksFile(t, "unknowns resolved: 0")
+	rep := Judge(7, []NightRun{{Exit: 0, Coverage: killsOK, Checks: none, History: h}, {Index: 1, Exit: 0, Coverage: killsOK, Checks: none, History: h}})
+	if rep.Verdict != "FAIL" || len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0], "no run's C6 resolved an unknown") {
+		t.Fatalf("kills answered ok satisfied the unknowns rule: %s %v", rep.Verdict, rep.Findings)
+	}
+	want := []string{
+		"in-operation hit kill_during|v3_op_snapshot|hit: 2 in 2 of 2 runs (beside the unknowns rule, never toward it)",
+		"in-operation hit kill_during|v3_op_write|hit: 2 in 2 of 2 runs (beside the unknowns rule, never toward it)",
+	}
+	if strings.Join(rep.InOp, "|") != strings.Join(want, "|") || rep.Runs[0].InOpHits["kill_during|v3_op_write|hit"] != 1 {
+		t.Fatalf("in-operation lines %v, run hits %v", rep.InOp, rep.Runs[0].InOpHits)
+	}
+	// The store pause's run: its snapshot ended unknown and C6 placed it, so
+	// C6's count is 1 and the rule holds, on that count.
+	paused := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"fault_cells": map[string]int{"kill|p0": 1, "store_pause|v3_op_snapshot|hit": 1}})
+	rep = Judge(7, []NightRun{{Exit: 0, Coverage: killsOK, Checks: none, History: h}, {Index: 1, Exit: 0, Coverage: paused, Checks: checksFile(t, "unknowns resolved: 1"), History: h}})
+	if rep.Verdict != "PASS" || len(rep.Findings) != 0 || len(rep.InOp) != 3 {
+		t.Fatalf("a placed unknown: %s %v %v", rep.Verdict, rep.Findings, rep.InOp)
+	}
+	// And a store pause hit cell without C6's count does not satisfy it either.
+	rep = Judge(7, []NightRun{{Exit: 0, Coverage: paused, Checks: none, History: h}})
+	if rep.Verdict != "FAIL" {
+		t.Fatalf("a hit cell alone satisfied the rule: %v", rep.Findings)
+	}
+}
+
+// The union holds every cell any run reached, a fault cell too: a fault
+// cell one run lists never reached and another run reached is reached in
+// the union (red control: the union of before summed only the ordinary
+// cells, and listed it never reached). And the night records why it
+// FAILs: each failing run's line, with its index, seed and error.
+func TestUnionHoldsAFaultCellAnyRunReached(t *testing.T) {
+	h, ck := historyFile(t, "C0"), checksFile(t, "unknowns resolved: 1")
+	hitCell := "kill_during|v3_op_write|hit"
+	reached := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"cells_never_reached": []string{}, "fault_cells": map[string]int{"kill|p0": 1, hitCell: 1}})
+	missed := writeJSON(t, "gen-coverage.json", map[string]any{"cells": map[string]int{"write|up": 5},
+		"cells_never_reached": []string{hitCell, "kill|p9"}, "fault_cells": map[string]int{"kill|p0": 1, "kill_during|v3_op_write|missed": 1}})
+	rep := Judge(7, []NightRun{{Index: 0, Seed: 11, Exit: 0, Coverage: reached, Checks: ck, History: h}, {Index: 1, Seed: 12, Exit: 0, Coverage: missed, Checks: ck, History: h}})
+	if rep.Verdict != "PASS" || rep.UnionFaultCells[hitCell] != 1 || slices.Contains(rep.UnionNeverReached, hitCell) {
+		t.Fatalf("a hit one run reached: %s never %v fault cells %v", rep.Verdict, rep.UnionNeverReached, rep.UnionFaultCells)
+	}
+	if !slices.Equal(rep.UnionNeverReached, []string{"kill|p9"}) {
+		t.Fatalf("a fault cell no run reached is never reached: %v", rep.UnionNeverReached)
+	}
+	// A night that lists a never-reached fault cell says that nights before
+	// the fix overstated them.
+	if len(rep.Findings) != 1 || !strings.HasPrefix(rep.Findings[0], "note: night verdicts before d105834") {
+		t.Fatalf("the note: %v", rep.Findings)
+	}
+	// A failing run's reason is a night finding.
+	rep = Judge(7, []NightRun{{Index: 0, Seed: 11, Exit: 0, Coverage: reached, Checks: ck, History: h}, {Index: 4, Seed: 15, Exit: 1, Coverage: reached, Checks: ck, History: h}})
+	if rep.Verdict != "FAIL" || len(rep.Findings) != 1 || rep.Findings[0] != "run 4 (seed 15) FAILs: run exited 1" {
+		t.Fatalf("the night's reason: %s %v", rep.Verdict, rep.Findings)
 	}
 }

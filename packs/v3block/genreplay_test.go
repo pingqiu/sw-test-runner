@@ -71,7 +71,7 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	sa, sb := stepsOf(t, a), stepsOf(t, b)
-	if out["value"] != "match" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) < 300 {
+	if out["value"] != "match_unjudged" || out["steps"] != strconv.Itoa(len(sa)) || len(sa) < 300 {
 		t.Fatalf("out %v, %d steps", out, len(sa))
 	}
 	if !reflect.DeepEqual(sa, sb) {
@@ -86,7 +86,7 @@ func TestGenReplayOfARecordedRunMatches(t *testing.T) {
 		t.Fatalf("gen_replay %+v", rep.Result)
 	}
 	// A replayed history is itself replayable, judged the same way.
-	if out, c, err := replayInto(t, b); err != nil || out["value"] != "match" || !reflect.DeepEqual(stepsOf(t, c), sa) {
+	if out, c, err := replayInto(t, b); err != nil || out["value"] != "match_unjudged" || !reflect.DeepEqual(stepsOf(t, c), sa) {
 		t.Fatalf("replay of the replay: %v %v", out, err)
 	}
 }
@@ -170,7 +170,7 @@ func TestGenRunSweepsAtTheEndAndTheReplayReExecutesIt(t *testing.T) {
 		t.Fatalf("the steps before the sweep end %q", kinds[max(0, len(kinds)-6):])
 	}
 	out, b, err := replayInto(t, a)
-	if err != nil || out["value"] != "match" {
+	if err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 	ops2, after2 := sweepOf(t, b)
@@ -285,7 +285,7 @@ func TestGenReplayRecordedOutcomeIsTheWorstCompletion(t *testing.T) {
 	}
 	f := &fakeProduct{failWrite: "3"}
 	f.install(t)
-	if out, _, err := replayInto(t, p); err != nil || out["value"] != "match" {
+	if out, _, err := replayInto(t, p); err != nil || out["value"] != "match_unjudged" {
 		t.Fatalf("%v %v", out, err)
 	}
 }

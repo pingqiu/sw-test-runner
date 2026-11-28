@@ -70,6 +70,8 @@ func RegisterPack(r *tr.Registry) {
 		"v3_op_observe": driven("v3_op_observe"), "v3_op_flush": driven("v3_op_flush"),
 		// Process faults (faults.go): kill and restart by recorded identity, and the healthy observation.
 		"v3_op_kill": driven("v3_op_kill"), "v3_op_restart": v3OpRestart, "v3_op_restart_holder": driven("v3_op_restart_holder"), "v3_op_healthy": v3OpHealthy,
+		// Store faults (actions.json): a pause of the store process and its continue.
+		"v3_op_fault_apply_store": driven("v3_op_fault_apply_store"), "v3_op_fault_restore_store": driven("v3_op_fault_restore_store"),
 	} {
 		r.RegisterFunc(name, tr.TierBlock, f)
 	}
